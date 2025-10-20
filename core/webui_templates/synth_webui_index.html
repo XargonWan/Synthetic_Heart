@@ -3710,11 +3710,13 @@
                 statusIndicator?.classList.remove('online');
                 setStatusMessage('Connection lost. Reconnecting…', 'warn');
                 sendBtn.disabled = true;
+                removeTypingIndicator(); // Remove typing indicator on disconnect
                 setTimeout(connect, 1500);
             });
 
             ws.addEventListener('error', () => {
                 setStatusMessage('Communication error.', 'error');
+                removeTypingIndicator(); // Remove typing indicator on error
             });
         }
 
@@ -3733,7 +3735,12 @@
             }
             
             addMessage('user', text);
-            addTypingIndicator(); // Show typing indicator immediately after sending
+            // Show typing indicator after a short delay to simulate processing start
+            setTimeout(() => {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    addTypingIndicator();
+                }
+            }, 500);
             // Animation will be triggered by backend via WebSocket
             isWaitingForFirstResponse = true;
             console.log('[synth_webui] Sending message via WebSocket:', text);
@@ -3986,13 +3993,26 @@
                     
                     let action = this.actions[actionName];
                     
-                    // If specific animation file is requested and we have it cached
-                    if (animationFile && this.actions[`${actionName}:${animationFile}`]) {
-                        action = this.actions[`${actionName}:${animationFile}`];
-                        console.log(`[AnimationHandler] Using cached specific animation: ${actionName}:${animationFile}`);
-                    } else if (animationFile && !this.actions[`${actionName}:${animationFile}`]) {
-                        console.log(`[AnimationHandler] Specific animation ${animationFile} not cached, using random from ${actionName}`);
-                        // Fall back to random animation from the action group
+                    // If specific animation file is requested
+                    if (animationFile) {
+                        const specificKey = `${actionName}:${animationFile}`;
+                        if (this.actions[specificKey]) {
+                            action = this.actions[specificKey];
+                            console.log(`[AnimationHandler] Using cached specific animation: ${specificKey}`);
+                        } else {
+                            console.log(`[AnimationHandler] Loading specific animation: ${animationFile} for ${actionName}`);
+                            // Load the specific animation file
+                            const clip = await this.loadAnimation(actionName, animationFile);
+                            if (clip) {
+                                action = this.mixer.clipAction(clip);
+                                action.setLoop(THREE.LoopRepeat);
+                                this.actions[specificKey] = action;
+                                console.log(`[AnimationHandler] Specific animation ${animationFile} loaded and cached`);
+                            } else {
+                                console.log(`[AnimationHandler] Failed to load specific animation ${animationFile}, falling back to random from ${actionName}`);
+                                // Fall back to random animation from the action group
+                            }
+                        }
                     }
                     
                     if (!action) {
@@ -4203,20 +4223,6 @@
                     // Dispatch event to notify animation system
                     window.dispatchEvent(new Event('vrmLoaded'));
                     
-                    // TEST: Force animation change after 10 seconds to test rotation
-                    setTimeout(async () => {
-                        console.log('[TEST] Forcing animation change to test system...');
-                        if (animationHandler) {
-                            try {
-                                await animationHandler.startAction('idle', 'Idle2.fbx');
-                                console.log('[TEST] Animation change completed');
-                            } catch (error) {
-                                console.error('[TEST] Animation change failed:', error);
-                            }
-                        } else {
-                            console.error('[TEST] AnimationHandler not available');
-                        }
-                    }, 10000);
                     console.log(`[synth_webui] Dispatched 'vrmLoaded' event`);
                     
                     console.log(`[synth_webui] ========== LOAD VRM END (success) ==========`);
