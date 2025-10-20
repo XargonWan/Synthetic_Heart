@@ -331,7 +331,7 @@ class SeleniumChatGPTPlugin(SeleniumLLMBase):
             log_debug(f"[selenium_chatgpt] Textarea value after clear: '{after_clear_value}' (length: {len(after_clear_value)})")
             
             # Paste the filtered prompt text
-            log_debug(f"[selenium_chatgpt] Sending keys to textarea: '{filtered_prompt[:100]}...' (length: {len(filtered_prompt)})")
+            log_debug(f"[selenium_chatgpt] Sending keys to textarea: '{filtered_prompt}' (length: {len(filtered_prompt)})")
             try:
                 textarea.send_keys(filtered_prompt)
                 log_debug(f"[selenium_chatgpt] Keys sent to textarea")
@@ -349,7 +349,7 @@ class SeleniumChatGPTPlugin(SeleniumLLMBase):
             
             # Check final content
             final_value = textarea.get_attribute("value") or ""
-            log_debug(f"[selenium_chatgpt] Final textarea value: '{final_value[:100]}...' (length: {len(final_value)})")
+            log_debug(f"[selenium_chatgpt] Final textarea value: '{final_value}' (length: {len(final_value)})")
             
             # Wait a bit for ChatGPT to process the input before trying to send
             import time

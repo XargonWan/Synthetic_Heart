@@ -121,7 +121,7 @@ def notifier(message: str) -> None:
     from core.config import get_log_chat_id_sync, get_log_chat_thread_id_sync, get_trainer_id
     from core.core_initializer import INTERFACE_REGISTRY
 
-    log_debug(f"[notifier] Sending: {message[:100]}...")
+    log_debug(f"[notifier] Sending: {message}")
     
     # Try LogChat first
     log_chat_id = get_log_chat_id_sync()
@@ -165,7 +165,7 @@ def notify_intelligent(message: str) -> None:
     from core.config import get_log_chat_id_sync, get_log_chat_thread_id_sync, get_trainer_id
     from core.core_initializer import INTERFACE_REGISTRY
 
-    log_info(f"[notifier] notify_intelligent() called with message: {message[:100]}...")
+    log_info(f"[notifier] notify_intelligent() called with message: {message}")
     
     # Try LogChat first
     log_chat_id = get_log_chat_id_sync()
@@ -247,7 +247,7 @@ def notify_trainer(message: str) -> None:
     from core.config import TRAINER_IDS, get_log_chat_id_sync, get_log_chat_interface_sync
     from core.core_initializer import INTERFACE_REGISTRY
 
-    log_info(f"[notifier] notify_trainer() called with message: {message[:100]}...")
+    log_info(f"[notifier] notify_trainer() called with message: {message}")
     log_info(f"[notifier] INTERFACE_REGISTRY keys: {list(INTERFACE_REGISTRY.keys())}")
     log_info(f"[notifier] TRAINER_IDS: {TRAINER_IDS}")
 

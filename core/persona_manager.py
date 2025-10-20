@@ -110,6 +110,7 @@ class EmotiveState:
 
 
 @dataclass
+@dataclass
 class PersonaData:
     """Digital persona identity data structure.
     
@@ -128,28 +129,12 @@ class PersonaData:
     created_at: str = ""
     last_updated: str = ""
 
-    def __post_init__(self):
-        """Initialize default values for lists."""
-        if self.aliases is None:
-            self.aliases = []
-        if self.likes is None:
-            self.likes = []
-        if self.dislikes is None:
-            self.dislikes = []
-        if self.interests is None:
-            self.interests = []
-        if self.emotive_state is None:
-            self.emotive_state = []
-        if not self.created_at:
-            self.created_at = datetime.utcnow().isoformat()
-        if not self.last_updated:
-            self.last_updated = datetime.utcnow().isoformat()
-
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary format for storage."""
         data = asdict(self)
         # Convert EmotiveState objects to dicts
-        data['emotive_state'] = [asdict(es) for es in self.emotive_state]
+        if self.emotive_state:
+            data['emotive_state'] = [asdict(es) for es in self.emotive_state]
         return data
 
     @classmethod
@@ -271,12 +256,21 @@ class PersonaManager(PluginBase):
     async def async_init(self):
         """Async initialization - load the default persona."""
         try:
+            log_debug("[persona_manager] Starting async_init...")
             await init_persona_table()
+            log_debug("[persona_manager] Table initialized, loading default persona...")
             self._current_persona = await self.load_persona("default")
-            self._persona_loaded = True
-            log_info("[persona_manager] Default persona loaded successfully")
+            log_debug(f"[persona_manager] load_persona returned: {self._current_persona}")
+            if self._current_persona:
+                self._persona_loaded = True
+                log_info("[persona_manager] Default persona loaded successfully")
+            else:
+                log_error("[persona_manager] Failed to load default persona - no fallback will be created")
+                self._persona_loaded = False
         except Exception as e:
             log_error(f"[persona_manager] Error loading default persona: {e}")
+            import traceback
+            log_error(f"[persona_manager] Traceback: {traceback.format_exc()}")
 
     def set_animation_handler(self, animation_handler):
         """Set the animation handler reference."""
@@ -455,34 +449,7 @@ class PersonaManager(PluginBase):
             )
             
             if not result:
-                # Create default persona if it doesn't exist
-                if persona_id == "default":
-                    # Load default persona from config_registry
-                    default_name = PERSONA_DEFAULT_NAME or "SyntH"
-                    default_profile = PERSONA_DEFAULT_PROFILE or (
-                        "You are a SyntH (Synthetic Heart) - a digital being with your own personality, "
-                        "preferences, and emotional depth. You interact authentically and naturally, "
-                        "expressing your genuine thoughts and feelings.")
-                    
-                    # Set aliases based on the default name
-                    if default_name.lower() == "synth":
-                        default_aliases = ["synth", "senth", "taonuki", "android", "androide", "tanuki", "girl", "bot", "ai"]
-                    else:
-                        default_aliases = ["SyntH", "Synthetic Heart"]
-                    
-                    default_persona = PersonaData(
-                        id="default",
-                        name=default_name,
-                        aliases=default_aliases,
-                        profile=default_profile,
-                        likes=[""],
-                        dislikes=[""],
-                        interests=[""],
-                        emotive_state=[EmotiveState("curious", 5.0), EmotiveState("eager", 5.0)]
-                    )
-                    log_info(f"[persona_manager] Creating default persona '{default_name}' in database")
-                    await self.save_persona(default_persona)
-                    return default_persona
+                log_warning(f"[persona_manager] Persona {persona_id} not found in database")
                 return None
             
             # Convert database row to PersonaData
@@ -496,8 +463,8 @@ class PersonaManager(PluginBase):
                 'interests': json.loads(result[6]) if result[6] else [],
                 'emotive_state': json.loads(result[7]) if result[7] else [],
                 'current_animation': result[8],
-                'created_at': result[9].isoformat() if result[9] else "",
-                'last_updated': result[10].isoformat() if result[10] else "",
+                'created_at': result[9] if isinstance(result[9], str) else (result[9].isoformat() if result[9] else ""),
+                'last_updated': result[10] if isinstance(result[10], str) else (result[10].isoformat() if result[10] else ""),
             }
             
             return PersonaData.from_dict(persona_data)
@@ -923,6 +890,11 @@ class PersonaManager(PluginBase):
             True if animation was set successfully
         """
         if not self._current_persona:
+            log_debug("[persona_manager] Persona not loaded in set_animation_state, loading...")
+            await self.async_init()
+            log_debug(f"[persona_manager] After async_init, current_persona: {self._current_persona}")
+        
+        if not self._current_persona:
             log_warning("[persona_manager] No current persona loaded")
             return False
             
@@ -951,8 +923,10 @@ class PersonaManager(PluginBase):
                 
                 # Start rotation task if multiple animations available
                 if len(animation_files) > 1:
+                    log_debug(f"[persona_manager] Starting animation rotation for {animation_state} with {len(animation_files)} files")
                     await self._start_animation_rotation(session_id, animation_enum, context_id)
                 else:
+                    log_debug(f"[persona_manager] Not starting rotation for {animation_state} - only {len(animation_files)} file(s)")
                     await self._stop_animation_rotation(session_id, animation_enum)
                 
                 return True
@@ -1082,10 +1056,12 @@ class PersonaManager(PluginBase):
     async def _animation_rotation_loop(self, session_id: str, animation_state: AnimationState, context_id: Optional[str]) -> None:
         """Background loop that rotates animations every 30-60 seconds."""
         key = f"{session_id}:{animation_state.value}"
+        log_debug(f"[persona_manager] Animation rotation loop started for {key}")
         try:
             while True:
                 # Wait 30-60 seconds
                 delay = random.randint(30, 60)
+                log_debug(f"[persona_manager] Animation rotation waiting {delay} seconds for {key}")
                 await asyncio.sleep(delay)
                 
                 # Check if we should still rotate (persona still in this state)
@@ -1094,13 +1070,17 @@ class PersonaManager(PluginBase):
                     if len(animation_files) > 1:
                         # Select different animation
                         selected_animation = random.choice(animation_files)
+                        log_debug(f"[persona_manager] Rotating animation for {key} to {selected_animation}")
                         await self._send_animation_update(session_id, selected_animation, animation_state.value)
                         log_debug(f"[persona_manager] Rotated animation for {key} to {selected_animation}")
                     else:
+                        log_debug(f"[persona_manager] Stopping rotation for {key} - only {len(animation_files)} file(s)")
                         break
                 else:
+                    log_debug(f"[persona_manager] Stopping rotation for {key} - persona state changed or no persona")
                     break
         except asyncio.CancelledError:
+            log_debug(f"[persona_manager] Animation rotation cancelled for {key}")
             pass
         except Exception as e:
             log_warning(f"[persona_manager] Animation rotation error for {key}: {e}")

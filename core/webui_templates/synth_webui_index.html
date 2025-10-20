@@ -3669,18 +3669,29 @@
 
             ws.addEventListener('message', (event) => {
                 const data = JSON.parse(event.data);
+                console.log('[synth_webui] Received WebSocket message:', data);
+                
                 if (data.type === 'session') {
                     sessionId = data.session_id;
+                    console.log('[synth_webui] Session established:', sessionId);
                     refreshStats(true);
                     return;
                 }
                 if (data.type === 'animation') {
                     // Handle animation command from backend
+                    console.log('[synth_webui] Processing animation command:', data);
+                    console.log('[synth_webui] animationHandler exists:', !!animationHandler);
+                    console.log('[synth_webui] data.state:', data.state);
+                    console.log('[synth_webui] data.animation:', data.animation);
+                    
                     if (animationHandler && data.state) {
-                        console.log('[synth_webui] Received animation command:', data.state, data.animation);
+                        console.log('[synth_webui] Calling animationHandler.startAction with:', data.state, data.animation);
                         // Extract filename from animation URL (e.g., "animations/Idle2.fbx" -> "Idle2.fbx")
                         const animationFile = data.animation ? data.animation.split('/').pop() : null;
+                        console.log('[synth_webui] Extracted animationFile:', animationFile);
                         animationHandler.startAction(data.state, animationFile);
+                    } else {
+                        console.warn('[synth_webui] Animation handler not ready or missing state:', animationHandler, data.state);
                     }
                     return;
                 }
@@ -3927,12 +3938,20 @@
                 }
 
                 async loadAnimation(actionName, animationFile) {
+                    console.log(`[AnimationHandler] loadAnimation called for ${actionName} with file ${animationFile}`);
                     if (this.loadedAnimations[animationFile]) {
+                        console.log(`[AnimationHandler] Using cached animation for ${animationFile}`);
                         return this.loadedAnimations[animationFile];
                     }
                     try {
+                        console.log(`[AnimationHandler] Calling loadMixamoAnimation for /animations/${animationFile}`);
+                        console.log(`[AnimationHandler] loadMixamoAnimation function exists:`, typeof loadMixamoAnimation);
                         const clip = await loadMixamoAnimation(`/animations/${animationFile}`, this.vrm);
-                        this.loadedAnimations[animationFile] = clip;
+                        console.log(`[AnimationHandler] loadMixamoAnimation returned clip:`, !!clip);
+                        if (clip) {
+                            this.loadedAnimations[animationFile] = clip;
+                            console.log(`[AnimationHandler] Animation ${animationFile} cached successfully`);
+                        }
                         return clip;
                     } catch (error) {
                         console.error(`[AnimationHandler] Failed to load ${animationFile}:`, error);
@@ -3961,34 +3980,45 @@
                 }
 
                 async startAction(actionName, animationFile = null) {
+                    console.log(`[AnimationHandler] startAction called with actionName: ${actionName}, animationFile: ${animationFile}`);
+                    console.log(`[AnimationHandler] this.mixer exists:`, !!this.mixer);
+                    console.log(`[AnimationHandler] this.vrm exists:`, !!this.vrm);
+                    
                     let action = this.actions[actionName];
                     
-                    if (!action || animationFile) {
-                        // If specific animation file is provided, load it directly
-                        if (animationFile) {
-                            const clip = await this.loadAnimation(actionName, animationFile);
-                            if (clip) {
-                                action = this.mixer.clipAction(clip);
-                                action.setLoop(THREE.LoopRepeat);
-                                // Store with specific key to avoid conflicts
-                                this.actions[`${actionName}:${animationFile}`] = action;
-                            }
-                        } else {
-                            // Load random animation for the action
-                            action = await this.loadAction(actionName);
-                        }
+                    // If specific animation file is requested and we have it cached
+                    if (animationFile && this.actions[`${actionName}:${animationFile}`]) {
+                        action = this.actions[`${actionName}:${animationFile}`];
+                        console.log(`[AnimationHandler] Using cached specific animation: ${actionName}:${animationFile}`);
+                    } else if (animationFile && !this.actions[`${actionName}:${animationFile}`]) {
+                        console.log(`[AnimationHandler] Specific animation ${animationFile} not cached, using random from ${actionName}`);
+                        // Fall back to random animation from the action group
+                    }
+                    
+                    if (!action) {
+                        console.log(`[AnimationHandler] Loading action ${actionName}...`);
+                        action = await this.loadAction(actionName);
+                        console.log(`[AnimationHandler] Action loaded:`, !!action);
+                    } else {
+                        console.log(`[AnimationHandler] Using existing action for ${actionName}`);
                     }
 
-                    if (!action) return;
+                    if (!action) {
+                        console.error(`[AnimationHandler] No action available for ${actionName}`);
+                        return;
+                    }
 
                     // Stop current action
                     if (this.currentAction && this.currentAction !== action) {
+                        console.log(`[AnimationHandler] Fading out current action`);
                         this.currentAction.fadeOut(0.5);
                     }
 
                     // Start new action
+                    console.log(`[AnimationHandler] Starting new action for ${actionName}`);
                     action.reset().fadeIn(0.5).play();
                     this.currentAction = action;
+                    console.log(`[AnimationHandler] Action started successfully`);
                 }
 
                 stopAction(actionName) {
@@ -4160,6 +4190,8 @@
                     // Initialize animation mixer
                     console.log('[synth_webui] Creating AnimationMixer...');
                     currentMixer = new THREE.AnimationMixer(vrm.scene);
+                    window.vrmMixer = currentMixer; // Make mixer available globally for AnimationHandler
+                    console.log('[synth_webui] AnimationMixer created and set globally');
                     
                     // Load default animations
                     console.log('[synth_webui] Loading default animations...');
@@ -4167,6 +4199,26 @@
                     
                     setStatus(`Avatar ${name} loaded`, 'success');
                     console.log(`[synth_webui] ✓✓✓ VRM ${name} loaded and rendered successfully ✓✓✓`);
+                    
+                    // Dispatch event to notify animation system
+                    window.dispatchEvent(new Event('vrmLoaded'));
+                    
+                    // TEST: Force animation change after 10 seconds to test rotation
+                    setTimeout(async () => {
+                        console.log('[TEST] Forcing animation change to test system...');
+                        if (animationHandler) {
+                            try {
+                                await animationHandler.startAction('idle', 'Idle2.fbx');
+                                console.log('[TEST] Animation change completed');
+                            } catch (error) {
+                                console.error('[TEST] Animation change failed:', error);
+                            }
+                        } else {
+                            console.error('[TEST] AnimationHandler not available');
+                        }
+                    }, 10000);
+                    console.log(`[synth_webui] Dispatched 'vrmLoaded' event`);
+                    
                     console.log(`[synth_webui] ========== LOAD VRM END (success) ==========`);
                     
                 } catch (error) {
@@ -4951,122 +5003,6 @@
                 }
             });
         }
-
-        // VRM Animation Handler
-        class AnimationHandler {
-            constructor() {
-                this.mixer = null;
-                this.actions = {};
-                this.currentAction = null;
-                this.animationMappings = {
-                    'think': 'think',
-                    'write': 'write', 
-                    'talk': 'talk',
-                    'idle': 'idle'
-                };
-            }
-
-            async loadAction(actionName, url) {
-                try {
-                    console.log(`[AnimationHandler] Loading animation: ${actionName} from ${url}`);
-                    
-                    // Load animation using existing loadMixamoAnimation function
-                    if (typeof loadMixamoAnimation === 'function') {
-                        const clip = await loadMixamoAnimation(url);
-                        if (clip && this.mixer) {
-                            const action = this.mixer.clipAction(clip);
-                            this.actions[actionName] = action;
-                            console.log(`[AnimationHandler] Successfully loaded animation: ${actionName}`);
-                            return action;
-                        }
-                    }
-                    
-                    console.warn(`[AnimationHandler] Failed to load animation: ${actionName}`);
-                    return null;
-                } catch (error) {
-                    console.error(`[AnimationHandler] Error loading animation ${actionName}:`, error);
-                    return null;
-                }
-            }
-
-            startAction(actionName) {
-                try {
-                    console.log(`[AnimationHandler] Starting animation: ${actionName}`);
-                    
-                    if (this.currentAction) {
-                        this.currentAction.fadeOut(0.5);
-                    }
-                    
-                    const action = this.actions[actionName];
-                    if (action) {
-                        action.reset();
-                        action.fadeIn(0.5);
-                        action.play();
-                        this.currentAction = action;
-                        
-                        console.log(`[AnimationHandler] Successfully started animation: ${actionName}`);
-                    } else {
-                        console.warn(`[AnimationHandler] Animation not found: ${actionName}`);
-                    }
-                } catch (error) {
-                    console.error(`[AnimationHandler] Error starting animation ${actionName}:`, error);
-                }
-            }
-
-            setMixer(mixer) {
-                this.mixer = mixer;
-                console.log('[AnimationHandler] Mixer set successfully');
-            }
-        }
-
-        // Initialize animation handler
-        const animationHandler = new AnimationHandler();
-
-        // Integrate with chat events
-        const originalWebSocketMessageHandler = ws.addEventListener.bind(ws);
-        ws.addEventListener('message', (event) => {
-            const data = JSON.parse(event.data);
-            
-            // Handle animation triggers based on message type
-            if (data.type === 'message') {
-                if (data.sender === 'user') {
-                    // User sent a message - trigger think animation
-                    animationHandler.startAction('think');
-                } else if (data.sender === 'synth') {
-                    // Synth is responding - trigger talk animation
-                    animationHandler.startAction('talk');
-                }
-            } else if (data.type === 'typing_start') {
-                // Synth started typing - trigger think animation
-                animationHandler.startAction('think');
-            } else if (data.type === 'typing_end') {
-                // Synth stopped typing - back to idle
-                animationHandler.startAction('idle');
-            }
-        });
-
-        // Load animations when VRM is loaded
-        window.addEventListener('vrmLoaded', () => {
-            console.log('[AnimationHandler] VRM loaded, initializing animations');
-            
-            // Load animation URLs (these should be configured based on available animations)
-            const animationUrls = {
-                'think': '/animations/think.fbx',
-                'write': '/animations/write.fbx',
-                'talk': '/animations/talk.fbx',
-                'idle': '/animations/idle.fbx'
-            };
-            
-            // Load all animations
-            Object.entries(animationUrls).forEach(([actionName, url]) => {
-                animationHandler.loadAction(actionName, url);
-            });
-            
-            // Set mixer from global VRM context
-            if (window.vrmMixer) {
-                animationHandler.setMixer(window.vrmMixer);
-            }
-        });
 
         // Chat resize functionality
         (function() {

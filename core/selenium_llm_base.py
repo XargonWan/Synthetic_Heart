@@ -1379,7 +1379,7 @@ class SeleniumLLMBase(AIPluginBase):
             else:
                 prompt_text = str(messages)
 
-            log_warning(f"[selenium] ⚠️ About to call _execute_complete_workflow with prompt: {prompt_text[:100]}...")
+            log_warning(f"[selenium] ⚠️ About to call _execute_complete_workflow with prompt: {prompt_text}")
 
             # Lazy driver initialization - create only when first actual request comes in
             if self.driver is None:

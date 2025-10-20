@@ -20,14 +20,9 @@ from core.config_manager import config_registry
 from core.image_processor import RESTRICT_ACTIONS
 
 # Global dictionary to track retry attempts per chat/message thread for the corrector
-CORRECTOR_RETRIES = config_registry.get_var(
+CORRECTOR_RETRIES = config_registry.get_value(
     "CORRECTOR_RETRIES",
-    2,
-    value_type="int",
-    label="JSON Corrector Retries",
-    description="Number of times the corrector retries invalid JSON responses from LLM",
-    group="core",
-    component="core",
+    2
 )
 
 _retry_tracker = {}
@@ -981,7 +976,7 @@ async def _create_diary_entry_for_actions(processed_actions, context, original_m
             thread_id=str(thread_id) if thread_id else None
         )
         
-        log_debug(f"[action_parser] Created personal diary entry: {synth_response[:100]}...")
+        log_debug(f"[action_parser] Created personal diary entry: {synth_response}")
         
     except Exception as e:
         log_warning(f"[action_parser] Failed to create diary entry: {e}")

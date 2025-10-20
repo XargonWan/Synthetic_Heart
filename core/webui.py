@@ -364,17 +364,12 @@ class SynthWebUIInterface:
                 "required_fields": ["text", "target"],
                 "optional_fields": [],
                 "description": f"Send a text message to a {BRAND_NAME} session.",
-            },
-            "message_webui": {
-                "required_fields": ["text", "target"],
-                "optional_fields": [],
-                "description": f"Send a text message to a {BRAND_NAME} session.",
             }
         }
 
     @staticmethod
     def get_prompt_instructions(action_name: str) -> dict:
-        if action_name in ("message_synth_webui", "message_webui"):
+        if action_name == "message_synth_webui":
             return {
                 "description": f"Send a message to the {BRAND_NAME} browser client.",
                 "payload": {
@@ -510,6 +505,17 @@ class SynthWebUIInterface:
         self.message_history.setdefault(session_id, deque(maxlen=self.max_history))
         await websocket.send_json({"type": "session", "session_id": session_id})
         await self._replay_history(session_id)
+        
+        # Set initial idle animation for new session
+        try:
+            if self.persona_manager:
+                await self.persona_manager.set_animation_state("idle", session_id=session_id)
+                log_debug(f"{LOG_PREFIX} Set initial idle animation for session {session_id}")
+            else:
+                log_debug(f"{LOG_PREFIX} Persona manager not available, skipping initial animation for session {session_id}")
+        except Exception as anim_exc:
+            log_warning(f"{LOG_PREFIX} Failed to set initial idle animation for session {session_id}: {anim_exc}")
+        
         log_info(f"{LOG_PREFIX} Client connected: {session_id}")
 
         try:
@@ -769,7 +775,7 @@ class SynthWebUIInterface:
         await self._append_history(str(chat_id), "synth", text)
 
     async def execute_action(self, action: dict, context: dict, bot, original_message):
-        if action.get("type") in ("message_synth_webui", "message_webui"):
+        if action.get("type") == "message_synth_webui":
             payload = action.get("payload", {})
             await self.send_message(payload, original_message=original_message)
 
