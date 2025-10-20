@@ -162,6 +162,8 @@
             left: 1rem;
             right: auto;
             width: 20%;
+            min-width: 250px;
+            max-width: 50%;
             height: 60vh;
             max-height: 500px;
             display: flex;
@@ -176,8 +178,32 @@
             padding-top: 4rem;
             overflow: hidden;
             z-index: 50;
+            resize: horizontal;
+            cursor: ew-resize;
         }
-        /* On mobile, chat is compact by default */
+        #chat:hover {
+            cursor: ew-resize;
+        }
+        /* Resize handle styling */
+        #chat::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            right: -5px;
+            width: 10px;
+            height: 100%;
+            cursor: ew-resize;
+            background: transparent;
+            z-index: 60;
+        }
+        #chat.resizing {
+            transition: none;
+            cursor: ew-resize;
+        }
+        #chat.resizing::after {
+            background: rgba(255, 107, 214, 0.3);
+        }
+        /* On mobile, chat is not resizable */
         @media (max-width: 768px) {
             #chat {
                 width: 30%;
@@ -185,6 +211,14 @@
                 right: auto;
                 height: 40vh;
                 max-height: 250px;
+                resize: none;
+                cursor: default;
+            }
+            #chat::after {
+                display: none;
+            }
+            #chat:hover {
+                cursor: default;
             }
         }
         #chat.hidden {
@@ -3644,7 +3678,9 @@
                     // Handle animation command from backend
                     if (animationHandler && data.state) {
                         console.log('[synth_webui] Received animation command:', data.state, data.animation);
-                        animationHandler.startAction(data.state);
+                        // Extract filename from animation URL (e.g., "animations/Idle2.fbx" -> "Idle2.fbx")
+                        const animationFile = data.animation ? data.animation.split('/').pop() : null;
+                        animationHandler.startAction(data.state, animationFile);
                     }
                     return;
                 }
@@ -3924,12 +3960,25 @@
                     return action;
                 }
 
-                async startAction(actionName) {
-                    if (!this.actions[actionName]) {
-                        await this.loadAction(actionName);
+                async startAction(actionName, animationFile = null) {
+                    let action = this.actions[actionName];
+                    
+                    if (!action || animationFile) {
+                        // If specific animation file is provided, load it directly
+                        if (animationFile) {
+                            const clip = await this.loadAnimation(actionName, animationFile);
+                            if (clip) {
+                                action = this.mixer.clipAction(clip);
+                                action.setLoop(THREE.LoopRepeat);
+                                // Store with specific key to avoid conflicts
+                                this.actions[`${actionName}:${animationFile}`] = action;
+                            }
+                        } else {
+                            // Load random animation for the action
+                            action = await this.loadAction(actionName);
+                        }
                     }
 
-                    const action = this.actions[actionName];
                     if (!action) return;
 
                     // Stop current action
@@ -5018,6 +5067,65 @@
                 animationHandler.setMixer(window.vrmMixer);
             }
         });
+
+        // Chat resize functionality
+        (function() {
+            const chat = document.getElementById('chat');
+            let isResizing = false;
+            let startX = 0;
+            let startWidth = 0;
+
+            function startResize(e) {
+                isResizing = true;
+                startX = e.clientX;
+                startWidth = chat.offsetWidth;
+                chat.classList.add('resizing');
+                document.body.style.cursor = 'ew-resize';
+                document.body.style.userSelect = 'none';
+                
+                // Prevent text selection during resize
+                e.preventDefault();
+            }
+
+            function resize(e) {
+                if (!isResizing) return;
+                
+                const deltaX = e.clientX - startX;
+                const newWidth = Math.max(250, Math.min(startWidth + deltaX, window.innerWidth * 0.5));
+                
+                chat.style.width = newWidth + 'px';
+            }
+
+            function stopResize() {
+                if (!isResizing) return;
+                
+                isResizing = false;
+                chat.classList.remove('resizing');
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+            }
+
+            // Add event listeners
+            chat.addEventListener('mousedown', function(e) {
+                // Check if click is on the resize handle (right edge)
+                const rect = chat.getBoundingClientRect();
+                if (e.clientX >= rect.right - 10 && e.clientX <= rect.right + 5) {
+                    startResize(e);
+                }
+            });
+
+            document.addEventListener('mousemove', resize);
+            document.addEventListener('mouseup', stopResize);
+
+            // Prevent context menu on resize handle
+            chat.addEventListener('contextmenu', function(e) {
+                const rect = chat.getBoundingClientRect();
+                if (e.clientX >= rect.right - 10 && e.clientX <= rect.right + 5) {
+                    e.preventDefault();
+                }
+            });
+
+        })();
 
     </script>
 </body>

@@ -41,6 +41,7 @@ from core.config_manager import config_registry
 from core.message_chain import get_failed_message_text, RESPONSE_TIMEOUT, FAILED_MESSAGE_TEXT
 import core.plugin_instance as plugin_instance
 from core.animation_handler import get_animation_handler, AnimationState
+from core.persona_manager import get_persona_manager
 import mimetypes
 
 
@@ -339,6 +340,9 @@ class SynthWebUIInterface:
         self.animation_handler = get_animation_handler()
         self.animation_handler.set_webui(self)
         log_info(f"{LOG_PREFIX} Animation handler initialized")
+        
+        # Persona manager will be initialized in start() method after core initialization
+        self.persona_manager = None
         
         if self.autostart:
             log_info(f"{LOG_PREFIX} Autostart enabled - will start server when event loop is available")
@@ -666,11 +670,20 @@ class SynthWebUIInterface:
         # Start "Think" animation when message is received
         context_id = f"msg_{session_id}_{message.message_id}"
         try:
-            await self.animation_handler.transition_to(
-                AnimationState.THINK,
-                session_id=session_id,
-                context_id=context_id
-            )
+            if self.persona_manager:
+                log_info(f"{LOG_PREFIX} Triggering THINK animation for session {session_id}, context {context_id}")
+                await self.persona_manager.set_animation_state(
+                    "think",
+                    session_id=session_id,
+                    context_id=context_id
+                )
+            else:
+                log_info(f"{LOG_PREFIX} Using animation_handler for THINK animation (no persona_manager)")
+                await self.animation_handler.transition_to(
+                    AnimationState.THINK,
+                    session_id=session_id,
+                    context_id=context_id
+                )
         except Exception as anim_exc:
             log_warning(f"{LOG_PREFIX} Failed to trigger Think animation: {anim_exc}")
         
@@ -697,7 +710,12 @@ class SynthWebUIInterface:
         finally:
             # Stop animation context and return to Idle when message is complete
             try:
-                await self.animation_handler.stop_animation(context_id, session_id)
+                if self.persona_manager:
+                    log_info(f"{LOG_PREFIX} Stopping animation context {context_id} and returning to IDLE for session {session_id}")
+                    await self.persona_manager.stop_animation_context(context_id, session_id)
+                else:
+                    log_info(f"{LOG_PREFIX} Using animation_handler to stop animation context {context_id}")
+                    await self.animation_handler.stop_animation(context_id, session_id)
             except Exception as anim_exc:
                 log_warning(f"{LOG_PREFIX} Failed to stop animation: {anim_exc}")
 
@@ -2018,6 +2036,16 @@ class SynthWebUIInterface:
 
     async def start(self) -> None:
         """Start the web UI interface if autostart is enabled."""
+        # Initialize persona manager now that core initialization is complete
+        if self.persona_manager is None:
+            self.persona_manager = get_persona_manager()
+            if self.persona_manager:
+                self.persona_manager.set_webui(self)
+                self.persona_manager.set_animation_handler(self.animation_handler)
+                log_info(f"{LOG_PREFIX} Persona manager initialized")
+            else:
+                log_warning(f"{LOG_PREFIX} Failed to initialize persona manager")
+        
         if self.autostart:
             log_info(f"{LOG_PREFIX} Autostart enabled, starting {BRAND_NAME} server")
             self.start_server_async()
