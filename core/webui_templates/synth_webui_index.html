@@ -1571,6 +1571,9 @@
         let historyBuffer = [];
         let logsSocket = null;
         let logsReconnectTimer = null;
+        let pendingAnimationCommands = []; // Queue for animation commands received before handler is ready
+        let pendingAnimationTimeout = null; // Timeout for processing pending animations
+        let animationHandler = null; // Global animation handler, initialized when VRM loads
         let activeTab = localStorage.getItem(TAB_KEY) || 'home';
         const logBuffer = [];
         const logFilterState = { debug: true, info: true, warning: true, error: true, other: true };
@@ -1841,21 +1844,25 @@
 
         // Chat state persistence functions
         function saveChatState() {
-            const chatMessages = document.getElementById('chat-messages');
-            if (chatMessages) {
-                localStorage.setItem(CHAT_MESSAGES_KEY, chatMessages.innerHTML);
-            }
-            
-            // Save typing indicator state
-            const typingIndicator = document.querySelector('.typing-indicator');
-            localStorage.setItem(TYPING_INDICATOR_KEY, typingIndicator ? 'true' : 'false');
-            
-            // Save VRM model state - we need to get the active model from the server data
-            // For now, save currentModel name and we'll restore by refreshing models
-            if (currentModel) {
-                localStorage.setItem(VRM_MODEL_KEY, currentModel);
-            } else {
-                localStorage.removeItem(VRM_MODEL_KEY);
+            try {
+                const chatMessages = document.getElementById('chat-messages');
+                if (chatMessages) {
+                    localStorage.setItem(CHAT_MESSAGES_KEY, chatMessages.innerHTML);
+                }
+                
+                // Save typing indicator state
+                const typingIndicator = document.querySelector('.typing-indicator');
+                localStorage.setItem(TYPING_INDICATOR_KEY, typingIndicator ? 'true' : 'false');
+                
+                // Save VRM model state - we need to get the active model from the server data
+                // For now, save currentModel name and we'll restore by refreshing models
+                if (typeof currentModel !== 'undefined' && currentModel) {
+                    localStorage.setItem(VRM_MODEL_KEY, currentModel);
+                } else {
+                    localStorage.removeItem(VRM_MODEL_KEY);
+                }
+            } catch (error) {
+                console.debug('[synth_webui] Error saving chat state:', error);
             }
         }
 
@@ -1868,15 +1875,10 @@
                     chatMessages.innerHTML = savedMessages;
                 }
                 
-                // Restore typing indicator
-                const savedTyping = localStorage.getItem(TYPING_INDICATOR_KEY);
-                if (savedTyping === 'true') {
-                    // Re-add typing indicator if it was active
-                    const existingIndicator = document.querySelector('.typing-indicator');
-                    if (!existingIndicator && typeof addTypingIndicator === 'function') {
-                        addTypingIndicator();
-                    }
-                }
+                // DO NOT restore typing indicator on page load
+                // It should only be shown when Synth is actively responding
+                // Always clear it on load to ensure clean state
+                removeTypingIndicator();
                 
                 // Note: VRM model should already be loaded, no need to refresh
                 console.log('[synth_webui] Chat state restored (VRM should persist)');
@@ -3670,11 +3672,37 @@
             ws.addEventListener('message', (event) => {
                 const data = JSON.parse(event.data);
                 console.log('[synth_webui] Received WebSocket message:', data);
+                console.log('[synth_webui] Message type:', data.type);
                 
                 if (data.type === 'session') {
                     sessionId = data.session_id;
                     console.log('[synth_webui] Session established:', sessionId);
                     refreshStats(true);
+                    return;
+                }
+                if (data.type === 'action_state') {
+                    // Handle new action state from backend (THINKING, WRITING, IDLE, etc)
+                    console.log('[synth_webui] ✅ MATCHED action_state!');
+                    console.log('[synth_webui] Received action_state:', data.phase);
+                    
+                    // Map action phases to animation states (matching AnimationState enum in animation_handler.py)
+                    const phaseToAnimationState = {
+                        'THINKING': 'think',
+                        'WRITING': 'write',
+                        'CORRECTING': 'think',  // Use think for correcting
+                        'TALKING': 'talk',
+                        'IDLE': 'idle'
+                    };
+                    
+                    const animationState = phaseToAnimationState[data.phase] || 'idle';
+                    
+                    if (animationHandler) {
+                        console.log('[synth_webui] ✅ Setting animation state to:', animationState, 'from phase:', data.phase);
+                        animationHandler.startAction(animationState);
+                    } else {
+                        console.log('[synth_webui] Animation handler not ready, queueing action_state command:', animationState);
+                        pendingAnimationCommands.push({ state: animationState, phase: data.phase });
+                    }
                     return;
                 }
                 if (data.type === 'animation') {
@@ -3690,6 +3718,20 @@
                         const animationFile = data.animation ? data.animation.split('/').pop() : null;
                         console.log('[synth_webui] Extracted animationFile:', animationFile);
                         animationHandler.startAction(data.state, animationFile);
+                    } else if (data.state) {
+                        // Queue the command if animation handler is not ready yet
+                        console.log('[synth_webui] Animation handler not ready, queueing command:', data.state);
+                        pendingAnimationCommands.push(data);
+                        
+                        // Set a timeout to check if animations are still pending (fallback)
+                        if (!pendingAnimationTimeout) {
+                            pendingAnimationTimeout = setTimeout(() => {
+                                console.warn('[synth_webui] ⚠️ Animation handler still not ready after 10 seconds');
+                                console.warn('[synth_webui] Pending commands:', pendingAnimationCommands.length);
+                                // Still log this but don't force anything - wait for vrmLoaded event
+                                pendingAnimationTimeout = null;
+                            }, 10000);
+                        }
                     } else {
                         console.warn('[synth_webui] Animation handler not ready or missing state:', animationHandler, data.state);
                     }
@@ -3719,6 +3761,29 @@
                 removeTypingIndicator(); // Remove typing indicator on error
             });
         }
+
+        // Listen for VRM loaded event to process pending animation commands
+        window.addEventListener('vrmLoaded', () => {
+            console.log('[synth_webui] VRM loaded event received, checking pending animations...');
+            
+            // Clear pending animation timeout since VRM is now ready
+            if (pendingAnimationTimeout) {
+                clearTimeout(pendingAnimationTimeout);
+                pendingAnimationTimeout = null;
+            }
+            
+            if (pendingAnimationCommands.length > 0 && typeof animationHandler !== 'undefined' && animationHandler) {
+                console.log('[synth_webui] Processing', pendingAnimationCommands.length, 'pending animation commands after VRM load');
+                const commands = pendingAnimationCommands.splice(0); // Copy and clear
+                for (const cmd of commands) {
+                    console.log('[synth_webui] Executing pending animation (from vrmLoaded):', cmd.state, cmd.animation);
+                    if (cmd.state && animationHandler) {
+                        const animationFile = cmd.animation ? cmd.animation.split('/').pop() : null;
+                        animationHandler.startAction(cmd.state, animationFile);
+                    }
+                }
+            }
+        });
 
         function sendMessage() {
             const text = input.value.trim();
@@ -3981,7 +4046,18 @@
                     // Create action from random clip if multiple
                     const clip = clips[Math.floor(Math.random() * clips.length)];
                     const action = this.mixer.clipAction(clip);
-                    action.setLoop(THREE.LoopRepeat);
+                    
+                    // Set appropriate loop type based on action
+                    // Some animations (like think) need special handling for smooth looping
+                    if (actionName === 'think') {
+                        // For think animations with intro/middle/outro, use LoopRepeat for native looping
+                        action.setLoop(THREE.LoopRepeat);
+                        action.clampWhenFinished = false;
+                    } else {
+                        action.setLoop(THREE.LoopRepeat);
+                        action.clampWhenFinished = false;
+                    }
+                    
                     this.actions[actionName] = action;
                     return action;
                 }
@@ -4005,7 +4081,14 @@
                             const clip = await this.loadAnimation(actionName, animationFile);
                             if (clip) {
                                 action = this.mixer.clipAction(clip);
-                                action.setLoop(THREE.LoopRepeat);
+                                // Set appropriate loop type based on action name
+                                if (actionName === 'think') {
+                                    action.setLoop(THREE.LoopRepeat);
+                                    action.clampWhenFinished = false;
+                                } else {
+                                    action.setLoop(THREE.LoopRepeat);
+                                    action.clampWhenFinished = false;
+                                }
                                 this.actions[specificKey] = action;
                                 console.log(`[AnimationHandler] Specific animation ${animationFile} loaded and cached`);
                             } else {
@@ -4059,7 +4142,6 @@
                 }
             }
 
-            let animationHandler = null;
             let isWaitingForFirstResponse = false;
             let idleTimeout = null;
 
@@ -4251,21 +4333,50 @@
                     animationHandler = new AnimationHandler(currentMixer, vrm);
                     
                     console.log('[synth_webui] Loading idle action...');
-                    await animationHandler.loadAction('idle');
-                    await animationHandler.startAction('idle');
-                    console.log('[synth_webui] ✓ Idle action loaded and playing');
+                    try {
+                        await animationHandler.loadAction('idle');
+                        await animationHandler.startAction('idle');
+                        console.log('[synth_webui] ✓ Idle action loaded and playing');
+                    } catch (e) {
+                        console.error('[synth_webui] ✗ Idle action failed:', e);
+                    }
                     
                     console.log('[synth_webui] Loading talk action...');
-                    await animationHandler.loadAction('talk');
-                    console.log('[synth_webui] ✓ Talk action loaded');
+                    try {
+                        await animationHandler.loadAction('talk');
+                        console.log('[synth_webui] ✓ Talk action loaded');
+                    } catch (e) {
+                        console.error('[synth_webui] ✗ Talk action failed:', e);
+                    }
                     
                     console.log('[synth_webui] Loading think action...');
-                    await animationHandler.loadAction('think');
-                    console.log('[synth_webui] ✓ Think action loaded');
+                    try {
+                        await animationHandler.loadAction('think');
+                        console.log('[synth_webui] ✓ Think action loaded');
+                    } catch (e) {
+                        console.error('[synth_webui] ✗ Think action failed:', e);
+                    }
                     
                     console.log('[synth_webui] Loading write action...');
-                    await animationHandler.loadAction('write');
-                    console.log('[synth_webui] ✓ Write action loaded');
+                    try {
+                        await animationHandler.loadAction('write');
+                        console.log('[synth_webui] ✓ Write action loaded');
+                    } catch (e) {
+                        console.error('[synth_webui] ✗ Write action failed:', e);
+                    }
+                    
+                    // Process any pending animation commands that arrived while loading
+                    if (pendingAnimationCommands.length > 0) {
+                        console.log('[synth_webui] Processing', pendingAnimationCommands.length, 'pending animation commands');
+                        const commands = pendingAnimationCommands.splice(0); // Copy and clear the queue
+                        for (const cmd of commands) {
+                            console.log('[synth_webui] Executing pending animation command:', cmd.state, cmd.animation);
+                            if (cmd.state && animationHandler) {
+                                const animationFile = cmd.animation ? cmd.animation.split('/').pop() : null;
+                                animationHandler.startAction(cmd.state, animationFile);
+                            }
+                        }
+                    }
                     
                 } catch (error) {
                     console.error('[synth_webui] Failed to load animations:', error);

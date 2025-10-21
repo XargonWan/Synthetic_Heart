@@ -42,6 +42,7 @@ from core.message_chain import get_failed_message_text, RESPONSE_TIMEOUT, FAILED
 import core.plugin_instance as plugin_instance
 from core.animation_handler import get_animation_handler, AnimationState
 from core.persona_manager import get_persona_manager
+from core.action_state_manager import get_action_state_manager, AnimationPhase
 import mimetypes
 
 
@@ -306,6 +307,7 @@ class SynthWebUIInterface:
 
         self.app.get("/")(self.index)
         self.app.get("/health")(self.health)
+        self.app.get("/api/action-state")(self.get_action_state_endpoint)
         self.app.get("/stats")(self.stats)
         self.app.get("/logs")(self.logs_page)
         self.app.get("/diary")(self.diary_page)
@@ -340,6 +342,12 @@ class SynthWebUIInterface:
         self.animation_handler = get_animation_handler()
         self.animation_handler.set_webui(self)
         log_info(f"{LOG_PREFIX} Animation handler initialized")
+        
+        # Initialize global action state manager
+        self.action_state_manager = get_action_state_manager()
+        # Register callback to broadcast state changes to all WebSocket clients
+        self.action_state_manager.register_state_changed_callback(self._broadcast_action_state)
+        log_info(f"{LOG_PREFIX} Action state manager initialized with WebSocket broadcast")
         
         # Persona manager will be initialized in start() method after core initialization
         self.persona_manager = None
@@ -450,6 +458,19 @@ class SynthWebUIInterface:
 
     async def health(self):
         return JSONResponse({"status": "ok", "time": datetime.utcnow().isoformat()})
+
+    async def get_action_state_endpoint(self):
+        """Get the current global action state."""
+        state = await self.action_state_manager.get_current_action()
+        if state:
+            return JSONResponse(state)
+        else:
+            return JSONResponse({
+                "action_id": None,
+                "phase": "IDLE",
+                "component": None,
+                "started_at": None
+            })
 
     async def stats(self):
         uptime = int((datetime.utcnow() - self.start_time).total_seconds())
@@ -647,6 +668,38 @@ class SynthWebUIInterface:
             except Exception:
                 pass  # Websocket might already be closed
 
+    async def _broadcast_action_state(self, state: Optional[Dict[str, Any]]) -> None:
+        """
+        Broadcast the current action state to all connected WebSocket clients.
+        
+        Called whenever the global action state changes.
+        """
+        if not state:
+            # Stack is empty, return to IDLE
+            message = {
+                "type": "action_state",
+                "phase": "IDLE",
+                "action_id": None,
+                "component": None
+            }
+        else:
+            message = {
+                "type": "action_state",
+                "phase": state.get("phase"),
+                "action_id": state.get("action_id"),
+                "component": state.get("component")
+            }
+        
+        log_info(f"{LOG_PREFIX} Broadcasting action state to {len(self.connections)} clients: {message['phase']}")
+        
+        # Send to all connected clients
+        for session_id, websocket in self.connections.items():
+            try:
+                await websocket.send_json(message)
+                log_info(f"{LOG_PREFIX} ✓ Sent action_state to session {session_id}: {message['phase']}")
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to broadcast action state to session {session_id}: {exc}")
+
     async def _handle_user_message(self, session_id: str, text: str) -> None:
         from types import SimpleNamespace
 
@@ -673,34 +726,26 @@ class SynthWebUIInterface:
 
         log_debug(f"{LOG_PREFIX} message from {session_id}: {text}")
         
-        # Start "Think" animation when message is received
-        context_id = f"msg_{session_id}_{message.message_id}"
+        # Global action ID for this message
+        action_id = f"webui_msg_{session_id}_{message.message_id}"
+        
         try:
-            if self.persona_manager:
-                log_info(f"{LOG_PREFIX} Triggering THINK animation for session {session_id}, context {context_id}")
-                await self.persona_manager.set_animation_state(
-                    "think",
-                    session_id=session_id,
-                    context_id=context_id
-                )
-            else:
-                log_info(f"{LOG_PREFIX} Using animation_handler for THINK animation (no persona_manager)")
-                await self.animation_handler.transition_to(
-                    AnimationState.THINK,
-                    session_id=session_id,
-                    context_id=context_id
-                )
-        except Exception as anim_exc:
-            log_warning(f"{LOG_PREFIX} Failed to trigger Think animation: {anim_exc}")
+            # Push THINKING action to global state
+            log_info(f"{LOG_PREFIX} Pushing THINKING action: {action_id}")
+            await self.action_state_manager.push_action(
+                action_id=action_id,
+                phase=AnimationPhase.THINKING,
+                component="webui"
+            )
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} Failed to push action state: {exc}")
         
         # Get the configured response timeout from message_chain
         from core.message_chain import RESPONSE_TIMEOUT
         timeout_seconds = int(RESPONSE_TIMEOUT)
         
         try:
-            # The plugin_instance will handle transitioning to WRITE when it
-            # starts generating a response (it broadcasts the animation).
-            # Here we simply invoke the plugin and wait for the result.
+            # Call plugin to handle message
             response = await asyncio.wait_for(
                 plugin_instance.handle_incoming_message(
                     self, message, {}, INTERFACE_NAME
@@ -709,21 +754,17 @@ class SynthWebUIInterface:
             )
         except asyncio.TimeoutError:
             log_error(f"{LOG_PREFIX} Message handling timed out after {timeout_seconds}s for session {session_id}")
-            response = str(get_failed_message_text())  # Use configured fallback message (convert ConfigVar to str)
+            response = str(get_failed_message_text())
         except Exception as exc:  # pragma: no cover - runtime issues
             log_error(f"{LOG_PREFIX} error handling message: {exc}")
-            response = str(get_failed_message_text())  # Use configured fallback message (convert ConfigVar to str)
+            response = str(get_failed_message_text())
         finally:
-            # Stop animation context and return to Idle when message is complete
+            # Pop action and return to IDLE
             try:
-                if self.persona_manager:
-                    log_info(f"{LOG_PREFIX} Stopping animation context {context_id} and returning to IDLE for session {session_id}")
-                    await self.persona_manager.stop_animation_context(context_id, session_id)
-                else:
-                    log_info(f"{LOG_PREFIX} Using animation_handler to stop animation context {context_id}")
-                    await self.animation_handler.stop_animation(context_id, session_id)
-            except Exception as anim_exc:
-                log_warning(f"{LOG_PREFIX} Failed to stop animation: {anim_exc}")
+                await self.action_state_manager.pop_action(action_id)
+                log_info(f"{LOG_PREFIX} Popped action: {action_id} - returning to IDLE")
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to pop action state: {exc}")
 
         if response:
             await self.send_message(session_id, text=response)
@@ -804,9 +845,18 @@ class SynthWebUIInterface:
         else:
             log_debug(f"{LOG_PREFIX} No marker file found, looking for first available VRM...")
         
-        # Fallback to first available model
+        # Fallback to first available model, preferring SynTh.vrm as default
         available_vrms = list(sorted(self.vrm_dir.glob("*.vrm")))
         log_debug(f"{LOG_PREFIX} Available VRM files: {[v.name for v in available_vrms]}")
+        
+        # Prefer SyntH.vrm as the default model
+        synth_vrm = self.vrm_dir / "SyntH.vrm"
+        if synth_vrm.exists():
+            log_info(f"{LOG_PREFIX} Using default SyntH.vrm model")
+            self._set_active_vrm(synth_vrm.name)
+            return synth_vrm.name
+        
+        # Otherwise use first available
         for candidate in available_vrms:
             log_info(f"{LOG_PREFIX} Using first available VRM: {candidate.name}")
             return candidate.name
