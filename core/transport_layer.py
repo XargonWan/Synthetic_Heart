@@ -237,6 +237,11 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
             thread_id = int(thread_id)
         kwargs['message_thread_id'] = thread_id
 
+    # Filter out internal parameters that should not be passed to interface send functions
+    excluded_params = {'event_id', 'interface', 'is_llm_response', 'context', 'error_retry_policy'}
+    for param in excluded_params:
+        kwargs.pop(param, None)
+
     # Log LLM response for debugging
     if text:
         preview = text[:200] + "..." if len(text) > 200 else text

@@ -1066,16 +1066,32 @@ def _send_prompt_with_confirmation(textarea, prompt_text: str) -> None:
                 continue
             
             paste_and_send(textarea, prompt_text)
-            try:
-                send_btn = WebDriverWait(driver, 3).until(
-                    EC.element_to_be_clickable(
-                        (By.CSS_SELECTOR, "button[data-testid='send-button']")
+            
+            # Try multiple selectors for the send button
+            send_button_selectors = [
+                (By.CSS_SELECTOR, "button[data-testid='send-button']"),
+                (By.CSS_SELECTOR, "button[aria-label='Send prompt']"),
+                (By.CSS_SELECTOR, "button.absolute.rounded-full"),
+                (By.XPATH, "//button[@data-testid='send-button']"),
+                (By.XPATH, "//button[contains(@class, 'bottom') and not(@disabled)]")
+            ]
+            
+            button_clicked = False
+            for selector in send_button_selectors:
+                try:
+                    send_btn = WebDriverWait(driver, 2).until(
+                        EC.element_to_be_clickable(selector)
                     )
-                )
-                driver.execute_script("arguments[0].click();", send_btn)
-                log_debug("[selenium][STEP] Clicked send button")
-            except (StaleElementReferenceException, TimeoutException) as e:
-                log_warning(f"[selenium] Failed to click send button: {e}")
+                    driver.execute_script("arguments[0].click();", send_btn)
+                    log_debug(f"[selenium][STEP] Clicked send button with selector: {selector}")
+                    button_clicked = True
+                    break
+                except (StaleElementReferenceException, TimeoutException, NoSuchElementException):
+                    continue
+            
+            # Fallback to ENTER key if button click failed
+            if not button_clicked:
+                log_warning("[selenium] All send button selectors failed, using ENTER key")
                 try:
                     textarea.send_keys(Keys.ENTER)
                     log_debug("[selenium][STEP] Sent ENTER key as fallback")
@@ -1318,29 +1334,40 @@ def process_prompt_in_chat(
                 time.sleep(1)
                 continue
 
-            candidate = final_value.strip()
-            if candidate.startswith("```"):
-                match = re.match(r"```(?:json)?\n(.*)\n```", candidate, re.DOTALL)
-                if match:
-                    candidate = match.group(1)
-            try:
-                json.loads(candidate)
-            except Exception:
-                log_warning("[selenium] JSON invalid after paste; retrying")
-                time.sleep(1)
-                continue
-            try:
-                send_btn = WebDriverWait(driver, 3).until(
-                    EC.element_to_be_clickable(
-                        (By.CSS_SELECTOR, "button[data-testid='send-button']")
+            # Skip JSON validation for normal prompts (they now include persona identity before JSON)
+            # JSON validation is only needed for correction/system messages which are still pure JSON
+            
+            # Try multiple selectors for the send button
+            send_button_selectors = [
+                (By.CSS_SELECTOR, "button[data-testid='send-button']"),
+                (By.CSS_SELECTOR, "button[aria-label='Send prompt']"),
+                (By.CSS_SELECTOR, "button.absolute.rounded-full"),
+                (By.XPATH, "//button[@data-testid='send-button']"),
+                (By.XPATH, "//button[contains(@class, 'bottom') and not(@disabled)]")
+            ]
+            
+            button_clicked = False
+            for selector in send_button_selectors:
+                try:
+                    send_btn = WebDriverWait(driver, 2).until(
+                        EC.element_to_be_clickable(selector)
                     )
-                )
-                driver.execute_script("arguments[0].click();", send_btn)
-                log_debug("[selenium][STEP] Clicked send button")
-            except Exception as e:
-                log_warning(f"[selenium] Failed to click send button: {e}")
-                textarea.send_keys(Keys.ENTER)
-                log_debug("[selenium][STEP] Sent ENTER key as fallback")
+                    driver.execute_script("arguments[0].click();", send_btn)
+                    log_debug(f"[selenium][STEP] Clicked send button with selector: {selector}")
+                    button_clicked = True
+                    break
+                except (StaleElementReferenceException, TimeoutException, NoSuchElementException):
+                    continue
+            
+            # Fallback to ENTER key if button click failed
+            if not button_clicked:
+                log_warning("[selenium] All send button selectors failed, using ENTER key")
+                try:
+                    textarea.send_keys(Keys.ENTER)
+                    log_debug("[selenium][STEP] Sent ENTER key as fallback")
+                except Exception as e:
+                    log_error(f"[selenium] Even ENTER key failed: {e}")
+                    return None
         except ElementNotInteractableException as e:
             log_warning(f"[selenium][retry] Element not interactable: {e}")
             time.sleep(2)
@@ -2443,9 +2470,39 @@ class SeleniumChatGPTLegacyPlugin(AIPluginBase):
             chat_id = await chat_link_store.get_chatgpt_link(
                 message.chat_id, thread_id, interface=interface_name
             )
-            prompt_text = json.dumps(prompt, ensure_ascii=False)
+            
+            # Format the prompt with proper instructions
+            # For system messages (errors, terminal output), wrap in code block
             if isinstance(prompt, dict) and "system_message" in prompt:
+                prompt_text = json.dumps(prompt, ensure_ascii=False)
                 prompt_text = f"```json\n{prompt_text}\n```"
+            else:
+                # For normal prompts, extract persona identity and prepend as clear instructions
+                # Then remove it from the JSON to avoid duplication
+                persona_identity = ""
+                if isinstance(prompt, dict):
+                    context = prompt.get("context", {})
+                    persona_data = context.get("persona", "")
+                    
+                    if persona_data:
+                        # Extract the persona identity to use as role instructions
+                        persona_identity = persona_data
+                        # Remove persona from context to avoid duplication
+                        prompt_copy = json.loads(json.dumps(prompt))  # Deep copy
+                        if "persona" in prompt_copy.get("context", {}):
+                            del prompt_copy["context"]["persona"]
+                        prompt_text = json.dumps(prompt_copy, ensure_ascii=False)
+                    else:
+                        prompt_text = json.dumps(prompt, ensure_ascii=False)
+                else:
+                    prompt_text = json.dumps(prompt, ensure_ascii=False)
+                
+                # Build the final prompt with identity first, then JSON context
+                if persona_identity:
+                    prompt_text = f"{persona_identity}\n\nYou must respond as this persona using the following context and instructions. Read the JSON below and respond accordingly:\n\n```json\n{prompt_text}\n```"
+                else:
+                    # Fallback: at least tell ChatGPT what to do with the JSON
+                    prompt_text = f"Use the following JSON context to respond. Read carefully and respond as instructed:\n\n```json\n{prompt_text}\n```"
             if not chat_id:
                 path = recent_chats.get_chat_path(message.chat_id)
                 if path and go_to_chat_by_path_with_retries(driver, path):
