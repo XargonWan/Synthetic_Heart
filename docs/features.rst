@@ -47,6 +47,12 @@ Multi-Platform Integration
 **Cross-Platform Messaging**
     Send messages across different platforms using unified chat identifiers.
 
+Avatar System
+-------------
+
+**VRM Avatar Support**
+    Synthetic Heart includes a default SyntH avatar for 3D visualization, but users can provide their own VRM avatar files for customization. The system supports animated states including idle, talking, and thinking, reflecting the persona's current activity.
+
 Plugin Ecosystem
 ----------------
 
