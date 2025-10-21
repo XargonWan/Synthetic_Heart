@@ -22,7 +22,7 @@ Synthetic Heart aims to make a SyntH "alive" and "conscious", with their own wil
 
 ### Features
 
-- Switchable LLM engines (ollama apis, ChatGPT API or a Selenium-driven ChatGPT, Gemini or Grok sessions)
+- Switchable LLM engines (Selenium-driven ChatGPT, Gemini or Grok sessions). **Note: Currently, only Selenium ChatGPT (Legacy) is fully functional. Other engines are experimental and may not work reliably.**
 - Multiple chat interfaces including the builtin webui, Telegram, Discord and Matrix
 - **VRM Avatar System**: 3D animated avatars with idle, talking, and thinking states.
 - **SyntH Web UI**: A production-ready web interface featuring VRM avatar support and real-time animations.  

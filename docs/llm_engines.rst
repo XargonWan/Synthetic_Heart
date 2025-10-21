@@ -17,10 +17,16 @@ All LLM engines follow a consistent architecture:
 Available Engines
 -----------------
 
+**Stable Engines:**
+
+* ``selenium_chatgpt_legacy`` – Legacy version of the ChatGPT Selenium engine. This is the only fully functional LLM engine at present.
+
+**Experimental/Development Engines:**
+
 * ``manual`` – Forward prompts to a human trainer for manual responses (useful for debugging and development).
-* ``openai_chatgpt`` – Access OpenAI's ChatGPT API with support for GPT-3.5, GPT-4, and GPT-4o models. Requires ``OPENAI_API_KEY``.
-* ``google_cli`` – Use Google's Gemini models via the command-line ``gemini`` tool. Requires ``GEMINI_API_KEY`` and the ``gemini`` CLI tool.
-* ``selenium_chatgpt`` – Drive a browser-based ChatGPT session for advanced interaction. Uses ``CHROMIUM_HEADLESS`` and ``CHATGPT_MODEL``; ``WEBVIEW_HOST``/``WEBVIEW_PORT`` expose the desktop interface.
+* ``selenium_chatgpt`` – Drive a browser-based ChatGPT session for advanced interaction. Currently experimental and may not work reliably.
+* ``selenium_gemini`` – Browser-controlled Google Gemini for AI interaction. Experimental, supports multiple Gemini models but may have issues.
+* ``selenium_grok`` – Browser-controlled xAI Grok for advanced reasoning. Experimental, supports Grok models but functionality is not guaranteed.
 
 Manual Engine
 -------------
@@ -31,33 +37,6 @@ The ``manual`` engine forwards all prompts to a human trainer instead of an AI m
 - **Development Aid**: Allows manual inspection of prompts and responses
 - **No Configuration**: Works immediately without API keys or external dependencies
 - **Trainer Feedback**: Responses are sent back through the normal message flow
-
-OpenAI ChatGPT Engine
----------------------
-
-The ``openai_chatgpt`` engine provides access to OpenAI's models:
-
-- **Model Support**: GPT-3.5-turbo, GPT-4, GPT-4o with automatic capability detection
-- **Token Management**: Respects model-specific context limits and token budgets
-- **Multimodal**: GPT-4o supports image inputs and analysis
-- **Rate Limiting**: Built-in rate limiting and retry logic for API stability
-
-Configuration:
-
-.. code-block:: bash
-
-   OPENAI_API_KEY=your_api_key_here
-   CHATGPT_MODEL=gpt-4o  # Optional, defaults to gpt-3.5-turbo
-
-Google CLI Engine
------------------
-
-The ``google_cli`` engine uses Google's command-line Gemini tool:
-
-- **Local Execution**: Runs Gemini models locally via CLI
-- **API Key Required**: Set ``GEMINI_API_KEY`` for authentication
-- **Installation Required**: Must install the ``gemini`` CLI tool separately
-- **Offline Capable**: Can work without internet once models are cached
 
 Selenium ChatGPT Engine
 -----------------------
@@ -75,6 +54,43 @@ Setup Steps:
 2. Access ``http://<host>:5006`` in your browser
 3. Complete ChatGPT login and captcha verification
 4. synth can then interact with ChatGPT in real-time
+
+Selenium ChatGPT Legacy Engine
+------------------------------
+
+The ``selenium_chatgpt_legacy`` engine is a legacy version of the ChatGPT Selenium engine for backward compatibility with older setups.
+
+Selenium Gemini Engine
+----------------------
+
+The ``selenium_gemini`` engine controls a Google Gemini browser session:
+
+- **Model Support**: Gemini 2.5 Flash, 2.0 Flash, 1.5 Flash, 1.5 Pro with automatic limit detection
+- **Multimodal**: Supports image inputs and analysis
+- **Character Limits**: Up to 500k characters for Pro models
+- **Browser Control**: Uses Selenium for web interface interaction
+
+Configuration:
+
+.. code-block:: bash
+
+   GEMINI_MODEL=2.5-flash  # Optional, defaults to 2.5-flash
+
+Selenium Grok Engine
+--------------------
+
+The ``selenium_grok`` engine controls an xAI Grok browser session:
+
+- **Advanced Reasoning**: Access to Grok's reasoning capabilities
+- **Vision Support**: Grok Vision Beta for image analysis
+- **Large Context**: Up to 128k tokens context window
+- **Browser-Based**: Selenium-driven interaction with web interface
+
+Configuration:
+
+.. code-block:: bash
+
+   GROK_MODEL=grok-beta  # Optional, defaults to grok-beta
 
 Engine Registration and Discovery
 ---------------------------------
@@ -175,4 +191,4 @@ Best Practices
 **Security**
     Never log API keys or sensitive authentication data.
 
-For complete examples, examine ``llm_engines/openai_chatgpt.py`` or ``llm_engines/selenium_chatgpt.py`` in the repository.
+For complete examples, examine ``llm_engines/selenium_chatgpt.py`` or ``llm_engines/selenium_gemini.py`` in the repository.
