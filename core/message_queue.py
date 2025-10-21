@@ -394,7 +394,10 @@ async def _consumer_loop() -> None:
                     if bot and chat_id:
                         kwargs = {"chat_id": chat_id, "text": "😵‍💫"}
                         if thread_id:
-                            kwargs["thread_id"] = thread_id
+                            # Convert thread_id to int if it's a string (for Telegram API compatibility)
+                            if isinstance(thread_id, str) and thread_id.isdigit():
+                                thread_id = int(thread_id)
+                            kwargs["message_thread_id"] = thread_id
                         reply_msg = final.get("message")
                         reply_id = getattr(reply_msg, "message_id", None)
                         if reply_id:

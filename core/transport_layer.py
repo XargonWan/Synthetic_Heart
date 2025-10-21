@@ -229,6 +229,14 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
     except Exception as _:
         log_debug("[transport] universal_send diagnostic logging failed to inspect interface_send_func")
 
+    # Map thread_id to message_thread_id for Telegram API compatibility
+    if 'thread_id' in kwargs:
+        thread_id = kwargs.pop('thread_id')
+        # Convert thread_id to int if it's a string (for Telegram API compatibility)
+        if isinstance(thread_id, str) and thread_id.isdigit():
+            thread_id = int(thread_id)
+        kwargs['message_thread_id'] = thread_id
+
     # Log LLM response for debugging
     if text:
         preview = text[:200] + "..." if len(text) > 200 else text

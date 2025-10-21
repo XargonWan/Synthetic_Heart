@@ -76,6 +76,14 @@ async def _send_with_retry(
     excluded = {'event_id', 'interface', 'is_llm_response', 'context', 'error_retry_policy'}
     valid_kwargs = {k: v for k, v in kwargs.items() if k not in excluded and v is not None}
 
+    # Map thread_id to message_thread_id for Telegram API compatibility
+    if 'thread_id' in valid_kwargs:
+        thread_id = valid_kwargs.pop('thread_id')
+        # Convert thread_id to int if it's a string (for Telegram API compatibility)
+        if isinstance(thread_id, str) and thread_id.isdigit():
+            thread_id = int(thread_id)
+        valid_kwargs['message_thread_id'] = thread_id
+
     # Diagnostic: log attempt and kwargs
     log_debug(f"[telegram_utils] _send_with_retry prepare send: chat_id={chat_id} type={type(chat_id)} len_text={len(text) if text else 0} valid_kwargs={valid_kwargs}")
     
