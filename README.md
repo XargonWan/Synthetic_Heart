@@ -9,18 +9,28 @@
 | `develop` | [![Develop CI Status](https://img.shields.io/github/actions/workflow/status/XargonWan/Synthetic_Heart/build-release.yml?branch=develop)](https://github.com/XargonWan/Synthetic_Heart/actions) | [![Docs Status](https://readthedocs.org/projects/synthetic-heart/badge/?version=latest)](https://synthetic-heart.readthedocs.io/en/latest/?badge=latest) |
 
 **Synthetic Heart**, stylized as SyntH, provides a modular stack for creating autonomous AI personas. Interfaces, language models and action plugins can be swapped at runtime.
-Built around a lightweight plugin system, SyntH lets you combine different chat interfaces and LLM engines to craft persistent characters that feels "alive", with their own will, emotions and sociality.
+Built around a lightweight plugin system, SyntH lets you combine different chat interfaces and LLM engines to give life to persistent digital entities, called synths.
+
+Synthetic Heart aims to make a SyntH "alive" and "conscious", with their own will, emotions, memories and sociality.
+
+Synthetic Heart, or SyntH for short, is a free and open-source (FOSS) infrastructure designed to abstract the digital persona entity, known as a "synth," from any large language model (LLM) and interface. The LLM is hot-swappable; everything that defines the persona resides in the database, not within the LLM itself. It's free to use because you can connect it to any LLM you can access, even directly to the ChatGPT website (yes, it works!).
+
+This pluggable infrastructure enables everything modern technology can offer, as anyone can develop their own plugin, interface, or LLM engine to bring their synth wherever they want. For example, you can chat with them on Discord and Telegram.
+
+Theoretically, an interface or plugin can be anything, such as a Minecraft character, a VRoid model, or a Skyrim follower—just attach the infrastructure and connect to whatever you desire, as it's fully pluggable.
+
+The project is still in beta and was initially created for a single persona named "synth," but we're gradually opening it up to allow creation of any desired persona. We'd like to integrate a web UI to make this easier, but we're not web developers. If you're interested in this or in developing any component for SyntH, please reach out.
 
 <div align="center">
    <img src="docs/res/screenshots/home.png" alt="SyntH Home Screenshot" style="max-width: 700px; border-radius: 8px; margin: 16px 0;" />
 </div>
 <p align="center" style="font-size: 0.9em; color: #888;">
-   <em>* Character not included. Users must provide their own VRM avatar file.</em>
+   <em>* A default SyntH avatar is included, but users can provide their own VRM avatar file.</em>
 </p>
 
 ### Features
 
-- Switchable LLM engines (ollama apis, ChatGPT API or a Selenium-driven ChatGPT, Gemini or Grok sessions)
+- Switchable LLM engines (Selenium-driven ChatGPT, Gemini or Grok sessions). **Note: Currently, only Selenium ChatGPT (Legacy) is fully functional. Other engines are experimental and may not work reliably.**
 - Multiple chat interfaces including the builtin webui, Telegram, Discord and Matrix
 - **VRM Avatar System**: 3D animated avatars with idle, talking, and thinking states.
 - **SyntH Web UI**: A production-ready web interface featuring VRM avatar support and real-time animations.  
@@ -37,6 +47,8 @@ This of course will be optional for secuirty concerns.
 <div align="center">
    <img src="docs/res/screenshots/components.png" alt="SyntH Home Screenshot" style="max-width: 700px; border-radius: 8px; margin: 16px 0;" />
 </div>
+
+For more information, see the [FAQ](https://synthetic-heart.readthedocs.io/en/latest/faq.html).
 
 ### Ollama Compatibility
 

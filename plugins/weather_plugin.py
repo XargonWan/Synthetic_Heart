@@ -28,7 +28,9 @@ register_injection_priority()
 
 
 class WeatherPlugin:
-    """Plugin that provides weather info as a static injection."""
+    """Plugin to provide weather information using wttr.in."""
+    
+    display_name = "Weather"
 
     def __init__(self):
         register_plugin("weather", self)

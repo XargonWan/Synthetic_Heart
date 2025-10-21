@@ -52,3 +52,6 @@ A: Yes, imagine your synth being a person with their smartphone in the hand: if 
 
 Q: What about the privacy concerns?
 A: This is a tough topic that I didn't address yet, just follow the golden rule: don't say anything private to an AI, unless is self hosted and not inside some public groups. You can ask to keep something private, and they're usually good to do that, but I won't bet my money on that.
+
+Q: Sometimes the SyntH is jusat doing nothing in the 3D space, can you add some animations to make it feel alive?
+A: I won't, as the animations should show what they're actually doing, not to show fake actions just to give the sense of reality. I want to achieve realism, not faking it.

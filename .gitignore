@@ -49,6 +49,7 @@ dist/
 build/
 site/
 logs/
+!res/synth_webui/avatars/SyntH.vrm
 avatars/
 persona*/
 docker-compose-*.yml

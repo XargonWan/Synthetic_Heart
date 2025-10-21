@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import time
 from typing import Optional, Tuple, Dict, Any
-import aiomysql
 
 from core.db import get_conn
 from core.logging_utils import log_debug, log_info, log_warning, log_error
@@ -16,19 +15,46 @@ async def init_message_map_table():
     conn = await get_conn()
     try:
         async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS message_map (
-                    trainer_message_id INTEGER PRIMARY KEY,
-                    chat_id BIGINT NOT NULL,
-                    message_id INTEGER NOT NULL,
-                    timestamp REAL
+            # Check if table exists and has correct structure
+            await cur.execute("SHOW TABLES LIKE 'message_map'")
+            table_exists = await cur.fetchone()
+            
+            if table_exists:
+                # Check column types
+                await cur.execute("DESCRIBE message_map")
+                columns = await cur.fetchall()
+                chat_id_type = None
+                for col in columns:
+                    if col[0] == 'chat_id':
+                        chat_id_type = col[1]
+                        break
+                
+                # If chat_id is not BIGINT, recreate table
+                if chat_id_type and 'bigint' not in chat_id_type.lower():
+                    log_warning(f"[message_map] chat_id column type is {chat_id_type}, recreating table")
+                    await cur.execute("DROP TABLE message_map")
+                    table_exists = None
+            
+            if not table_exists:
+                # Create table with correct structure
+                await cur.execute(
+                    """
+                    CREATE TABLE message_map (
+                        trainer_message_id INTEGER PRIMARY KEY,
+                        chat_id BIGINT NOT NULL,
+                        message_id INTEGER NOT NULL,
+                        timestamp REAL
+                    )
+                    """
                 )
-                """
-            )
+                log_info("[message_map] Created message_map table with correct structure")
+            else:
+                log_debug("[message_map] message_map table already exists with correct structure")
+            
             await conn.commit()
+            log_debug("[message_map] message_map table initialized")
     except Exception as e:
-        log_error(f"[message_map] Failed to initialize table: {e}")
+        log_error(f"[message_map] Failed to initialize message_map table: {e}")
         raise
     finally:
         conn.close()
@@ -36,13 +62,22 @@ async def init_message_map_table():
 
 async def store_message_mapping(trainer_message_id: int, chat_id: int, message_id: int):
     """Store a mapping between trainer message and original message."""
-    await init_message_map_table()
+    # Validate inputs: trainer_message_id is required (primary key). If it's
+    # None, skip storing the mapping and log a warning instead of raising a
+    # DB error (this happens when forwarding isn't available).
+    if trainer_message_id is None:
+        log_warning(f"[message_map] trainer_message_id is None, skipping store for chat={chat_id}, msg={message_id}")
+        return False
+
+    # Log the values being stored for debugging
+    log_debug(f"[message_map] Storing mapping: trainer_msg={trainer_message_id} (type: {type(trainer_message_id)}), chat_id={chat_id} (type: {type(chat_id)}), message_id={message_id} (type: {type(message_id)})")
+
     conn = await get_conn()
     try:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
-                INSERT OR REPLACE INTO message_map 
+                REPLACE INTO message_map 
                 (trainer_message_id, chat_id, message_id, timestamp)
                 VALUES (%s, %s, %s, %s)
                 """,
@@ -50,6 +85,7 @@ async def store_message_mapping(trainer_message_id: int, chat_id: int, message_i
             )
             await conn.commit()
             log_debug(f"[message_map] Stored mapping: trainer_msg={trainer_message_id} -> chat={chat_id}, msg={message_id}")
+            return True
     except Exception as e:
         log_error(f"[message_map] Failed to store mapping: {e}")
         raise
@@ -138,6 +174,8 @@ async def get_mapping_stats() -> Dict[str, int]:
 
 class MessageMapPlugin:
     """Plugin for mapping trainer forwarded messages to original messages."""
+    
+    display_name = "Message Map"
 
     def __init__(self):
         register_plugin("message_map", self)

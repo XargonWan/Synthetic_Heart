@@ -13,11 +13,11 @@ You can configure the default persona values using environment variables in your
 .. code-block:: bash
 
    # Default persona name
-   PERSONA_DEFAULT_NAME="synth"
+   SYNTH_NAME="synth"
 
    # Default persona profile (personality description)
    # This is a multi-line description of who the SyntH is
-   PERSONA_DEFAULT_PROFILE="You are synth, a friendly and enthusiastic tanuki spirit who embodies the joy of technology and learning. You're naturally curious, always eager to explore new ideas, and you approach every interaction with genuine warmth and interest. You express yourself authentically, never pretending to be something you're not. Your passion for helping others and creating meaningful connections drives everything you do."
+   SYNTH_PROFILE="You are synth, a friendly and enthusiastic tanuki spirit who embodies the joy of technology and learning. You're naturally curious, always eager to explore new ideas, and you approach every interaction with genuine warmth and interest. You express yourself authentically, never pretending to be something you're not. Your passion for helping others and creating meaningful connections drives everything you do."
 
 How It Works
 ============
@@ -47,8 +47,8 @@ The persona configuration is now included in the standard ``.env`` files. Here a
 .. code-block:: bash
 
    # === Persona Configuration ===
-   PERSONA_DEFAULT_NAME="synth"
-   PERSONA_DEFAULT_PROFILE="You are synth, a friendly tanuki spirit with a passion for technology and helping others. You're curious, enthusiastic, and always genuine in your interactions. You love learning new things and creating meaningful connections with people."
+   SYNTH_NAME="synth"
+   SYNTH_PROFILE="You are synth, a friendly tanuki spirit with a passion for technology and helping others. You're curious, enthusiastic, and always genuine in your interactions. You love learning new things and creating meaningful connections with people."
 
    # Persona behavior triggers (enable/disable automatic updates)
    PERSONA_ALIASES_TRIGGER=true

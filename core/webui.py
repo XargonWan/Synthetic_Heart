@@ -41,6 +41,8 @@ from core.config_manager import config_registry
 from core.message_chain import get_failed_message_text, RESPONSE_TIMEOUT, FAILED_MESSAGE_TEXT
 import core.plugin_instance as plugin_instance
 from core.animation_handler import get_animation_handler, AnimationState
+from core.persona_manager import get_persona_manager
+from core.action_state_manager import get_action_state_manager, AnimationPhase
 import mimetypes
 
 
@@ -62,6 +64,8 @@ mimetypes.add_type('application/json', '.json')
 
 class SynthWebUIInterface:
     """Production-ready web interface served from the Docker container."""
+    
+    display_name = "Web UI"
 
     def __init__(self) -> None:
         self.app = FastAPI(title=BRAND_NAME, version="1.0")
@@ -303,6 +307,7 @@ class SynthWebUIInterface:
 
         self.app.get("/")(self.index)
         self.app.get("/health")(self.health)
+        self.app.get("/api/action-state")(self.get_action_state_endpoint)
         self.app.get("/stats")(self.stats)
         self.app.get("/logs")(self.logs_page)
         self.app.get("/diary")(self.diary_page)
@@ -337,6 +342,15 @@ class SynthWebUIInterface:
         self.animation_handler = get_animation_handler()
         self.animation_handler.set_webui(self)
         log_info(f"{LOG_PREFIX} Animation handler initialized")
+        
+        # Initialize global action state manager
+        self.action_state_manager = get_action_state_manager()
+        # Register callback to broadcast state changes to all WebSocket clients
+        self.action_state_manager.register_state_changed_callback(self._broadcast_action_state)
+        log_info(f"{LOG_PREFIX} Action state manager initialized with WebSocket broadcast")
+        
+        # Persona manager will be initialized in start() method after core initialization
+        self.persona_manager = None
         
         if self.autostart:
             log_info(f"{LOG_PREFIX} Autostart enabled - will start server when event loop is available")
@@ -445,6 +459,19 @@ class SynthWebUIInterface:
     async def health(self):
         return JSONResponse({"status": "ok", "time": datetime.utcnow().isoformat()})
 
+    async def get_action_state_endpoint(self):
+        """Get the current global action state."""
+        state = await self.action_state_manager.get_current_action()
+        if state:
+            return JSONResponse(state)
+        else:
+            return JSONResponse({
+                "action_id": None,
+                "phase": "IDLE",
+                "component": None,
+                "started_at": None
+            })
+
     async def stats(self):
         uptime = int((datetime.utcnow() - self.start_time).total_seconds())
         return JSONResponse({"uptime": uptime, "sessions": len(self.connections)})
@@ -499,6 +526,17 @@ class SynthWebUIInterface:
         self.message_history.setdefault(session_id, deque(maxlen=self.max_history))
         await websocket.send_json({"type": "session", "session_id": session_id})
         await self._replay_history(session_id)
+        
+        # Set initial idle animation for new session
+        try:
+            if self.persona_manager:
+                await self.persona_manager.set_animation_state("idle", session_id=session_id)
+                log_debug(f"{LOG_PREFIX} Set initial idle animation for session {session_id}")
+            else:
+                log_debug(f"{LOG_PREFIX} Persona manager not available, skipping initial animation for session {session_id}")
+        except Exception as anim_exc:
+            log_warning(f"{LOG_PREFIX} Failed to set initial idle animation for session {session_id}: {anim_exc}")
+        
         log_info(f"{LOG_PREFIX} Client connected: {session_id}")
 
         try:
@@ -551,11 +589,26 @@ class SynthWebUIInterface:
             seen.add(key)
             unique_candidates.append(candidate)
 
-        log_info(f"{LOG_PREFIX} Log file candidates: {[str(c) for c in unique_candidates]}")
+        log_debug(f"{LOG_PREFIX} Log file candidates: {[str(c) for c in unique_candidates]}")
         path = next((candidate for candidate in unique_candidates if candidate.exists()), unique_candidates[0])
-        log_info(f"{LOG_PREFIX} Selected log file: {path} (exists: {path.exists()})")
+        log_debug(f"{LOG_PREFIX} Selected log file: {path} (exists: {path.exists()})")
 
         try:
+            # Prepare list of exception types that are considered 'normal' disconnects
+            try:
+                from websockets.exceptions import ConnectionClosedOK, ConnectionClosedError
+            except Exception:
+                ConnectionClosedOK = ConnectionClosedError = None  # type: ignore
+            try:
+                from uvicorn.protocols.utils import ClientDisconnected
+            except Exception:
+                ClientDisconnected = None  # type: ignore
+            from starlette.websockets import WebSocketDisconnect
+
+            disconnect_exceptions = tuple(
+                [exc for exc in (ConnectionClosedOK, ConnectionClosedError, ClientDisconnected, WebSocketDisconnect) if exc]
+            )
+
             wait_seconds = self.log_wait_seconds if self.log_wait_seconds else 20
             waited = 0
             while not path.exists() and waited < wait_seconds:
@@ -566,45 +619,86 @@ class SynthWebUIInterface:
             if not path.exists():
                 error_msg = f"Log file not found: {path}"
                 log_warning(f"{LOG_PREFIX} {error_msg}")
-                await websocket.send_text(error_msg)
+                try:
+                    await websocket.send_text(error_msg)
+                except Exception:
+                    # Client probably disconnected before we could send
+                    log_debug(f"{LOG_PREFIX} Client disconnected before receiving 'log not found' message")
                 return
 
-            log_info(f"{LOG_PREFIX} Opening log file: {path}")
+            log_debug(f"{LOG_PREFIX} Opening log file: {path}")
             with path.open("r", encoding="utf-8", errors="replace") as log_file:
                 # Send last 200 lines
                 log_file.seek(0)
                 recent_lines = deque(log_file, maxlen=200)
                 for line in recent_lines:
-                    await websocket.send_text(line.rstrip())
+                    try:
+                        await websocket.send_text(line.rstrip())
+                    except Exception as exc:
+                        # If the client disconnected, stop streaming silently
+                        if isinstance(exc, disconnect_exceptions) or isinstance(exc, (BrokenPipeError, ConnectionResetError)):
+                            log_info(f"{LOG_PREFIX} Log stream websocket disconnected while sending history: {type(exc).__name__}")
+                            return
+                        # Otherwise log and break
+                        log_error(f"{LOG_PREFIX} Failed to send log line: {exc}")
+                        return
                 log_file.seek(0, os.SEEK_END)
                 while True:
                     line = log_file.readline()
                     if not line:
                         await asyncio.sleep(1)
                         continue
-                    await websocket.send_text(line.rstrip())
-        except Exception as exc:  # pragma: no cover - runtime issues
-            # WebSocket disconnections are normal (user closed browser, page reload, etc.)
-            from starlette.websockets import WebSocketDisconnect
-            if isinstance(exc, WebSocketDisconnect):
-                # Normal disconnect, don't log as error
-                pass
-            else:
-                # Actual error, log it
-                import traceback
-                log_error(f"{LOG_PREFIX} log stream error: {exc}")
-                log_error(f"{LOG_PREFIX} Exception type: {type(exc).__name__}")
-                log_error(f"{LOG_PREFIX} Traceback: {traceback.format_exc()}")
-                try:
-                    # Try to send error to client
-                    await websocket.send_text(f"--- log stream error: {exc} ---")
-                except Exception:
-                    pass  # Websocket might be closed already
+                    try:
+                        await websocket.send_text(line.rstrip())
+                    except Exception as exc:
+                        if isinstance(exc, disconnect_exceptions) or isinstance(exc, (BrokenPipeError, ConnectionResetError)):
+                            log_info(f"{LOG_PREFIX} Log stream websocket disconnected while streaming: {type(exc).__name__}")
+                            return
+                        import traceback
+                        log_error(f"{LOG_PREFIX} log stream error: {exc}")
+                        log_error(f"{LOG_PREFIX} Exception type: {type(exc).__name__}")
+                        log_error(f"{LOG_PREFIX} Traceback: {traceback.format_exc()}")
+                        try:
+                            await websocket.send_text(f"--- log stream error: {exc} ---")
+                        except Exception:
+                            pass  # Websocket might be closed already
         finally:
             try:
                 await websocket.close()
             except Exception:
                 pass  # Websocket might already be closed
+
+    async def _broadcast_action_state(self, state: Optional[Dict[str, Any]]) -> None:
+        """
+        Broadcast the current action state to all connected WebSocket clients.
+        
+        Called whenever the global action state changes.
+        """
+        if not state:
+            # Stack is empty, return to IDLE
+            message = {
+                "type": "action_state",
+                "phase": "IDLE",
+                "action_id": None,
+                "component": None
+            }
+        else:
+            message = {
+                "type": "action_state",
+                "phase": state.get("phase"),
+                "action_id": state.get("action_id"),
+                "component": state.get("component")
+            }
+        
+        log_info(f"{LOG_PREFIX} Broadcasting action state to {len(self.connections)} clients: {message['phase']}")
+        
+        # Send to all connected clients
+        for session_id, websocket in self.connections.items():
+            try:
+                await websocket.send_json(message)
+                log_info(f"{LOG_PREFIX} ✓ Sent action_state to session {session_id}: {message['phase']}")
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to broadcast action state to session {session_id}: {exc}")
 
     async def _handle_user_message(self, session_id: str, text: str) -> None:
         from types import SimpleNamespace
@@ -632,25 +726,26 @@ class SynthWebUIInterface:
 
         log_debug(f"{LOG_PREFIX} message from {session_id}: {text}")
         
-        # Start "Think" animation when message is received
-        context_id = f"msg_{session_id}_{message.message_id}"
+        # Global action ID for this message
+        action_id = f"webui_msg_{session_id}_{message.message_id}"
+        
         try:
-            await self.animation_handler.transition_to(
-                AnimationState.THINK,
-                session_id=session_id,
-                context_id=context_id
+            # Push THINKING action to global state
+            log_info(f"{LOG_PREFIX} Pushing THINKING action: {action_id}")
+            await self.action_state_manager.push_action(
+                action_id=action_id,
+                phase=AnimationPhase.THINKING,
+                component="webui"
             )
-        except Exception as anim_exc:
-            log_warning(f"{LOG_PREFIX} Failed to trigger Think animation: {anim_exc}")
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} Failed to push action state: {exc}")
         
         # Get the configured response timeout from message_chain
         from core.message_chain import RESPONSE_TIMEOUT
         timeout_seconds = int(RESPONSE_TIMEOUT)
         
         try:
-            # The plugin_instance will handle transitioning to WRITE when it
-            # starts generating a response (it broadcasts the animation).
-            # Here we simply invoke the plugin and wait for the result.
+            # Call plugin to handle message
             response = await asyncio.wait_for(
                 plugin_instance.handle_incoming_message(
                     self, message, {}, INTERFACE_NAME
@@ -659,16 +754,17 @@ class SynthWebUIInterface:
             )
         except asyncio.TimeoutError:
             log_error(f"{LOG_PREFIX} Message handling timed out after {timeout_seconds}s for session {session_id}")
-            response = str(get_failed_message_text())  # Use configured fallback message (convert ConfigVar to str)
+            response = str(get_failed_message_text())
         except Exception as exc:  # pragma: no cover - runtime issues
             log_error(f"{LOG_PREFIX} error handling message: {exc}")
-            response = str(get_failed_message_text())  # Use configured fallback message (convert ConfigVar to str)
+            response = str(get_failed_message_text())
         finally:
-            # Stop animation context and return to Idle when message is complete
+            # Pop action and return to IDLE
             try:
-                await self.animation_handler.stop_animation(context_id, session_id)
-            except Exception as anim_exc:
-                log_warning(f"{LOG_PREFIX} Failed to stop animation: {anim_exc}")
+                await self.action_state_manager.pop_action(action_id)
+                log_info(f"{LOG_PREFIX} Popped action: {action_id} - returning to IDLE")
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to pop action state: {exc}")
 
         if response:
             await self.send_message(session_id, text=response)
@@ -749,9 +845,18 @@ class SynthWebUIInterface:
         else:
             log_debug(f"{LOG_PREFIX} No marker file found, looking for first available VRM...")
         
-        # Fallback to first available model
+        # Fallback to first available model, preferring SynTh.vrm as default
         available_vrms = list(sorted(self.vrm_dir.glob("*.vrm")))
         log_debug(f"{LOG_PREFIX} Available VRM files: {[v.name for v in available_vrms]}")
+        
+        # Prefer SyntH.vrm as the default model
+        synth_vrm = self.vrm_dir / "SyntH.vrm"
+        if synth_vrm.exists():
+            log_info(f"{LOG_PREFIX} Using default SyntH.vrm model")
+            self._set_active_vrm(synth_vrm.name)
+            return synth_vrm.name
+        
+        # Otherwise use first available
         for candidate in available_vrms:
             log_info(f"{LOG_PREFIX} Using first available VRM: {candidate.name}")
             return candidate.name
@@ -1439,14 +1544,6 @@ class SynthWebUIInterface:
             "synth_webui": "SyntH Web UI",
             "synth-webui": "SyntH Web UI",
             "synth_webui_interface": "SyntH Web UI",
-            "telegram_bot": "Telegram Bot",
-            "discord_interface": "Discord Interface",
-            "selenium_gemini": "Selenium Gemini",
-            "selenium_chatgpt": "Selenium ChatGPT",
-            "manual": "Manual",
-            "openai": "OpenAI",
-            "llama_cpp": "LLaMA.cpp",
-            "chat_link": "Chat Link",
         }
         key = str(raw_name)
         lower_key = key.lower()
@@ -1802,14 +1899,15 @@ class SynthWebUIInterface:
         component_type = str(data.get("type") or "").strip().lower()
         component_name = str(data.get("name") or "").strip()
 
-        if not component_type or component_type not in ["interface", "plugin"]:
-            raise HTTPException(status_code=400, detail="Missing or invalid 'type'. Must be 'interface' or 'plugin'")
+        if not component_type or component_type not in ["interface", "plugin", "llm"]:
+            raise HTTPException(status_code=400, detail="Missing or invalid 'type'. Must be 'interface', 'plugin', or 'llm'")
         
         if not component_name:
             raise HTTPException(status_code=400, detail="Missing 'name'")
 
         try:
             from core.core_initializer import PLUGIN_REGISTRY, INTERFACE_REGISTRY
+            from core.llm_registry import get_llm_registry
         except Exception as exc:
             log_error(f"{LOG_PREFIX} unable to import registries: {exc}")
             raise HTTPException(status_code=500, detail="Unable to access component registries") from exc
@@ -1848,6 +1946,30 @@ class SynthWebUIInterface:
                 # Plugins typically don't need reload, but we can report success
                 log_info(f"{LOG_PREFIX} Plugin '{component_name}' noted for reload (plugins use ConfigVar auto-updates)")
                 return JSONResponse({"status": "ok", "message": f"Plugin '{component_name}' configuration updated"})
+            
+            elif component_type == "llm":
+                # Reload LLM engine
+                llm_registry = get_llm_registry()
+                
+                # Check if engine exists
+                if component_name not in llm_registry.get_available_engines():
+                    raise HTTPException(status_code=404, detail=f"LLM engine '{component_name}' not found")
+                
+                # Unload current instance if exists
+                current_instance = llm_registry.get_engine(component_name)
+                if current_instance:
+                    log_info(f"{LOG_PREFIX} Unloading LLM engine '{component_name}'...")
+                    llm_registry.unload_engine(component_name)
+                
+                # Reload the engine
+                log_info(f"{LOG_PREFIX} Reloading LLM engine '{component_name}'...")
+                try:
+                    new_instance = llm_registry.load_engine(component_name)
+                    log_info(f"{LOG_PREFIX} LLM engine '{component_name}' reloaded successfully")
+                    return JSONResponse({"status": "ok", "message": f"LLM engine '{component_name}' reloaded successfully"})
+                except Exception as load_exc:
+                    log_error(f"{LOG_PREFIX} Failed to reload LLM engine '{component_name}': {load_exc}")
+                    raise HTTPException(status_code=500, detail=f"Failed to reload LLM engine '{component_name}': {str(load_exc)}") from load_exc
         
         except HTTPException:
             raise
@@ -1970,6 +2092,16 @@ class SynthWebUIInterface:
 
     async def start(self) -> None:
         """Start the web UI interface if autostart is enabled."""
+        # Initialize persona manager now that core initialization is complete
+        if self.persona_manager is None:
+            self.persona_manager = get_persona_manager()
+            if self.persona_manager:
+                self.persona_manager.set_webui(self)
+                self.persona_manager.set_animation_handler(self.animation_handler)
+                log_info(f"{LOG_PREFIX} Persona manager initialized")
+            else:
+                log_warning(f"{LOG_PREFIX} Failed to initialize persona manager")
+        
         if self.autostart:
             log_info(f"{LOG_PREFIX} Autostart enabled, starting {BRAND_NAME} server")
             self.start_server_async()

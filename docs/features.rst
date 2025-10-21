@@ -24,12 +24,13 @@ Modular Architecture
 Adaptive Intelligence
 ---------------------
 
-synth supports multiple language model backends with seamless switching:
+synth supports multiple language model backends with seamless switching. **Note: Currently, only the Selenium ChatGPT (Legacy) engine is fully functional. Other engines are experimental and may not work reliably.**
 
-* ``openai_chatgpt`` – OpenAI API integration with GPT-3.5, GPT-4, and GPT-4o support
-* ``google_cli`` – Google Gemini models via command-line interface
-* ``selenium_chatgpt`` – Browser-controlled ChatGPT for advanced interaction
-* ``manual`` – Human trainer input for debugging and development
+* ``selenium_chatgpt_legacy`` – Legacy browser-controlled ChatGPT (fully functional).
+* ``selenium_chatgpt`` – Browser-controlled ChatGPT for advanced interaction (experimental).
+* ``selenium_gemini`` – Browser-controlled Google Gemini with multimodal support (experimental).
+* ``selenium_grok`` – Browser-controlled xAI Grok with reasoning capabilities (experimental).
+* ``manual`` – Human trainer input for debugging and development.
 
 **Runtime Engine Switching**
     Use ``/llm <engine_name>`` to switch engines instantly during operation.
@@ -38,31 +39,33 @@ Multi-Platform Integration
 ---------------------------
 
 **Available Interfaces**
-    - **Telegram**: Bot and userbot support with media handling
+    - **Telegram**: Bot support with media handling
     - **Discord**: Full bot integration with threading
-    - **Reddit**: Post creation, commenting, and monitoring
-    - **Web UI**: Browser-based interface with real-time updates
-    - **CLI**: Command-line interface for direct interaction
+    - **Matrix**: Chat bridge with real-time messaging
+    - **Ollama Compatible**: REST API bridge for external clients
 
 **Cross-Platform Messaging**
     Send messages across different platforms using unified chat identifiers.
+
+Avatar System
+-------------
+
+**VRM Avatar Support**
+    Synthetic Heart includes a default SyntH avatar for 3D visualization, but users can provide their own VRM avatar files for customization. The system supports animated states including idle, talking, and thinking, reflecting the persona's current activity.
 
 Plugin Ecosystem
 ----------------
 
 **Action Plugins**
-    - ``terminal``: Secure shell command execution
     - ``ai_diary``: Personal memory and interaction tracking
-    - ``event``: Scheduled reminders and notifications
-    - ``weather``: Real-time weather information
     - ``bio_manager``: Persistent user profile management
-    - ``message_plugin``: Cross-platform message routing
-
-**Specialized Plugins**
-    - ``chat_link``: Conversation linking and management
-    - ``recent_chats``: Access to conversation history
     - ``blocklist``: User access control
+    - ``chat_link``: Conversation linking and management
+    - ``message_map``: Message threading and tracking
+    - ``message_plugin``: Cross-platform message routing
+    - ``recent_chats``: Access to conversation history
     - ``time_plugin``: Time and location awareness
+    - ``weather_plugin``: Real-time weather information
 
 Contextual Memory
 -----------------

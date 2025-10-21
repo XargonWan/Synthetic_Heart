@@ -129,75 +129,58 @@ def extract_json_from_text(text: str, return_metadata: bool = False) -> Optional
     
     decoder = json.JSONDecoder()
     found_json = None
-    
+    best_extra_chars = float('inf')  # Track the JSON with least extra content
+
     for text_variant in texts_to_try:
         log_debug(f"[extract_json_from_text] Trying text variant (length: {len(text_variant)})")
-        
-        # Scan for JSON objects starting from each '{'
+
+        # First pass: look for clean JSON (no extra text)
         object_start_indices = [i for i, char in enumerate(text_variant) if char == '{']
-        if not object_start_indices:
-            log_debug("[extract_json_from_text] No starting braces found in text variant")
-            continue
-            
-        for start in object_start_indices:
+        array_start_indices = [i for i, char in enumerate(text_variant) if char == '[']
+        all_start_indices = sorted(set(object_start_indices + array_start_indices))
+
+        for start in all_start_indices:
             try:
                 obj, obj_end = decoder.raw_decode(text_variant[start:])
                 obj_end += start
                 prefix = text_variant[:start].strip()
                 suffix = text_variant[obj_end:].strip()
-                if prefix or suffix:
+
+                # Calculate total extra characters
+                extra_chars = len(prefix) + len(suffix)
+
+                # Skip if prefix looks like explanatory text (common LLM patterns)
+                if prefix and len(prefix.split()) <= 3:  # Skip prefixes like "json", "here is", etc.
+                    prefix_lower = prefix.lower().strip()
+                    if prefix_lower in ['json', 'here', 'output', 'response', 'result', 'answer'] or \
+                       prefix_lower.startswith(('here is', 'the json', 'json:', 'output:')):
+                        log_debug(f"[extract_json_from_text] Skipping JSON with explanatory prefix: '{prefix}'")
+                        continue
+
+                # Prefer clean JSON (no extra text)
+                if extra_chars == 0:
+                    log_debug(f"[extract_json_from_text] ✅ Found clean JSON: {type(obj)}")
+                    found_json = obj
+                    metadata['had_extra_text'] = False
+                    break
+
+                # If we have extra text, keep track of the one with least extra content
+                elif extra_chars < best_extra_chars:
+                    best_extra_chars = extra_chars
+                    found_json = obj
                     metadata['had_extra_text'] = True
-                    log_info(f"[extract_json_from_text] ✅ Extracted JSON from text with extra content (prefix: {len(prefix)} chars, suffix: {len(suffix)} chars)")
-                    if prefix:
-                        log_debug(f"[extract_json_from_text] Prefix text: {prefix[:100]}...")
-                    if suffix:
-                        log_debug(f"[extract_json_from_text] Suffix text: {suffix[:100]}...")
-                    # Check if suffix looks like it could be corrupted JSON
-                    if suffix and ('{' in suffix or '"type"' in suffix or '"actions"' in suffix):
-                        metadata['unparsed_content'] = suffix
-                        metadata['recovered'] = True
-                        log_warning(f"[extract_json_from_text] ⚠️ Corrupted JSON detected - unparsed content contains JSON-like structures")
-                # Return JSON even if there's extra content - actions can still be executed
-                log_debug(f"[extract_json_from_text] Found valid JSON object: {type(obj)}")
-                found_json = obj
-                break
+                    metadata['prefix_length'] = len(prefix)
+                    metadata['suffix_length'] = len(suffix)
+                    log_debug(f"[extract_json_from_text] Found JSON with {extra_chars} extra chars (best so far)")
+
             except json.JSONDecodeError as e:
                 log_debug(f"[extract_json_from_text] JSON decode error at position {start}: {e}")
                 metadata['had_errors'] = True
                 metadata['error_count'] += 1
                 continue
-        
+
         if found_json:
             break
-            
-        # Scan for JSON arrays starting from each '['
-        array_start_indices = [i for i, char in enumerate(text_variant) if char == '[']
-        for start in array_start_indices:
-            try:
-                obj, obj_end = decoder.raw_decode(text_variant[start:])
-                obj_end += start
-                prefix = text_variant[:start].strip()
-                suffix = text_variant[obj_end:].strip()
-                if prefix or suffix:
-                    metadata['had_extra_text'] = True
-                    log_info(f"[extract_json_from_text] ✅ Extracted JSON array from text with extra content (prefix: {len(prefix)} chars, suffix: {len(suffix)} chars)")
-                    if prefix:
-                        log_debug(f"[extract_json_from_text] Prefix text: {prefix[:100]}...")
-                    if suffix:
-                        log_debug(f"[extract_json_from_text] Suffix text: {suffix[:100]}...")
-                    if suffix and ('{' in suffix or '"type"' in suffix or '"actions"' in suffix):
-                        metadata['unparsed_content'] = suffix
-                        metadata['recovered'] = True
-                        log_warning(f"[extract_json_from_text] ⚠️ Corrupted JSON detected - unparsed content contains JSON-like structures")
-                # Return JSON even if there's extra content - actions can still be executed
-                log_debug(f"[extract_json_from_text] Found valid JSON array: {type(obj)}")
-                found_json = obj
-                break
-            except json.JSONDecodeError as e:
-                log_debug(f"[extract_json_from_text] JSON decode error at position {start}: {e}")
-                metadata['had_errors'] = True
-                metadata['error_count'] += 1
-                continue
         
         if found_json:
             break
@@ -207,12 +190,20 @@ def extract_json_from_text(text: str, return_metadata: bool = False) -> Optional
         log_debug(f"[extract_json_from_text] Text content (first 500 chars): {text[:500]}")
         log_debug(f"[extract_json_from_text] Text content (last 500 chars): {text[-500:]}")
         return (None, metadata) if return_metadata else None
-    
+
+    # Log results based on what we found
+    if metadata.get('had_extra_text', False):
+        prefix_len = metadata.get('prefix_length', 0)
+        suffix_len = metadata.get('suffix_length', 0)
+        log_info(f"[extract_json_from_text] ✅ Extracted JSON with {prefix_len + suffix_len} extra chars (prefix: {prefix_len}, suffix: {suffix_len})")
+    else:
+        log_debug(f"[extract_json_from_text] ✅ Found clean JSON: {type(found_json)}")
+
     # If we had errors but found JSON, it means we recovered from corruption
     if metadata['had_errors'] and found_json:
         metadata['recovered'] = True
         log_warning(f"[extract_json_from_text] ⚠️ JSON recovered after {metadata['error_count']} parsing errors - may be incomplete")
-    
+
     return (found_json, metadata) if return_metadata else found_json
 
 
@@ -237,6 +228,19 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
         log_debug(f"[transport] universal_send called: interface_send_func={interface_send_func} bot_self={bot_self} args={args} kwargs_keys={list(kwargs.keys())}")
     except Exception as _:
         log_debug("[transport] universal_send diagnostic logging failed to inspect interface_send_func")
+
+    # Map thread_id to message_thread_id for Telegram API compatibility
+    if 'thread_id' in kwargs:
+        thread_id = kwargs.pop('thread_id')
+        # Convert thread_id to int if it's a string (for Telegram API compatibility)
+        if isinstance(thread_id, str) and thread_id.isdigit():
+            thread_id = int(thread_id)
+        kwargs['message_thread_id'] = thread_id
+
+    # Filter out internal parameters that should not be passed to interface send functions
+    excluded_params = {'event_id', 'interface', 'is_llm_response', 'context', 'error_retry_policy'}
+    for param in excluded_params:
+        kwargs.pop(param, None)
 
     # Log LLM response for debugging
     if text:
@@ -602,7 +606,7 @@ async def llm_to_interface(interface_send_func, *args, text: str = None, **kwarg
 
     try:
         log_debug(f"[llm_to_interface] Delivering message to chat_id={chat_id}")
-        log_debug(f"[llm_to_interface] Message preview: {text[:100]}..." if len(str(text)) > 100 else f"[llm_to_interface] Message: {text}")
+        log_debug(f"[llm_to_interface] Message: {text}")
     except Exception:
         pass
 

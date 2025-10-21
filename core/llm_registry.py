@@ -52,6 +52,21 @@ class LLMRegistry:
             raise ValueError(f"Plugin `{name}` does not define `PLUGIN_CLASS`.")
 
         plugin_class = getattr(module, "PLUGIN_CLASS")
+        
+        # CRITICAL: Verify that the plugin class has display_name
+        if not hasattr(plugin_class, "display_name"):
+            error_msg = f"Plugin `{name}` (class `{plugin_class.__name__}`) does not define `display_name`. All plugins MUST have a `display_name` class attribute."
+            log_error(f"[llm_registry] ❌ {error_msg}")
+            raise ValueError(error_msg)
+        
+        # Verify display_name is not empty
+        display_name = getattr(plugin_class, "display_name", "")
+        if not display_name or not isinstance(display_name, str) or not display_name.strip():
+            error_msg = f"Plugin `{name}` (class `{plugin_class.__name__}`) has invalid `display_name`: '{display_name}'. It must be a non-empty string."
+            log_error(f"[llm_registry] ❌ {error_msg}")
+            raise ValueError(error_msg)
+        
+        log_debug(f"[llm_registry] Plugin `{name}` has valid display_name: '{display_name}'")
 
         try:
             plugin_args = plugin_class.__init__.__code__.co_varnames

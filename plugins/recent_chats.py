@@ -123,6 +123,8 @@ async def cleanup_old_chats(older_than_days: int = 30):
 
 class RecentChatsPlugin:
     """Plugin for tracking recent chat activity."""
+    
+    display_name = "Recent Chats"
 
     def __init__(self):
         register_plugin("recent_chats", self)

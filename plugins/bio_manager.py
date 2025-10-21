@@ -734,6 +734,8 @@ def alter_feeling(user_id: str, feeling_type: str, intensity: int) -> None:
 
 class BioPlugin:
     """Plugin providing bio storage and retrieval utilities."""
+    
+    display_name = "Bio Manager"
 
     def __init__(self):
         self._participants: list[dict[str, Any]] = []

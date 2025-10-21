@@ -1047,6 +1047,21 @@ def register_plugin(name: str, plugin_obj: Any) -> None:
     """Register a plugin instance and its actions."""
     log_debug(f"[core_initializer] Global register_plugin called for: {name}")
     
+    # CRITICAL: Verify that the plugin has display_name
+    if not hasattr(plugin_obj, "display_name"):
+        error_msg = f"Plugin `{name}` (class `{plugin_obj.__class__.__name__}`) does not define `display_name`. All plugins MUST have a `display_name` class attribute."
+        log_error(f"[core_initializer] ❌ {error_msg}")
+        raise ValueError(error_msg)
+    
+    # Verify display_name is not empty
+    display_name = getattr(plugin_obj, "display_name", "")
+    if not display_name or not isinstance(display_name, str) or not display_name.strip():
+        error_msg = f"Plugin `{name}` (class `{plugin_obj.__class__.__name__}`) has invalid `display_name`: '{display_name}'. It must be a non-empty string."
+        log_error(f"[core_initializer] ❌ {error_msg}")
+        raise ValueError(error_msg)
+    
+    log_debug(f"[core_initializer] Plugin `{name}` has valid display_name: '{display_name}'")
+    
     # Avoid re-registering the same plugin by name
     existing = PLUGIN_REGISTRY.get(name)
     if existing is not None:
@@ -1119,6 +1134,22 @@ INTERFACE_REGISTRY: dict[str, Any] = {}
 
 def register_interface(name: str, interface_obj: Any) -> None:
     """Register an interface instance and its actions."""
+    
+    # CRITICAL: Verify that the interface has display_name
+    if not hasattr(interface_obj, "display_name"):
+        error_msg = f"Interface `{name}` (class `{interface_obj.__class__.__name__}`) does not define `display_name`. All interfaces MUST have a `display_name` class attribute."
+        log_error(f"[core_initializer] ❌ {error_msg}")
+        raise ValueError(error_msg)
+    
+    # Verify display_name is not empty
+    display_name = getattr(interface_obj, "display_name", "")
+    if not display_name or not isinstance(display_name, str) or not display_name.strip():
+        error_msg = f"Interface `{name}` (class `{interface_obj.__class__.__name__}`) has invalid `display_name`: '{display_name}'. It must be a non-empty string."
+        log_error(f"[core_initializer] ❌ {error_msg}")
+        raise ValueError(error_msg)
+    
+    log_debug(f"[core_initializer] Interface `{name}` has valid display_name: '{display_name}'")
+    
     INTERFACE_REGISTRY[name] = interface_obj
     log_debug(f"[core_initializer] Registered interface: {name}")
 

@@ -205,11 +205,14 @@ if __name__ == "__main__":
                     from core.core_initializer import INTERFACE_REGISTRY
                     if 'synth_webui' in INTERFACE_REGISTRY:
                         webui_interface = INTERFACE_REGISTRY['synth_webui']
-                        if hasattr(webui_interface, 'start_server_async'):
+                        if hasattr(webui_interface, 'start'):
+                            await webui_interface.start()
+                            log_info("[main] WebUI interface started")
+                        elif hasattr(webui_interface, 'start_server_async'):
                             webui_interface.start_server_async()
                             log_info("[main] WebUI server started")
                 except Exception as e:
-                    log_warning(f"[main] Could not start webui server: {e}")
+                    log_warning(f"[main] Could not start webui interface: {e}")
                 
                 # Start message queue consumer
                 from core import message_queue

@@ -30,7 +30,7 @@
         }
         body {
             margin: 0;
-            min-height: 100vh;
+            height: 100vh;
             display: flex;
             flex-direction: column;
             background:
@@ -124,7 +124,7 @@
             box-shadow: 0 0 12px rgba(24, 201, 140, 0.7);
         }
         main {
-            flex: 1;
+            height: 100%;
             display: block;
             width: 100%;
         }
@@ -135,6 +135,11 @@
         .tab-panel.active {
             display: flex;
             flex-direction: column;
+            /* Ensure the active panel fills available space but can shrink so children with overflow work */
+            flex: 1 1 auto;
+            min-height: 0;
+            /* Constrain active panel to viewport minus header so children with overflow can scroll */
+            height: 100%;
         }
         .home-stage {
             height: calc(100vh - 80px); /* Adjust based on header height */

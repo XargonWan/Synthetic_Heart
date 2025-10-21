@@ -8,6 +8,8 @@ from core.core_initializer import INTERFACE_REGISTRY
 
 class MessagePlugin:
     """Plugin to handle message-type actions across multiple interfaces."""
+    
+    display_name = "Message Handler"
 
     def __init__(self):
         """Initialize the plugin."""

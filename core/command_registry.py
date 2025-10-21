@@ -144,7 +144,11 @@ async def diary_command(days: str = "7") -> str:
             num_days = 7
         
         # Get recent entries (no char limit for manual viewing)
-        entries = get_recent_entries(days=num_days, max_chars=None)
+        try:
+            days_arg = int(num_days)
+        except Exception:
+            days_arg = 2
+        entries = get_recent_entries(days=days_arg, max_chars=None)
         
         if not entries:
             return f"📔 No diary entries found in the last {num_days} days."

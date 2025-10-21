@@ -992,6 +992,8 @@ async def start_bot():
 
 class TelegramInterface:
     """Interface wrapper providing a standard send_message method for Telegram."""
+    
+    display_name = "Telegram Bot"
 
     def __init__(self, bot: Bot = None):
         """Store the python-telegram-bot ``Bot`` instance."""

@@ -397,6 +397,8 @@ class ChatLinkStore:
 
 class ChatLinkPlugin:
     """Plugin for chat link management."""
+    
+    display_name = "Chat Links"
 
     def __init__(self):
         self.store = ChatLinkStore()

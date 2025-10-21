@@ -125,6 +125,8 @@ async def get_blocked_users() -> List[Dict]:
 
 class BlocklistPlugin:
     """Plugin for user blocking and management."""
+    
+    display_name = "Blocklist"
 
     def __init__(self):
         register_plugin("blocklist", self)

@@ -60,6 +60,7 @@ _manual_log_throttle_sec = 5
 _last_bot_none_manual_log_time = 0
 
 class ManualAIPlugin(AIPluginBase):
+    display_name = "Manual"
 
     def __init__(self, notify_fn=None):
         from core.notifier import set_notifier
@@ -174,14 +175,13 @@ class ManualAIPlugin(AIPluginBase):
                 await safe_send(bot, trainer_id, f"(original message from chat {message.chat_id} id {getattr(message, 'message_id', 'unknown')})")
                 sent = None
 
-            if sent:
+            if sent and getattr(sent, 'message_id', None) is not None:
                 await self.track_message(getattr(sent, 'message_id', None), message.chat_id, getattr(message, 'message_id', None))
             else:
-                # If forwarding not available, still record mapping using a sentinel
-                try:
-                    await self.track_message(None, message.chat_id, getattr(message, 'message_id', None))
-                except Exception:
-                    pass
+                # If forwarding not available, do not create a mapping with a
+                # null trainer_message_id. Log and continue; mapping cannot be
+                # created without a trainer message to reference.
+                log_warning(f"[manual] Forwarding failed or trainer message id missing; skipping mapping for original chat={message.chat_id}, msg={getattr(message, 'message_id', None)}")
             log_debug("[manual] Message forwarded and tracked")
         except Exception as e:  # pragma: no cover - best effort
             log_error(f"[manual] Failed to notify trainer: {repr(e)}")

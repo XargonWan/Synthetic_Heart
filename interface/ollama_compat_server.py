@@ -27,6 +27,8 @@ def _now_iso() -> str:
 
 class OllamaCompatServer:
     """Expose the synth message chain through a REST API compatible with Ollama."""
+    
+    display_name = "Ollama Compat Server"
 
     interface_id = "ollama_serve"
 

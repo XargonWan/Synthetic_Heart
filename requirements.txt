@@ -4,6 +4,7 @@ openai
 selenium
 telethon
 undetected-chromedriver>=3.5.5
+selenium-stealth
 webdriver-manager
 setuptools
 pytz

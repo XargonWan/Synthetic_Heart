@@ -1054,7 +1054,7 @@ Weekly recurring reminder:
                 chat_id = kwargs.get("chat_id")
                 thread_id = kwargs.get("thread_id")
 
-                log_debug(f"[event_plugin] LLM responded with: {text[:100]}...")
+                log_debug(f"[event_plugin] LLM responded with: {text}")
 
                 # Parse the JSON response from the LLM
                 if text.strip().startswith("{") and text.strip().endswith("}"):

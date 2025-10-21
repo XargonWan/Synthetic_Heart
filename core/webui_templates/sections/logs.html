@@ -38,6 +38,7 @@
                 padding: 1.5rem min(4vw, 2.4rem);
                 border-bottom: 1px solid var(--border);
                 background: var(--surface-alt);
+                flex-shrink: 0;
             }
             .section-header h2 {
                 margin: 0;
@@ -90,6 +91,7 @@
                 font-size: 0.85rem;
                 line-height: 1.4;
                 background: var(--surface);
+                min-height: 0; /* allow the container to shrink inside flex parent so overflow works */
             }
             .log-line {
                 margin-bottom: 0.25rem;

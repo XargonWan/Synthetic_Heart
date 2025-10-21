@@ -6,6 +6,8 @@ from core.core_initializer import core_initializer, register_plugin
 
 class TimePlugin:
     """Plugin that injects current date, time, and location."""
+    
+    display_name = "Time & Location"
 
     def __init__(self):
         register_plugin("time", self)

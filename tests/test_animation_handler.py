@@ -247,6 +247,29 @@ async def test_global_handler():
 
 
 @pytest.mark.asyncio
+async def test_idle_animation_rotation_task_created(animation_handler, mock_webui):
+    """Test that a rotation task is created for idle animations with multiple files."""
+    session_id = "test_session"
+    mock_ws = AsyncMock()
+    mock_webui.connections[session_id] = mock_ws
+    
+    # Play idle animation (has multiple files)
+    await animation_handler.play_animation(
+        AnimationState.IDLE,
+        session_id=session_id,
+        loop=True
+    )
+    
+    # Check that a rotation task was created
+    key = f"{session_id}:idle"
+    assert key in animation_handler._rotation_tasks
+    assert animation_handler._rotation_tasks[key] is not None
+    
+    # Clean up the task
+    await animation_handler._stop_rotation_task(session_id, AnimationState.IDLE)
+
+
+@pytest.mark.asyncio
 async def test_websocket_message_format(animation_handler, mock_webui):
     """Test WebSocket message format."""
     session_id = "test_session"

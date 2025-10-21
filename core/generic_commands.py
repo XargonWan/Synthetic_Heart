@@ -53,7 +53,11 @@ async def generic_diary_command(abstract_context: AbstractContext, reply_fn: Opt
                 pass
         
         # Get recent entries (no char limit for manual viewing)
-        entries = get_recent_entries(days=days, max_chars=None)
+        try:
+            days_arg = int(days)
+        except Exception:
+            days_arg = 2
+        entries = get_recent_entries(days=days_arg, max_chars=None)
         
         if not entries:
             response = f"📔 No diary entries found in the last {days} days."

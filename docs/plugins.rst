@@ -23,19 +23,24 @@ All plugins follow a consistent architecture:
 Available Action Plugins
 ------------------------
 
+**Stable Plugins** (in ``plugins/`` directory):
+
 * ``ai_diary`` – Personal memory system for synth. Records conversations, thoughts, and emotions. See :doc:`ai_diary_personal_memory` for details.
 * ``bio_manager`` – Manage persistent user biographies. Uses database settings ``DB_HOST``, ``DB_USER``, ``DB_PASS`` and ``DB_NAME``.
 * ``blocklist`` – User blocking/unblocking functionality (no configuration).
 * ``chat_link`` – Cross-platform chat linking and message forwarding.
-* ``event`` – Schedule and deliver reminders. Requires ``DB_HOST``, ``DB_PORT``, ``DB_USER``, ``DB_PASS``, ``DB_NAME`` and optional ``CORRECTOR_RETRIES``.
 * ``message_map`` – Message threading and conversation tracking.
 * ``message_plugin`` – Send text across registered interfaces (no configuration).
 * ``recent_chats`` – Access to recent conversation history.
+* ``time_plugin`` – Inject current time and location (no configuration).
+* ``weather_plugin`` – Provide weather info as static context. Optional ``WEATHER_FETCH_TIME`` sets refresh interval.
+
+**Development Plugins** (in ``plugins_dev/`` directory):
+
+* ``event`` – Schedule and deliver reminders. Requires ``DB_HOST``, ``DB_PORT``, ``DB_USER``, ``DB_PASS``, ``DB_NAME`` and optional ``CORRECTOR_RETRIES``.
 * ``reddit_plugin`` – Submit posts and comments to Reddit. Requires ``REDDIT_CLIENT_ID``, ``REDDIT_CLIENT_SECRET``, ``REDDIT_USERNAME``, ``REDDIT_PASSWORD`` and ``REDDIT_USER_AGENT``.
 * ``selenium_elevenlabs`` – Generate speech audio with ElevenLabs. Set ``ELEVENLABS_EMAIL`` and ``ELEVENLABS_PASSWORD`` (``synth_SELENIUM_HEADLESS`` controls headless mode).
 * ``terminal`` – Run shell commands or interactive sessions. Uses ``TELEGRAM_TRAINER_ID`` to authorize access.
-* ``time_plugin`` – Inject current time and location (no configuration).
-* ``weather_plugin`` – Provide weather info as static context. Optional ``WEATHER_FETCH_TIME`` sets refresh interval.
 
 Terminal Plugin
 ---------------

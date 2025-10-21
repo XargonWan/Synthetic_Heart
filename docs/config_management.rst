@@ -314,9 +314,9 @@ Example 2: Persona Manager        return
 
    # Multiple related variables```
 
-   PERSONA_DEFAULT_NAME = config_registry.get_var(
+   SYNTH_NAME = config_registry.get_var(
 
-       "PERSONA_DEFAULT_NAME",## Configuration Options
+       "SYNTH_NAME",## Configuration Options
 
        "SyntH",
 
@@ -352,7 +352,7 @@ Example 2: Persona Manager        return
 
    def get_persona_name():)
 
-       return str(PERSONA_DEFAULT_NAME)```
+       return str(SYNTH_NAME)```
 
 
 

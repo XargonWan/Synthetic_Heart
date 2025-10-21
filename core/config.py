@@ -68,6 +68,13 @@ def get_trainer_id(interface_name: str) -> int | None:
     return get_trainer_ids().get(interface_name)
     return None
 
+
+# Backwards compatibility: module-level TRAINER_IDS mapping expected by some
+# modules (e.g. core.notifier). This is populated at import time from the
+# underlying config registry. Callers that need up-to-date values should use
+# get_trainer_ids() instead, but we keep this symbol to avoid import errors.
+TRAINER_IDS = get_trainer_ids()
+
 # LLM Configuration
 LLM_MODE = config_registry.get_var(
     "LLM_MODE",

@@ -57,6 +57,15 @@ System Components
     - Handles validation and execution of specific actions
     - Can be pure action providers or full AI plugins
 
+Advanced Components
+-------------------
+
+``Event Handler``
+    Allows the synth to schedule and manage events for future execution. Events can be spontaneous or user-requested, enabling proactive behaviors like sending morning greetings, weather warnings, or checking in on users. This creates a sense of initiative and care.
+
+``Thinking Engine (G.R.I.L.L.O.)``
+    A low-priority, configurable background process that generates internal thoughts and proposals for the synth. It picks up on conversations or ideas, prompting autonomous actions. For example, if users discuss AI art limitations, the synth might research human art concepts or artist communities. This demonstrates emerging "will" and self-directed behavior, though full implementation depends on available plugins like web search.
+
 Message Flow
 ------------
 

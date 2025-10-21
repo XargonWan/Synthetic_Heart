@@ -71,6 +71,8 @@ def _extract_username(mxid: str) -> str:
 
 class MatrixInterface:
     """Matrix chat interface wrapping matrix-nio."""
+    
+    display_name = "Matrix Interface"
 
     _current_instance_enabled: bool = False
 

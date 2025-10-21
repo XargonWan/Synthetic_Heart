@@ -35,6 +35,6 @@ synth uses a zero-configuration approach where components are automatically disc
 
 - **Interfaces**: Chat platforms like Telegram, Discord, Reddit
 - **Plugins**: Action providers like terminal access, weather, file operations
-- **LLM Engines**: AI backends like OpenAI, Google Gemini, manual input
+- **LLM Engines**: AI backends like ChatGPT (via Selenium), Gemini, Grok (experimental), or manual input. **Note: Only Selenium ChatGPT (Legacy) is currently fully functional.**
 
 Simply place compatible Python files in the appropriate directories and restart - no manual registration required. This modular architecture ensures that functionality can be added or removed without modifying the core system.

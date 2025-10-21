@@ -44,8 +44,8 @@ DIARY_CONFIG = {
     'diary_injection_file': 'synth_diary.json',
     'diary_injection_enabled': True,
     'diary_allocation_percentage': 30,  # Increased from 15% to utilize more available prompt space
-    'max_static_injection_chars': 60000,  # Increased to accommodate more entries
-    'fallback_diary_chars': 15000,  # Increased backup for unknown prompts
+    'max_static_injection_chars': 30000,  # Reduced for free ChatGPT limits
+    'fallback_diary_chars': 10000,  # Reduced for free ChatGPT limits
     'default_days': 7,  # Default number of days to look back for diary entries
     'min_space_threshold': 0.75,  # Include diary only if we're using less than 75% of prompt space
     'diary_entry_structure': 'auto',  # auto-select based on available space
@@ -119,7 +119,7 @@ def get_max_diary_chars(interface_name: str = None, current_prompt_length: int =
         
         if not active_llm or active_llm == "manual":
             log_debug("[ai_diary] Using manual fallback limits")
-            return 15000
+            return 8000
         
         registry = get_llm_registry()
         engine = registry.get_engine(active_llm)
@@ -127,10 +127,10 @@ def get_max_diary_chars(interface_name: str = None, current_prompt_length: int =
         if not engine:
             engine = registry.load_engine(active_llm)
         
-        max_prompt_chars = 15000  # Default fallback
+        max_prompt_chars = 8000  # Default fallback
         if engine and hasattr(engine, 'get_interface_limits'):
             limits = engine.get_interface_limits()
-            max_prompt_chars = limits.get("max_prompt_chars", 15000)
+            max_prompt_chars = limits.get("max_prompt_chars", 8000)
         
         # Use 30% of available prompt space for diary, with fallback
         diary_limit = int(max_prompt_chars * 0.30)
@@ -143,7 +143,7 @@ def get_max_diary_chars(interface_name: str = None, current_prompt_length: int =
         return max(diary_allocation, 5000)  # Minimum 5k chars
     except Exception as e:
         log_warning(f"[ai_diary] Error calculating diary limit: {e}")
-        return 15000  # Fallback
+        return 8000  # Fallback
 
 
 def _run_sync(coro):
@@ -1007,6 +1007,8 @@ except Exception as e:
 
 class DiaryPlugin:
     """Plugin that manages AI diary and provides static injection of recent entries."""
+    
+    display_name = "AI Diary"
 
     def __init__(self):
         register_plugin("ai_diary", self)
@@ -1098,13 +1100,27 @@ class DiaryPlugin:
             
             if engine and hasattr(engine, 'get_interface_limits'):
                 limits = engine.get_interface_limits()
-                max_prompt_chars = limits.get("max_prompt_chars", 8000)
+                # Prefer an engine-provided limit, fall back to core default
+                try:
+                    from core.prompt_engine import DEFAULT_MAX_PROMPT_CHARS
+                    fallback_limit = DEFAULT_MAX_PROMPT_CHARS
+                except Exception:
+                    fallback_limit = 128000
+                max_prompt_chars = limits.get("max_prompt_chars", fallback_limit)
                 log_debug(f"[ai_diary] Active LLM {active_llm} max_prompt_chars: {max_prompt_chars}")
             else:
-                max_prompt_chars = 8000
+                try:
+                    from core.prompt_engine import DEFAULT_MAX_PROMPT_CHARS
+                    max_prompt_chars = DEFAULT_MAX_PROMPT_CHARS
+                except Exception:
+                    max_prompt_chars = 128000
         except Exception as e:
             log_debug(f"[ai_diary] Could not get active LLM limits: {e}")
-            max_prompt_chars = 8000
+            try:
+                from core.prompt_engine import DEFAULT_MAX_PROMPT_CHARS
+                max_prompt_chars = DEFAULT_MAX_PROMPT_CHARS
+            except Exception:
+                max_prompt_chars = 128000
         
         log_debug(f"[ai_diary] Prompt stats - current: {current_prompt_length}, max: {max_prompt_chars}")
         

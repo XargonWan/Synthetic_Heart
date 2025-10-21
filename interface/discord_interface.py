@@ -26,6 +26,8 @@ chat_link_store = ChatLinkStore()
 
 class DiscordInterface:
     """Discord interface mirroring Telegram bot behaviour."""
+    
+    display_name = "Discord Interface"
 
     def __init__(self, bot_token: str):
         self.bot_token = bot_token.strip() if bot_token else ""

@@ -28,8 +28,16 @@ async def load_plugin(name: str, notify_fn=None):
             if hasattr(plugin, '_worker_task') and plugin._worker_task and not plugin._worker_task.done():
                 log_debug(f"[plugin] ⏳ Waiting for ongoing response to complete in {current_plugin_name}")
                 try:
-                    await plugin._worker_task
+                    # Use a reasonable timeout for plugin switching (30 seconds), not the full LLM response timeout
+                    await asyncio.wait_for(plugin._worker_task, timeout=30.0)
                     log_debug(f"[plugin] ✅ Ongoing response completed in {current_plugin_name}")
+                except asyncio.TimeoutError:
+                    log_warning(f"[plugin] ⏰ Timeout waiting for response completion in {current_plugin_name}, cancelling task")
+                    plugin._worker_task.cancel()
+                    try:
+                        await asyncio.wait_for(plugin._worker_task, timeout=5.0)
+                    except (asyncio.TimeoutError, Exception):
+                        pass  # Task cancelled or already done
                 except Exception as e:
                     log_warning(f"[plugin] ⚠️ Error waiting for response completion: {e}")
             # Cleanup the previous plugin before loading the new one
@@ -98,7 +106,7 @@ async def load_plugin(name: str, notify_fn=None):
         try:
             models = plugin.get_supported_models()
             if models:
-                from config import get_current_model, set_current_model
+                from core.config import get_current_model, set_current_model
                 current = get_current_model()
                 if not current:
                     set_current_model(models[0])
