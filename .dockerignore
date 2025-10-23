@@ -12,3 +12,4 @@ tests/
 run_tests.sh
 .venv/
 GitVersion.yml
+skins/Rekku
