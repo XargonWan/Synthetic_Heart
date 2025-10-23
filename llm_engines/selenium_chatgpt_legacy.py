@@ -1139,8 +1139,14 @@ async def enqueue_prompt(textarea, prompt_text: str) -> None:
     await _prompt_queue.put((textarea, prompt_text))
     log_debug(f"[selenium] Prompt enqueued (size={_prompt_queue.qsize()})")
     global _queue_worker
-    if _queue_worker is None or _queue_worker.done():
-        _queue_worker = asyncio.create_task(_queue_worker_loop())
+    # Ensure we always create a fresh coroutine object for the queue worker.
+    try:
+        if _queue_worker is None or _queue_worker.done():
+            _queue_worker = asyncio.create_task(_queue_worker_loop())
+    except RuntimeError:
+        # If no running loop is available, schedule creation when loop is running.
+        loop = asyncio.get_event_loop()
+        loop.call_soon_threadsafe(lambda: asyncio.create_task(_queue_worker_loop()))
 
 
 def _build_vnc_url() -> str:
@@ -1608,10 +1614,14 @@ class SeleniumChatGPTLegacyPlugin(AIPluginBase):
         """Clean up resources when the plugin is stopped."""
         log_debug("[selenium] Starting cleanup...")
         
-        # Stop the worker task
-        if self._worker_task and not self._worker_task.done():
-            self._worker_task.cancel()
-            log_debug("[selenium] Worker task cancelled")
+        # Stop the worker task (best-effort)
+        task = getattr(self, "_worker_task", None)
+        if task and not task.done():
+            try:
+                task.cancel()
+                log_debug("[selenium] Worker task cancelled (cleanup)")
+            except Exception as e:
+                log_warning(f"[selenium] Failed to cancel worker task during cleanup: {e}")
         
         # Clear the queue to prevent pending tasks
         try:
@@ -1639,9 +1649,17 @@ class SeleniumChatGPTLegacyPlugin(AIPluginBase):
 
     async def stop(self):
         """Cancel worker task and run cleanup."""  # [FIX]
-        if self._worker_task:
-            self._worker_task.cancel()
-            await asyncio.gather(self._worker_task, return_exceptions=True)
+        task = getattr(self, "_worker_task", None)
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                log_debug("[selenium] Worker task cancelled cleanly (stop)")
+            except Exception as e:
+                log_warning(f"[selenium] Exception while awaiting worker task during stop: {e}")
+        self._worker_task = None
+        # Run synchronous cleanup
         self.cleanup()
 
     async def start(self):
@@ -1650,16 +1668,22 @@ class SeleniumChatGPTLegacyPlugin(AIPluginBase):
         if self.is_worker_running():
             log_debug("[selenium] Worker already running")
             return
-        if self._worker_task is not None and self._worker_task.done():
+
+        # Clear completed task reference if present
+        if getattr(self, "_worker_task", None) is not None and self._worker_task.done():
             log_warning("[selenium] Previous worker task ended, restarting")
-            self._worker_task = None  # Clear the old task reference
-        
-        # Create new worker task
-        self._worker_task = asyncio.create_task(
-            self._worker_loop(), name="selenium_worker"
-        )
-        self._worker_task.add_done_callback(self._handle_worker_done)
-        log_debug("[selenium] Worker task created")
+            self._worker_task = None
+
+        # Create a fresh coroutine object and task
+        try:
+            self._worker_task = asyncio.create_task(self._worker_loop(), name="selenium_worker")
+            self._worker_task.add_done_callback(self._handle_worker_done)
+            log_debug("[selenium] Worker task created")
+        except RuntimeError as e:
+            # No running loop in this thread; schedule creation on the running loop
+            log_warning(f"[selenium] Could not create worker task directly: {e}; scheduling on running loop")
+            loop = asyncio.get_event_loop()
+            loop.call_soon_threadsafe(lambda: asyncio.create_task(self._worker_loop()))
 
     def is_worker_running(self) -> bool:
         return self._worker_task is not None and not self._worker_task.done()
@@ -1678,14 +1702,25 @@ class SeleniumChatGPTLegacyPlugin(AIPluginBase):
         """Handle worker task completion and attempt restart if needed."""
         if fut.cancelled():
             log_warning("[selenium] Worker task cancelled")
-        elif fut.exception():
-            log_warning(f"[selenium] Worker task crashed: {fut.exception()}")
+        else:
+            exc = None
+            try:
+                exc = fut.exception()
+            except Exception:
+                exc = None
+            if exc:
+                log_warning(f"[selenium] Worker task crashed: {repr(exc)}")
+                try:
+                    tb = ''.join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+                    log_warning(f"[selenium] Worker traceback:\n{tb}")
+                except Exception:
+                    pass
         
         # Attempt restart if needed, but prevent concurrent restart attempts
         if self._restarting:
             log_debug("[selenium] Restart already in progress, skipping")
             return
-            
+
         self._restarting = True
         try:
             loop = asyncio.get_running_loop()

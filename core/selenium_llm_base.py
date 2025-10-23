@@ -1169,8 +1169,13 @@ class SeleniumLLMBase(AIPluginBase):
         """Enqueue prompt_text for sequential sending."""
         await self._prompt_queue.put((textarea, prompt_text))
         log_debug(f"[selenium] Prompt enqueued (size={self._prompt_queue.qsize()})")
-        if self._queue_worker is None or self._queue_worker.done():
-            self._queue_worker = asyncio.create_task(self._queue_worker_loop())
+        # Ensure we always create a fresh coroutine object for the queue worker.
+        try:
+            if self._queue_worker is None or self._queue_worker.done():
+                self._queue_worker = asyncio.create_task(self._queue_worker_loop())
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+            loop.call_soon_threadsafe(lambda: asyncio.create_task(self._queue_worker_loop()))
 
     # === ABSTRACT METHODS (to be implemented by subclasses) ===
 
