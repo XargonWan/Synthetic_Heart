@@ -73,185 +73,58 @@ class SynthWebUIInterface:
         self.connections: Dict[str, WebSocket] = {}
         self.message_history: Dict[str, Deque[dict]] = {}
         self.max_history = 100
-
-        self.host = config_registry.get_value(
-            "WEBUI_HOST",
-            "0.0.0.0",
-            label="Web UI Host",
-            description="Address the Web UI server binds to.",
-            group="core",
-            component=INTERFACE_NAME,
-            advanced=True,
-            tags=["bootstrap"],
-        )
-
-        def _update_host(value: str | None) -> None:
-            self.host = (value or "0.0.0.0").strip() or "0.0.0.0"
-
-        config_registry.add_listener("WEBUI_HOST", _update_host)
-
-        self.port = config_registry.get_value(
-            "WEBUI_PORT",
-            8000,
-            label="Web UI Port",
-            description="Port used by the Web UI server.",
-            value_type=int,
-            group="core",
-            component=INTERFACE_NAME,
-            advanced=True,
-            tags=["bootstrap"],
-        )
-
-        def _update_port(value) -> None:
-            try:
-                self.port = int(value)
-            except Exception:
-                log_warning(f"{LOG_PREFIX} Ignoring invalid WEBUI_PORT value: {value}")
-
-        config_registry.add_listener("WEBUI_PORT", _update_port)
-
-        autostart_flag = config_registry.get_value(
-            _AUTOSTART_ENV,
-            True,
-            label="Autostart Web UI",
-            description="Automatically start the Web UI background server when synth boots.",
-            value_type=bool,
-            group="core",
-            component=INTERFACE_NAME,
-            tags=["bootstrap"],  # Hidden from UI
-        )
-        legacy_autostart = os.getenv(_LEGACY_AUTOSTART_ENV)
-        if legacy_autostart is not None:
-            autostart_flag = str(legacy_autostart).strip().lower() not in {"0", "false", "False"}
-        self.autostart = bool(autostart_flag)
-
-        def _update_autostart(value) -> None:
-            if isinstance(value, bool):
-                self.autostart = value
-            else:
-                self.autostart = str(value).strip().lower() not in {"0", "false", "False"}
-
-        config_registry.add_listener(_AUTOSTART_ENV, _update_autostart)
-
-        self._server_thread: Optional[threading.Thread] = None
-        self._server: Optional[object] = None  # uvicorn.Server set when started
+        # Runtime/configurable attributes with sensible defaults
+        # The Web UI must always autostart; do not allow runtime toggle.
+        self.autostart = True
+        self.host = os.getenv('SYNTH_WEBUI_HOST', '0.0.0.0')
+        try:
+            self.port = int(os.getenv('SYNTH_WEBUI_PORT', os.getenv('PORT', '8080')))
+        except Exception:
+            self.port = 8080
+        self.log_level = os.getenv('SYNTH_WEBUI_LOG_LEVEL', 'info')
+        # Selkies desktop ports used for UI hints
+        try:
+            self.selkies_https_port = int(os.getenv('SELKIES_HTTPS_PORT', '3000'))
+        except Exception:
+            self.selkies_https_port = 3000
+        try:
+            self.selkies_http_port = int(os.getenv('SELKIES_HTTP_PORT', '3001'))
+        except Exception:
+            self.selkies_http_port = 3001
+        # Log streaming options
+        self.log_source_path = None
+        self.log_wait_seconds = 20
+        # Server control placeholders
         self._server_lock = threading.Lock()
+        self._server = None
+        self._server_thread = None
+        self._server_task = None
 
-        default_vrm_dir = Path(__file__).resolve().parent.parent / "res" / "synth_webui" / "avatars"
-        vrm_dir_setting = config_registry.get_value(
-            _VRM_DIR_ENV,
-            str(default_vrm_dir),
-            label="VRM Storage Directory",
-            description="Directory where uploaded VRM avatars are stored.",
-            group="core",
-            component=INTERFACE_NAME,
-            tags=["bootstrap"],  # Hidden from UI - managed via docker volume
-        )
-        legacy_vrm_dir = os.getenv(_LEGACY_VRM_DIR_ENV)
-        if legacy_vrm_dir:
-            vrm_dir_setting = legacy_vrm_dir
-        self.vrm_dir = Path(vrm_dir_setting).expanduser()
+        # Static and VRM directories used by the Web UI. These are calculated
+        # relative to the repository layout and can be overridden using the
+        # SYNTH_WEBUI_VRM_DIR environment variable for deployments.
+        base_res = Path(__file__).resolve().parent.parent / "res" / "synth_webui"
+        static_dir = base_res / "static"
 
-        def _update_vrm_dir(value: str | None) -> None:
-            try:
-                new_dir = Path(value or str(default_vrm_dir)).expanduser()
-                new_dir.mkdir(parents=True, exist_ok=True)
-                self.vrm_dir = new_dir
-                log_info(f"{LOG_PREFIX} VRM directory updated to {new_dir}")
-            except Exception as exc:
-                log_warning(f"{LOG_PREFIX} Failed to update VRM directory: {exc}")
-
-        config_registry.add_listener(_VRM_DIR_ENV, _update_vrm_dir)
-
+        # VRM directory: default to skins/temp (deterministic upload location)
+        env_vrm = os.getenv(_VRM_DIR_ENV) or os.getenv(_LEGACY_VRM_DIR_ENV)
+        if env_vrm:
+            self.vrm_dir = Path(env_vrm).expanduser()
+        else:
+            # store uploaded VRMs in skins/temp to be deterministic
+            self.vrm_dir = Path('skins/temp')
+        # Ensure parent exists
         try:
             self.vrm_dir.mkdir(parents=True, exist_ok=True)
-        except Exception as exc:  # pragma: no cover - runtime issues
-            log_warning(f"{LOG_PREFIX} Failed to ensure VRM directory {self.vrm_dir}: {exc}")
+        except Exception:
+            # Non-fatal; operations will check existence before use
+            pass
 
+        # Active VRM marker file path
         self.active_vrm_marker = self.vrm_dir / ".active"
+        # Load active VRM from marker or default
         self.active_vrm = self._load_active_vrm()
 
-        self.log_source_path = config_registry.get_value(
-            "SYNTH_LOG_PATH",
-            "",
-            label="Log File Override",
-            description="Optional absolute path to the log file streamed to the browser.",
-            group="core",
-            component=INTERFACE_NAME,
-            tags=["bootstrap"],  # Hidden from UI
-        )
-        self.log_wait_seconds = config_registry.get_value(
-            "SYNTH_LOG_WAIT",
-            20,
-            label="Log Stream Wait",
-            description="Seconds to wait for the log file to appear before aborting.",
-            value_type=int,
-            group="core",
-            component=INTERFACE_NAME,
-            advanced=True,
-        )
-        
-        # Use system-wide LOG_LEVEL
-        from core.logging_utils import _LOGGING_LEVEL
-        self.log_level = _LOGGING_LEVEL.lower()  # Follow global logging level
-        
-        def _update_log_level(value: str | None) -> None:
-            self.log_level = (value or "error").lower()
-        
-        config_registry.add_listener("LOGGING_LEVEL", _update_log_level)
-
-        # Selkies (desktop) ports
-        self.selkies_https_port = config_registry.get_value(
-            "SELKIES_HTTPS_PORT",
-            "3000",
-            label="Selkies HTTPS Port",
-            description="HTTPS port for Selkies desktop access.",
-            group="core",
-            component=INTERFACE_NAME,
-            advanced=True,
-        )
-        
-        self.selkies_http_port = config_registry.get_value(
-            "SELKIES_HTTP_PORT",
-            "3001",
-            label="Selkies HTTP Port",
-            description="HTTP port for Selkies desktop access.",
-            group="core",
-            component=INTERFACE_NAME,
-            advanced=True,
-        )
-
-        config_registry.add_listener("SYNTH_LOG_PATH", lambda value: setattr(self, "log_source_path", value or ""))
-
-        def _update_log_wait(value) -> None:
-            try:
-                parsed = int(value)
-                self.log_wait_seconds = parsed if parsed > 0 else 20
-            except Exception:
-                log_warning(f"{LOG_PREFIX} Invalid SYNTH_LOG_WAIT value: {value}")
-
-        config_registry.add_listener("SYNTH_LOG_WAIT", _update_log_wait)
-        
-        def _update_selkies_https_port(value) -> None:
-            self.selkies_https_port = value or "3000"
-        
-        config_registry.add_listener("SELKIES_HTTPS_PORT", _update_selkies_https_port)
-        
-        def _update_selkies_http_port(value) -> None:
-            self.selkies_http_port = value or "3001"
-        
-        config_registry.add_listener("SELKIES_HTTP_PORT", _update_selkies_http_port)
-
-        # Allow the UI to be embedded if desired (same-origin by default)
-        self.app.add_middleware(
-            CORSMiddleware,
-            allow_origins=["*"],
-            allow_credentials=True,
-            allow_methods=["*"],
-            allow_headers=["*"],
-        )
-
-        static_dir = Path(__file__).resolve().parent.parent / "docs" / "res"
         if static_dir.exists():
             self.app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
         else:
@@ -265,18 +138,18 @@ class SynthWebUIInterface:
         else:
             log_warning(f"{LOG_PREFIX} JS directory not found: {js_dir}")
         
-        # Mount animations directory for VRM animations
-        animations_dir = Path(__file__).resolve().parent.parent / "res" / "synth_webui" / "animations"
-        if animations_dir.exists():
-            self.app.mount("/animations", StaticFiles(directory=str(animations_dir)), name="synth-webui-animations")
-            log_info(f"{LOG_PREFIX} Mounted /animations to {animations_dir}")
-        else:
-            log_warning(f"{LOG_PREFIX} Animations directory not found: {animations_dir}")
+        # No global animations directory: animations live inside each skin under /skins/<skin>/animations
 
-        log_info(f"{LOG_PREFIX} ========== VRM DIRECTORY MOUNT ==========")
-        log_info(f"{LOG_PREFIX} VRM directory path: {self.vrm_dir}")
-        log_info(f"{LOG_PREFIX} VRM directory exists: {self.vrm_dir.exists()}")
-        
+        # Mount skins directory (contains per-skin assets: preview, animations, md)
+        skins_dir = Path(__file__).resolve().parent.parent / "skins"
+        if skins_dir.exists():
+            try:
+                self.app.mount("/skins", StaticFiles(directory=str(skins_dir)), name="synth-webui-skins")
+                log_info(f"{LOG_PREFIX} Mounted /skins to {skins_dir}")
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to mount /skins: {exc}")
+        else:
+            log_warning(f"{LOG_PREFIX} Skins directory not found: {skins_dir}")
         if self.vrm_dir.exists():
             log_debug(f"{LOG_PREFIX} VRM directory is_dir: {self.vrm_dir.is_dir()}")
             log_debug(f"{LOG_PREFIX} VRM directory is readable: {os.access(self.vrm_dir, os.R_OK)}")
@@ -290,15 +163,6 @@ class SynthWebUIInterface:
                     log_info(f"{LOG_PREFIX}   - {item.name} ({file_type}, {size} bytes)")
             except Exception as list_exc:
                 log_warning(f"{LOG_PREFIX} Unable to list VRM directory contents: {list_exc}")
-            
-            try:
-                log_info(f"{LOG_PREFIX} Mounting /avatars to {self.vrm_dir}...")
-                self.app.mount("/avatars", StaticFiles(directory=str(self.vrm_dir)), name="synth-webui-avatars")
-                log_info(f"{LOG_PREFIX} ✓ Successfully mounted /avatars endpoint")
-            except Exception as exc:  # pragma: no cover - runtime
-                log_error(f"{LOG_PREFIX} ⚠️ Unable to mount VRM directory {self.vrm_dir}: {exc}")
-                import traceback
-                log_error(f"{LOG_PREFIX} Traceback: {traceback.format_exc()}")
         else:
             log_warning(f"{LOG_PREFIX} VRM directory does not exist, /avatars endpoint NOT mounted")
         
@@ -318,6 +182,12 @@ class SynthWebUIInterface:
         self.app.post("/api/vrm")(self.upload_vrm_model)
         self.app.post("/api/vrm/active")(self.set_active_vrm_endpoint)
         self.app.delete("/api/vrm/{model_name}")(self.delete_vrm_model)
+
+        self.app.post("/api/persona")(self.upload_persona_pack)
+        # Skins management endpoints
+        self.app.get("/api/skins")(self.list_skins)
+        self.app.post("/api/skins/{skin_name}/activate")(self.activate_skin)
+        self.app.post("/api/skins/uploaded/clear")(self.clear_uploaded_vrm)
         self.app.get("/api/components")(self.components_summary)
         self.app.post("/api/components/reload")(self.reload_component)
         self.app.post("/api/components/dev/toggle")(self.toggle_dev_components)
@@ -758,16 +628,53 @@ class SynthWebUIInterface:
         except Exception as exc:  # pragma: no cover - runtime issues
             log_error(f"{LOG_PREFIX} error handling message: {exc}")
             response = str(get_failed_message_text())
-        finally:
-            # Pop action and return to IDLE
-            try:
-                await self.action_state_manager.pop_action(action_id)
-                log_info(f"{LOG_PREFIX} Popped action: {action_id} - returning to IDLE")
-            except Exception as exc:
-                log_warning(f"{LOG_PREFIX} Failed to pop action state: {exc}")
 
+        # Ensure we keep the THINKING action active until we've delivered the response
         if response:
-            await self.send_message(session_id, text=response)
+            # Push WRITING so clients can display write animation while we deliver the message
+            writing_action_id = f"webui_write_{session_id}_{int(datetime.utcnow().timestamp() * 1000) % 1_000_000}"
+            try:
+                await self.action_state_manager.push_action(
+                    action_id=writing_action_id,
+                    phase=AnimationPhase.WRITING,
+                    component="webui"
+                )
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to push WRITING action state: {exc}")
+
+            try:
+                await self.send_message(session_id, text=response)
+            except Exception as send_exc:
+                log_warning(f"{LOG_PREFIX} Failed to send response to session {session_id}: {send_exc}")
+            finally:
+                # Pop WRITING first, then THINKING
+                try:
+                    await self.action_state_manager.pop_action(writing_action_id)
+                except Exception as exc:
+                    log_warning(f"{LOG_PREFIX} Failed to pop WRITING action state: {exc}")
+                try:
+                    await self.action_state_manager.pop_action(action_id)
+                    log_info(f"{LOG_PREFIX} Popped action: {action_id} - returning to IDLE")
+                except Exception as exc:
+                    log_warning(f"{LOG_PREFIX} Failed to pop THINKING action state: {exc}")
+        else:
+            # Some LLM engines return None but process asynchronously; keep THINKING for a short grace period
+            async def delayed_pop():
+                await asyncio.sleep(0.5)
+                try:
+                    await self.action_state_manager.pop_action(action_id)
+                    log_info(f"{LOG_PREFIX} Delayed pop action: {action_id} - returning to IDLE")
+                except Exception as exc:
+                    log_warning(f"{LOG_PREFIX} Failed to delayed pop action state: {exc}")
+
+            try:
+                asyncio.create_task(delayed_pop())
+            except Exception:
+                # Fallback to immediate pop if task creation fails
+                try:
+                    await self.action_state_manager.pop_action(action_id)
+                except Exception as exc:
+                    log_warning(f"{LOG_PREFIX} Failed to pop action state after fallback: {exc}")
 
     async def _replay_history(self, session_id: str) -> None:
         history = self.message_history.get(session_id)
@@ -809,11 +716,15 @@ class SynthWebUIInterface:
 
         websocket = self.connections.get(str(chat_id))
         if not websocket:
-            log_warning(f"{LOG_PREFIX} no active websocket for session {chat_id}")
+            # Improved debug information: list active sessions to help debug target mismatches
+            active_sessions = list(self.connections.keys())
+            log_warning(f"{LOG_PREFIX} no active websocket for session {chat_id}. Active sessions: {active_sessions}")
+            log_debug(f"{LOG_PREFIX} send_message payload target: {chat_id}, text length: {len(text) if text else 0}")
             return
 
         await websocket.send_json({"type": "message", "sender": "synth", "text": text})
         await self._append_history(str(chat_id), "synth", text)
+        log_info(f"{LOG_PREFIX} Sent message to session {chat_id}: {text[:80]}{'...' if len(text)>80 else ''}")
 
     async def execute_action(self, action: dict, context: dict, bot, original_message):
         if action.get("type") == "message_synth_webui":
@@ -1418,7 +1329,16 @@ class SynthWebUIInterface:
     async def get_active_vrm_endpoint(self):
         log_debug(f"{LOG_PREFIX} Getting active VRM: {self.active_vrm}")
         if self.active_vrm:
-            result = {"name": self.active_vrm, "url": f"/avatars/{self.active_vrm}"}
+            # Build URL relative to web root based on vrm_dir
+            vrm_path = self.vrm_dir / self.active_vrm
+            # Convert absolute path to web-accessible URL
+            try:
+                web_path = vrm_path.relative_to(Path(__file__).resolve().parent.parent)
+                url = f"/{web_path}"
+            except ValueError:
+                # Fallback if path is not relative
+                url = f"/{self.vrm_dir}/{self.active_vrm}"
+            result = {"name": self.active_vrm, "url": url}
             log_debug(f"{LOG_PREFIX} Active VRM response: {result}")
             return JSONResponse(result)
         log_debug(f"{LOG_PREFIX} No active VRM set")
@@ -1438,6 +1358,21 @@ class SynthWebUIInterface:
             raise HTTPException(status_code=404, detail="Model not found")
         self._set_active_vrm(candidate.name)
         log_info(f"{LOG_PREFIX} Active VRM set to: {candidate.name}")
+        # Preload the current idle animation to all connected clients so the newly-loaded
+        # VRM does not appear in a T-pose while the client initializes the model.
+        try:
+            if self.persona_manager:
+                for session in list(self.connections.keys()):
+                    try:
+                        # persona_manager.set_animation_state accepts the state name and session_id
+                        await self.persona_manager.set_animation_state("idle", session_id=session)
+                        log_debug(f"{LOG_PREFIX} Preloaded idle animation for session {session}")
+                    except Exception as anim_exc:
+                        log_warning(f"{LOG_PREFIX} Failed to preload idle for session {session}: {anim_exc}")
+            else:
+                log_debug(f"{LOG_PREFIX} Persona manager not available - skipping idle preload for connected clients")
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} Error while preloading idle animations: {exc}")
         return JSONResponse(
             {"status": "ok", "name": candidate.name, "url": f"/avatars/{candidate.name}"}
         )
@@ -1471,6 +1406,8 @@ class SynthWebUIInterface:
         
         try:
             log_debug(f"{LOG_PREFIX} Opening destination file for writing...")
+            # Per new behavior, always write to model.vrm inside the VRM dir (overwrite)
+            destination = self.vrm_dir / "model.vrm"
             with destination.open("wb") as buffer:
                 log_debug(f"{LOG_PREFIX} File opened successfully, starting to read chunks...")
                 bytes_written = 0
@@ -1507,11 +1444,15 @@ class SynthWebUIInterface:
             await file.close()
             log_debug(f"{LOG_PREFIX} File handle closed")
 
-        log_info(f"{LOG_PREFIX} Setting active VRM to: {filename}")
-        self._set_active_vrm(filename)
+        log_info(f"{LOG_PREFIX} Setting active VRM to: model.vrm")
+        # Persist marker pointing to model.vrm
+        try:
+            self._set_active_vrm("model.vrm")
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} Failed to persist active VRM marker: {exc}")
         log_info(f"{LOG_PREFIX} Active VRM set successfully")
         
-        response_data = {"status": "ok", "name": filename, "url": f"/avatars/{filename}"}
+        response_data = {"status": "ok", "name": "model.vrm", "url": f"/avatars/model.vrm"}
         log_info(f"{LOG_PREFIX} Returning response: {response_data}")
         log_info(f"{LOG_PREFIX} ========== VRM UPLOAD END ==========")
         
@@ -1535,6 +1476,127 @@ class SynthWebUIInterface:
                 break
             self._set_active_vrm(fallback)
         return JSONResponse(self._models_payload())
+
+    async def upload_persona_pack(self, file: UploadFile = File(None), folder_path: Optional[str] = None):
+        """Upload a persona pack (.zip or .shp) containing a VRM, animations, descriptor and preview image.
+
+        The pack will be extracted into res/synth_webui/personas/<name> and the VRM will be copied into /avatars.
+        """
+        import zipfile
+        personas_dir = Path(__file__).resolve().parent.parent / "res" / "synth_webui" / "personas"
+        personas_dir.mkdir(parents=True, exist_ok=True)
+
+        # Two supported modes:
+        #  - Uploaded archive (.zip or .shp) via `file`
+        #  - Server-side folder copy via `folder_path` (useful for local persona installs)
+        dest = None
+        temp_path = None
+        if folder_path:
+            # Treat folder_path as a server-local folder to copy into personas_dir
+            src = Path(folder_path).expanduser()
+            if not src.exists() or not src.is_dir():
+                raise HTTPException(status_code=400, detail="Provided folder_path does not exist or is not a directory")
+            # Create a unique dest folder name based on folder basename
+            root = src.name
+            dest = personas_dir / root
+            if dest.exists():
+                dest = personas_dir / f"{root}_{uuid.uuid4().hex[:6]}"
+            import shutil
+            try:
+                shutil.copytree(src, dest)
+            except Exception as exc:
+                log_error(f"{LOG_PREFIX} Failed to copy persona folder from {src} to {dest}: {exc}")
+                raise HTTPException(status_code=500, detail="Failed to copy persona folder")
+        else:
+            if not file or not file.filename:
+                raise HTTPException(status_code=400, detail="No file uploaded")
+
+            filename = Path(file.filename).name
+            lower = filename.lower()
+            if not (lower.endswith('.zip') or lower.endswith('.shp')):
+                raise HTTPException(status_code=400, detail="Only .zip or .shp persona packs are accepted")
+
+            # Save uploaded archive to a temp location
+            temp_path = personas_dir / f"upload_{uuid.uuid4().hex}.tmp"
+            try:
+                with temp_path.open('wb') as f:
+                    while True:
+                        chunk = await file.read(1 << 20)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+            finally:
+                await file.close()
+
+            # Extract
+            try:
+                with zipfile.ZipFile(temp_path, 'r') as zf:
+                    # Determine root folder name from archive (or use filename sans ext)
+                    root_candidates = [n.split('/')[0] for n in zf.namelist() if n and '/' in n]
+                    root = root_candidates[0] if root_candidates else Path(filename).stem
+                    dest = personas_dir / root
+                    if dest.exists():
+                        # create unique folder
+                        dest = personas_dir / f"{root}_{uuid.uuid4().hex[:6]}"
+                    dest.mkdir(parents=True, exist_ok=True)
+                    zf.extractall(dest)
+
+                # Find a .vrm file inside dest
+                vrm_file = None
+                for p in dest.rglob('*.vrm'):
+                    vrm_file = p
+                    break
+
+                if vrm_file:
+                    # Copy VRM to avatars dir
+                    avatars_dir = self.vrm_dir
+                    avatars_dir.mkdir(parents=True, exist_ok=True)
+                    safe_name = self._sanitize_vrm_filename(vrm_file.name)
+                    target = avatars_dir / safe_name
+                    import shutil
+                    shutil.copy2(vrm_file, target)
+                    # Optionally copy animations (we assume animations are relative paths under animations/ in the persona pack)
+                    animations_src = dest / 'animations'
+                    animations_dest = Path(__file__).resolve().parent.parent / 'res' / 'synth_webui' / 'animations'
+                    if animations_src.exists() and animations_src.is_dir():
+                        animations_dest.mkdir(parents=True, exist_ok=True)
+                        for anim in animations_src.iterdir():
+                            try:
+                                shutil.copy2(anim, animations_dest / anim.name)
+                            except Exception:
+                                pass
+
+                    # If there's a persona metadata file, try to read name/preview
+                    meta = None
+                    for m in dest.glob('*.md'):
+                        try:
+                            meta = m.read_text(encoding='utf-8')
+                            break
+                        except Exception:
+                            continue
+
+                    # Mark this VRM as active (optional - for now set as active)
+                    self._set_active_vrm(target.name)
+
+                    return JSONResponse({
+                        'status': 'ok',
+                        'name': target.name,
+                        'skin_folder': str(dest),
+                        'meta': meta,
+                    }, status_code=201)
+                else:
+                    return JSONResponse({'status': 'error', 'detail': 'No VRM found in persona pack'}, status_code=400)
+            except zipfile.BadZipFile:
+                raise HTTPException(status_code=400, detail='Invalid zip file')
+            except Exception as exc:
+                log_error(f"{LOG_PREFIX} Failed to process persona pack: {exc}")
+                raise HTTPException(status_code=500, detail='Failed to process persona pack')
+            finally:
+                try:
+                    if temp_path and temp_path.exists():
+                        temp_path.unlink()
+                except Exception:
+                    pass
 
     @staticmethod
     def _prettify_name(raw_name: str) -> str:
@@ -2302,120 +2364,143 @@ class SynthWebUIInterface:
                     <div class="diary-date-group">
                         <div class="diary-date-header" onclick="toggleDateGroup(this)">
                             <span>${{date}}</span>
-                            <span>(${entries.length} entries)</span>
                         </div>
                         <div class="diary-date-content">
-                            ${{entries.map(entry => renderDiaryEntry(entry)).join('')}}
+                            ${entries.map(e => renderDiaryEntry(e)).join('')}
                         </div>
                     </div>
                 `;
-            }}).join('');
-            
+            }).join('');
             container.innerHTML = html || '<div class="loading">No entries found</div>';
-        }}
-
-        function renderDiaryEntry(entry) {{
-            const isArchived = entry.archived || false;
-            const timestamp = new Date(entry.timestamp).toLocaleString();
-            return `
-                <div class="diary-entry ${{isArchived ? 'archived' : ''}}" data-id="${{entry.id}}">
-                    <input type="checkbox" class="diary-entry-checkbox" data-id="${{entry.id}}" onchange="toggleEntrySelection(${entry.id})" />
-                    <div class="diary-entry-content">
-                        <div class="diary-entry-meta">
-                            ${{timestamp}} - ${{entry.interface || 'unknown'}} ${{isArchived ? '(Archived)' : ''}}
-                        </div>
-                        <div class="diary-entry-text">${{entry.content || ''}}</div>
-                        ${{entry.personal_thought ? `<div class="diary-entry-text"><strong>Thoughts:</strong> ${{entry.personal_thought}}</div>` : ''}}
-                        ${{entry.interaction_summary ? `<div class="diary-entry-text"><strong>Summary:</strong> ${{entry.interaction_summary}}</div>` : ''}}
-                    </div>
-                </div>
-            `;
-        }}
-
-        function toggleDateGroup(header) {{
-            const content = header.nextElementSibling;
-            content.style.display = content.style.display === 'none' ? 'block' : 'none';
-        }}
-
-        function toggleEntrySelection(entryId) {{
-            if (selectedEntries.has(entryId)) {{
-                selectedEntries.delete(entryId);
-            }} else {{
-                selectedEntries.add(entryId);
-            }}
-            updateActionButtons();
-        }}
-
-        function updateActionButtons() {{
-            const hasSelection = selectedEntries.size > 0;
-            document.getElementById('archive-btn').style.display = hasSelection ? 'inline-block' : 'none';
-            document.getElementById('unarchive-btn').style.display = hasSelection ? 'inline-block' : 'none';
-            document.getElementById('delete-btn').style.display = hasSelection ? 'inline-block' : 'none';
-        }}
-
-        async function archiveSelected() {{
-            if (!confirm('Archive selected entries?')) return;
-            await performAction('archive');
-        }}
-
-        async function unarchiveSelected() {{
-            await performAction('unarchive');
-        }}
-
-        async function deleteSelected() {{
-            if (!confirm('Permanently delete selected archived entries? This cannot be undone!')) return;
-            await performAction('delete');
-        }}
-
-        async function performAction(action) {{
-            try {{
-                const response = await fetch(`/api/diary/${{action}}`, {{
-                    method: action === 'delete' ? 'DELETE' : 'POST',
-                    headers: {{ 'Content-Type': 'application/json' }},
-                    body: JSON.stringify({{ entry_ids: Array.from(selectedEntries) }})
-                }});
-                
-                if (response.ok) {{
-                    selectedEntries.clear();
-                    updateActionButtons();
-                    loadDiaryEntries();
-                }} else {{
-                    alert('Action failed');
-                }}
-            }} catch (error) {{
-                console.error('Action error:', error);
-                alert('Action failed');
-            }}
-        }}
-
-        // Event listeners
-        document.getElementById('diary-search').addEventListener('input', renderDiaryEntries);
-        document.getElementById('show-archived').addEventListener('change', loadDiaryEntries);
-        document.getElementById('group-by-date').addEventListener('change', renderDiaryEntries);
-        
-        document.getElementById('edit-mode-btn').addEventListener('click', () => {{
-            editMode = !editMode;
-            document.querySelectorAll('.diary-entry-checkbox').forEach(cb => {{
-                cb.style.display = editMode ? 'block' : 'none';
-            }});
-            document.getElementById('edit-mode-btn').textContent = editMode ? 'Done' : 'Edit';
-            if (!editMode) {{
-                selectedEntries.clear();
-                updateActionButtons();
-            }}
-        }});
-        
-        document.getElementById('archive-btn').addEventListener('click', archiveSelected);
-        document.getElementById('unarchive-btn').addEventListener('click', unarchiveSelected);
-        document.getElementById('delete-btn').addEventListener('click', deleteSelected);
-
-        // Initial load
-        loadDiaryEntries();
+        }
     </script>
 </body>
 </html>
 """
         return template.replace('{brand_name}', BRAND_NAME)
+
+    async def list_skins(self):
+        """List available skins (folders under skins).
+
+        Returns: JSON list with entries: name, preview_url (if present), meta (persona.md text), vrm_present
+        """
+        skins_dir = Path(__file__).resolve().parent.parent / "skins"
+        result = []
+        if not skins_dir.exists():
+            return JSONResponse(result)
+
+        for entry in sorted(skins_dir.iterdir()):
+            if not entry.is_dir():
+                continue
+            name = entry.name
+            if name == 'temp':
+                continue
+            preview = None
+            meta = None
+            vrm_present = False
+            preview_path = entry / 'preview.png'
+            if preview_path.exists():
+                preview = f"/skins/{name}/preview.png"
+            # read persona md if present
+            for m in entry.glob('*.md'):
+                try:
+                    meta = m.read_text(encoding='utf-8')
+                    break
+                except Exception:
+                    continue
+            # check for vrm
+            for v in entry.rglob('*.vrm'):
+                vrm_present = True
+                break
+            result.append({
+                'name': name,
+                'preview_url': preview,
+                'meta': meta,
+                'vrm_present': vrm_present,
+                'valid': vrm_present,
+            })
+
+        # Ensure Rei exists and is valid
+        rei = next((s for s in result if s['name'] == 'Rei'), None)
+        if not rei:
+            raise HTTPException(status_code=500, detail="Default skin 'Rei' missing")
+        if not rei.get('valid'):
+            raise HTTPException(status_code=500, detail="Default skin 'Rei' invalid (missing VRM)")
+
+        return JSONResponse(result)
+
+    async def clear_uploaded_vrm(self):
+        """Clear any user-uploaded VRM in skins/temp/model.vrm and restore Rei's VRM.
+
+        This sets the active VRM to the restored model.
+        """
+        skins_dir = Path(__file__).resolve().parent.parent / "skins"
+        rei_dir = skins_dir / 'Rei'
+        if not rei_dir.exists() or not rei_dir.is_dir():
+            raise HTTPException(status_code=500, detail="Default skin 'Rei' missing")
+
+        # find VRM inside Rei
+        rei_vrm = None
+        for p in rei_dir.rglob('*.vrm'):
+            rei_vrm = p
+            break
+        if not rei_vrm:
+            raise HTTPException(status_code=500, detail="Default skin 'Rei' has no VRM to restore")
+
+        temp_dir = Path(__file__).resolve().parent.parent / "res" / "synth_webui" / "skins" / "temp"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        target = temp_dir / 'model.vrm'
+        import shutil
+        try:
+            shutil.copy2(rei_vrm, target)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to restore Rei VRM to temp: {exc}")
+            raise HTTPException(status_code=500, detail="Failed to restore default VRM")
+
+        try:
+            self._set_active_vrm('model.vrm')
+        except Exception:
+            pass
+
+        return JSONResponse({'status': 'ok', 'restored_from': str(rei_vrm)}, status_code=200)
+
+    async def activate_skin(self, skin_name: str):
+        """Activate a skin by copying its VRM into avatars and setting it active.
+
+        Returns 201 with name if activated, 404 if no VRM found.
+        """
+        skins_dir = Path(__file__).resolve().parent.parent / "skins"
+        target_skin = skins_dir / Path(skin_name).name
+        if not target_skin.exists() or not target_skin.is_dir():
+            raise HTTPException(status_code=404, detail="Skin not found")
+
+        # find a .vrm file inside skin
+        vrm_file = None
+        for p in target_skin.rglob('*.vrm'):
+            vrm_file = p
+            break
+        if not vrm_file:
+            raise HTTPException(status_code=404, detail="No VRM found in skin")
+
+        # copy to avatars and set active
+        avatars_dir = self.vrm_dir
+        avatars_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = self._sanitize_vrm_filename(vrm_file.name)
+        target = avatars_dir / safe_name
+        import shutil
+        try:
+            shutil.copy2(vrm_file, target)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to copy VRM when activating skin {skin_name}: {exc}")
+            raise HTTPException(status_code=500, detail="Failed to activate skin")
+
+        try:
+            self._set_active_vrm(target.name)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to set active VRM after activating skin {skin_name}: {exc}")
+            raise HTTPException(status_code=500, detail="Failed to activate skin")
+
+        return JSONResponse({'status': 'ok', 'name': target.name}, status_code=201)
 
     # ------------------------------------------------------------------
     # WebSocket logic

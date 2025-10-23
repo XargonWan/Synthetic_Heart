@@ -12,4 +12,7 @@ tests/
 run_tests.sh
 .venv/
 GitVersion.yml
-skins/Rekku
+skins
+!skins/Rei
+!skins/temp/skins/README.md
+!skins/README.md

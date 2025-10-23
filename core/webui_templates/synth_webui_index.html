@@ -104,6 +104,37 @@
         .nav-btn.active .icon {
             transform: scale(1.08);
         }
+        /* Skins grid */
+        .skins-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+            gap: 1rem;
+            margin-top: 1rem;
+        }
+        .skin-card {
+            background: var(--surface-alt);
+            border-radius: 12px;
+            padding: 0.8rem;
+            border: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            gap: 0.6rem;
+        }
+        .skin-preview {
+            width: 100%;
+            height: 140px;
+            background: linear-gradient(135deg, rgba(255,255,255,0.02), rgba(0,0,0,0.02));
+            border-radius: 8px;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .skin-preview img { width: 100%; height: 100%; object-fit: cover; }
+        .skin-meta { color: var(--text-soft); font-size: 0.9rem; max-height: 6rem; overflow: auto; }
+        .skin-actions { display:flex; gap:0.5rem; }
+        .btn-ghost { background: transparent; border: 1px solid var(--border); color:var(--text); padding:0.45rem 0.8rem; border-radius:8px; cursor:pointer; }
+        .btn-primary { background:var(--accent); color:#07070c; padding:0.45rem 0.8rem; border-radius:8px; border:none; cursor:pointer; }
         .connection-status {
             display: flex;
             align-items: center;
@@ -144,6 +175,9 @@
         #tab-home {
             padding: 0;
         }
+
+        /* Skins tab */
+        #tab-skins { padding-top: 1rem; }
         .home-stage {
             width: 100%;
             height: 100%;
@@ -178,30 +212,34 @@
             padding-top: 4rem;
             overflow: hidden;
             z-index: 50;
-            resize: horizontal;
-            cursor: ew-resize;
+            /* allow manual control via the corner handle (desktop only) */
+            resize: none; /* we implement custom resize */
+            cursor: default;
         }
+        /* Dynamic resize cursors are handled by JS based on pointer location */
         #chat:hover {
-            cursor: ew-resize;
+            /* default to diagonal on hover but JS will override based on edge */
+            cursor: nwse-resize;
         }
-        /* Resize handle styling */
+        /* Corner resize handle styling (bottom-right) */
         #chat::after {
             content: '';
             position: absolute;
-            top: 0;
-            right: -5px;
-            width: 10px;
-            height: 100%;
-            cursor: ew-resize;
+            right: 6px;
+            bottom: 6px;
+            width: 16px;
+            height: 16px;
+            cursor: nwse-resize;
             background: transparent;
             z-index: 60;
+            border-radius: 2px;
         }
         #chat.resizing {
             transition: none;
-            cursor: ew-resize;
+            cursor: nwse-resize;
         }
         #chat.resizing::after {
-            background: rgba(255, 107, 214, 0.3);
+            background: rgba(255, 107, 214, 0.18);
         }
         /* On mobile, chat is not resizable */
         @media (max-width: 768px) {
@@ -919,53 +957,6 @@
         .pill.secondary:hover {
             background: rgba(114, 137, 218, 0.26);
         }
-        #vrm-upload {
-            display: none;
-        }
-        .vrm-list {
-            list-style: none;
-            margin: 0;
-            padding: 0;
-            display: flex;
-            flex-direction: column;
-            gap: 0.6rem;
-        }
-        .vrm-list li {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            gap: 0.8rem;
-            padding: 0.65rem 0.9rem;
-            border: 1px solid var(--border);
-            border-radius: 14px;
-            background: rgba(10, 10, 18, 0.65);
-            font-size: 0.9rem;
-        }
-        .vrm-list li.active {
-            border-color: rgba(255, 107, 214, 0.65);
-            background: rgba(255, 107, 214, 0.16);
-        }
-        .vrm-list li .name {
-            flex: 1;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-        .vrm-actions {
-            display: inline-flex;
-            gap: 0.4rem;
-        }
-        .vrm-actions button {
-            border: 1px solid var(--border);
-            background: var(--surface-alt);
-            color: inherit;
-            padding: 0.45rem 0.9rem;
-            border-radius: 12px;
-            cursor: pointer;
-        }
-        .vrm-actions button:hover {
-            background: var(--accent-soft);
-        }
         .toggle {
             display: inline-flex;
             align-items: center;
@@ -1292,6 +1283,10 @@
             <button class="nav-btn" data-tab="diary" aria-controls="tab-diary" aria-pressed="false">
                 <span class="icon" aria-hidden="true">📓</span><span>Diary</span>
             </button>
+            <button class="nav-btn" id="nav-skins" data-tab="skins" title="Skins">
+                <span class="icon">🧥</span>
+                <span>Skins</span>
+            </button>
             <button class="nav-btn" data-tab="logs" aria-controls="tab-logs" aria-pressed="false">
                 <span class="icon" aria-hidden="true">📜</span><span>Logs</span>
             </button>
@@ -1328,6 +1323,24 @@
                         <canvas id="vrm-canvas"></canvas>
                     </div>
                 </div>
+            </div>
+        </section>
+        <section class="tab-panel" id="tab-skins" data-tab="skins" role="tabpanel">
+            <div class="settings-grid">
+                <article class="card">
+                    <h2>Skins</h2>
+                    <p>Manage installed skins. Each skin should include at least one <code>.vrm</code> file. If a skin lacks animations, Rei will be used as fallback.</p>
+                    <div style="margin-top:0.6rem; margin-bottom:0.6rem;">
+                        <label for="skin-vrm-upload" class="pill">Select a skin or load a single VRM file</label>
+                        <input type="file" id="skin-vrm-upload" accept=".vrm" style="display:inline-block; margin-left:0.6rem;" />
+                    </div>
+                    <div id="skins-grid" class="skins-grid">
+                        <div class="meta">Loading skins...</div>
+                    </div>
+                    <div style="margin-top:1rem">
+                        <button class="btn-ghost" id="clear-uploaded">Clear uploaded VRM (restore Rei)</button>
+                    </div>
+                </article>
             </div>
         </section>
         <section class="tab-panel" id="tab-logs" data-tab="logs" role="tabpanel">
@@ -1419,18 +1432,6 @@
         </section>
         <section class="tab-panel" id="tab-settings" data-tab="settings" role="tabpanel">
             <div class="settings-grid">
-                <article class="card">
-                    <h2>VRM Avatar</h2>
-                    <p>Upload or select a VRM avatar. The active model renders on the Home stage.</p>
-                    <div class="vrm-controls">
-                        <input type="file" id="vrm-upload" accept=".vrm" />
-                        <label class="pill" for="vrm-upload">Upload VRM</label>
-                        <button class="pill secondary" type="button" id="vrm-refresh">Refresh List</button>
-                    </div>
-                    <ul class="vrm-list" id="vrm-list">
-                        <li class="empty">No models available</li>
-                    </ul>
-                </article>
                 <article class="card">
                     <h2>Notifications</h2>
                     <p>Enable desktop notifications and audio cues whenever new messages arrive.</p>
@@ -3887,13 +3888,114 @@
         refreshStats(true);
         setInterval(() => refreshStats(true), 15000);
     </script>
-    <script type="importmap">
-    {
-        "imports": {
-            "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
-            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+    <script>
+    // Skins UI: fetch and render installed skins
+    (function(){
+        const grid = document.getElementById('skins-grid');
+        const clearBtn = document.getElementById('clear-uploaded');
+
+        async function fetchSkins(){
+            try{
+                const res = await fetch('/api/skins');
+                if(!res.ok) throw new Error('Failed to load skins')
+                const data = await res.json();
+                renderSkins(data);
+            }catch(e){
+                grid.innerHTML = `<div class="meta">${e.message}</div>`;
+            }
         }
-    }
+
+        function renderSkins(skins){
+            if(!skins || skins.length===0){
+                grid.innerHTML = '<div class="meta">No skins found</div>';
+                return;
+            }
+            grid.innerHTML = '';
+            skins.forEach(s => {
+                const card = document.createElement('div'); card.className='skin-card';
+                const preview = document.createElement('div'); preview.className='skin-preview';
+                if(s.preview_url){
+                    const img = document.createElement('img'); img.src = s.preview_url; preview.appendChild(img);
+                } else {
+                    preview.innerHTML = '<div class="meta">No preview</div>';
+                }
+                const title = document.createElement('div'); title.innerHTML = `<strong>${s.name}</strong>`;
+                const meta = document.createElement('div'); meta.className='skin-meta'; meta.textContent = s.meta || '';
+                const actions = document.createElement('div'); actions.className='skin-actions';
+                const act = document.createElement('button'); act.className='btn-primary'; act.textContent='Activate';
+                act.disabled = !s.valid;
+                act.addEventListener('click', ()=> activateSkin(s.name));
+                const info = document.createElement('button'); info.className='btn-ghost'; info.textContent = s.vrm_present? 'Has VRM':'No VRM'; info.disabled=true;
+                actions.appendChild(act); actions.appendChild(info);
+                card.appendChild(preview); card.appendChild(title); card.appendChild(meta); card.appendChild(actions);
+                grid.appendChild(card);
+            })
+        }
+
+        async function activateSkin(name){
+            try{
+                const res = await fetch(`/api/skins/${encodeURIComponent(name)}/activate`, {method:'POST'});
+                if(!res.ok) throw new Error('Activate failed');
+                await fetchSkins();
+                await refreshModels();
+                alert('Skin activated: '+name);
+            }catch(e){ alert('Error: '+e.message) }
+        }
+
+        async function clearUploaded(){
+            try{
+                const res = await fetch('/api/skins/uploaded/clear', {method:'POST'});
+                if(!res.ok) throw new Error('Clear failed');
+                await fetchSkins();
+                await refreshModels();
+                alert('Restored default Rei VRM');
+            }catch(e){ alert('Error: '+e.message) }
+        }
+
+        if(clearBtn) clearBtn.addEventListener('click', clearUploaded);
+        // If the skins tab is opened, load skins
+        document.getElementById('nav-skins').addEventListener('click', function(){ fetchSkins(); });
+        
+        // After a successful VRM upload we want to refresh both skins and models lists
+        async function postUploadRefresh(){
+            try{
+                // refresh skins grid
+                await fetchSkins();
+            }catch(e){ console.warn('[synth_webui] postUploadRefresh: failed to refresh skins', e); }
+            try{
+                // refresh VRM models list (avatar manager)
+                await refreshModels();
+            }catch(e){ console.warn('[synth_webui] postUploadRefresh: failed to refresh models', e); }
+        }
+
+        // If the skins upload control exists, hook a small listener to ensure the skins list
+        // and models list are refreshed after upload. The main upload handler already loads
+        // the local VRM for immediate preview; this ensures server-side lists are in-sync.
+        const skinUpload = document.getElementById('skin-vrm-upload');
+        if(skinUpload){
+            skinUpload.addEventListener('change', async (e)=>{
+                // The heavy upload logic is already implemented further down and will call /api/vrm.
+                // Here we schedule a delayed refresh to allow the upload handler to complete.
+                setTimeout(()=>{ postUploadRefresh().catch(()=>{}); }, 1200);
+            });
+        }
+    })();
+    </script>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+            }
+        }
+    </script>
+    <script>
+        // Configure VRM loader resource path
+        if (typeof loader !== 'undefined') {
+            loader.setResourcePath('/skins/temp/');
+            console.log('[synth_webui] VRM loader configured with resource path: /skins/temp/');
+        }
+    </script>
     </script>
     <script type="module">
         import * as THREE from 'three';
@@ -3911,8 +4013,8 @@
             console.log('[synth_webui] VRM canvas found, initializing viewer...');
             const setStatus = window.SynthWebUISetStatus || ((message) => console.log('[synth_webui]', message));
             const listEl = document.getElementById('vrm-list');
-            const uploadInput = document.getElementById('vrm-upload');
-            const refreshBtn = document.getElementById('vrm-refresh');
+            // The upload control was moved into the Skins tab. Use its element here.
+            const uploadInput = document.getElementById('skin-vrm-upload');
             let currentModel = null;
             let currentVRM = null;
             let currentMixer = null;
@@ -3982,7 +4084,7 @@
 
             const loader = new GLTFLoader();
             loader.setCrossOrigin('anonymous');
-            loader.setResourcePath('/avatars/');
+            loader.setResourcePath('/skins/temp/');
             loader.register((parser) => new VRMLoaderPlugin(parser));
             console.log('[synth_webui] VRM loader configured with resource path: /avatars/');
 
@@ -4045,19 +4147,49 @@
 
                     // Create action from random clip if multiple
                     const clip = clips[Math.floor(Math.random() * clips.length)];
-                    const action = this.mixer.clipAction(clip);
-                    
-                    // Set appropriate loop type based on action
-                    // Some animations (like think) need special handling for smooth looping
-                    if (actionName === 'think') {
-                        // For think animations with intro/middle/outro, use LoopRepeat for native looping
-                        action.setLoop(THREE.LoopRepeat);
-                        action.clampWhenFinished = false;
-                    } else {
-                        action.setLoop(THREE.LoopRepeat);
-                        action.clampWhenFinished = false;
+
+                    // Special-case 'think' animations: split into intro / loop / outro
+                    if (actionName === 'think' && clip && clip.duration && THREE.AnimationUtils && typeof THREE.AnimationUtils.subclip === 'function') {
+                        try {
+                            const fps = 30; // assumption for subclip frame math
+                            const totalFrames = Math.max(2, Math.round(clip.duration * fps));
+                            const introFrames = Math.max(1, Math.round(totalFrames * 0.20));
+                            const outroFrames = Math.max(1, Math.round(totalFrames * 0.20));
+                            const loopFrames = Math.max(1, totalFrames - introFrames - outroFrames);
+
+                            const introClip = THREE.AnimationUtils.subclip(clip, `${actionName}_intro`, 0, introFrames - 1, fps);
+                            const loopClip = THREE.AnimationUtils.subclip(clip, `${actionName}_loop`, introFrames, introFrames + loopFrames - 1, fps);
+                            const outroClip = THREE.AnimationUtils.subclip(clip, `${actionName}_outro`, introFrames + loopFrames, totalFrames - 1, fps);
+
+                            const introAction = this.mixer.clipAction(introClip);
+                            const loopAction = this.mixer.clipAction(loopClip);
+                            const outroAction = this.mixer.clipAction(outroClip);
+
+                            introAction.setLoop(THREE.LoopOnce, 0);
+                            introAction.clampWhenFinished = true;
+                            loopAction.setLoop(THREE.LoopRepeat);
+                            loopAction.clampWhenFinished = false;
+                            outroAction.setLoop(THREE.LoopOnce, 0);
+                            outroAction.clampWhenFinished = true;
+
+                            // Store structured actions so start/stop can coordinate them
+                            this.actions[actionName] = {
+                                intro: introAction,
+                                loop: loopAction,
+                                outro: outroAction,
+                                _meta: { source: clip.name || 'think_clip' }
+                            };
+                            return this.actions[actionName];
+                        } catch (err) {
+                            console.warn(`[AnimationHandler] Failed to create think subclips, falling back to full clip: ${err}`);
+                            // Fall through to create single action below
+                        }
                     }
-                    
+
+                    // Default: create a single looping action
+                    const action = this.mixer.clipAction(clip);
+                    action.setLoop(THREE.LoopRepeat);
+                    action.clampWhenFinished = false;
                     this.actions[actionName] = action;
                     return action;
                 }
@@ -4111,13 +4243,67 @@
                         return;
                     }
 
+                    // If action is structured (intro/loop/outro), handle it differently
+                    if (action && action.loop && action.loop === undefined && typeof action === 'object' && action.loop !== undefined) {
+                        // defensive - not likely
+                    }
+
+                    // If the action is the structured think object
+                    if (action && action.intro && action.loop && action.outro) {
+                        const structured = action;
+
+                        // Fade out current action if different
+                        if (this.currentAction && this.currentAction !== structured.loop && this.currentAction !== structured.intro) {
+                            console.log(`[AnimationHandler] Fading out current action`);
+                            this.currentAction.fadeOut(0.25);
+                        }
+
+                        // Ensure we have a mixer finished handler to move intro -> loop and outro -> cleanup
+                        if (!this._mixerEventBound) {
+                            this._mixerEventBound = true;
+                            this.mixer.addEventListener('finished', (evt) => {
+                                try {
+                                    const finishedAction = evt.action;
+                                    const finishedClipName = finishedAction && finishedAction.getClip && finishedAction.getClip().name;
+                                    // Iterate structured actions to find matching intro/outro
+                                    for (const key in this.actions) {
+                                        const candidate = this.actions[key];
+                                        if (!candidate || !candidate.intro || !candidate.loop || !candidate.outro) continue;
+                                        const introName = `${key}_intro`;
+                                        const outroName = `${key}_outro`;
+                                        if (finishedClipName === introName) {
+                                            console.log(`[AnimationHandler] intro finished for ${key} -> starting loop`);
+                                            candidate.loop.reset().fadeIn(0.1).play();
+                                            this.currentAction = candidate.loop;
+                                            break;
+                                        }
+                                        if (finishedClipName === outroName) {
+                                            console.log(`[AnimationHandler] outro finished for ${key} -> clearing currentAction`);
+                                            if (this.currentAction === candidate.outro) this.currentAction = null;
+                                            break;
+                                        }
+                                    }
+                                } catch (err) {
+                                    console.warn('[AnimationHandler] mixer finished handler error:', err);
+                                }
+                            });
+                        }
+
+                        // Start with intro, then the mixer event will switch to loopAction
+                        console.log(`[AnimationHandler] Starting structured think action (intro -> loop)`);
+                        structured.intro.reset().fadeIn(0.15).play();
+                        this.currentAction = structured.intro;
+                        console.log(`[AnimationHandler] Structured think action started`);
+                        return;
+                    }
+
                     // Stop current action
                     if (this.currentAction && this.currentAction !== action) {
                         console.log(`[AnimationHandler] Fading out current action`);
                         this.currentAction.fadeOut(0.5);
                     }
 
-                    // Start new action
+                    // Start new action (single clip)
                     console.log(`[AnimationHandler] Starting new action for ${actionName}`);
                     action.reset().fadeIn(0.5).play();
                     this.currentAction = action;
@@ -4126,7 +4312,31 @@
 
                 stopAction(actionName) {
                     const action = this.actions[actionName];
-                    if (action) {
+                    // If structured think action, play outro when stopping
+                    if (action && action.loop && action.intro && action.outro) {
+                        try {
+                            // If currently looping, fade it out and play outro
+                            if (this.currentAction === action.loop) {
+                                console.log('[AnimationHandler] Stopping think loop -> playing outro');
+                                action.loop.fadeOut(0.2);
+                                action.outro.reset().fadeIn(0.15).play();
+                                this.currentAction = action.outro;
+                                return;
+                            }
+                            // If intro still playing, fade it out and play outro
+                            if (this.currentAction === action.intro) {
+                                console.log('[AnimationHandler] Intro still playing -> switching to outro');
+                                action.intro.fadeOut(0.1);
+                                action.outro.reset().fadeIn(0.15).play();
+                                this.currentAction = action.outro;
+                                return;
+                            }
+                        } catch (err) {
+                            console.warn('[AnimationHandler] Error while stopping structured think action:', err);
+                        }
+                    }
+
+                    if (action && typeof action === 'object' && action.stop) {
                         action.fadeOut(0.5);
                         if (this.currentAction === action) {
                             this.currentAction = null;
@@ -4383,6 +4593,34 @@
                 }
             }
 
+            // Function to refresh the active VRM model in the 3D viewer (called from skins UI)
+            async function refreshModels() {
+                try {
+                    console.log('[synth_webui] refreshModels called - fetching active VRM');
+                    const response = await fetch('/api/vrm/active');
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                    }
+                    const activeModel = await response.json();
+                    console.log('[synth_webui] Active VRM response:', activeModel);
+                    
+                    if (activeModel.name && activeModel.url) {
+                        console.log(`[synth_webui] Loading active VRM: ${activeModel.name} from ${activeModel.url}`);
+                        await loadVRM(activeModel.url, activeModel.name);
+                    } else {
+                        console.log('[synth_webui] No active VRM - clearing scene');
+                        clearVRM();
+                        currentModel = null;
+                    }
+                } catch (error) {
+                    console.error('[synth_webui] Failed to refresh models:', error);
+                    setStatus('Failed to refresh VRM model', 'error');
+                }
+            }
+
+            // Make refreshModels available globally for skins UI
+            window.refreshModels = refreshModels;
+
             // Start thinking animation
             function startThinking() {
                 if (!animationHandler || isProcessing) return;
@@ -4510,241 +4748,6 @@
                 });
             }
 
-            async function refreshModels(feedback = false) {
-                console.log('[synth_webui] ========== REFRESH MODELS START ==========');
-                console.log('[synth_webui] Refreshing VRM models list... (feedback:', feedback, ')');
-                
-                try {
-                    console.log('[synth_webui] Fetching /api/vrm...');
-                    const res = await fetch('/api/vrm');
-                    console.log(`[synth_webui] Fetch /api/vrm response status: ${res.status}`);
-                    console.log(`[synth_webui] Response ok: ${res.ok}`);
-                    console.log(`[synth_webui] Response headers:`, [...res.headers.entries()]);
-                    
-                    if (!res.ok) {
-                        console.error('[synth_webui] ⚠️ Non-OK response from /api/vrm');
-                        throw new Error('HTTP ' + res.status);
-                    }
-                    
-                    console.log('[synth_webui] Parsing JSON response...');
-                    const data = await res.json();
-                    console.log('[synth_webui] ✓ VRM models data:', data);
-                    console.log('[synth_webui] Models count:', data.models ? data.models.length : 0);
-                    
-                    if (data.models) {
-                        data.models.forEach((model, idx) => {
-                            console.log(`[synth_webui] Model ${idx}:`, model);
-                        });
-                    }
-                    
-                    console.log('[synth_webui] Rendering models list...');
-                    renderList(data);
-                    console.log('[synth_webui] ✓ List rendered');
-                    
-                    const activeModel = data.models.find((item) => item.active);
-                    console.log('[synth_webui] Active model from server:', activeModel);
-                    console.log('[synth_webui] Current model in UI:', currentModel);
-                    
-                    if (activeModel && activeModel.name !== currentModel) {
-                        console.log(`[synth_webui] Active model changed! Loading: ${activeModel.name}`);
-                        console.log(`[synth_webui] Active model URL: ${activeModel.url}`);
-                        await loadVRM(activeModel.url, activeModel.name);
-                    } else if (!activeModel) {
-                        console.log('[synth_webui] No active model on server, clearing VRM');
-                        clearVRM();
-                        if (feedback) setStatus('No active avatar', 'warn');
-                    } else if (feedback) {
-                        console.log('[synth_webui] Active model unchanged, no reload needed');
-                        setStatus('Avatar list refreshed', 'success');
-                    }
-                    
-                    console.log('[synth_webui] ========== REFRESH MODELS END (success) ==========');
-                    
-                } catch (error) {
-                    console.error('[synth_webui] ========== REFRESH MODELS ERROR ==========');
-                    console.error('[synth_webui] ⚠️ Unable to refresh models');
-                    console.error('[synth_webui] Error:', error);
-                    console.error('[synth_webui] Error stack:', error.stack);
-                    setStatus('Unable to refresh avatar list', 'error');
-                    console.error('[synth_webui] ========== REFRESH MODELS END (error) ==========');
-                }
-            }
-
-            async function setActive(name, trigger = null) {
-                console.log('[synth_webui] ========== SET ACTIVE VRM START ==========');
-                console.log('[synth_webui] Setting active VRM to:', name);
-                
-                try {
-                    console.log('[synth_webui] Posting to /api/vrm/active...');
-                    const res = await fetch('/api/vrm/active', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ name }),
-                    });
-                    
-                    console.log('[synth_webui] Set active response status:', res.status);
-                    console.log('[synth_webui] Set active response ok:', res.ok);
-                    
-                    if (!res.ok) {
-                        console.error('[synth_webui] ⚠️ Set active failed with status:', res.status);
-                        throw new Error('HTTP ' + res.status);
-                    }
-                    
-                    console.log('[synth_webui] ✓ Active VRM set successfully, refreshing...');
-                    // Refresh components and models; ensure the trigger button shows active state quickly
-                    await refreshModels(true);
-                    if (trigger) {
-                        try {
-                            trigger.textContent = 'Active';
-                            trigger.disabled = true;
-                        } catch (e) {}
-                    }
-                    console.log('[synth_webui] ========== SET ACTIVE VRM END (success) ==========');
-                    
-                } catch (error) {
-                    console.error('[synth_webui] ========== SET ACTIVE VRM ERROR ==========');
-                    console.error('[synth_webui] ⚠️ Failed to set active VRM');
-                    console.error('[synth_webui] Error:', error);
-                    console.error('[synth_webui] Error stack:', error.stack);
-                    setStatus('Unable to activate the model', 'error');
-                    console.error('[synth_webui] ========== SET ACTIVE VRM END (error) ==========');
-                }
-            }
-
-            async function removeModel(name) {
-                console.log('[synth_webui] ========== REMOVE VRM START ==========');
-                console.log('[synth_webui] Attempting to remove VRM:', name);
-                
-                if (!confirm(`Delete the model "${name}"?`)) {
-                    console.log('[synth_webui] User cancelled deletion');
-                    console.log('[synth_webui] ========== REMOVE VRM END (cancelled) ==========');
-                    return;
-                }
-                
-                console.log('[synth_webui] User confirmed deletion');
-                
-                try {
-                    const encodedName = encodeURIComponent(name);
-                    console.log('[synth_webui] Encoded name:', encodedName);
-                    console.log('[synth_webui] Deleting via DELETE /api/vrm/' + encodedName);
-                    
-                    const res = await fetch(`/api/vrm/${encodedName}`, {
-                        method: 'DELETE',
-                    });
-                    
-                    console.log('[synth_webui] Delete response status:', res.status);
-                    console.log('[synth_webui] Delete response ok:', res.ok);
-                    
-                    if (!res.ok) {
-                        console.error('[synth_webui] ⚠️ Delete failed with status:', res.status);
-                        throw new Error('HTTP ' + res.status);
-                    }
-                    
-                    console.log('[synth_webui] ✓ VRM deleted successfully, refreshing...');
-                    await refreshModels(true);
-                    console.log('[synth_webui] ========== REMOVE VRM END (success) ==========');
-                    
-                } catch (error) {
-                    console.error('[synth_webui] ========== REMOVE VRM ERROR ==========');
-                    console.error('[synth_webui] ⚠️ Failed to delete VRM');
-                    console.error('[synth_webui] Error:', error);
-                    console.error('[synth_webui] Error stack:', error.stack);
-                    setStatus('Unable to delete the model', 'error');
-                    console.error('[synth_webui] ========== REMOVE VRM END (error) ==========');
-                }
-            }
-
-            uploadInput?.addEventListener('change', async (event) => {
-                console.log('[synth_webui] ========== UPLOAD VRM START ==========');
-                console.log('[synth_webui] Upload input changed');
-                
-                const file = event.target.files?.[0];
-                console.log('[synth_webui] File selected:', file);
-                console.log('[synth_webui] File name:', file?.name);
-                console.log('[synth_webui] File size:', file?.size, 'bytes');
-                console.log('[synth_webui] File type:', file?.type);
-                
-                if (!file) {
-                    console.warn('[synth_webui] ⚠️ No file selected');
-                    console.log('[synth_webui] ========== UPLOAD VRM END (no file) ==========');
-                    return;
-                }
-                
-                if (!file.name.toLowerCase().endsWith('.vrm')) {
-                    console.warn('[synth_webui] ⚠️ Invalid file extension:', file.name);
-                    setStatus('Select a valid .vrm file', 'warn');
-                    uploadInput.value = '';
-                    console.log('[synth_webui] ========== UPLOAD VRM END (invalid extension) ==========');
-                    return;
-                }
-                
-                console.log('[synth_webui] ✓ File validation passed');
-                console.log('[synth_webui] Creating FormData...');
-                const formData = new FormData();
-                formData.append('file', file);
-                console.log('[synth_webui] ✓ FormData created');
-                
-                setStatus('Uploading model…', 'info');
-                console.log('[synth_webui] Uploading to /api/vrm via POST...');
-                
-                try {
-                    const res = await fetch('/api/vrm', {
-                        method: 'POST',
-                        body: formData,
-                    });
-                    
-                    console.log('[synth_webui] Upload response status:', res.status);
-                    console.log('[synth_webui] Upload response ok:', res.ok);
-                    console.log('[synth_webui] Upload response headers:', [...res.headers.entries()]);
-                    
-                    if (!res.ok) {
-                        console.error('[synth_webui] ⚠️ Upload failed with status:', res.status);
-                        const errorText = await res.text();
-                        console.error('[synth_webui] Error response body:', errorText);
-                        throw new Error('HTTP ' + res.status);
-                    }
-                    
-                    console.log('[synth_webui] ✓ Upload successful, parsing response...');
-                    const payload = await res.json();
-                    console.log('[synth_webui] Upload response payload:', payload);
-                    console.log('[synth_webui] Uploaded model name:', payload.name);
-                    console.log('[synth_webui] Uploaded model URL:', payload.url);
-                    
-                    console.log('[synth_webui] Creating object URL from file for immediate display...');
-                    const localUrl = URL.createObjectURL(file);
-                    console.log('[synth_webui] Object URL created:', localUrl);
-                    
-                    console.log('[synth_webui] Loading VRM from object URL...');
-                    await loadVRM(localUrl, payload.name, { isObjectUrl: true });
-                    
-                    console.log('[synth_webui] Revoking object URL...');
-                    URL.revokeObjectURL(localUrl);
-                    console.log('[synth_webui] ✓ Object URL revoked');
-                    
-                    setStatus('Model uploaded successfully', 'success');
-                    uploadInput.value = '';
-                    
-                    console.log('[synth_webui] Refreshing models list after upload...');
-                    await refreshModels();
-                    console.log('[synth_webui] ✓✓✓ Upload complete and models refreshed ✓✓✓');
-                    console.log('[synth_webui] ========== UPLOAD VRM END (success) ==========');
-                    
-                } catch (error) {
-                    console.error('[synth_webui] ========== UPLOAD VRM ERROR ==========');
-                    console.error('[synth_webui] ⚠️ Upload failed');
-                    console.error('[synth_webui] Error:', error);
-                    console.error('[synth_webui] Error message:', error.message);
-                    console.error('[synth_webui] Error stack:', error.stack);
-                    setStatus('Unable to upload the model', 'error');
-                    console.error('[synth_webui] ========== UPLOAD VRM END (error) ==========');
-                }
-            });
-
-            refreshBtn?.addEventListener('click', () => {
-                refreshModels(true);
-            });
-
-            refreshModels().catch((error) => console.error(error));
             refreshConfig().catch((error) => console.error(error));
 
             // Restore chat state on page load if we're on home tab
@@ -5125,59 +5128,125 @@
         (function() {
             const chat = document.getElementById('chat');
             let isResizing = false;
+            let resizeMode = null; // 'right' | 'bottom' | 'corner'
             let startX = 0;
+            let startY = 0;
             let startWidth = 0;
+            let startHeight = 0;
 
-            function startResize(e) {
+            const MIN_WIDTH = 250;
+            const MAX_WIDTH_PCT = 0.85; // fraction of window width
+            const MIN_HEIGHT = 140;
+            const MAX_HEIGHT_PCT = 0.85;
+            const EDGE_ZONE = 12; // px sensitivity for edges
+
+            function beginResize(e, mode) {
                 isResizing = true;
+                resizeMode = mode;
                 startX = e.clientX;
+                startY = e.clientY;
                 startWidth = chat.offsetWidth;
+                startHeight = chat.offsetHeight || Math.floor(window.innerHeight * 0.35);
                 chat.classList.add('resizing');
-                document.body.style.cursor = 'ew-resize';
                 document.body.style.userSelect = 'none';
-                
-                // Prevent text selection during resize
+                document.body.style.cursor = (mode === 'corner') ? 'nwse-resize' : (mode === 'bottom' ? 'ns-resize' : 'ew-resize');
                 e.preventDefault();
             }
 
-            function resize(e) {
-                if (!isResizing) return;
-                
+            function doResize(e) {
+                if (!isResizing || !resizeMode) return;
                 const deltaX = e.clientX - startX;
-                const newWidth = Math.max(250, Math.min(startWidth + deltaX, window.innerWidth * 0.5));
-                
-                chat.style.width = newWidth + 'px';
+                const deltaY = e.clientY - startY;
+                const maxWidth = Math.floor(window.innerWidth * MAX_WIDTH_PCT);
+                const maxHeight = Math.floor(window.innerHeight * MAX_HEIGHT_PCT);
+
+                if (resizeMode === 'corner') {
+                    const newWidth = Math.max(MIN_WIDTH, Math.min(startWidth + deltaX, maxWidth));
+                    const newHeight = Math.max(MIN_HEIGHT, Math.min(startHeight + deltaY, maxHeight));
+                    chat.style.width = newWidth + 'px';
+                    chat.style.height = newHeight + 'px';
+                } else if (resizeMode === 'right') {
+                    const newWidth = Math.max(MIN_WIDTH, Math.min(startWidth + deltaX, maxWidth));
+                    chat.style.width = newWidth + 'px';
+                } else if (resizeMode === 'bottom') {
+                    const newHeight = Math.max(MIN_HEIGHT, Math.min(startHeight + deltaY, maxHeight));
+                    chat.style.height = newHeight + 'px';
+                }
+
+                if (window.resizeVRMRenderer) {
+                    try { window.resizeVRMRenderer(); } catch (err) { /* ignore */ }
+                }
             }
 
-            function stopResize() {
+            function endResize() {
                 if (!isResizing) return;
-                
                 isResizing = false;
+                resizeMode = null;
                 chat.classList.remove('resizing');
                 document.body.style.cursor = '';
                 document.body.style.userSelect = '';
+                if (window.resizeVRMRenderer) {
+                    try { window.resizeVRMRenderer(); } catch (err) { /* ignore */ }
+                }
             }
 
-            // Add event listeners
-            chat.addEventListener('mousedown', function(e) {
-                // Check if click is on the resize handle (right edge)
+            function updateCursor(e) {
+                if (isResizing) return; // keep current cursor while resizing
                 const rect = chat.getBoundingClientRect();
-                if (e.clientX >= rect.right - 10 && e.clientX <= rect.right + 5) {
-                    startResize(e);
+                const x = e.clientX;
+                const y = e.clientY;
+                const onRight = x >= rect.right - EDGE_ZONE && x <= rect.right + EDGE_ZONE;
+                const onBottom = y >= rect.bottom - EDGE_ZONE && y <= rect.bottom + EDGE_ZONE;
+                if (onRight && onBottom) {
+                    chat.style.cursor = 'nwse-resize';
+                } else if (onRight) {
+                    chat.style.cursor = 'ew-resize';
+                } else if (onBottom) {
+                    chat.style.cursor = 'ns-resize';
+                } else {
+                    chat.style.cursor = '';
+                }
+            }
+
+            // Mouse down decides which mode to start based on pointer location
+            chat.addEventListener('mousedown', function(e) {
+                const rect = chat.getBoundingClientRect();
+                const inRight = e.clientX >= rect.right - EDGE_ZONE && e.clientX <= rect.right + EDGE_ZONE;
+                const inBottom = e.clientY >= rect.bottom - EDGE_ZONE && e.clientY <= rect.bottom + EDGE_ZONE;
+                if (inRight && inBottom) {
+                    beginResize(e, 'corner');
+                    return;
+                }
+                if (inRight) {
+                    beginResize(e, 'right');
+                    return;
+                }
+                if (inBottom) {
+                    beginResize(e, 'bottom');
+                    return;
                 }
             });
 
-            document.addEventListener('mousemove', resize);
-            document.addEventListener('mouseup', stopResize);
+            // Track pointer to update cursor zones
+            chat.addEventListener('mousemove', updateCursor);
+            chat.addEventListener('mouseleave', function() { if (!isResizing) chat.style.cursor = ''; });
 
-            // Prevent context menu on resize handle
+            document.addEventListener('mousemove', function(e) {
+                doResize(e);
+            });
+            document.addEventListener('mouseup', function() {
+                endResize();
+            });
+
+            // Prevent context menu on edge/corner
             chat.addEventListener('contextmenu', function(e) {
                 const rect = chat.getBoundingClientRect();
-                if (e.clientX >= rect.right - 10 && e.clientX <= rect.right + 5) {
+                const inRight = e.clientX >= rect.right - EDGE_ZONE && e.clientX <= rect.right + EDGE_ZONE;
+                const inBottom = e.clientY >= rect.bottom - EDGE_ZONE && e.clientY <= rect.bottom + EDGE_ZONE;
+                if (inRight || inBottom) {
                     e.preventDefault();
                 }
             });
-
         })();
 
     </script>

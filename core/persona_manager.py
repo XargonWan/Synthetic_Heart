@@ -948,7 +948,51 @@ class PersonaManager(PluginBase):
         # Select random animation file
         selected_animation = random.choice(animation_files) if animation_files else "Idle.fbx"
         
-        # Send animation command to WebUI
+        # Send animation command to WebUI (prefer animation handler if available)
+        if self._animation_handler and session_id:
+            try:
+                # Map logical animation states to implicit priorities (higher = more important)
+                priority_map = {
+                    "idle": 0,
+                    "think": 10,
+                    "write": 10,
+                    "talk": 20,
+                }
+                priority = priority_map.get(animation_state, 0)
+
+                # Use animation handler's API (new signature supports priority optionally)
+                try:
+                    await self._animation_handler.play_animation(
+                        animation_enum,
+                        session_id,
+                        loop=True,
+                        context_id=context_id,
+                        priority=priority,
+                    )
+                except TypeError:
+                    # Backwards compatibility: older handler without priority param
+                    await self._animation_handler.play_animation(
+                        animation_enum,
+                        session_id,
+                        loop=True,
+                        context_id=context_id,
+                    )
+
+                log_info(f"[persona_manager] ✅ Successfully set animation state to {animation_state} (file {selected_animation}) for session {session_id} with priority {priority}")
+
+                # Start rotation task if multiple animations available
+                if len(animation_files) > 1:
+                    log_debug(f"[persona_manager] Starting animation rotation for {animation_state} with {len(animation_files)} files")
+                    await self._start_animation_rotation(session_id, animation_enum, context_id)
+                else:
+                    log_debug(f"[persona_manager] Not starting rotation for {animation_state} - only {len(animation_files)} file(s)")
+                    await self._stop_animation_rotation(session_id, animation_enum)
+
+                return True
+            except Exception as e:
+                log_error(f"[persona_manager] ❌ Failed to send animation update via handler: {e}")
+                # Fallback to direct websocket send below
+        
         if self._webui and session_id:
             try:
                 await self._send_animation_update(session_id, selected_animation, animation_state)

@@ -104,8 +104,8 @@ The web interface provides browser-based access:
 
 .. code-block:: bash
 
-   WEBUI_HOST=0.0.0.0
-   WEBUI_PORT=5006
+   SYNTH_WEBUI_HOST=0.0.0.0
+   SYNTH_WEBUI_PORT=5006
 
 **Features:**
 

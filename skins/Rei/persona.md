@@ -1,7 +1,6 @@
-# Rei (SyntH default persona)
+The default SyntH skin — the first distributable model, feel free to edit it.
 
-Rei is the original SyntH persona — the first model (Rei) used as default for the WebUI.
-
-This persona pack includes the VRM model, animations and a short bio.
+Browsing this skin's files you can see the structure of any skin you might want to create.
+Any animation not present in your skins will fall back here.
 
 Author: Xargon
