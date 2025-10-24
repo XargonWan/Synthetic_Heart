@@ -366,7 +366,14 @@ def load_json_instructions() -> str:
 - Use 'reply_message_id' to reply to specific messages and maintain conversation context.
 - You MUST ALWAYS return syntactically valid JSON
 - You MUST use the 'actions' array, even for single actions
-- DO NOT include any text outside the JSON structure
+- ⚠️ CRITICAL: ANY TEXT OUTSIDE THE JSON STRUCTURE WILL BE DISCARDED. Only JSON will be processed.
+  - This means: If you write text before the JSON, it will be ignored
+  - This means: If you write text after the JSON, it will be ignored
+  - This means: Put ALL your response content INSIDE the JSON payload fields
+  - For messages to users, use the "text" field in message actions
+  - For thoughts/reasoning, use create_personal_diary_entry or similar internal actions
+  - Example WRONG: "Here are the actions:\n{...json...}\nLet me know if you need more!"
+  - Example RIGHT: {"actions": [{"type": "message_telegram_bot", "payload": {"text": "Here are the actions! Let me know if you need more!", "target": "..."}}]}
 
 - IMPORTANT: When responding to a user, you MUST ALWAYS include a create_personal_diary_entry action to record this interaction in your personal memory. You MUST provide an interaction_summary field that describes what happened in this conversation.
 

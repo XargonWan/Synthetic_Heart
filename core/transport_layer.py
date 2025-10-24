@@ -97,13 +97,17 @@ def extract_json_from_text(text: str, return_metadata: bool = False) -> Optional
         - 'unparsed_content': str - Content that couldn't be parsed (if any)
         - 'recovered': bool - True if JSON was recovered after errors
         - 'had_extra_text': bool - True if text was found before or after JSON
+        - 'prefix': str - Text before JSON (if any)
+        - 'suffix': str - Text after JSON (if any)
     """
     metadata = {
         'had_errors': False,
         'error_count': 0,
         'unparsed_content': '',
         'recovered': False,
-        'had_extra_text': False
+        'had_extra_text': False,
+        'prefix': '',
+        'suffix': ''
     }
     
     if not text:
@@ -169,6 +173,8 @@ def extract_json_from_text(text: str, return_metadata: bool = False) -> Optional
                     best_extra_chars = extra_chars
                     found_json = obj
                     metadata['had_extra_text'] = True
+                    metadata['prefix'] = prefix
+                    metadata['suffix'] = suffix
                     metadata['prefix_length'] = len(prefix)
                     metadata['suffix_length'] = len(suffix)
                     log_debug(f"[extract_json_from_text] Found JSON with {extra_chars} extra chars (best so far)")
@@ -363,6 +369,27 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
                 log_info(
                     f"[transport] Processed {len(processed_actions)} unique JSON actions via plugin system"
                 )
+                
+                # After processing actions, check if there's text outside the JSON that should be sent
+                if json_metadata and (json_metadata.get('prefix') or json_metadata.get('suffix')):
+                    companion_text = ""
+                    
+                    # Combine prefix and suffix, removing duplicate content
+                    if json_metadata.get('prefix'):
+                        companion_text = json_metadata.get('prefix', '').strip()
+                    
+                    if json_metadata.get('suffix'):
+                        suffix_text = json_metadata.get('suffix', '').strip()
+                        if companion_text:
+                            companion_text += "\n" + suffix_text
+                        else:
+                            companion_text = suffix_text
+                    
+                    if companion_text:
+                        log_info(f"[transport] Sending companion text alongside JSON actions: {len(companion_text)} chars")
+                        # Send the companion text as a separate message after the actions
+                        await interface_send_func(*args, text=companion_text, **kwargs)
+                
                 return
             else:
                 # No actions for current interface, send as plain text
@@ -373,8 +400,12 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
             log_warning(f"[transport] Failed to process JSON actions: {e}")
 
     # Non-JSON plain text — forward directly. Corrector is only run in llm_to_interface.
+    # NOTE: If LLM output contains no JSON and no actions, it will be forwarded as plain text.
+    # The LLM instructions are clear that ANY TEXT OUTSIDE JSON WILL BE DISCARDED,
+    # so LLMs should only output JSON. If they output plain text anyway, it still gets sent,
+    # but companion text from JSON extraction does NOT get sent in this path.
     if text and not text.startswith(("[ERROR]", "[WARNING]", "[INFO]", "[DEBUG]")):
-        log_debug(f"[flow] transport.non_json -> forwarding plain text (no in-line corrector) chat_id={kwargs.get('chat_id')}")
+        log_debug(f"[flow] transport.non_json -> forwarding plain text (no JSON detected, no corrector triggered) chat_id={kwargs.get('chat_id')}")
         return await interface_send_func(*args, text=text, **kwargs)
 
     # Send as normal text
@@ -384,7 +415,7 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
 
 # Re-entry guard removed: rely solely on the corrector retry counter to avoid loops
 
-async def run_corrector_middleware(text: str, bot=None, context: dict = None, chat_id=None) -> str:
+async def run_corrector_middleware(text: str, bot=None, context: dict = None, chat_id=None, thread_id=None) -> str:
     """Attempt to obtain a corrected LLM output that contains valid JSON actions.
 
     Strategy:
@@ -395,6 +426,13 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
 
     This function is intentionally best-effort and non-blocking for the system: if no
     active LLM plugin is available it will log and return None.
+    
+    Args:
+        text: The text to correct
+        bot: The bot instance
+        context: Context dictionary
+        chat_id: The chat ID for the correction
+        thread_id: The thread ID to maintain conversation continuity (optional)
     """
     try:
         # Avoid circular imports at module import time
@@ -470,6 +508,9 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
             except Exception:
                 full_json = {}
 
+            # Use the thread_id from the original conversation if available
+            payload_thread_id = thread_id if thread_id is not None else 0
+
             correction_payload = {
                 "system_message": {
                     "type": "error",
@@ -482,8 +523,8 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
                                 "type": "message_telegram_bot",
                                 "payload": {
                                     "text": "Your message content here",
-                                    "target": "-1003098886330",
-                                    "thread_id": 2
+                                    "target": str(chat_id or "-1003098886330"),
+                                    "thread_id": payload_thread_id
                                 }
                             }
                         ]
@@ -503,12 +544,12 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
             correction_message = SimpleNamespace()
             correction_message.chat_id = chat_id or getattr(bot, 'chat_id', None) or -1
             correction_message.text = correction_prompt
-            correction_message.thread_id = None
+            correction_message.thread_id = thread_id  # Use thread_id from original conversation
             correction_message.date = None
             correction_message.from_user = None
             correction_message.chat = SimpleNamespace(id=correction_message.chat_id, type='private')
 
-            log_debug(f"[corrector_middleware] Requesting correction from LLM (attempt {attempt}/{max_retries})")
+            log_debug(f"[corrector_middleware] Requesting correction from LLM (attempt {attempt}/{max_retries}) - chat_id={correction_message.chat_id}, thread_id={correction_message.thread_id}")
 
             # Mark that we are expecting a system reply for this chat_id so llm_to_interface can
             # consume it without forwarding and avoid re-entry loops.
@@ -650,8 +691,13 @@ async def llm_to_interface(interface_send_func, *args, text: str = None, **kwarg
             log_warning(f"[llm_to_interface] 🔧 Corrupted JSON detected - activating corrector to regenerate damaged actions")
             log_debug(f"[llm_to_interface] Unparsed content ({len(json_metadata.get('unparsed_content', ''))} chars): {json_metadata.get('unparsed_content', '')[:200]}...")
         
-        # Detect correction/system payloads (top-level "system_message") OR corrupted JSON
-        if (isinstance(json_payload, dict) and 'system_message' in json_payload) or is_corrupted:
+        # Check if LLM returned plain text with NO JSON at all (violates LLM instructions)
+        is_plain_text_only = (not json_payload and text and text.strip())
+        if is_plain_text_only:
+            log_warning(f"[llm_to_interface] ⚠️ LLM returned plain text with NO JSON - violates instructions! Activating corrector to request JSON format")
+        
+        # Detect correction/system payloads (top-level "system_message") OR corrupted JSON OR plain text only
+        if (isinstance(json_payload, dict) and 'system_message' in json_payload) or is_corrupted or is_plain_text_only:
             try:
                 # Determine bot instance from args if present
                 bot = args[0] if args and len(args) > 0 else None
@@ -703,7 +749,8 @@ async def llm_to_interface(interface_send_func, *args, text: str = None, **kwarg
                     corrector_context, 
                     bot, 
                     message,
-                    completed_actions=completed_actions if is_corrupted else None
+                    completed_actions=completed_actions if is_corrupted else None,
+                    force_correction=is_plain_text_only  # Force corrector to run for plain text
                 )
 
                 if orchestrator_result is True:

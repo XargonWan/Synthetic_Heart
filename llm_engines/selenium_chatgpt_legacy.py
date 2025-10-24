@@ -1808,9 +1808,12 @@ class SeleniumChatGPTLegacyPlugin(AIPluginBase):
                         self._init_driver()
                     
                     # Get chat ID for ChatGPT conversation
+                    thread_id_for_link = getattr(message, "thread_id", None)
+                    log_debug(f"[selenium] _process_correction_message: Getting ChatGPT link with chat_id={message.chat_id}, thread_id={thread_id_for_link}")
+                    
                     chat_id = await chat_link_store.get_chatgpt_link(
                         message.chat_id, 
-                        getattr(message, "thread_id", None),
+                        thread_id_for_link,
                         interface=self._get_interface_name(bot)
                     )
                     
@@ -1865,9 +1868,12 @@ class SeleniumChatGPTLegacyPlugin(AIPluginBase):
                         self._init_driver()
                     
                     # Get chat ID for ChatGPT conversation
+                    thread_id_for_link = getattr(message, "thread_id", None)
+                    log_debug(f"[selenium] _process_system_output_message: Getting ChatGPT link with chat_id={message.chat_id}, thread_id={thread_id_for_link}")
+                    
                     chat_id = await chat_link_store.get_chatgpt_link(
                         message.chat_id, 
-                        getattr(message, "thread_id", None),
+                        thread_id_for_link,
                         interface=self._get_interface_name(bot)
                     )
                     

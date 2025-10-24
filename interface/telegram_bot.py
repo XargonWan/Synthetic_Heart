@@ -844,6 +844,10 @@ async def plugin_startup_callback(application):
     application.create_task(message_queue.run())
 
 
+# Global variable to track the telegram polling task
+_polling_task = None
+
+
 async def start_bot():
     """Start the Telegram bot application.
     
@@ -946,6 +950,32 @@ async def start_bot():
     # Plugin startup is handled by plugin_startup_callback
     # No need for fallback as the callback ensures proper async startup
 
+    async def _run_polling_loop():
+        """Run the polling loop in a separate background task.
+        
+        This function will run indefinitely until cancelled or until an error occurs.
+        It's executed in a background task created by asyncio.create_task() to avoid
+        blocking the main application startup.
+        """
+        try:
+            log_info("[telegram_bot] Polling loop task started")
+            log_info("[telegram_bot] Starting Telegram polling...")
+            await app.updater.start_polling()
+            log_info("[telegram_bot] Polling started successfully")
+            
+            # Keep the polling running until cancelled
+            log_info("[telegram_bot] Bot is now running and listening for messages...")
+            # Wait indefinitely - this will be interrupted when the app shuts down
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            log_info("[telegram_bot] Polling task was cancelled")
+            raise
+        except Exception as e:
+            log_error(f"[telegram_bot] Error in polling loop: {repr(e)}")
+            raise
+        finally:
+            log_info("[telegram_bot] Polling loop task ending...")
+    
     try:
         log_info("[telegram_bot] Starting Telegram application initialization...")
         # Use async initialization instead of run_polling to avoid event loop conflicts
@@ -959,7 +989,7 @@ async def start_bot():
             log_info("[telegram_bot] Existing updater stopped")
 
         # Update the global interface instance with the bot
-        global telegram_interface
+        global telegram_interface, _polling_task
         telegram_interface.bot = app.bot
         telegram_interface.is_enabled = True
         telegram_interface.disabled_reason = None
@@ -973,22 +1003,20 @@ async def start_bot():
         await app.start()
         log_info("[telegram_bot] Telegram application started")
         
-        # Keep running until interrupted
-        log_info("[telegram_bot] Starting polling...")
-        await app.updater.start_polling()
-        log_info("[telegram_bot] Polling started successfully")
+        # Create a background task for polling that doesn't block start_bot() from returning
+        log_info("[telegram_bot] Creating background polling task...")
+        _polling_task = asyncio.create_task(_run_polling_loop())
+        _polling_task.set_name("telegram_polling")
+        log_info("[telegram_bot] Background polling task created and scheduled")
+        log_info("[telegram_bot] start_bot() completed successfully - polling running in background")
         
-        # This keeps the application running
-        log_info("[telegram_bot] Bot is now running and listening for messages...")
-        await asyncio.Event().wait()  # Wait forever until interrupted
     except Exception as e:
-        log_error(f"[telegram_bot] Error in bot polling: {repr(e)}")
+        log_error(f"[telegram_bot] Error during Telegram bot startup: {repr(e)}")
         raise
     finally:
-        log_info("[telegram_bot] Shutting down Telegram application...")
-        await app.stop()
-        await app.shutdown()
-        log_info("[telegram_bot] Telegram application shutdown completed")
+        # Note: We don't stop/shutdown the app here because the polling task runs in background
+        # The proper shutdown will be handled by the application lifecycle when signals are received
+        log_debug("[telegram_bot] start_bot() finally block completed")
 
 class TelegramInterface:
     """Interface wrapper providing a standard send_message method for Telegram."""
@@ -1609,7 +1637,7 @@ def shutdown_interface():
     
     Called before reload or shutdown to properly cleanup resources.
     """
-    global telegram_interface
+    global telegram_interface, _polling_task
     
     if telegram_interface is None:
         log_debug("[telegram_bot] No interface to shutdown")
@@ -1618,6 +1646,19 @@ def shutdown_interface():
     log_info("[telegram_bot] Shutting down Telegram interface...")
     
     try:
+        # Cancel the polling task if it's running
+        if _polling_task is not None:
+            if not _polling_task.done():
+                log_info("[telegram_bot] Cancelling polling task...")
+                _polling_task.cancel()
+                try:
+                    import asyncio
+                    # Give it a moment to cancel gracefully
+                    asyncio.get_event_loop().run_until_complete(asyncio.sleep(0.5))
+                except Exception:
+                    pass
+            _polling_task = None
+        
         # Stop the bot if it's running
         if telegram_interface.bot is not None:
             # The actual bot shutdown is handled by the application lifecycle

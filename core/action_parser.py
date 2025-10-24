@@ -1256,7 +1256,7 @@ __all__ = [
 ]
 
 
-async def corrector_orchestrator(text: str, context: dict, bot, message, max_retries: int | None = None, completed_actions: list = None):
+async def corrector_orchestrator(text: str, context: dict, bot, message, max_retries: int | None = None, completed_actions: list = None, force_correction: bool = False):
     """Process model text: parse JSON actions or run the corrector loop.
     
     Args:
@@ -1267,6 +1267,8 @@ async def corrector_orchestrator(text: str, context: dict, bot, message, max_ret
         max_retries: Maximum number of correction attempts
         completed_actions: List of action types that were already successfully executed
                           (so the corrector knows not to regenerate them)
+        force_correction: If True, force the corrector to run even for non-JSON-like text
+                         (used when LLM returns plain text that violates JSON-only instructions)
 
     Returns:
         True  -> actions parsed and executed
@@ -1339,11 +1341,17 @@ async def corrector_orchestrator(text: str, context: dict, bot, message, max_ret
             log_warning(f"[corrector_orchestrator] Failed to run actions: {e}")
             return False
 
-    # Not parsed initially. If not JSON-like, indicate to caller to forward as plain text
+    # Not parsed initially. If not JSON-like, check if we should force correction
     if '{' not in (text or '') and '[' not in (text or ''):
-        return None
+        if not force_correction:
+            # Not JSON-like and not forced -> indicate to caller to forward as plain text
+            return None
+        else:
+            # force_correction=True: LLM returned plain text violating JSON-only rule
+            # Fall through to run corrector loop
+            log_info("[corrector_orchestrator] Plain text detected with force_correction=True - running corrector loop to request JSON format")
 
-    # JSON-like but not valid -> run corrector loop here
+    # JSON-like but not valid (or forced correction for plain text) -> run corrector loop here
     # Build context for corrector, including completed actions
     if completed_actions:
         log_info(f"[corrector_orchestrator] Starting correction loop - actions already completed: {completed_actions}")
@@ -1371,7 +1379,9 @@ async def corrector_orchestrator(text: str, context: dict, bot, message, max_ret
             # Add message to context for error handling
             context = dict(context) if context else {}
             context['message'] = message
-            corrected = await transport.run_corrector_middleware(text, bot=bot, context=context, chat_id=getattr(message, 'chat_id', None))
+            # Pass thread_id from original message to maintain conversation continuity
+            thread_id = getattr(message, 'thread_id', None)
+            corrected = await transport.run_corrector_middleware(text, bot=bot, context=context, chat_id=getattr(message, 'chat_id', None), thread_id=thread_id)
         except Exception as e:
             log_warning(f"[corrector_orchestrator] Corrector invocation failed: {e}")
             return False
