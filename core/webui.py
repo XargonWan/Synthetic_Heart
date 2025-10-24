@@ -1933,7 +1933,7 @@ class SynthWebUIInterface:
 
         try:
             from core.config import list_available_llms, set_active_llm
-            from core.core_initializer import core_initializer
+            from core.plugin_instance import load_plugin
         except Exception as exc:  # pragma: no cover - defensive
             log_error(f"{LOG_PREFIX} unable to import LLM configuration helpers: {exc}")
             raise HTTPException(status_code=500, detail="Unable to access LLM configuration") from exc
@@ -1943,8 +1943,10 @@ class SynthWebUIInterface:
             raise HTTPException(status_code=404, detail=f"LLM '{name}' is not available")
 
         try:
+            # Hot-swap: Just load the new plugin without full restart
             await set_active_llm(name)
-            await core_initializer.initialize_all()
+            await load_plugin(name)
+            log_info(f"{LOG_PREFIX} Successfully switched LLM to {name}")
         except Exception as exc:
             log_error(f"{LOG_PREFIX} failed to switch LLM to {name}: {exc}")
             raise HTTPException(status_code=500, detail=f"Failed to activate LLM '{name}'") from exc
