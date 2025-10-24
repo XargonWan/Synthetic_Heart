@@ -283,7 +283,9 @@ class ChatGPTLinkStore(ChatLinkStore):
                 result = await cursor.fetchone()
                 await connection.ensure_closed()
                 
-                return result[0] if result and result[0] else None
+                chatgpt_link = result[0] if result and result[0] else None
+                log_debug(f"[selenium_chatgpt_legacy] get_chatgpt_link: chat_id={chat_id}, thread_id={thread_id}, interface={interface} -> link={chatgpt_link}")
+                return chatgpt_link
         except Exception as e:
             log_error(f"[selenium_chatgpt_legacy] Failed to get ChatGPT link: {e}")
             return None
