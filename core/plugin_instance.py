@@ -262,6 +262,35 @@ async def handle_incoming_message(bot, message, context_memory_or_prompt, interf
             log_info(f"[flow] <- LLM plugin: completed for chat_id={getattr(message, 'chat_id', None)} result_type={type(result)}")
         except Exception:
             log_info(f"[flow] <- LLM plugin: completed for chat_id={getattr(message, 'chat_id', None)}")
+        
+        # If the LLM plugin returned a response, pass it through the message chain for validation/correction
+        # This ensures ALL LLM responses go through proper JSON validation before being sent to interfaces
+        if result:
+            log_debug(f"[plugin_instance] LLM returned response ({len(str(result)) if result else 0} chars), passing to message chain for validation")
+            from core.message_chain import handle_incoming_message as message_chain_handle
+            
+            # Build context from the original message if available
+            llm_context = {}
+            if hasattr(message, 'chat_id'):
+                llm_context['chat_id'] = message.chat_id
+            if hasattr(message, 'thread_id'):
+                llm_context['thread_id'] = message.thread_id
+            if isinstance(context_memory_or_prompt, dict):
+                llm_context.update(context_memory_or_prompt)
+            
+            # Pass to message chain with source="llm" to mark it as LLM-origin
+            # The message chain will validate JSON, auto-correct if needed, and execute actions
+            chain_result = await message_chain_handle(
+                bot=bot,
+                message=message,
+                text=result,
+                source="llm",  # Mark as LLM-origin so corrector can intervene
+                context=llm_context
+            )
+            
+            log_debug(f"[plugin_instance] Message chain processed LLM response: {chain_result}")
+            return chain_result
+        
         return result
     except Exception as e:
         log_error(f"[plugin_instance] LLM plugin raised an exception: {e}")

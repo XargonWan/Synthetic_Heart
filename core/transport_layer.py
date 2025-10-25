@@ -520,9 +520,9 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
                     "required_format": {
                         "actions": [
                             {
-                                "type": "message_telegram_bot",
+                                "action": "message_telegram_bot",
                                 "payload": {
-                                    "text": "Your message content here",
+                                    "text": "Your message content here (optional - only if you want to reply to user)",
                                     "target": str(chat_id or "-1003098886330"),
                                     "thread_id": payload_thread_id
                                 }

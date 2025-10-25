@@ -2,6 +2,7 @@
 from core.selenium_llm_base import SeleniumLLMBase
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from selenium.webdriver.common.by import By
+import time
 
 # Selenium ChatGPT-specific configuration
 # Model-specific character limits (based on official documentation and testing)
@@ -190,9 +191,6 @@ class SeleniumChatGPTPlugin(SeleniumLLMBase):
         
         # Additional selectors as fallback (from current version)
         fallback_selectors = [
-            # New specific selectors provided by user
-            (By.CSS_SELECTOR, "#prompt-textarea > p"),
-            (By.CSS_SELECTOR, "#thread-bottom > div > div > div.pointer-events-auto.relative.z-1.flex.h-\\[var\\(--composer-container-height\\,100\\%\\)\\].max-w-full.flex-\\[var\\(--composer-container-flex\\,1\\)\\].flex-col > form > div:nth-child\\(2\\) > div > div.-my-2\\.5.flex.min-h-14.items-center.overflow-x-hidden.px-1\\.5.\\[grid-area\\:primary\\].group-data-expanded\\/composer\\:mb-0.group-data-expanded\\/composer\\:px-2\\.5 > div"),
             # ProseMirror editor selectors
             (By.CSS_SELECTOR, "div.ProseMirror.ProseMirror-focused"),
             (By.CSS_SELECTOR, "div.ProseMirror"),
@@ -201,7 +199,7 @@ class SeleniumChatGPTPlugin(SeleniumLLMBase):
             (By.CSS_SELECTOR, "div.ProseMirror p[data-placeholder]"),
             # Additional ChatGPT-specific selectors
             (By.CSS_SELECTOR, "textarea[data-id='prompt-textarea']"),
-            (By.CSS_SELECTOR, "#prompt-textarea"),
+            (By.CSS_SELECTOR, "#prompt-textarea"),  # Fallback to ID selector
             (By.CSS_SELECTOR, "textarea[data-testid='prompt-textarea']"),
             (By.CSS_SELECTOR, "div[data-testid='prompt-textarea'][contenteditable='true']"),
             # Rich text editor selectors
@@ -296,7 +294,9 @@ class SeleniumChatGPTPlugin(SeleniumLLMBase):
                 log_warning(f"[selenium_chatgpt] Filtered {removed_chars} non-BMP characters from prompt")
             
             # Check prompt length and truncate if too long
-            max_prompt_length = 10000  # Conservative limit for ChatGPT
+            # ChatGPT's web interface can handle much larger prompts than 10000 chars
+            # We use 100000 as a more realistic limit for the textarea content
+            max_prompt_length = 100000  # Realistic limit for ChatGPT web textarea
             if len(filtered_prompt) > max_prompt_length:
                 original_length = len(filtered_prompt)
                 filtered_prompt = filtered_prompt[:max_prompt_length]
@@ -317,39 +317,80 @@ class SeleniumChatGPTPlugin(SeleniumLLMBase):
             )
             log_debug(f"[selenium_chatgpt] Textarea is clickable")
             
+            # Determine if it's a textarea or contenteditable div
+            tag_name = textarea.tag_name.lower()
+            is_textarea = tag_name == "textarea"
+            is_contenteditable = textarea.get_attribute("contenteditable") == "true"
+            
+            log_debug(f"[selenium_chatgpt] Element type: tag={tag_name}, is_textarea={is_textarea}, is_contenteditable={is_contenteditable}")
+            
             # Check current content before clearing
-            current_value = textarea.get_attribute("value") or ""
-            log_debug(f"[selenium_chatgpt] Current textarea value before clear: '{current_value}' (length: {len(current_value)})")
+            if is_textarea:
+                current_value = textarea.get_attribute("value") or ""
+            else:
+                current_value = textarea.get_attribute("textContent") or textarea.text or ""
+            log_debug(f"[selenium_chatgpt] Current textarea value before clear: '{current_value[:100] if len(current_value) > 100 else current_value}' (length: {len(current_value)})")
             
             # Clear any existing text
             log_debug(f"[selenium_chatgpt] Clearing textarea")
-            textarea.clear()
+            if is_textarea:
+                textarea.clear()
+            else:
+                # For contenteditable divs, use JavaScript to clear
+                self.driver.execute_script("arguments[0].textContent = '';", textarea)
             log_debug(f"[selenium_chatgpt] Textarea cleared")
             
             # Check content after clearing
-            after_clear_value = textarea.get_attribute("value") or ""
+            if is_textarea:
+                after_clear_value = textarea.get_attribute("value") or ""
+            else:
+                after_clear_value = textarea.get_attribute("textContent") or textarea.text or ""
             log_debug(f"[selenium_chatgpt] Textarea value after clear: '{after_clear_value}' (length: {len(after_clear_value)})")
             
             # Paste the filtered prompt text
-            log_debug(f"[selenium_chatgpt] Sending keys to textarea: '{filtered_prompt}' (length: {len(filtered_prompt)})")
-            try:
-                textarea.send_keys(filtered_prompt)
-                log_debug(f"[selenium_chatgpt] Keys sent to textarea")
-            except Exception as send_keys_error:
-                log_debug(f"[selenium_chatgpt] send_keys failed: {send_keys_error}")
-                # Try alternative method: use JavaScript to set value
+            log_debug(f"[selenium_chatgpt] Sending text to textarea: '{filtered_prompt[:100]}...' (length: {len(filtered_prompt)})")
+            
+            if is_textarea:
+                # For textarea elements, use send_keys
                 try:
-                    self.driver.execute_script("arguments[0].value = arguments[1];", textarea, filtered_prompt)
-                    # Trigger input event to make sure ChatGPT detects the change
-                    self.driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", textarea)
-                    log_debug(f"[selenium_chatgpt] Text set via JavaScript")
+                    textarea.send_keys(filtered_prompt)
+                    log_debug(f"[selenium_chatgpt] Keys sent to textarea via send_keys")
+                except Exception as send_keys_error:
+                    log_debug(f"[selenium_chatgpt] send_keys failed: {send_keys_error}")
+                    # Try alternative method: use JavaScript to set value
+                    try:
+                        self.driver.execute_script("arguments[0].value = arguments[1];", textarea, filtered_prompt)
+                        # Trigger input event to make sure ChatGPT detects the change
+                        self.driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", textarea)
+                        log_debug(f"[selenium_chatgpt] Text set via JavaScript")
+                    except Exception as js_error:
+                        log_debug(f"[selenium_chatgpt] JavaScript method also failed: {js_error}")
+                        raise send_keys_error  # Re-raise original error
+            else:
+                # For contenteditable divs, use JavaScript to insert text
+                log_debug(f"[selenium_chatgpt] Inserting text via JavaScript for contenteditable div")
+                try:
+                    # Focus the element first
+                    self.driver.execute_script("arguments[0].focus();", textarea)
+                    # Set the text content
+                    self.driver.execute_script("arguments[0].textContent = arguments[1];", textarea, filtered_prompt)
+                    # Trigger input and change events
+                    self.driver.execute_script("""
+                        const elem = arguments[0];
+                        elem.dispatchEvent(new Event('input', { bubbles: true }));
+                        elem.dispatchEvent(new Event('change', { bubbles: true }));
+                    """, textarea)
+                    log_debug(f"[selenium_chatgpt] Text injected via JavaScript for contenteditable")
                 except Exception as js_error:
-                    log_debug(f"[selenium_chatgpt] JavaScript method also failed: {js_error}")
-                    raise send_keys_error  # Re-raise original error
+                    log_error(f"[selenium_chatgpt] Failed to inject text via JavaScript: {js_error}")
+                    raise
             
             # Check final content
-            final_value = textarea.get_attribute("value") or ""
-            log_debug(f"[selenium_chatgpt] Final textarea value: '{final_value}' (length: {len(final_value)})")
+            if is_textarea:
+                final_value = textarea.get_attribute("value") or ""
+            else:
+                final_value = textarea.get_attribute("textContent") or textarea.text or ""
+            log_debug(f"[selenium_chatgpt] Final textarea value: '{final_value[:100] if len(final_value) > 100 else final_value}' (length: {len(final_value)})")
             
             # Wait a bit for ChatGPT to process the input before trying to send
             import time
@@ -418,74 +459,67 @@ class SeleniumChatGPTPlugin(SeleniumLLMBase):
                 log_debug(f"[selenium_chatgpt] Wait for confirmation timed out or failed: {wait_error}")
                 # Continue anyway - the message might have been sent
             
+            return True  # Prompt was sent successfully
+        
         except Exception as e:
             from core.logging_utils import log_error
             log_error(f"[selenium_chatgpt] Failed to send prompt: {e}")
             raise
 
-    def _extract_response_text(self, driver) -> str:
-        """Extract the latest response from ChatGPT."""
-        try:
-            from selenium.webdriver.common.by import By
-            from selenium.webdriver.support.ui import WebDriverWait
-            from selenium.webdriver.support import expected_conditions as EC
-            
-            # Try multiple selectors for response extraction (most specific first)
-            response_selectors = [
-                "#thread > div > div.relative.basis-auto.flex-col.-mb-\\(--composer-overlap-px\\).\\[--composer-overlap-px\\:28px\\].grow.flex.overflow-hidden > div > div > div.flex.flex-col.text-sm.thread-xl\\:pt-header-height.pb-25 > article.text-token-text-primary.w-full.focus\\:outline-none.\\[--shadow-height\\:45px\\].has-data-writing-block\\:pointer-events-none.has-data-writing-block\\:-mt-\\(--shadow-height\\).has-data-writing-block\\:pt-\\(--shadow-height\\).\\[\\&\\:has\\(\\[data-writing-block\\]\\)\\>\\*\\]\\:pointer-events-auto.scroll-mt-\\[calc\\(var\\(--header-height\\)\\+min\\(200px\\,max\\(70px\\,20svh\\)\\)\\)\\] > div > div > div.flex.max-w-full.flex-col.grow > div > div > div > pre > div > div.overflow-y-auto.p-4",  # User provided specific selector
-                "div.markdown.prose",  # Legacy selector
-                "[data-message-id] .markdown",  # New ChatGPT message structure
-                ".message-content .markdown",
-                "[data-testid*='conversation-turn'] .markdown",
-                ".conversation-turn .markdown",
-                "[role='presentation'] .markdown",  # Generic markdown content
-                ".prose",  # Fallback prose content
-                "[data-message-author-role='assistant']",  # Assistant messages
-            ]
-            
-            response_element = None
-            for selector in response_selectors:
-                try:
-                    response_element = WebDriverWait(driver, 5).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, selector))
-                    )
-                    from core.logging_utils import log_debug
-                    log_debug(f"[selenium_chatgpt] Found response with selector: {selector}")
-                    break
-                except:
-                    continue
-            
-            if not response_element:
-                from core.logging_utils import log_warning
-                log_warning("[selenium_chatgpt] No response element found with any selector")
-                return ""
-            
-            # Get all response elements and take the last one (most recent)
-            response_elements = driver.find_elements(By.CSS_SELECTOR, selector)
-            if response_elements:
-                response_text = response_elements[-1].text
-            else:
-                response_text = ""
-            
-            # Wait for response to stabilize (no more typing indicators)
-            self.wait_until_response_stabilizes(driver)
-            
-            # Get final text after stabilization - take the last element again
-            response_elements = driver.find_elements(By.CSS_SELECTOR, selector)
-            if response_elements:
-                final_response = response_elements[-1].text
-            else:
-                final_response = ""
-            
-            from core.logging_utils import log_debug
-            log_debug(f"[selenium] Extracted response: {len(final_response)} characters")
-            return final_response
-            
-        except Exception as e:
-            from core.logging_utils import log_error
-            log_error(f"[selenium] Failed to extract response: {e}")
-            return ""
+    def _get_response_selectors(self) -> list:
+        """Get CSS selectors for extracting ChatGPT responses.
+        
+        These selectors are tried in order until a response is found.
+        Returns the LAST matching element (most recent response).
+        """
+        return [
+            "div.markdown.prose",  # Primary selector (from legacy version that works)
+            "[data-message-author-role='assistant']",  # Alternative for assistant messages
+            "div.markdown",  # Fallback
+            "[role='presentation'] .markdown",  # Generic markdown content
+            ".prose",  # Fallback prose content
+            "[data-testid*='conversation-turn'] .markdown",  # New ChatGPT message structure
+            ".message-content .markdown",
+        ]
 
+    def _extract_response_text(self, driver) -> str:
+        """Extract response from ChatGPT with prefer-response dialog dismissal.
+        
+        Extends the base method to handle ChatGPT-specific dialogs.
+        """
+        # Dismiss the "prefer-response" dialog if it appears
+        try:
+            buttons = driver.find_elements(By.CSS_SELECTOR, "[data-testid='paragen-prefer-response-button']")
+            if buttons:
+                try:
+                    buttons[0].click()
+                    time.sleep(1)
+                    log_debug("[selenium_chatgpt] Dismissed prefer-response dialog")
+                except Exception as e:
+                    log_debug(f"[selenium_chatgpt] Could not click prefer-response button: {e}")
+        except Exception:
+            pass
+        
+        # Use the base class method which tries all selectors
+        return super()._extract_response_text(driver)
+    
+    def _get_response_choice_selectors(self) -> list:
+        """Get CSS selectors for ChatGPT response choice buttons.
+        
+        ChatGPT sometimes offers users a choice between multiple responses.
+        This returns selectors to find the choice buttons so we can auto-select the first one.
+        """
+        return [
+            # The complex selector provided by user for first choice button
+            "div.basis-auto > div > div.flex.flex-col > article > div > div > div.overflow-x-auto > div > div:first-child > div > button",
+            # Simplified selectors for response choice buttons
+            "article button[data-testid*='response']",
+            "div.snap-x button",
+            "article .flex > button:first-child",
+            # Fallback: any button near the response area
+            "article button",
+        ]
+    
     def get_supported_models(self) -> list:
         """Get list of supported ChatGPT models."""
         return list(CHATGPT_MODEL_LIMITS.keys())

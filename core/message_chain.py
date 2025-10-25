@@ -109,15 +109,25 @@ async def handle_incoming_message(bot, message: Optional[SimpleNamespace], text:
         message = SimpleNamespace()
         message.chat_id = kwargs.get('chat_id')
         message.text = ""
-        message.original_text = text
         message.thread_id = kwargs.get('thread_id')
         message.date = datetime.utcnow()
 
-    # Mark LLM-origin if source indicates so
-    message.from_llm = True if source == 'llm' else getattr(message, 'from_llm', False)
+    # Default context
+    ctx = context or {}
+    ctx['message'] = message
+    ctx['original_text'] = text  # Track original text in context, not on message (for consistency with immutable Telegram Message objects)
+    
+    # Mark LLM-origin in context (not on message object, as Telegram Message objects are immutable)
+    ctx['from_llm'] = True if source == 'llm' else ctx.get('from_llm', False)
+    
+    # Preserve chat_id and thread_id in context to avoid losing them during processing
+    if hasattr(message, 'chat_id'):
+        ctx['chat_id'] = message.chat_id
+    if hasattr(message, 'thread_id'):
+        ctx['thread_id'] = message.thread_id
 
     # Process LLM messages for emotional state updates
-    if getattr(message, 'from_llm', False) or source == 'llm':
+    if ctx.get('from_llm', False) or source == 'llm':
         try:
             from core.persona_manager import get_persona_manager
             persona_manager = get_persona_manager()
@@ -125,14 +135,6 @@ async def handle_incoming_message(bot, message: Optional[SimpleNamespace], text:
                 persona_manager.process_llm_message_for_emotions(text)
         except Exception as e:
             log_debug(f"[message_chain] Error processing LLM emotions: {e}")
-
-    # Default context
-    ctx = context or {}
-    ctx['message'] = message
-    
-    # Preserve chat_id in context to avoid losing it during correction
-    if hasattr(message, 'chat_id'):
-        ctx['chat_id'] = message.chat_id
 
     # Retry/tried set to avoid loops
     tried_texts = set()
@@ -175,38 +177,57 @@ async def handle_incoming_message(bot, message: Optional[SimpleNamespace], text:
             if isinstance(parsed, dict) and 'actions' in parsed:
                 actions = parsed['actions'] if isinstance(parsed['actions'], list) else None
                 if actions is None:
-                    log_warning('[message_chain] actions field must be a list')
-                    return FORWARD_AS_TEXT
+                    log_warning('[message_chain] actions field must be a list - triggering corrector')
+                    # Don't return here - let corrector fix it
+                    parsed = None  # Force correction path
             elif isinstance(parsed, list):
                 actions = parsed
             elif isinstance(parsed, dict) and 'type' in parsed:
                 actions = [parsed]
             else:
-                log_warning(f"[message_chain] Unrecognized JSON structure: {parsed}")
-                return FORWARD_AS_TEXT
+                log_warning(f"[message_chain] Unrecognized JSON structure: {parsed} - triggering corrector")
+                # Don't return here - let corrector fix it
+                parsed = None  # Force correction path
 
-            # Execute actions via action_parser
-            try:
-                await run_actions(actions, ctx, bot, message)
-                log_info('[message_chain] Actions executed successfully - loop interrupted')
-                return ACTIONS_EXECUTED
-            except Exception as e:
-                log_warning(f"[message_chain] Failed to run actions: {e}")
-                # If action execution fails, don't continue with correction loop
-                # This prevents cascading failures and loops
-                return BLOCKED
+            # Only execute actions if we have valid ones
+            if parsed is not None:
+                # Note: LLM decides freely whether to respond to user or not
+                # If no message_telegram_bot action is included, user simply receives nothing
+                # Log for debugging purposes
+                if source == "llm" or getattr(message, "from_llm", False):
+                    has_user_response = False
+                    if isinstance(actions, list):
+                        for action in actions:
+                            action_name = action.get('action') if isinstance(action, dict) else None
+                            if action_name in ['message_telegram_bot', 'message_discord_bot', 'message_ollama_serve']:
+                                has_user_response = True
+                                break
+                    
+                    if not has_user_response:
+                        log_debug('[message_chain] LLM chose not to send user message (diary/internal only)')
+                    else:
+                        log_debug('[message_chain] LLM will send message to user')
+                
+                # Execute actions regardless of whether response is included
+                if parsed is not None:
+                    try:
+                        await run_actions(actions, ctx, bot, message)
+                        log_info('[message_chain] Actions executed successfully - loop interrupted')
+                        return ACTIONS_EXECUTED
+                    except Exception as e:
+                        log_warning(f"[message_chain] Failed to run actions: {e}")
+                        # If action execution fails, don't continue with correction loop
+                        # This prevents cascading failures and loops
+                        return BLOCKED
 
-        # Not parsed. If not JSON-like, forward as plain text
-        if '{' not in (text or '') and '[' not in (text or ''):
-            log_debug('[message_chain] Not JSON-like -> forward as plain text')
-            return FORWARD_AS_TEXT
 
-        # JSON-like but invalid -> attempt correction
+        # Not parsed. If it's from LLM, always attempt correction regardless of braces
+        # If it's non-LLM source, don't attempt correction
         # IMPORTANT: Only attempt correction for LLM messages that failed JSON parsing
-        # Non-LLM messages and messages that don't require correction should be forwarded as text
+        # Non-LLM messages and messages that don't require correction should be blocked
         if source != "llm" and not getattr(message, "from_llm", False):
-            log_debug("[message_chain] Non-LLM source; messages that don't require correction should not be corrected")
-            return FORWARD_AS_TEXT
+            log_debug("[message_chain] Non-LLM source; no correction needed")
+            return BLOCKED
 
         # Additional check: if this is already a system error message from corrector, don't re-correct
         if "system_message" in (text or '') and "error" in (text or ''):
@@ -253,8 +274,8 @@ async def handle_incoming_message(bot, message: Optional[SimpleNamespace], text:
         log_debug('[message_chain] Received corrected text from LLM; retrying parse')
         text = corrected
         source = 'llm'
-        message.original_text = text
-        message.from_llm = True
+        ctx['original_text'] = text  # Track in context instead of on message object
+        ctx['from_llm'] = True  # Track in context instead of on message object
         # loop continues
 
 

@@ -1029,6 +1029,9 @@ class SeleniumLLMBase(AIPluginBase):
     def wait_until_response_stabilizes(self, driver, max_total_wait: int = AWAIT_RESPONSE_TIMEOUT,
                                       no_change_grace: float = 3.5) -> str:
         """Return the last response text once its length stops growing."""
+        # Convert max_total_wait to int in case it's a ConfigVar
+        max_total_wait = int(max_total_wait)
+        
         start = time.time()
         last_len = -1
         last_change = start
@@ -1061,33 +1064,75 @@ class SeleniumLLMBase(AIPluginBase):
 
             time.sleep(0.5)
 
-    def _extract_response_text(self, driver) -> str:
-        """Extract response text from the page (to be overridden by subclasses)."""
-        # Default implementation - subclasses should override
-        try:
-            # Try common selectors
-            selectors = [
-                "div.markdown",
-                "[data-message-author-role='model']",
-                "div.model-response-text",
-                ".response-content"
-            ]
+    def _get_response_selectors(self) -> list:
+        """Get the CSS selectors for extracting response text.
+        
+        Subclasses should override this to provide service-specific selectors.
+        Returns a list of CSS selector strings (tried in order).
+        """
+        # Default generic selectors - subclasses should override with specific ones
+        return [
+            "div.markdown",
+            "[data-message-author-role='model']",
+            "div.model-response-text",
+            ".response-content"
+        ]
 
+    def _extract_response_text(self, driver) -> str:
+        """Extract response text from the page using service-specific selectors.
+        
+        This standardized method:
+        1. Gets selectors from _get_response_selectors() (can be overridden by subclass)
+        2. Tries each selector in order
+        3. Returns text from the LAST matching element (most recent response)
+        4. Handles both .text and .textContent attributes
+        5. Returns empty string if no response found
+        
+        This approach works for ChatGPT, Grok, Gemini, etc. - just override
+        _get_response_selectors() in subclass to provide the right selectors.
+        """
+        try:
+            selectors = self._get_response_selectors()
+            
             for selector in selectors:
                 try:
+                    log_debug(f"[selenium] Trying response selector: {selector}")
                     elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                    
                     if elements:
-                        return elements[-1].text or ""
-                except Exception:
+                        # Get the LAST element (most recent response in chat)
+                        last_element = elements[-1]
+                        
+                        # Try .text first (Selenium's smart getter)
+                        text = last_element.text or ""
+                        
+                        # Fallback to textContent if .text is empty
+                        if not text:
+                            text = last_element.get_attribute("textContent") or ""
+                        
+                        # Clean up whitespace
+                        text = text.strip()
+                        
+                        if text:
+                            log_debug(f"[selenium] Found response with selector '{selector}': {len(text)} chars")
+                            return text
+                            
+                except Exception as e:
+                    log_debug(f"[selenium] Selector '{selector}' failed: {e}")
                     continue
-
+            
+            log_debug("[selenium] No response found with any selector")
             return ""
+            
         except Exception as e:
             log_warning(f"[selenium] Error extracting response text: {e}")
             return ""
 
     def wait_for_response_completion(self, driver, timeout: int = AWAIT_RESPONSE_TIMEOUT) -> bool:
         """Wait until the current response finishes streaming."""
+        # Convert timeout to int in case it's a ConfigVar
+        timeout = int(timeout)
+        
         start_time = time.time()
         end_time = start_time + timeout
 
@@ -1149,6 +1194,62 @@ class SeleniumLLMBase(AIPluginBase):
                     continue
                 except WebDriverException:
                     continue
+        return False
+
+    # === RESPONSE CHOICE HANDLING ===
+
+    def _get_response_choice_selectors(self) -> list:
+        """Get CSS selectors for response choice buttons (when LLM offers multiple options).
+        
+        Subclasses should override this to provide service-specific selectors for choice buttons.
+        Returns a list of CSS selector strings (tried in order).
+        Default returns empty list (no choice handling).
+        """
+        return []
+
+    def _handle_response_choice(self, driver) -> bool:
+        """Handle response choice selection (when LLM offers multiple response options).
+        
+        Some LLMs like ChatGPT offer users to choose between multiple response versions.
+        This method detects and automatically selects the first option.
+        
+        Args:
+            driver: Selenium WebDriver instance
+            
+        Returns:
+            bool: True if a choice was found and selected, False otherwise
+        """
+        from selenium.webdriver.common.by import By
+        from core.logging_utils import log_debug, log_warning
+        
+        selectors = self._get_response_choice_selectors()
+        if not selectors:
+            log_debug("[selenium] No response choice selectors configured")
+            return False
+        
+        log_debug(f"[selenium] Checking for response choice buttons with {len(selectors)} selector(s)")
+        
+        for selector in selectors:
+            try:
+                elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                if elements:
+                    log_debug(f"[selenium] Found {len(elements)} choice button(s) with selector: {selector}")
+                    # Click the first button (first response option)
+                    try:
+                        first_button = elements[0]
+                        if first_button.is_displayed():
+                            log_debug("[selenium] Clicking first response choice button")
+                            first_button.click()
+                            return True
+                        else:
+                            log_debug("[selenium] First choice button not visible, skipping")
+                    except Exception as click_err:
+                        log_warning(f"[selenium] Failed to click choice button: {click_err}")
+            except Exception as e:
+                log_debug(f"[selenium] Error checking choice selector '{selector}': {e}")
+                continue
+        
+        log_debug("[selenium] No response choice buttons found")
         return False
 
     # === QUEUE MANAGEMENT ===
@@ -1323,7 +1424,17 @@ class SeleniumLLMBase(AIPluginBase):
     # === AI PLUGIN BASE INTERFACE IMPLEMENTATION ===
 
     async def handle_incoming_message(self, bot, message, prompt):
-        """Process a message using a pre-built prompt."""
+        """Process a message using a pre-built prompt.
+        
+        This method:
+        1. Converts the prompt to text
+        2. Sends to ChatGPT via generate_response()
+        3. Returns the response to the caller (plugin_instance)
+        
+        The response will then be passed to message_chain.handle_incoming_message()
+        for validation, correction, and action execution. This ensures all LLM responses
+        are properly validated through the central message chain, not sent directly to interfaces.
+        """
         try:
             # Convert prompt to text format for LLM
             if isinstance(prompt, list):
@@ -1339,23 +1450,20 @@ class SeleniumLLMBase(AIPluginBase):
             else:
                 prompt_text = str(prompt)
 
-            # Send to LLM and get response (like the old plugin did)
+            # Send to LLM and get response
+            # The response will be returned to plugin_instance which passes it to message_chain
             response = await self.generate_response([{"role": "user", "content": prompt_text}])
-
-            # Send response back via bot
-            if bot and response:
-                from interface.telegram_utils import safe_send
-                chat_id = message.chat_id if hasattr(message, 'chat_id') else message.get('chat_id')
-                if chat_id:
-                    await safe_send(bot, chat_id, response)
+            
+            # Simply return the response - don't send it directly!
+            # plugin_instance will handle passing it to message_chain for proper validation
+            log_debug(f"[selenium] Response generated ({len(response) if response else 0} chars), returning to plugin_instance for message chain processing")
+            return response
 
         except Exception as e:
             log_error(f"[selenium] Failed to handle incoming message: {e}", e)
-            if bot:
-                from interface.telegram_utils import safe_send
-                chat_id = message.chat_id if hasattr(message, 'chat_id') else message.get('chat_id')
-                if chat_id:
-                    await safe_send(bot, chat_id, f"❌ Error processing message: {e}")
+            # Return error message instead of sending directly
+            error_msg = f"❌ Error processing message: {e}"
+            return error_msg
 
     async def generate_response(self, messages):
         """Send messages to the LLM engine and receive the response."""
@@ -1393,12 +1501,35 @@ class SeleniumLLMBase(AIPluginBase):
                 self.driver = shared_driver  # Assign to instance for compatibility
                 log_info(f"[selenium] ✅ Driver ready for {self.component_name}")
 
-            # Log window count before processing
-            log_info(f"[selenium] Using shared driver with {len(self.driver.window_handles)} window(s)")
+            # Health check: verify driver is still alive
+            driver_is_dead = False
+            try:
+                window_count = len(self.driver.window_handles)
+                log_info(f"[selenium] Using shared driver with {window_count} window(s)")
+            except Exception as health_check_error:
+                log_warning(f"[selenium] ⚠️ Driver health check failed: {health_check_error}")
+                driver_is_dead = True
+
+            # If driver is dead, reset and recreate it
+            if driver_is_dead:
+                log_warning(f"[selenium] 🔴 Driver is dead, resetting global driver")
+                # Reset global driver so it gets recreated
+                SeleniumLLMBase._global_shared_driver = None
+                SeleniumLLMBase._global_ref_count = 0
+                # Get a fresh driver
+                shared_driver = await self._get_shared_driver()
+                self.driver = shared_driver
+                log_info(f"[selenium] ✅ Fresh driver ready for {self.component_name}")
+                window_count = len(self.driver.window_handles)
+                log_info(f"[selenium] Using fresh shared driver with {window_count} window(s)")
 
             try:
                 # Execute interaction in a single thread (driver is now guaranteed to be ready)
                 response = await asyncio.to_thread(self._execute_complete_workflow, prompt_text)
+                
+                # Simply return the response as-is from ChatGPT
+                # Validation and correction will be handled by the message chain / transport layer
+                # NOT by this LLM engine itself (to avoid recursive loops)
                 return response or "No response received from LLM"
             finally:
                 # Don't release the shared driver here - let it persist for other requests
@@ -1435,8 +1566,11 @@ class SeleniumLLMBase(AIPluginBase):
             if not self._send_prompt_with_confirmation(textarea, prompt_text):
                 return "❌ Failed to send prompt"
 
-            # Wait for and extract response
-            response = self._extract_response_text(self.driver)
+            # Handle response choice if applicable (e.g., ChatGPT offers two responses)
+            self._handle_response_choice(self.driver)
+
+            # Wait for response to stabilize (text stops growing for N seconds)
+            response = self.wait_until_response_stabilizes(self.driver)
 
             return response
 
