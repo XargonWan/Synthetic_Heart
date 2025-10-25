@@ -26,6 +26,8 @@ class EventPlugin(AIPluginBase):
     # Class-level variables to prevent multiple schedulers
     _scheduler_running = False
     _scheduler_task = None
+    # Human-readable name required by core initializer
+    display_name = "Event Plugin"
 
     def __init__(self, notify_fn=None, bot=None):
         self.reply_map: dict[int, tuple[int, int]] = {}
