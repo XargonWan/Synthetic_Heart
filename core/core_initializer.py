@@ -85,6 +85,15 @@ class CoreInitializer:
             # 1. Load LLM engine
             await self._load_llm_engine(notify_fn)
 
+            # 1.5. Flush env overrides to DB now that LLM is loaded (avoids connection deadlocks)
+            try:
+                log_debug("[core_initializer] About to flush env overrides to database")
+                from core.config_manager import config_registry
+                await config_registry.flush_env_overrides_to_db()
+                log_debug("[core_initializer] Env overrides flushed to database successfully")
+            except Exception as flush_exc:
+                log_warning(f"[core_initializer] Failed to flush env overrides: {flush_exc}")
+
             # 2. Load generic plugins (this may load additional plugins)
             self._load_plugins()
         
@@ -267,17 +276,8 @@ class CoreInitializer:
             # The interfaces registry is initialized by each interface when it starts
             log_debug("[core_initializer] Registries initialized successfully")
             
-            # Flush env overrides to DB now that it should be ready
-            try:
-                from core.config_manager import config_registry
-                # Flush ENV overrides to DB immediately
-                await config_registry.flush_env_overrides_to_db()
-                log_debug("[core_initializer] Env overrides flushed to database")
-                
-                # NOTE: load_all_from_db() will be called AFTER all components have registered their variables
-                # This ensures variables from plugins, persona_manager, and interfaces are also loaded from DB
-            except Exception as flush_exc:
-                log_warning(f"[core_initializer] Failed to flush env overrides: {flush_exc}")
+            # NOTE: flush_env_overrides_to_db() will be called AFTER LLM engine is loaded
+            # to avoid connection pool deadlocks during initialization
                 
         except Exception as e:
             log_error(f"[core_initializer] Failed to initialize registries: {e}", e)
