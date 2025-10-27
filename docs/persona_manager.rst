@@ -167,10 +167,10 @@ The Persona Manager includes a configurable trigger system that automatically ac
 Environment Variables
 ~~~~~~~~~~~~~~~~~~~~
 
-- ``PERSONA_ALIASES_TRIGGER=true``: Activate when aliases are mentioned
-- ``PERSONA_INTERESTS_TRIGGER=true``: Activate when interests are mentioned  
-- ``PERSONA_LIKES_TRIGGER=false``: Activate when likes are mentioned
-- ``PERSONA_DISLIKES_TRIGGER=false``: Activate when dislikes are mentioned
+- ``SYNTH_ALIASES_TRIGGER=true``: Activate when aliases are mentioned
+- ``SYNTH_INTERESTS_TRIGGER=true``: Activate when interests are mentioned  
+- ``SYNTH_LIKES_TRIGGER=false``: Activate when likes are mentioned
+- ``SYNTH_DISLIKES_TRIGGER=false``: Activate when dislikes are mentioned
 
 When any configured trigger is found in a user message, the bot will automatically respond, even in group chats where it might not normally activate.
 

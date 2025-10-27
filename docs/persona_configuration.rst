@@ -51,10 +51,10 @@ The persona configuration is now included in the standard ``.env`` files. Here a
    SYNTH_PROFILE="You are synth, a friendly tanuki spirit with a passion for technology and helping others. You're curious, enthusiastic, and always genuine in your interactions. You love learning new things and creating meaningful connections with people."
 
    # Persona behavior triggers (enable/disable automatic updates)
-   PERSONA_ALIASES_TRIGGER=true
-   PERSONA_INTERESTS_TRIGGER=true
-   PERSONA_LIKES_TRIGGER=false
-   PERSONA_DISLIKES_TRIGGER=false
+   SYNTH_ALIASES_TRIGGER=true
+   SYNTH_INTERESTS_TRIGGER=true
+   SYNTH_LIKES_TRIGGER=false
+   SYNTH_DISLIKES_TRIGGER=false
 
 Manual Database Population
 ==========================

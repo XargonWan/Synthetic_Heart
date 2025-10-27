@@ -332,9 +332,9 @@ Example 2: Persona Manager        return
 
     "default_value",           # Default if not in ENV or DB
 
-   PERSONA_ALIASES_TRIGGER = config_registry.get_var(    label="Human Readable",    # Display name in Web UI
+   SYNTH_ALIASES_TRIGGER = config_registry.get_var(    label="Human Readable",    # Display name in Web UI
 
-       "PERSONA_ALIASES_TRIGGER",    description="...",         # Help text in Web UI
+       "SYNTH_ALIASES_TRIGGER",    description="...",         # Help text in Web UI
 
        "//aliases",    value_type=str,            # str, int, bool, float, or custom converter
 

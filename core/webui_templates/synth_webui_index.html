@@ -2504,10 +2504,10 @@
             
             // Map keys to friendly labels
             const triggerLabels = {
-                'PERSONA_ALIASES_TRIGGER': 'Aliases (names/nicknames)',
-                'PERSONA_INTERESTS_TRIGGER': 'Interests',
-                'PERSONA_LIKES_TRIGGER': 'Likes',
-                'PERSONA_DISLIKES_TRIGGER': 'Dislikes'
+                'SYNTH_ALIASES_TRIGGER': 'Aliases (names/nicknames)',
+                'SYNTH_INTERESTS_TRIGGER': 'Interests',
+                'SYNTH_LIKES_TRIGGER': 'Likes',
+                'SYNTH_DISLIKES_TRIGGER': 'Dislikes'
             };
             
             // Sort by defined order
@@ -2871,6 +2871,128 @@
                 inputWrapper.appendChild(listContainer);
                 input = listContainer; // Set input reference for later logic
                 
+            } else if (item.key === 'SYNTH_ALIASES') {
+                // Special case: tag list editor for SYNTH_ALIASES
+                const tagContainer = document.createElement('div');
+                tagContainer.style.cssText = 'display: flex; flex-direction: column; gap: 0.5rem;';
+                
+                // Current tags display
+                const tagsDisplay = document.createElement('div');
+                tagsDisplay.style.cssText = 'display: flex; flex-wrap: wrap; gap: 0.5rem; min-height: 2rem; padding: 0.5rem; border: 1px solid #666; border-radius: 0.25rem; background: #1a1a1a;';
+                
+                // Input for adding new tags
+                const tagInput = document.createElement('input');
+                tagInput.type = 'text';
+                tagInput.placeholder = 'Type alias and press Enter to add';
+                tagInput.style.cssText = 'flex: 1; padding: 0.5rem; border: 1px solid #666; border-radius: 0.25rem; background: #1a1a1a; color: #fff;';
+                tagInput.disabled = item.env_override || !item.editable;
+                
+                // Parse JSON string to array if needed
+                let currentAliases = [];
+                if (Array.isArray(item.value)) {
+                    currentAliases = item.value;
+                } else if (typeof item.value === 'string') {
+                    try {
+                        currentAliases = JSON.parse(item.value);
+                        if (!Array.isArray(currentAliases)) {
+                            currentAliases = [];
+                        }
+                    } catch {
+                        currentAliases = [];
+                    }
+                }
+                
+                const renderTags = () => {
+                    tagsDisplay.innerHTML = '';
+                    currentAliases.forEach((alias, index) => {
+                        const tag = document.createElement('span');
+                        tag.style.cssText = 'display: inline-flex; align-items: center; gap: 0.25rem; padding: 0.25rem 0.5rem; background: var(--accent-soft); border-radius: 0.25rem; font-size: 0.85rem;';
+                        
+                        const tagText = document.createElement('span');
+                        tagText.textContent = alias;
+                        tag.appendChild(tagText);
+                        
+                        // Don't allow removing base aliases (SyntH, Synthetic Heart) or persona name
+                        const baseAliases = ["SyntH", "Synthetic Heart"];
+                        const isRemovable = !baseAliases.includes(alias) && alias !== window.currentPersonaName && !item.env_override && item.editable;
+                        
+                        if (isRemovable) {
+                            const removeBtn = document.createElement('button');
+                            removeBtn.textContent = '×';
+                            removeBtn.style.cssText = 'background: none; border: none; color: var(--text); cursor: pointer; font-size: 1.2rem; line-height: 1; padding: 0; margin-left: 0.25rem;';
+                            removeBtn.title = 'Remove alias';
+                            removeBtn.addEventListener('click', async () => {
+                                currentAliases.splice(index, 1);
+                                await persistAliases();
+                                renderTags();
+                            });
+                            tag.appendChild(removeBtn);
+                        } else {
+                            // Style protected aliases differently
+                            tag.style.background = 'var(--primary)';
+                            tag.style.fontWeight = 'bold';
+                            tag.style.opacity = '0.8';
+                        }
+                        
+                        tagsDisplay.appendChild(tag);
+                    });
+                    
+                    if (currentAliases.length === 0) {
+                        const emptyMsg = document.createElement('span');
+                        emptyMsg.textContent = 'No aliases configured';
+                        emptyMsg.style.cssText = 'color: var(--text-soft); font-style: italic;';
+                        tagsDisplay.appendChild(emptyMsg);
+                    }
+                };
+                
+                const persistAliases = async () => {
+                    if (item.env_override || !item.editable) {
+                        return;
+                    }
+                    console.log('[synth_webui_debug] persistAliases called, currentAliases=', currentAliases, 'item.key=', item.key);
+                    try {
+                        const payload = { key: item.key, value: currentAliases };
+                        console.log('[synth_webui_debug] Sending payload:', JSON.stringify(payload));
+                        const res = await fetch('/api/config', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload),
+                        });
+                        if (!res.ok) {
+                            const errorText = await res.text();
+                            console.error('[synth_webui_debug] Response error:', res.status, errorText);
+                            showToast('Failed to update persona aliases', true);
+                            return;
+                        }
+                        item.value = currentAliases;
+                        showToast('Settings saved');
+                    } catch (error) {
+                        console.error('[synth_webui] Error updating SYNTH_ALIASES:', error);
+                        showToast('Error updating persona aliases', true);
+                    }
+                };
+                
+                tagInput.addEventListener('keydown', async (event) => {
+                    if (event.key === 'Enter') {
+                        event.preventDefault();
+                        const newAlias = tagInput.value.trim();
+                        if (newAlias && !currentAliases.includes(newAlias)) {
+                            currentAliases.push(newAlias);
+                            await persistAliases();
+                            renderTags();
+                            tagInput.value = '';
+                        } else if (currentAliases.includes(newAlias)) {
+                            showToast('Alias already exists', true);
+                        }
+                    }
+                });
+                
+                renderTags();
+                tagContainer.appendChild(tagsDisplay);
+                tagContainer.appendChild(tagInput);
+                inputWrapper.appendChild(tagContainer);
+                input = tagContainer; // Set input reference for later logic
+                
             } else if (item.key === 'REACT_WHEN_MENTIONED') {
                 const emojiContainer = document.createElement('div');
                 emojiContainer.style.cssText = 'display: flex; flex-direction: column; gap: 0.5rem;';
@@ -3037,9 +3159,9 @@
                 updateConfigValue(item, newValue, input);
             };
 
-            // Skip event listeners for TRAINER_IDS (handles saving internally)
-            if (item.key === 'TRAINER_IDS') {
-                // Do nothing, TRAINER_IDS handles its own save logic
+            // Skip event listeners for TRAINER_IDS and SYNTH_ALIASES (handles saving internally)
+            if (item.key === 'TRAINER_IDS' || item.key === 'SYNTH_ALIASES') {
+                // Do nothing, these handle their own save logic
             } else if (type === 'bool') {
                 input.addEventListener('change', applyUpdate);
             } else if (item.key === 'REACT_WHEN_MENTIONED') {
@@ -3167,6 +3289,12 @@
             configAdvancedList.innerHTML = '';
 
             const items = Array.isArray(data?.items) ? data.items : [];
+            
+            // Extract persona name for alias management
+            const synthNameItem = items.find(item => item.key === 'SYNTH_NAME');
+            window.currentPersonaName = synthNameItem ? synthNameItem.value : 'SyntH';
+            
+            // Filter out items tagged with "logs_only" (should only appear in Logs tab)
             
             // Filter out items tagged with "logs_only" (should only appear in Logs tab)
             const filteredItems = items.filter(item => {
@@ -3937,7 +4065,7 @@
                 const res = await fetch(`/api/skins/${encodeURIComponent(name)}/activate`, {method:'POST'});
                 if(!res.ok) throw new Error('Activate failed');
                 await fetchSkins();
-                await refreshModels();
+                if(window.refreshModels) await window.refreshModels();
                 alert('Skin activated: '+name);
             }catch(e){ alert('Error: '+e.message) }
         }
@@ -3947,7 +4075,7 @@
                 const res = await fetch('/api/skins/uploaded/clear', {method:'POST'});
                 if(!res.ok) throw new Error('Clear failed');
                 await fetchSkins();
-                await refreshModels();
+                if(window.refreshModels) await window.refreshModels();
                 alert('Restored default Rei VRM');
             }catch(e){ alert('Error: '+e.message) }
         }
@@ -3964,7 +4092,7 @@
             }catch(e){ console.warn('[synth_webui] postUploadRefresh: failed to refresh skins', e); }
             try{
                 // refresh VRM models list (avatar manager)
-                await refreshModels();
+                if(window.refreshModels) await window.refreshModels();
             }catch(e){ console.warn('[synth_webui] postUploadRefresh: failed to refresh models', e); }
         }
 
@@ -4093,13 +4221,14 @@
             blobLoader.register((parser) => new VRMLoaderPlugin(parser));
             console.log('[synth_webui] Blob loader configured');
 
-            // Animation mappings
+            // Animation mappings - now dynamically loaded from API
             const animationMappings = {
-                think: ['Thinking.fbx'],
-                write: ['Texting While Standing.fbx', 'Texting.fbx'],
-                talk: ['talking.fbx'],
-                idle: ['Idle.fbx', 'Idle2.fbx', 'Happy Idle.fbx']
+                think: [],
+                write: [],
+                talk: [],
+                idle: []
             };
+            const animationMappingsLoaded = new Map(); // Track which skins/types have been loaded
 
             // Animation handler
             class AnimationHandler {
@@ -4111,6 +4240,35 @@
                     this.loadedAnimations = {};
                 }
 
+                async getAnimationsForType(actionName) {
+                    const skin = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
+                    const cacheKey = `${skin}:${actionName}`;
+                    
+                    // Return cached mappings if available
+                    if (animationMappingsLoaded.has(cacheKey)) {
+                        return animationMappings[actionName] || [];
+                    }
+                    
+                    try {
+                        console.log(`[AnimationHandler] Fetching animations for ${skin}/${actionName}`);
+                        const response = await fetch(`/api/animations/${skin}/${actionName}`);
+                        if (response.ok) {
+                            const data = await response.json();
+                            animationMappings[actionName] = data.animations || [];
+                            animationMappingsLoaded.set(cacheKey, true);
+                            console.log(`[AnimationHandler] Loaded ${animationMappings[actionName].length} animations for ${actionName}:`, animationMappings[actionName]);
+                        } else {
+                            console.warn(`[AnimationHandler] Failed to load animations: HTTP ${response.status}`);
+                            animationMappings[actionName] = [];
+                        }
+                    } catch (error) {
+                        console.error(`[AnimationHandler] Error fetching animations:`, error);
+                        animationMappings[actionName] = [];
+                    }
+                    
+                    return animationMappings[actionName] || [];
+                }
+
                 async loadAnimation(actionName, animationFile) {
                     console.log(`[AnimationHandler] loadAnimation called for ${actionName} with file ${animationFile}`);
                     if (this.loadedAnimations[animationFile]) {
@@ -4118,9 +4276,13 @@
                         return this.loadedAnimations[animationFile];
                     }
                     try {
-                        console.log(`[AnimationHandler] Calling loadMixamoAnimation for /animations/${animationFile}`);
+                        // Build path with action type subdirectory: /skins/{skin}/animations/{actionType}/{file}
+                        const skinName = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
+                        const animPath = `/skins/${skinName}/animations/${actionName}/${animationFile}`;
+                        console.log(`[AnimationHandler] Calling loadMixamoAnimation for ${animPath}`);
                         console.log(`[AnimationHandler] loadMixamoAnimation function exists:`, typeof loadMixamoAnimation);
-                        const clip = await loadMixamoAnimation(`/animations/${animationFile}`, this.vrm);
+                        // Load animation from skin-specific subdirectory
+                        const clip = await loadMixamoAnimation(animPath, this.vrm);
                         console.log(`[AnimationHandler] loadMixamoAnimation returned clip:`, !!clip);
                         if (clip) {
                             this.loadedAnimations[animationFile] = clip;
@@ -4134,8 +4296,11 @@
                 }
 
                 async loadAction(actionName) {
-                    const files = animationMappings[actionName];
-                    if (!files) return null;
+                    const files = await this.getAnimationsForType(actionName);
+                    if (!files || files.length === 0) {
+                        console.log(`[AnimationHandler] No animations found for ${actionName}`);
+                        return null;
+                    }
 
                     const clips = [];
                     for (const file of files) {
@@ -4620,6 +4785,12 @@
 
             // Make refreshModels available globally for skins UI
             window.refreshModels = refreshModels;
+
+            // Load the active VRM model on page load
+            refreshModels().catch((error) => {
+                console.error('[synth_webui] Failed to load VRM on page load:', error);
+                setStatus('Failed to load VRM model', 'error');
+            });
 
             // Start thinking animation
             function startThinking() {

@@ -65,7 +65,7 @@ class ConfigVar:
         return str(self._get_value())
     
     def __repr__(self) -> str:
-        return f"ConfigVar({self._key!r}={self._get_value()!r})"
+        return f"ConfigVar({self._key!r}={self._get_value!r})"
     
     def __bool__(self) -> bool:
         """Allow using in if statements: if TOKEN: ..."""
@@ -115,6 +115,8 @@ class ConfigDefinition:
     sensitive: bool = False
     tags: List[str] = field(default_factory=list)
     constraints: Optional[Dict[str, Any]] = None
+    getter: Optional[Callable[[], Any]] = None
+    setter: Optional[Callable[[Any], None]] = None
 
     value: Any = None
     raw_value: Optional[str] = None
@@ -148,6 +150,8 @@ class ConfigRegistry:
         sensitive: bool = False,
         tags: Optional[Iterable[str]] = None,
         constraints: Optional[Dict[str, Any]] = None,
+        getter: Optional[Callable[[], Any]] = None,
+        setter: Optional[Callable[[Any], None]] = None,
     ) -> Any:
         """Return the typed value for ``key`` or register it if unknown."""
 
@@ -163,6 +167,8 @@ class ConfigRegistry:
             sensitive=sensitive,
             tags=tags,
             constraints=constraints,
+            getter=getter,
+            setter=setter,
         )
         if not definition.loaded:
             self._load_definition_sync(definition)
@@ -182,6 +188,8 @@ class ConfigRegistry:
         sensitive: bool = False,
         tags: Optional[Iterable[str]] = None,
         constraints: Optional[Dict[str, Any]] = None,
+        getter: Optional[Callable[[], Any]] = None,
+        setter: Optional[Callable[[Any], None]] = None,
     ) -> ConfigVar:
         """
         Return a ConfigVar that auto-updates when the config changes.
@@ -210,6 +218,8 @@ class ConfigRegistry:
             sensitive=sensitive,
             tags=tags,
             constraints=constraints,
+            getter=getter,
+            setter=setter,
         )
         
         # Return a ConfigVar that will always fetch the latest value
@@ -225,6 +235,64 @@ class ConfigRegistry:
             raise ValueError(
                 f"Configuration '{key}' is overridden by environment and cannot be modified."
             )
+
+        # Special handling for persona-related configs
+        if key in ['SYNTH_NAME', 'SYNTH_PROFILE']:
+            try:
+                # Access persona manager via global reference
+                from core.persona_manager import _persona_manager_instance
+                manager = _persona_manager_instance
+                if manager and manager._current_persona:
+                    persona = manager._current_persona
+                    if key == 'SYNTH_NAME':
+                        persona.name = new_value
+                    elif key == 'SYNTH_PROFILE':
+                        persona.profile = new_value
+                    
+                    # Save the persona asynchronously
+                    import asyncio
+                    asyncio.create_task(manager.save_persona(persona))
+                    
+                    # Also persist to config table for boot-up loading
+                    definition.value = new_value
+                    definition.raw_value = self._serialize_value(definition, new_value)
+                    definition.loaded = True
+                    await self._persist_to_db(definition.key, definition.raw_value)
+
+                    log_info(f"[config] Updated persona '{key}' via Web UI (saved to config table)")
+
+                    for callback in list(definition.listeners):
+                        try:
+                            callback(new_value)
+                        except Exception as exc:  # pragma: no cover - listener safety
+                            log_warning(f"[config] Listener for '{key}' failed: {exc}")
+                    return
+                else:
+                    log_warning(f"[config] Cannot update '{key}': persona manager not ready")
+                    return
+            except Exception as exc:
+                log_error(f"[config] Failed to update persona '{key}': {exc}")
+                raise
+
+        # If definition has a setter, use it instead of persisting to DB
+        if definition.setter is not None:
+            try:
+                definition.setter(new_value)
+                definition.value = new_value
+                definition.raw_value = self._serialize_value(definition, new_value)
+                definition.loaded = True
+
+                log_info(f"[config] Updated '{key}' via setter")
+
+                for callback in list(definition.listeners):
+                    try:
+                        callback(new_value)
+                    except Exception as exc:  # pragma: no cover - listener safety
+                        log_warning(f"[config] Listener for '{key}' failed: {exc}")
+                return
+            except Exception as exc:
+                log_error(f"[config] Failed to set value for '{key}' using setter: {exc}")
+                raise
 
         serialized = self._serialize_value(definition, new_value)
         typed_value = self._convert_value(definition, serialized)
@@ -261,13 +329,10 @@ class ConfigRegistry:
         log_info(f"[config] Flushing {len(self._pending_env_persists)} env override(s) to database")
         for key, value in list(self._pending_env_persists.items()):
             try:
-                # Check if value in DB is different
-                old_value = await self._load_from_db(key)
-                if old_value != value:
-                    log_info(f"[config] Updating '{key}' in DB: '{old_value}' → '{value}'")
-                else:
-                    log_debug(f"[config] '{key}' already has correct value in DB: '{value}'")
-                
+                log_debug(f"[config] Processing env override '{key}' with value '{value}'")
+                # Skip loading current value from DB to avoid potential deadlocks during init
+                # Just persist the new value directly
+                log_debug(f"[config] About to persist '{key}' to DB")
                 await self._persist_to_db(key, value)
                 log_debug(f"[config] ✓ Persisted env override '{key}' to DB")
             except Exception as exc:
@@ -323,6 +388,8 @@ class ConfigRegistry:
         sensitive: bool,
         tags: Optional[Iterable[str]],
         constraints: Optional[Dict[str, Any]],
+        getter: Optional[Callable[[], Any]] = None,
+        setter: Optional[Callable[[Any], None]] = None,
     ) -> ConfigDefinition:
         existing = self._definitions.get(key)
         if existing:
@@ -340,6 +407,8 @@ class ConfigRegistry:
             sensitive=sensitive,
             tags=list(tags or []),
             constraints=constraints,
+            getter=getter,
+            setter=setter,
         )
         self._definitions[key] = definition
         log_debug(f"[config] Registered setting '{key}' (component={component})")
@@ -347,6 +416,21 @@ class ConfigRegistry:
 
     def _load_definition_sync(self, definition: ConfigDefinition) -> None:
         """Synchronously ensure ``definition`` is loaded."""
+
+        # If definition has a getter, use it instead of loading from DB/env
+        if definition.getter is not None:
+            try:
+                definition.value = definition.getter()
+                definition.raw_value = self._serialize_value(definition, definition.value)
+                definition.loaded = True
+                return
+            except Exception as exc:
+                print(f"[config] Failed to get value for '{definition.key}' using getter: {exc}", flush=True)
+                # Fall back to default
+                definition.value = definition.default
+                definition.raw_value = self._serialize_value(definition, definition.default)
+                definition.loaded = True
+                return
 
         # Reset env_override flag at each load - it should only be True if ENV exists NOW
         definition.env_override = False
@@ -416,18 +500,27 @@ class ConfigRegistry:
 
     async def _load_from_db(self, key: str) -> Optional[str]:
         try:
+            log_debug(f"[config] About to import from core.db for key '{key}'")
             from core.db import get_conn, ensure_core_tables
+            log_debug(f"[config] Successfully imported from core.db for key '{key}'")
         except ImportError as e:
             # Circular import during initialization - skip DB load
             print(f"[config] Skipping DB load for '{key}' during initialization: {e}", flush=True)
             return None
 
+        log_debug(f"[config] About to ensure_core_tables for key '{key}'")
         await ensure_core_tables()
+        log_debug(f"[config] ensure_core_tables completed for key '{key}'")
+        log_debug(f"[config] About to get_conn for key '{key}'")
         conn = await get_conn()
+        log_debug(f"[config] get_conn completed for key '{key}'")
         try:
             async with conn.cursor() as cur:
+                log_debug(f"[config] About to execute query for key '{key}'")
                 await cur.execute("SELECT value FROM config WHERE config_key = %s", (key,))
+                log_debug(f"[config] Query executed for key '{key}'")
                 row = await cur.fetchone()
+                log_debug(f"[config] fetchone completed for key '{key}': {row}")
                 if row:
                     return row[0]
         finally:
@@ -471,6 +564,9 @@ class ConfigRegistry:
             return str(int(value))
         if definition.value_type is float:
             return str(float(value))
+        if definition.value_type == "json":
+            import json
+            return json.dumps(value)
         if callable(definition.value_type) and definition.value_type not in (bool, int, float, str):
             converted = definition.value_type(value)
             return str(converted)
@@ -575,6 +671,24 @@ class ConfigRegistry:
                 log_debug(f"[config] '{definition.key}' has default value, will try DB reload")
             
             try:
+                # Skip problematic configs during initial load to avoid deadlocks
+                # NOTE: DO NOT skip persona configs (SYNTH_NAME, SYNTH_PROFILE, SYNTH_ALIASES)
+                #       as they need to be loaded from DB for the webui
+                problematic_configs = {
+                    'LOGGING_LOGCHAT_LEVEL',
+                    'MATRIX_HOMESERVER',
+                    'MATRIX_USER',
+                    'MATRIX_PASSWORD',
+                    'MATRIX_ACCESS_TOKEN',
+                    'MATRIX_DEVICE_ID',
+                    'MATRIX_DEVICE_NAME',
+                    'MATRIX_ALLOWED_ROOMS'
+                }
+                if definition.key in problematic_configs:
+                    log_debug(f"[config] Skipping '{definition.key}' during initial load to avoid deadlock")
+                    skipped_count += 1
+                    continue
+                    
                 raw_value = await self._load_from_db(definition.key)
                 if raw_value is not None:
                     definition.raw_value = raw_value
