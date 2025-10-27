@@ -201,6 +201,7 @@ class SynthWebUIInterface:
         self.app.post("/api/diary/unarchive")(self.unarchive_diary_entries)
         self.app.delete("/api/diary/archive")(self.delete_archived_entries)
         self.app.get("/api/selkies")(self.get_selkies_config)
+        self.app.get("/api/animations/{skin}/{animation_type}")(self.get_animations_for_type)
 
         # Template sections route for modular loading
         self.app.get("/templates/{section}.html")(self.serve_template_section)
@@ -925,6 +926,35 @@ class SynthWebUIInterface:
             "http_port": self.selkies_http_port
         })
 
+    async def get_animations_for_type(self, skin: str, animation_type: str):
+        """Return list of animation files for a specific skin and animation type.
+        
+        Example: GET /api/animations/Rei/idle
+        Returns: {"animations": ["Idle.fbx", "Idle2.fbx", "Look Around.fbx"]}
+        """
+        try:
+            # Validate skin and animation_type to prevent directory traversal
+            if ".." in skin or ".." in animation_type:
+                raise HTTPException(status_code=400, detail="Invalid skin or animation type")
+            
+            anim_dir = Path(__file__).parent.parent / "skins" / skin / "animations" / animation_type
+            
+            if not anim_dir.exists():
+                log_debug(f"{LOG_PREFIX} Animation directory not found: {anim_dir}")
+                return JSONResponse({"animations": []})
+            
+            # Get all .fbx files in the directory (non-recursive, ignore subdirectories)
+            fbx_files = sorted([
+                f.name for f in anim_dir.iterdir() 
+                if f.is_file() and f.suffix.lower() == '.fbx'
+            ])
+            
+            log_debug(f"{LOG_PREFIX} Found {len(fbx_files)} animations in {skin}/{animation_type}: {fbx_files}")
+            return JSONResponse({"animations": fbx_files})
+        except Exception as e:
+            log_error(f"{LOG_PREFIX} Error listing animations for {skin}/{animation_type}: {e}")
+            return JSONResponse({"animations": []}, status_code=500)
+
     async def diary_summary(self, request: Request):
         """Return persona snapshot and recent diary entries for the Diary tab."""
         params = request.query_params
@@ -994,17 +1024,11 @@ class SynthWebUIInterface:
         try:
             from core.persona_manager import (  # type: ignore
                 get_persona_manager,
-                init_persona_table,
             )
         except Exception as exc:  # pragma: no cover - defensive import
             log_debug(f"{LOG_PREFIX} Persona manager unavailable: {exc}")
             snapshot["error"] = str(exc)
             return snapshot
-
-        try:
-            await init_persona_table()
-        except Exception as exc:
-            log_warning(f"{LOG_PREFIX} Unable to ensure persona table: {exc}")
 
         persona = None
         try:
@@ -1270,14 +1294,19 @@ class SynthWebUIInterface:
         except Exception as exc:
             raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
 
+        log_debug(f"{LOG_PREFIX} update_config_entry received payload: {payload}")
+        
         key = str(payload.get("key") or "").strip()
         if not key:
             raise HTTPException(status_code=400, detail="Missing configuration key")
 
         if "value" not in payload:
+            log_error(f"{LOG_PREFIX} 'value' not in payload. Keys: {list(payload.keys())}")
+            log_error(f"{LOG_PREFIX} Full payload: {payload}")
             raise HTTPException(status_code=400, detail="Missing configuration value")
 
         value = payload.get("value")
+        log_debug(f"{LOG_PREFIX} Updating config: key={key}, value_type={type(value)}, value_len={len(str(value)) if value else 0}")
         
         # Get component info before updating
         try:
