@@ -121,64 +121,59 @@ _db_init_lock = asyncio.Lock()
 _DB_LOG_THROTTLE_SEC = 2
 _last_db_log_time = 0
 
-async def get_conn() -> aiomysql.Connection:
-    """Return an async MariaDB connection using aiomysql."""
-    global _last_db_log_time
-    try:
-        now = time.time()
-        if now - _last_db_log_time > _DB_LOG_THROTTLE_SEC:
-            log_debug(
-                f"[db] Opening connection to {DB_USER}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-            )
-            _last_db_log_time = now
-    except Exception:
-        pass
-    try:
-        conn = await aiomysql.connect(
-            host=DB_HOST,
-            port=DB_PORT,
-            user=DB_USER,
-            password=DB_PASS,
-            db=DB_NAME,
-            autocommit=True,
-        )
-    except Exception as primary_exc:  # pragma: no cover - network errors
-        # Check if interpreter is shutting down
-        if "interpreter shutdown" in str(primary_exc):
-            log_debug("[db] Connection failed due to interpreter shutdown, skipping")
-            raise primary_exc
-        
-        primary_cause = getattr(primary_exc, "__cause__", None)
-        cause_msg = f" (cause: {primary_cause})" if primary_cause else ""
-        log_warning(
-            f"[db] Connection to {DB_HOST} failed: {primary_exc}{cause_msg}. Trying localhost..."
-        )
-        if DB_HOST != "localhost":
-            try:
-                conn = await aiomysql.connect(
-                    host="localhost",
+# Database connection pool
+_pool = None
+_pool_lock = asyncio.Lock()
+
+async def get_pool():
+    """Get or create the database connection pool."""
+    global _pool
+    if _pool is None:
+        async with _pool_lock:
+            if _pool is None:
+                log_info("[db] Creating connection pool")
+                _pool = await aiomysql.create_pool(
+                    host=DB_HOST,
                     port=DB_PORT,
                     user=DB_USER,
                     password=DB_PASS,
                     db=DB_NAME,
                     autocommit=True,
+                    minsize=1,
+                    maxsize=50,  # Increased to resolve deadlock during config loading
+                    pool_recycle=3600,  # Recycle connections every hour
                 )
-            except Exception as fallback_exc:  # pragma: no cover - network errors
-                # Check if interpreter is shutting down
-                if "interpreter shutdown" in str(fallback_exc):
-                    log_debug("[db] Localhost connection failed due to interpreter shutdown, skipping")
-                    raise fallback_exc
-                
-                fallback_cause = getattr(fallback_exc, "__cause__", None)
-                fb_cause_msg = f" (cause: {fallback_cause})" if fallback_cause else ""
-                log_error(
-                    f"[db] Localhost connection failed: {fallback_exc}{fb_cause_msg}."
-                )
-                raise primary_exc from fallback_exc
-        else:
-            raise
-    log_debug("[db] Connection opened")
+    return _pool
+
+async def get_conn() -> aiomysql.Connection:
+    """Return an async MariaDB connection from the connection pool."""
+    global _last_db_log_time
+    try:
+        now = time.time()
+        if now - _last_db_log_time > _DB_LOG_THROTTLE_SEC:
+            log_debug(
+                f"[db] Acquiring connection from pool to {DB_USER}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+            )
+            _last_db_log_time = now
+    except Exception:
+        pass
+    
+    log_debug("[db] About to call get_pool()")
+    pool = await get_pool()
+    log_debug("[db] get_pool() completed, about to call pool.acquire()")
+    try:
+        conn = await asyncio.wait_for(pool.acquire(), timeout=10.0)
+    except asyncio.TimeoutError:
+        log_error("[db] TIMEOUT acquiring connection from pool after 10 seconds - pool may be exhausted")
+        raise TimeoutError("Database connection pool exhausted - timeout acquiring connection")
+    log_debug("[db] Connection acquired from pool")
     return conn
+
+async def release_conn(conn):
+    """Release a connection back to the pool."""
+    if conn:
+        conn.close()  # This automatically returns the connection to the pool
+        log_debug("[db] Connection released to pool")
 
 async def test_connection() -> bool:
     """Check if the database is reachable."""

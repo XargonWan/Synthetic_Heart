@@ -56,6 +56,7 @@ services:
     command: --bind-address=0.0.0.0
     volumes:
       - synth_db_data:/var/lib/mysql
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
     restart: unless-stopped
     networks:
       - synth_network
