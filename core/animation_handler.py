@@ -39,7 +39,7 @@ class AnimationHandler:
     - Tracks the current animation state
     - Sends animation commands to the WebUI via WebSocket
     - Handles automatic fallback to Idle state
-    - Supports random selection from multiple animation files
+    - Supports random selection or sequential rotation from multiple animation files
     """
 
     # Animation mappings: logical state -> list of FBX files
@@ -70,6 +70,10 @@ class AnimationHandler:
         self._active_tasks: Dict[str, Optional[int]] = {}
         # Rotation tasks per session+state key -> asyncio.Task
         self._rotation_tasks: Dict[str, asyncio.Task] = {}
+        # Sequential animation indices per state -> map state.value to current index
+        self._sequence_indices: Dict[str, int] = {}
+        # States that use sequential rotation instead of random
+        self._sequential_states = {AnimationState.IDLE.value}
         
     def set_webui(self, webui: SynthWebUIInterface) -> None:
         """Set or update the WebUI reference.
@@ -159,7 +163,17 @@ class AnimationHandler:
             if not animations:
                 log_warning(f"[AnimationHandler] No animations found for state {state.value}, skipping")
                 return
-            selected_animation = random.choice(animations)
+            
+            # Select animation based on rotation mode
+            if state.value in self._sequential_states and len(animations) > 1:
+                # Sequential mode: use current index or start from 0
+                current_index = self._sequence_indices.get(state.value, -1)
+                next_index = (current_index + 1) % len(animations)
+                selected_animation = animations[next_index]
+                self._sequence_indices[state.value] = next_index
+            else:
+                # Random mode or single animation
+                selected_animation = random.choice(animations)
             
             # Update internal state
             self.current_state = state
@@ -377,7 +391,11 @@ class AnimationHandler:
             log_warning(f"[AnimationHandler] Failed to send animation command: {exc}")
 
     async def _rotation_loop(self, session_id: Optional[str], state: AnimationState, context_id: Optional[str]):
-        """Background loop that switches animations randomly every 30-60s."""
+        """Background loop that switches animations sequentially or randomly every 30-60s.
+        
+        For sequential states, advances through the animation list in order.
+        For random states, picks randomly while avoiding repetition when possible.
+        """
         key = f"{session_id}:{state.value}"
         try:
             while True:
@@ -392,12 +410,27 @@ class AnimationHandler:
                     animations = self.get_animations_for_state(state)
                     if not animations or len(animations) <= 1:
                         break
-                    # Pick a different animation than currently playing when possible
-                    candidate = random.choice(animations)
-                    if candidate == self.current_animation and len(animations) > 1:
-                        # pick another one
-                        choices = [a for a in animations if a != self.current_animation]
-                        candidate = random.choice(choices) if choices else candidate
+                    
+                    # Choose next animation based on rotation mode
+                    if state.value in self._sequential_states:
+                        # Sequential mode: advance to next animation, skip current if possible
+                        current_index = self._sequence_indices.get(state.value, -1)
+                        next_index = (current_index + 1) % len(animations)
+                        candidate = animations[next_index]
+                        
+                        # If the next animation is the same as current and we have alternatives, skip it
+                        if candidate == self.current_animation and len(animations) > 1:
+                            next_index = (next_index + 1) % len(animations)
+                            candidate = animations[next_index]
+                        
+                        self._sequence_indices[state.value] = next_index
+                    else:
+                        # Random mode: pick a different animation than currently playing when possible
+                        candidate = random.choice(animations)
+                        if candidate == self.current_animation and len(animations) > 1:
+                            # pick another one
+                            choices = [a for a in animations if a != self.current_animation]
+                            candidate = random.choice(choices) if choices else candidate
                     self.current_animation = candidate
                     # send new animation command (preserve loop and state)
                     await self._send_animation_command(session_id, candidate, True, state.value)
