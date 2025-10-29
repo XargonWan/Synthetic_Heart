@@ -2414,21 +2414,6 @@
             const engines = Array.isArray(data?.engines) ? data.engines : [];
             const activeInfo = engines.find((engine) => engine?.active);
             const activeDisplay = activeInfo?.display_name || data?.active || '';
-            const activeLine = document.createElement('div');
-            activeLine.textContent = activeDisplay ? `Active engine: ${activeDisplay}${activeInfo && activeInfo.name && activeInfo.name !== activeDisplay ? ` (${activeInfo.name})` : ''}` : 'No active engine detected';
-            componentsLLMSummary.appendChild(activeLine);
-            if (Array.isArray(data?.available) && data.available.length) {
-                const availableNames = data.available.map((name) => {
-                    const match = engines.find((engine) => engine?.name === name);
-                    if (match?.display_name && match.display_name !== name) {
-                        return `${match.display_name} (${name})`;
-                    }
-                    return name;
-                });
-                const availableLine = document.createElement('div');
-                availableLine.textContent = `Available: ${availableNames.join(', ')}`;
-                componentsLLMSummary.appendChild(availableLine);
-            }
             renderComponentGroup(componentsLLMList, engines, 'LLM engines', { emphasiseActive: true, openFirst: true });
         }
 
