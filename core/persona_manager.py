@@ -221,14 +221,56 @@ SYNTH_PROFILE = config_registry.get_var(
     component="core",
 )
 
-SYNTH_NAME = config_registry.get_var(
-    "SYNTH_NAME",
-    "SyntH",
-    label="Synth Name",
-    description="Name of the current synth",
-    group="synth",
-    component="core",
-)
+# Migrate SYNTH_NAME to the Exposed Variables engine which centralizes
+# metadata, validation and UI hints while still delegating persistence to
+# config_registry. We register the variable and then attach persona-aware
+# getter/setter so the value reflects the active Persona object.
+try:
+    from core.exposed_variables import register_exposed_var
+
+    register_exposed_var(
+        "SYNTH_NAME",
+        label="Synth Name",
+        default="SyntH",
+        value_type=str,
+        ui_type="string",
+        description="Name of the current synth",
+        scope="synth",
+        tags=["persona"],
+    )
+
+    # Attach persona-aware getter/setter to the underlying config definition
+    if "SYNTH_NAME" in config_registry._definitions:
+        defn = config_registry._definitions["SYNTH_NAME"]
+        # Use the persona manager accessors defined above
+        defn.getter = _get_persona_name
+        defn.setter = _set_persona_name
+        log_debug("[persona_manager] Attached persona getter/setter to SYNTH_NAME exposed var")
+    # For backward compatibility expose a module-level ConfigVar named SYNTH_NAME
+    try:
+        SYNTH_NAME = config_registry.get_var(
+            "SYNTH_NAME",
+            "SyntH",
+            label="Synth Name",
+            description="Name of the current synth",
+            group="synth",
+            component="core",
+        )
+    except Exception:
+        # If get_var fails for any reason, leave SYNTH_NAME as the earlier
+        # module-level string placeholder defined above.
+        pass
+except Exception as e:
+    # Fall back to previous behavior if exposed_variables is not available
+    log_warning(f"[persona_manager] Failed to register SYNTH_NAME with exposed_variables: {e}")
+    SYNTH_NAME = config_registry.get_var(
+        "SYNTH_NAME",
+        "SyntH",
+        label="Synth Name",
+        description="Name of the current synth",
+        group="synth",
+        component="core",
+    )
 
 SYNTH_ALIASES = config_registry.get_var(
     "SYNTH_ALIASES",
