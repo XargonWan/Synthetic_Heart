@@ -31,6 +31,31 @@ from core.animation_handler import get_animation_handler, AnimationState, Animat
 # Global reference to persona manager for config getters/setters
 _persona_manager_instance = None
 
+# Canonical alias list used across the UI and trigger checks.
+# Starts with base aliases and will be updated when persona is loaded/changed.
+CANONICAL_ALIASES = ["SyntH", "Synthetic Heart"]
+
+def build_canonical_aliases(persona: Optional['PersonaData']) -> list:
+    """Return canonical alias list: base aliases + persona name + persona.aliases.
+
+    This helper centralizes the alias ordering and de-duplication logic so the
+    WebUI and runtime trigger checks share a single source of truth.
+    """
+    base = ["SyntH", "Synthetic Heart"]
+    res = list(base)
+    try:
+        if persona and getattr(persona, 'name', None):
+            if persona.name not in res:
+                res.append(persona.name)
+        extras = getattr(persona, 'aliases', None) or []
+        for a in extras:
+            if a and a not in res:
+                res.append(a)
+    except Exception:
+        # Defensive: return at least the base aliases
+        return base
+    return res
+
 def _get_persona_name():
     """Get current persona name from manager."""
     # Only try to get persona manager if it has been initialized
@@ -85,21 +110,10 @@ def _get_persona_aliases():
             pass
     
     if _persona_manager_instance and _persona_manager_instance._current_persona:
-        # Start with base aliases
-        base_aliases = ["SyntH", "Synthetic Heart"]
-        current_aliases = list(base_aliases)
-        
-        # Add persona name if not already present
-        persona_name = _persona_manager_instance._current_persona.name
-        if persona_name and persona_name not in current_aliases:
-            current_aliases.append(persona_name)
-        
-        # Add additional aliases
-        for alias in _persona_manager_instance._current_persona.aliases:
-            if alias not in current_aliases:
-                current_aliases.append(alias)
-        
-        return current_aliases
+        # Use canonical builder to produce the aliases list
+        global CANONICAL_ALIASES
+        CANONICAL_ALIASES = build_canonical_aliases(_persona_manager_instance._current_persona)
+        return list(CANONICAL_ALIASES)
     # Return default aliases if manager not ready
     return ["SyntH", "Synthetic Heart"]
 
@@ -117,6 +131,21 @@ def _set_persona_aliases(value):
         
         _persona_manager_instance._current_persona.aliases = filtered_aliases
         # Note: Saving is handled by the webui or other components when needed
+
+
+def _get_full_aliases():
+    """Return the full canonical aliases list (base + name + user aliases).
+
+    This function is intended to be used as a `getter` when registering a
+    config variable so the Web UI / API can retrieve the computed aliases
+    without duplicating logic.
+    """
+    try:
+        if _persona_manager_instance and _persona_manager_instance._current_persona:
+            return build_canonical_aliases(_persona_manager_instance._current_persona)
+    except Exception:
+        pass
+    return list(CANONICAL_ALIASES)
 
 def _update_persona_configs(persona: 'PersonaData') -> None:
     """Synchronize persona data to config_registry for webui/API access.
@@ -144,13 +173,12 @@ def _update_persona_configs(persona: 'PersonaData') -> None:
             defn.raw_value = config_registry._serialize_value(defn, persona.profile)
             defn.loaded = True
         
-        # Update SYNTH_ALIASES - include base aliases + persona name + custom aliases
-        all_aliases = ["SyntH", "Synthetic Heart"]
-        if persona.name and persona.name not in all_aliases:
-            all_aliases.append(persona.name)
-        all_aliases.extend(persona.aliases)
-        all_aliases = list(dict.fromkeys(all_aliases))  # Remove duplicates while preserving order
-        
+        # Update SYNTH_ALIASES using canonical alias builder
+        all_aliases = build_canonical_aliases(persona)
+        # Also update module-level canonical list so other modules can read it
+        global CANONICAL_ALIASES
+        CANONICAL_ALIASES = list(all_aliases)
+
         if "SYNTH_ALIASES" in config_registry._definitions:
             defn = config_registry._definitions["SYNTH_ALIASES"]
             defn.value = all_aliases
@@ -281,6 +309,30 @@ SYNTH_ALIASES = config_registry.get_var(
     component="core",
     value_type="json",
 )
+
+# Expose the computed full aliases (canonical + persona name + user aliases)
+try:
+    SYNTH_FULL_ALIASES = config_registry.get_var(
+        "SYNTH_FULL_ALIASES",
+        ["SyntH", "Synthetic Heart"],
+        label="Synth Full Aliases",
+        description="Canonical alias list (base aliases + current name + additional aliases)",
+        group="synth",
+        component="core",
+        value_type="json",
+        getter=_get_full_aliases,
+    )
+except Exception:
+    # Fallback: if registration fails, expose a simple placeholder
+    SYNTH_FULL_ALIASES = config_registry.get_var(
+        "SYNTH_FULL_ALIASES",
+        ["SyntH", "Synthetic Heart"],
+        label="Synth Full Aliases",
+        description="Canonical alias list (base aliases + current name + additional aliases)",
+        group="synth",
+        component="core",
+        value_type="json",
+    )
 
 SYNTH_CURRENT_ANIMATION = config_registry.get_var(
     "SYNTH_CURRENT_ANIMATION",

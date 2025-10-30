@@ -2872,57 +2872,67 @@
                 tagInput.style.cssText = 'flex: 1; padding: 0.5rem; border: 1px solid #666; border-radius: 0.25rem; background: #1a1a1a; color: #fff;';
                 tagInput.disabled = item.env_override || !item.editable;
                 
-                // Parse JSON string to array if needed
-                let currentAliases = [];
+                // Parse JSON string to array if needed and normalize
+                let parsedAliases = [];
                 if (Array.isArray(item.value)) {
-                    currentAliases = item.value;
+                    parsedAliases = item.value;
                 } else if (typeof item.value === 'string') {
                     try {
-                        currentAliases = JSON.parse(item.value);
-                        if (!Array.isArray(currentAliases)) {
-                            currentAliases = [];
-                        }
+                        parsedAliases = JSON.parse(item.value);
+                        if (!Array.isArray(parsedAliases)) parsedAliases = [];
                     } catch {
-                        currentAliases = [];
+                        parsedAliases = [];
                     }
                 }
-                
+                parsedAliases = (parsedAliases || []).filter(a => !!a);
+
+                // Compute user-provided extras by removing canonical base aliases and persona name
+                const baseAliases = ["SyntH", "Synthetic Heart"];
+                const personaName = window.currentPersonaName || '';
+                let userAliases = parsedAliases.filter(a => !baseAliases.includes(a) && a !== personaName);
+
                 const renderTags = () => {
                     tagsDisplay.innerHTML = '';
-                    currentAliases.forEach((alias, index) => {
+                    // Build display list: base canonical aliases + current persona name + user-provided extras
+                    const displayAliases = [];
+                    baseAliases.forEach(a => { if (!displayAliases.includes(a)) displayAliases.push(a); });
+                    if (personaName && !displayAliases.includes(personaName)) displayAliases.push(personaName);
+                    userAliases.forEach(a => { if (a && !displayAliases.includes(a)) displayAliases.push(a); });
+
+                    displayAliases.forEach((alias) => {
                         const tag = document.createElement('span');
                         tag.style.cssText = 'display: inline-flex; align-items: center; gap: 0.25rem; padding: 0.25rem 0.5rem; background: var(--accent-soft); border-radius: 0.25rem; font-size: 0.85rem;';
-                        
                         const tagText = document.createElement('span');
                         tagText.textContent = alias;
                         tag.appendChild(tagText);
-                        
-                        // Don't allow removing base aliases (SyntH, Synthetic Heart) or Synth name
-                        const baseAliases = ["SyntH", "Synthetic Heart"];
-                        const isRemovable = !baseAliases.includes(alias) && alias !== window.currentPersonaName && !item.env_override && item.editable;
-                        
+
+                        const isRemovable = !baseAliases.includes(alias) && alias !== personaName && !item.env_override && item.editable;
                         if (isRemovable) {
                             const removeBtn = document.createElement('button');
                             removeBtn.textContent = '×';
                             removeBtn.style.cssText = 'background: none; border: none; color: var(--text); cursor: pointer; font-size: 1.2rem; line-height: 1; padding: 0; margin-left: 0.25rem;';
                             removeBtn.title = 'Remove alias';
-                            removeBtn.addEventListener('click', async () => {
-                                currentAliases.splice(index, 1);
-                                await persistAliases();
+                            removeBtn.addEventListener('click', () => {
+                                const userIndex = userAliases.indexOf(alias);
+                                if (userIndex >= 0) {
+                                    userAliases.splice(userIndex, 1);
+                                } else {
+                                    userAliases = userAliases.filter(a => a !== alias);
+                                }
                                 renderTags();
+                                schedulePersist();
                             });
                             tag.appendChild(removeBtn);
                         } else {
-                            // Style protected aliases differently
                             tag.style.background = 'var(--primary)';
                             tag.style.fontWeight = 'bold';
                             tag.style.opacity = '0.8';
                         }
-                        
                         tagsDisplay.appendChild(tag);
                     });
-                    
-                    if (currentAliases.length === 0) {
+
+                    // Only show 'no aliases' if there's truly nothing to display (rare)
+                    if (displayAliases.length === 0) {
                         const emptyMsg = document.createElement('span');
                         emptyMsg.textContent = 'No aliases configured';
                         emptyMsg.style.cssText = 'color: var(--text-soft); font-style: italic;';
@@ -2930,13 +2940,24 @@
                     }
                 };
                 
+                let _persistTimer = null;
+                const schedulePersist = () => {
+                    if (item.env_override || !item.editable) return;
+                    if (_persistTimer) clearTimeout(_persistTimer);
+                    _persistTimer = setTimeout(() => {
+                        _persistTimer = null;
+                        persistAliases();
+                    }, 2000);
+                };
+
                 const persistAliases = async () => {
                     if (item.env_override || !item.editable) {
                         return;
                     }
-                    console.log('[synth_webui_debug] persistAliases called, currentAliases=', currentAliases, 'item.key=', item.key);
+                    console.log('[synth_webui_debug] persistAliases called, userAliases=', userAliases, 'item.key=', item.key);
                     try {
-                        const payload = { key: item.key, value: currentAliases };
+                        // Persist only user-provided extras; the backend will build the canonical list
+                        const payload = { key: item.key, value: userAliases };
                         console.log('[synth_webui_debug] Sending payload:', JSON.stringify(payload));
                         const res = await fetch('/api/config', {
                             method: 'POST',
@@ -2949,7 +2970,12 @@
                             showToast('Failed to update synth aliases', true);
                             return;
                         }
-                        item.value = currentAliases;
+                        // Reflect new canonical aliases in the local item.value for UI
+                        const newDisplay = [];
+                        baseAliases.forEach(a => { if (!newDisplay.includes(a)) newDisplay.push(a); });
+                        if (personaName && !newDisplay.includes(personaName)) newDisplay.push(personaName);
+                        userAliases.forEach(a => { if (a && !newDisplay.includes(a)) newDisplay.push(a); });
+                        item.value = newDisplay;
                         showToast('Settings saved');
                     } catch (error) {
                         console.error('[synth_webui] Error updating SYNTH_ALIASES:', error);
@@ -2957,18 +2983,28 @@
                     }
                 };
                 
-                tagInput.addEventListener('keydown', async (event) => {
+                tagInput.addEventListener('keydown', (event) => {
                     if (event.key === 'Enter') {
                         event.preventDefault();
                         const newAlias = tagInput.value.trim();
-                        if (newAlias && !currentAliases.includes(newAlias)) {
-                            currentAliases.push(newAlias);
-                            await persistAliases();
-                            renderTags();
+                        if (!newAlias) return;
+                        // Prevent adding canonical/base/name aliases as editable entries
+                        const baseAliasesSet = new Set(["SyntH", "Synthetic Heart", window.currentPersonaName]);
+                        const existingSet = new Set([...baseAliases, personaName, ...userAliases]);
+                        if (baseAliasesSet.has(newAlias)) {
+                            showToast('This alias is reserved (canonical or current name)', true);
                             tagInput.value = '';
-                        } else if (currentAliases.includes(newAlias)) {
-                            showToast('Alias already exists', true);
+                            return;
                         }
+                        if (existingSet.has(newAlias)) {
+                            showToast('Alias already exists', true);
+                            tagInput.value = '';
+                            return;
+                        }
+                        userAliases.push(newAlias);
+                        renderTags();
+                        tagInput.value = '';
+                        schedulePersist();
                     }
                 });
                 
@@ -3332,6 +3368,8 @@
                 if (item.key === 'LOGGING_LEVEL' || item.key === 'LOGGING_LOGCHAT_LEVEL') {
                     return false;
                 }
+                // Internal-only: don't show computed full aliases (we expose editable SYNTH_ALIASES)
+                if (item.key === 'SYNTH_FULL_ALIASES') return false;
                 const tags = item.tags || [];
                 return !tags.includes('logs_only');
             });

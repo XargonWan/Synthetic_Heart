@@ -270,7 +270,8 @@ class ConfigRegistry:
                     elif key == 'SYNTH_PROFILE':
                         persona.profile = new_value
                     elif key == 'SYNTH_ALIASES':
-                        # Expect JSON/list for aliases
+                        # Expect JSON/list for aliases. We store only the user-provided
+                        # aliases on the Persona object (exclude base canonical and name)
                         try:
                             if isinstance(new_value, str):
                                 import json as _json
@@ -279,10 +280,21 @@ class ConfigRegistry:
                                 aliases_val = list(new_value)
                         except Exception:
                             aliases_val = []
-                        persona.aliases = aliases_val
+                        # Filter out canonical/base aliases and the persona name
+                        base_aliases = ["SyntH", "Synthetic Heart"]
+                        filtered = []
+                        for a in aliases_val:
+                            if not a:
+                                continue
+                            if a in base_aliases:
+                                continue
+                            if persona.name and a == persona.name:
+                                continue
+                            if a not in filtered:
+                                filtered.append(a)
+                        persona.aliases = filtered
                     
-                    # Save the persona asynchronously
-                    import asyncio
+                    # Save the persona asynchronously using the globally-imported asyncio
                     # Save persona record in background; don't await here to keep API responsive
                     try:
                         asyncio.create_task(manager.save_persona(persona))
@@ -294,6 +306,50 @@ class ConfigRegistry:
                     definition.value = new_value
                     definition.raw_value = self._serialize_value(definition, new_value)
                     definition.loaded = True
+
+                    # Ensure SYNTH_ALIASES in config table includes the new name.
+                    # Build canonical alias list: base aliases + persona name + additional aliases.
+                    try:
+                        import json as _json
+                        base_aliases = ["SyntH", "Synthetic Heart"]
+                        all_aliases = list(base_aliases)
+                        if persona.name and persona.name not in all_aliases:
+                            all_aliases.append(persona.name)
+                        # persona.aliases contains only user-provided extras
+                        extra = persona.aliases or []
+                        for a in extra:
+                            if a not in all_aliases:
+                                all_aliases.append(a)
+
+                        # Update in-memory definition for SYNTH_ALIASES if present
+                        if "SYNTH_ALIASES" in self._definitions:
+                            alias_def = self._definitions["SYNTH_ALIASES"]
+                            alias_def.value = all_aliases
+                            alias_def.raw_value = _json.dumps(all_aliases)
+                            alias_def.loaded = True
+
+                        # Persist aliases to DB in background (best-effort)
+                        try:
+                            loop = asyncio.get_running_loop()
+
+                            async def _persist_aliases():
+                                try:
+                                    await self._persist_to_db("SYNTH_ALIASES", _json.dumps(all_aliases))
+                                    log_debug(f"[config] Persisted SYNTH_ALIASES after name change: {all_aliases}")
+                                except Exception as _exc:
+                                    log_warning(f"[config] Failed to persist SYNTH_ALIASES after name change: {_exc}")
+
+                            loop.create_task(_persist_aliases())
+                        except RuntimeError:
+                            # No running loop - persist synchronously
+                            try:
+                                import asyncio as _asyncio
+                                _asyncio.run(self._persist_to_db("SYNTH_ALIASES", _json.dumps(all_aliases)))
+                            except Exception:
+                                log_warning("[config] Sync persist failed for SYNTH_ALIASES after name change")
+                    except Exception:
+                        # Non-critical: alias persist failure shouldn't block setting name
+                        pass
 
                     # Schedule background persistence to DB so the API call returns quickly.
                     try:
@@ -331,14 +387,92 @@ class ConfigRegistry:
                     # it's available on next startup and record a pending update so
                     # the PersonaManager can apply it when it initializes.
                     try:
-                        serialized = self._serialize_value(definition, new_value)
-                        # Schedule background persist - set memory state immediately
-                        definition.value = new_value
-                        definition.raw_value = serialized
-                        definition.loaded = True
-                        # Record pending persona update for PersonaManager to pick up
-                        self._pending_persona_updates[definition.key] = new_value
+                        # If incoming value is aliases (list/JSON), normalize to list and
+                        # store pending user aliases (exclude base/name if present).
+                        if key == 'SYNTH_ALIASES':
+                            try:
+                                import json as _json
+                                if isinstance(new_value, str):
+                                    aliases_val = _json.loads(new_value)
+                                else:
+                                    aliases_val = list(new_value)
+                            except Exception:
+                                aliases_val = []
 
+                            # Determine current persona name if available in definitions
+                            current_name = None
+                            try:
+                                name_def = self._definitions.get('SYNTH_NAME')
+                                if name_def and name_def.value:
+                                    current_name = name_def.value
+                            except Exception:
+                                current_name = None
+
+                            base_aliases = ["SyntH", "Synthetic Heart"]
+                            filtered = []
+                            for a in aliases_val:
+                                if not a:
+                                    continue
+                                if a in base_aliases:
+                                    continue
+                                if current_name and a == current_name:
+                                    continue
+                                if a not in filtered:
+                                    filtered.append(a)
+
+                            # Set module in-memory state and record pending user aliases
+                            serialized = self._serialize_value(definition, filtered)
+                            definition.value = filtered
+                            definition.raw_value = serialized
+                            definition.loaded = True
+                            self._pending_persona_updates[definition.key] = filtered
+
+                            # Build full alias list for UI/DB persistence: base + name + extras
+                            try:
+                                import json as _json
+                                all_aliases = list(base_aliases)
+                                if current_name and current_name not in all_aliases:
+                                    all_aliases.append(current_name)
+                                for a in filtered:
+                                    if a not in all_aliases:
+                                        all_aliases.append(a)
+
+                                # Update in-memory SYNTH_ALIASES full definition for UI
+                                if "SYNTH_ALIASES" in self._definitions:
+                                    alias_def = self._definitions["SYNTH_ALIASES"]
+                                    alias_def.value = all_aliases
+                                    alias_def.raw_value = _json.dumps(all_aliases)
+                                    alias_def.loaded = True
+
+                                # Schedule background persist for SYNTH_ALIASES (full list)
+                                try:
+                                    loop = asyncio.get_running_loop()
+
+                                    async def _persist_aliases_notready():
+                                        try:
+                                            ok = await self._persist_to_db("SYNTH_ALIASES", _json.dumps(all_aliases))
+                                            if not ok:
+                                                log_warning("[config] Failed to persist SYNTH_ALIASES (manager not ready)")
+                                        except Exception as _exc:
+                                            log_warning(f"[config] Error persisting SYNTH_ALIASES (manager not ready): {_exc}")
+
+                                    loop.create_task(_persist_aliases_notready())
+                                except RuntimeError:
+                                    try:
+                                        import asyncio as _asyncio
+                                        _asyncio.run(self._persist_to_db("SYNTH_ALIASES", _json.dumps(all_aliases)))
+                                    except Exception:
+                                        log_warning("[config] Sync persist failed for SYNTH_ALIASES (manager not ready)")
+                            except Exception:
+                                pass
+                        else:
+                            serialized = self._serialize_value(definition, new_value)
+                            # Schedule background persist - set memory state immediately
+                            definition.value = new_value
+                            definition.raw_value = serialized
+                            definition.loaded = True
+                            # Record pending persona update for PersonaManager to pick up
+                            self._pending_persona_updates[definition.key] = new_value
                         try:
                             loop = asyncio.get_running_loop()
 
@@ -678,15 +812,39 @@ class ConfigRegistry:
                 return False
 
             try:
-                log_debug(f"[config] Executing REPLACE for key='{key}' (value_len={len(value) if value else 0})")
+                log_debug(f"[config] Checking existence for key='{key}' before persist")
+                recreated = False
                 async with conn.cursor() as cur:
-                    await cur.execute(
-                        "REPLACE INTO config (config_key, value) VALUES (%s, %s)",
-                        (key, value),
-                    )
-                    await conn.commit()
-                log_debug(f"[config] REPLACE succeeded for key='{key}'")
-                return True
+                    await cur.execute("SELECT 1 FROM config WHERE config_key = %s", (key,))
+                    row = await cur.fetchone()
+                    if not row:
+                        recreated = True
+
+                log_debug(f"[config] Executing REPLACE for key='{key}' (value_len={len(value) if value else 0})")
+                try:
+                    async with conn.cursor() as cur:
+                        await cur.execute(
+                            "REPLACE INTO config (config_key, value) VALUES (%s, %s)",
+                            (key, value),
+                        )
+                        await conn.commit()
+                    log_debug(f"[config] REPLACE succeeded for key='{key}'")
+                    if recreated:
+                        log_warning(f"[config] Config key '{key}' was missing from DB and has been recreated with the new value")
+                    return True
+                except Exception:
+                    # Some MySQL variants or permissions could reject REPLACE; try robust fallback
+                    log_debug(f"[config] REPLACE failed for key='{key}', attempting INSERT ... ON DUPLICATE KEY UPDATE fallback")
+                    async with conn.cursor() as cur:
+                        await cur.execute(
+                            "INSERT INTO config (config_key, value) VALUES (%s, %s) ON DUPLICATE KEY UPDATE value = VALUES(value)",
+                            (key, value),
+                        )
+                        await conn.commit()
+                    log_debug(f"[config] Fallback INSERT succeeded for key='{key}'")
+                    if recreated:
+                        log_warning(f"[config] Config key '{key}' was missing from DB and has been recreated with the new value (fallback path)")
+                    return True
             except Exception as e:
                 # Log full traceback to help diagnose failures (timeouts, connection reset, schema error)
                 import traceback
