@@ -117,6 +117,8 @@ class ConfigDefinition:
     constraints: Optional[Dict[str, Any]] = None
     getter: Optional[Callable[[], Any]] = None
     setter: Optional[Callable[[Any], None]] = None
+    # If True, hide this variable from graphical UI listings (but keep API access)
+    hidden: bool = False
 
     value: Any = None
     raw_value: Optional[str] = None
@@ -125,6 +127,10 @@ class ConfigDefinition:
     loaded: bool = False
     listeners: List[Callable[[Any], None]] = field(default_factory=list)
     warned_default: bool = False
+    # If True, changing this configuration may require reloading the owning
+    # component (or the whole core). Default is False to avoid unnecessary
+    # reloads from routine config edits.
+    needs_component_reload: bool = False
 
 
 class ConfigRegistry:
@@ -159,6 +165,8 @@ class ConfigRegistry:
         constraints: Optional[Dict[str, Any]] = None,
         getter: Optional[Callable[[], Any]] = None,
         setter: Optional[Callable[[Any], None]] = None,
+        needs_component_reload: bool = False,
+        hidden: bool = False,
     ) -> Any:
         """Return the typed value for ``key`` or register it if unknown."""
 
@@ -173,6 +181,8 @@ class ConfigRegistry:
             advanced=advanced,
             sensitive=sensitive,
             tags=tags,
+            needs_component_reload=needs_component_reload,
+            hidden=hidden,
             constraints=constraints,
             getter=getter,
             setter=setter,
@@ -197,6 +207,8 @@ class ConfigRegistry:
         constraints: Optional[Dict[str, Any]] = None,
         getter: Optional[Callable[[], Any]] = None,
         setter: Optional[Callable[[Any], None]] = None,
+        needs_component_reload: bool = False,
+        hidden: bool = False,
     ) -> ConfigVar:
         """
         Return a ConfigVar that auto-updates when the config changes.
@@ -224,6 +236,8 @@ class ConfigRegistry:
             advanced=advanced,
             sensitive=sensitive,
             tags=tags,
+            needs_component_reload=needs_component_reload,
+            hidden=hidden,
             constraints=constraints,
             getter=getter,
             setter=setter,
@@ -269,23 +283,42 @@ class ConfigRegistry:
                     
                     # Save the persona asynchronously
                     import asyncio
-                    asyncio.create_task(manager.save_persona(persona))
+                    # Save persona record in background; don't await here to keep API responsive
+                    try:
+                        asyncio.create_task(manager.save_persona(persona))
+                    except Exception:
+                        # Best-effort: if scheduling fails, run non-blocking fallback
+                        _ = manager.save_persona(persona)
 
-                    # Also persist to config table for boot-up loading. If persistence
-                    # fails (e.g. DB pool exhausted) record the pending update so a
-                    # background worker can retry.
+                    # Update in-memory definition immediately and schedule DB persist
                     definition.value = new_value
                     definition.raw_value = self._serialize_value(definition, new_value)
                     definition.loaded = True
-                    persisted = await self._persist_to_db(definition.key, definition.raw_value)
-                    log_debug(f"[config] _persist_to_db returned {persisted} for key={definition.key} (len={len(definition.raw_value) if definition.raw_value else 0})")
-                    if not persisted:
-                        # Record pending update for background retry
-                        self._pending_persona_updates[definition.key] = new_value
-                        log_warning(f"[config] Persist of persona '{key}' failed; recorded pending update for retry (in-memory)")
-                        self._start_pending_persona_worker()
-                    else:
-                        log_info(f"[config] Updated persona '{key}' via Web UI (saved to config table)")
+
+                    # Schedule background persistence to DB so the API call returns quickly.
+                    try:
+                        loop = asyncio.get_running_loop()
+                        async def _bg_persist():
+                            try:
+                                ok = await self._persist_to_db(definition.key, definition.raw_value)
+                                log_debug(f"[config] Background persist for {definition.key} returned {ok}")
+                                if not ok:
+                                    self._pending_persona_updates[definition.key] = new_value
+                                    log_warning(f"[config] Background persist of persona '{key}' failed; recorded pending update for retry (in-memory)")
+                                    self._start_pending_persona_worker()
+                                else:
+                                    log_info(f"[config] Background persisted persona '{key}' to config table")
+                            except Exception as exc:
+                                log_warning(f"[config] Background persist error for persona '{key}': {exc}")
+
+                        loop.create_task(_bg_persist())
+                    except RuntimeError:
+                        # No running loop - persist synchronously (rare path)
+                        try:
+                            import asyncio as _asyncio
+                            _asyncio.run(self._persist_to_db(definition.key, definition.raw_value))
+                        except Exception as exc:
+                            log_warning(f"[config] Sync background persist failed for '{key}': {exc}")
 
                     for callback in list(definition.listeners):
                         try:
@@ -299,19 +332,36 @@ class ConfigRegistry:
                     # the PersonaManager can apply it when it initializes.
                     try:
                         serialized = self._serialize_value(definition, new_value)
-                        # Try to persist to DB immediately; if it fails, keep pending
-                        persisted = await self._persist_to_db(definition.key, serialized)
-                        log_debug(f"[config] _persist_to_db returned {persisted} for key={definition.key} (len={len(serialized) if serialized else 0})")
+                        # Schedule background persist - set memory state immediately
                         definition.value = new_value
                         definition.raw_value = serialized
                         definition.loaded = True
                         # Record pending persona update for PersonaManager to pick up
                         self._pending_persona_updates[definition.key] = new_value
-                        if not persisted:
-                            log_warning(f"[config] Persist of persona '{key}' failed; stored pending update for retry")
-                            self._start_pending_persona_worker()
-                        else:
-                            log_info(f"[config] Stored persona update for '{key}' (manager not ready); persisted to DB")
+
+                        try:
+                            loop = asyncio.get_running_loop()
+
+                            async def _bg_persist_notready():
+                                try:
+                                    ok = await self._persist_to_db(definition.key, serialized)
+                                    log_debug(f"[config] Background persist for {definition.key} returned {ok}")
+                                    if not ok:
+                                        log_warning(f"[config] Persist of persona '{key}' failed in background; will retry")
+                                        self._start_pending_persona_worker()
+                                    else:
+                                        log_info(f"[config] Background persisted persona '{key}' to config table (manager not ready)")
+                                except Exception as exc:
+                                    log_warning(f"[config] Background persist error for persona '{key}': {exc}")
+
+                            loop.create_task(_bg_persist_notready())
+                        except RuntimeError:
+                            # No running loop - persist synchronously (rare path)
+                            try:
+                                import asyncio as _asyncio
+                                _asyncio.run(self._persist_to_db(definition.key, serialized))
+                            except Exception as exc:
+                                log_warning(f"[config] Sync background persist failed for '{key}': {exc}")
 
                         for callback in list(definition.listeners):
                             try:
@@ -423,6 +473,8 @@ class ConfigRegistry:
                     "sensitive": defn.sensitive,
                     "env_override": defn.env_override,
                     "value_type": self._type_name(defn.value_type),
+                    "needs_component_reload": getattr(defn, 'needs_component_reload', False),
+                    "hidden": getattr(defn, 'hidden', False),
                     "tags": list(defn.tags),
                     "constraints": defn.constraints,
                 }
@@ -445,6 +497,8 @@ class ConfigRegistry:
         advanced: bool,
         sensitive: bool,
         tags: Optional[Iterable[str]],
+        needs_component_reload: bool = False,
+        hidden: bool = False,
         constraints: Optional[Dict[str, Any]],
         getter: Optional[Callable[[], Any]] = None,
         setter: Optional[Callable[[Any], None]] = None,
@@ -467,6 +521,8 @@ class ConfigRegistry:
             constraints=constraints,
             getter=getter,
             setter=setter,
+            needs_component_reload=needs_component_reload,
+            hidden=hidden,
         )
         self._definitions[key] = definition
         log_debug(f"[config] Registered setting '{key}' (component={component})")

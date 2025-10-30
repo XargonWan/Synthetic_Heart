@@ -25,73 +25,50 @@ except Exception:  # pragma: no cover - executed when aiomysql missing
 
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.config_manager import config_registry
+import os
 
-# Database connection parameters
-DB_HOST = config_registry.get_value(
-    "DB_HOST",
-    "localhost",
-    label="Database Host",
-    description="Host used to connect to the synth MariaDB instance.",
-    group="database",
-    component="core",
-    advanced=True,
-    tags=["bootstrap"],
-)
-DB_PORT = config_registry.get_value(
-    "DB_PORT",
-    3306,
-    label="Database Port",
-    description="Port used to connect to the synth MariaDB instance.",
-    value_type=int,
-    group="database",
-    component="core",
-    advanced=True,
-    tags=["bootstrap"],
-)
-DB_USER = config_registry.get_value(
-    "DB_USER",
-    "synth",
-    label="Database User",
-    description="Database username used by Synth.",
-    group="database",
-    component="core",
-    advanced=True,
-    tags=["bootstrap"],
-)
-DB_PASS = config_registry.get_value(
-    "DB_PASS",
-    "synth",
-    label="Database Password",
-    description="Database password used by the Synth.",
-    group="database",
-    component="core",
-    advanced=True,
-    sensitive=True,
-    tags=["bootstrap"],
-)
-DB_NAME = config_registry.get_value(
-    "DB_NAME",
-    "synth",
-    label="Database Name",
-    description="Database schema used by the Synth.",
-    group="database",
-    component="core",
-    advanced=True,
-    tags=["bootstrap"],
-)
+
+# NOTE: To avoid import-time circular dependencies between `core.db` and
+# `core.config_manager` (many modules import `get_conn` at import time),
+# read database configuration lazily from `config_registry` when needed
+# instead of at module import time. This prevents partially-initialized
+# module errors during startup.
+def _read_db_config():
+    """Return DB_HOST, DB_PORT, DB_USER, DB_PASS, DB_NAME reading from
+    config_registry when available, otherwise from environment or defaults.
+    """
+    try:
+        # Prefer config_registry values if accessible
+        host = config_registry.get_value('DB_HOST', os.getenv('DB_HOST', 'localhost'))
+        port = int(config_registry.get_value('DB_PORT', int(os.getenv('DB_PORT', 3306))))
+        user = config_registry.get_value('DB_USER', os.getenv('DB_USER', 'synth'))
+        passwd = config_registry.get_value('DB_PASS', os.getenv('DB_PASS', 'synth'))
+        dbname = config_registry.get_value('DB_NAME', os.getenv('DB_NAME', 'synth'))
+    except Exception:
+        # Fall back to environment or defaults if config_registry is not ready
+        host = os.getenv('DB_HOST', 'localhost')
+        try:
+            port = int(os.getenv('DB_PORT', '3306'))
+        except Exception:
+            port = 3306
+        user = os.getenv('DB_USER', 'synth')
+        passwd = os.getenv('DB_PASS', 'synth')
+        dbname = os.getenv('DB_NAME', 'synth')
+    return host, port, user, passwd, dbname
 
 # Test di connessione con retry e logging dettagliato
 async def wait_for_db(max_attempts=10, delay=3):
     """Wait for the DB to be reachable, with retry and detailed logging."""
     for attempt in range(1, max_attempts + 1):
         try:
-            log_info(f"[db] Attempt {attempt}: connecting to {DB_USER}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
+            host, port, user, passwd, dbname = _read_db_config()
+            log_info(f"[db] Attempt {attempt}: connecting to {user}@{host}:{port}/{dbname}")
             conn = await aiomysql.connect(
-                host=DB_HOST,
-                port=DB_PORT,
-                user=DB_USER,
-                password=DB_PASS,
-                db=DB_NAME,
+                host=host,
+                port=port,
+                user=user,
+                password=passwd,
+                db=dbname,
                 autocommit=True,
             )
             log_info("[db] Successfully connected to the database!")
@@ -110,8 +87,15 @@ def initialize_db_logging():
     global _db_logging_initialized
     if _db_logging_initialized:
         return
-    log_info(f"[db] Configuration: HOST={DB_HOST}, PORT={DB_PORT}, USER={DB_USER}, DB_NAME={DB_NAME}")
-    log_debug(f"[db] Password length: {len(DB_PASS)} characters")
+    try:
+        host, port, user, passwd, dbname = _read_db_config()
+        log_info(f"[db] Configuration: HOST={host}, PORT={port}, USER={user}, DB_NAME={dbname}")
+        try:
+            log_debug(f"[db] Password length: {len(passwd)} characters")
+        except Exception:
+            log_debug("[db] Password length: <unavailable>")
+    except Exception:
+        log_info("[db] Configuration: <unable to read DB config at import-time>")
     _db_logging_initialized = True
 
 _db_initialized = False
@@ -122,7 +106,7 @@ _DB_LOG_THROTTLE_SEC = 2
 _last_db_log_time = 0
 
 # Database connection pool
-_pool = None
+_pools_by_loop: dict[int, Any] = {}
 _pool_lock = asyncio.Lock()
 
 # Track active connections for leak detection and monitoring
@@ -133,22 +117,90 @@ _conn_acquired_stacks: dict[int, str] = {}
 async def get_pool():
     """Get or create the database connection pool."""
     global _pool
-    if _pool is None:
+    # Determine current event loop and use/create a pool bound to it.
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop (sync context). Use loop id 0 as a fallback key.
+        current_loop = None
+
+    loop_id = id(current_loop) if current_loop is not None else 0
+
+    pool = _pools_by_loop.get(loop_id)
+    if pool is None:
         async with _pool_lock:
-            if _pool is None:
-                log_info("[db] Creating connection pool")
-                _pool = await aiomysql.create_pool(
-                    host=DB_HOST,
-                    port=DB_PORT,
-                    user=DB_USER,
-                    password=DB_PASS,
-                    db=DB_NAME,
+            # Double-check under lock
+            pool = _pools_by_loop.get(loop_id)
+            if pool is None:
+                log_info("[db] Creating connection pool for loop id=%s" % loop_id)
+                # Allow pool size to be configured via config_registry or environment
+                try:
+                    DB_POOL_MINSIZE = int(os.getenv('DB_POOL_MINSIZE', config_registry.get_value('DB_POOL_MINSIZE', 1, label='DB Pool Min Size', group='database', component='core', advanced=True)))
+                except Exception:
+                    DB_POOL_MINSIZE = 1
+                try:
+                    DB_POOL_MAXSIZE = int(os.getenv('DB_POOL_MAXSIZE', config_registry.get_value('DB_POOL_MAXSIZE', 50, label='DB Pool Max Size', group='database', component='core', advanced=True)))
+                except Exception:
+                    DB_POOL_MAXSIZE = 50
+
+                try:
+                    host, port, user, passwd, dbname = _read_db_config()
+                except Exception:
+                    host, port, user, passwd, dbname = (os.getenv('DB_HOST', 'localhost'), int(os.getenv('DB_PORT', '3306')), os.getenv('DB_USER', 'synth'), os.getenv('DB_PASS', 'synth'), os.getenv('DB_NAME', 'synth'))
+
+                log_info(f"[db] Creating pool with minsize={DB_POOL_MINSIZE} maxsize={DB_POOL_MAXSIZE}")
+                new_pool = await aiomysql.create_pool(
+                    host=host,
+                    port=port,
+                    user=user,
+                    password=passwd,
+                    db=dbname,
                     autocommit=True,
-                    minsize=1,
-                    maxsize=50,  # Increased to resolve deadlock during config loading
+                    minsize=DB_POOL_MINSIZE,
+                    maxsize=DB_POOL_MAXSIZE,
                     pool_recycle=3600,  # Recycle connections every hour
                 )
-    return _pool
+                # Store the pool keyed by the loop id so concurrent event loops
+                # get a pool bound to their loop (avoids cross-loop use errors).
+                _pools_by_loop[loop_id] = new_pool
+                pool = new_pool
+
+    return pool
+
+
+def get_pool_debug_info(max_stacks: int = 3) -> dict:
+    """Return diagnostics about the DB pool and currently acquired connections.
+
+    This is safe to call from sync code and used by debug endpoints.
+    """
+    try:
+        info = {
+            'active_connections': _active_conn_count,
+            'acquired_count': len(_conn_acquired_times),
+            'oldest_held_seconds': None,
+            'oldest_stack': None,
+        }
+        if _conn_acquired_times:
+            now = time.time()
+            oldest_id = None
+            oldest_age = 0
+            for cid, ts in list(_conn_acquired_times.items()):
+                age = now - ts
+                if age > oldest_age:
+                    oldest_age = age
+                    oldest_id = cid
+            info['oldest_held_seconds'] = int(oldest_age)
+            if oldest_id and _conn_acquired_stacks.get(oldest_id):
+                info['oldest_stack'] = _conn_acquired_stacks.get(oldest_id)
+
+        # Provide a small sample of stacks (up to max_stacks)
+        stacks = []
+        for cid, stack in list(_conn_acquired_stacks.items())[:max_stacks]:
+            stacks.append({'id': cid, 'stack': stack})
+        info['stacks'] = stacks
+        return info
+    except Exception:
+        return {'active_connections': _active_conn_count}
 
 async def get_conn() -> aiomysql.Connection:
     """Return an async MariaDB connection from the connection pool."""
@@ -157,9 +209,12 @@ async def get_conn() -> aiomysql.Connection:
     try:
         now = time.time()
         if now - _last_db_log_time > _DB_LOG_THROTTLE_SEC:
-            log_debug(
-                f"[db] Acquiring connection from pool to {DB_USER}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-            )
+            try:
+                host, port, user, passwd, dbname = _read_db_config()
+                target = f"{user}@{host}:{port}/{dbname}"
+            except Exception:
+                target = "<unknown-db>"
+            log_debug(f"[db] Acquiring connection from pool to {target}")
             _last_db_log_time = now
     except Exception:
         pass

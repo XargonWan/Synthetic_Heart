@@ -470,8 +470,27 @@ class CoreInitializer:
             importlib.import_module("core.webui")
             log_debug("[core_initializer] Core WebUI loaded successfully")
         except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
             log_warning(f"[core_initializer] Failed to import core WebUI: {e}")
-            self.startup_errors.append(f"Core WebUI: {e}")
+            log_error(f"[core_initializer] Traceback while importing core.webui:\n{tb}")
+            # Record the error with some traceback so we can diagnose import-time failures
+            self.startup_errors.append(f"Core WebUI: {e} -- {tb}")
+        finally:
+            # Diagnostic dump: record whether core.webui is present in sys.modules
+            try:
+                import sys
+                present = 'core.webui' in sys.modules
+                log_debug(f"[core_initializer] Diagnostic: 'core.webui' in sys.modules = {present}")
+                if present:
+                    mod = sys.modules.get('core.webui')
+                    try:
+                        has_init = hasattr(mod, 'initialize_interface')
+                        log_debug(f"[core_initializer] core.webui module loaded: initialize_interface present={has_init}")
+                    except Exception:
+                        log_debug(f"[core_initializer] core.webui module loaded but unable to inspect initialize_interface")
+            except Exception:
+                pass
         
         # Discover interfaces from interface/ directory
         directories_to_scan = ["interface"]
@@ -497,13 +516,20 @@ class CoreInitializer:
                             importlib.import_module(full_module_path)
                             log_debug(f"[core_initializer] Successfully imported: {module_name}")
                         except Exception as e:
+                            import traceback
+                            tb = traceback.format_exc()
                             log_warning(f"[core_initializer] Failed to import interface {module_name}: {e}")
+                            log_error(f"[core_initializer] Traceback while importing {full_module_path}:\n{tb}")
+                            self.startup_errors.append(f"Interface {full_module_path}: {e} -- {tb}")
                 
                 log_debug(f"[core_initializer] {dir_name} auto-discovery complete")
                 
             except Exception as e:
+                import traceback
+                tb = traceback.format_exc()
                 log_error(f"[core_initializer] Error during {dir_name} discovery: {e}")
-                self.startup_errors.append(f"{dir_name} discovery failed: {e}")
+                log_error(f"[core_initializer] Traceback during discovery of {dir_name}:\n{tb}")
+                self.startup_errors.append(f"{dir_name} discovery failed: {e} -- {tb}")
     
     def _initialize_interface_instances(self):
         """Initialize interface instances after config has been loaded from DB.
@@ -519,7 +545,14 @@ class CoreInitializer:
         interface_modules = [name for name in sys.modules.keys() 
                            if name.startswith('interface.') or name.startswith('interface_dev.') or name == 'core.webui']
         
-        log_debug(f"[core_initializer] Found {len(interface_modules)} interface modules to initialize")
+        import sys as _sys
+        log_debug(f"[core_initializer] Found {len(interface_modules)} interface modules to initialize: {interface_modules}")
+        # Diagnostic: check if core.webui is in sys.modules
+        try:
+            present = 'core.webui' in _sys.modules
+            log_debug(f"[core_initializer] Diagnostic: 'core.webui' in sys.modules = {present}")
+        except Exception:
+            pass
         
         for module_name in interface_modules:
             try:
@@ -535,8 +568,22 @@ class CoreInitializer:
                     log_debug(f"[core_initializer] Module {module_name} has no initialize_interface function")
                     
             except Exception as e:
+                import traceback
+                tb = traceback.format_exc()
                 log_warning(f"[core_initializer] Failed to initialize interface {module_name}: {e}")
-                self.startup_errors.append(f"Interface initialization {module_name}: {e}")
+                log_error(f"[core_initializer] Traceback while initializing {module_name}:\n{tb}")
+                self.startup_errors.append(f"Interface initialization {module_name}: {e} -- {tb}")
+
+        # After attempting initialization, dump registry and startup errors for diagnostics
+        try:
+            from core.core_initializer import INTERFACE_REGISTRY as _ir
+            log_info(f"[core_initializer] Diagnostic: INTERFACE_REGISTRY keys after initialization: {list(_ir.keys())}")
+        except Exception:
+            pass
+        try:
+            log_info(f"[core_initializer] Diagnostic: startup_errors: {self.startup_errors}")
+        except Exception:
+            pass
     
     def register_interface(self, interface_name: str):
         """Register an active interface."""

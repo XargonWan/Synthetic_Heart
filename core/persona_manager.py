@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional, Callable
 from dataclasses import dataclass, asdict
 
 from core.plugin_base import PluginBase
-from core.db import get_conn
+from core.db import get_conn, get_conn_ctx
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.config_manager import config_registry
 from core.animation_handler import get_animation_handler, AnimationState, AnimationHandler
@@ -379,24 +379,22 @@ def _run(coro):
 
 
 async def _execute(query: str, params: tuple = ()):
-    """Execute a query with parameters."""
-    conn = await get_conn()
-    try:
+    """Execute a query with parameters using connection context manager.
+
+    Using `get_conn_ctx()` ensures the connection is released promptly and
+    reduces the risk of exhausting the pool when exceptions occur.
+    """
+    async with get_conn_ctx() as conn:
         async with conn.cursor() as cur:
             await cur.execute(query, params)
-    finally:
-        conn.close()
 
 
 async def _fetchone(query: str, params: tuple = ()):
     """Fetch one result from a query."""
-    conn = await get_conn()
-    try:
+    async with get_conn_ctx() as conn:
         async with conn.cursor() as cur:
             await cur.execute(query, params)
             return await cur.fetchone()
-    finally:
-        conn.close()
 
 
 

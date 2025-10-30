@@ -203,6 +203,7 @@ if __name__ == "__main__":
                 # Start webui server if available
                 try:
                     from core.core_initializer import INTERFACE_REGISTRY
+                    # If discovery populated the registry, use that instance.
                     if 'synth_webui' in INTERFACE_REGISTRY:
                         webui_interface = INTERFACE_REGISTRY['synth_webui']
                         if hasattr(webui_interface, 'start'):
@@ -211,6 +212,30 @@ if __name__ == "__main__":
                         elif hasattr(webui_interface, 'start_server_async'):
                             webui_interface.start_server_async()
                             log_info("[main] WebUI server started")
+                    else:
+                        # Fallback: attempt to import and initialize the core.webui module
+                        # This ensures the Web UI is created even if discovery missed it
+                        try:
+                            import importlib
+                            log_info("[main] synth_webui not found in INTERFACE_REGISTRY - attempting direct initialization")
+                            webui_mod = importlib.import_module('core.webui')
+                            if hasattr(webui_mod, 'initialize_interface'):
+                                webui_mod.initialize_interface()
+                                # If the module created the instance it should be in the registry now
+                                if 'synth_webui' in INTERFACE_REGISTRY:
+                                    webui_interface = INTERFACE_REGISTRY['synth_webui']
+                                    if hasattr(webui_interface, 'start'):
+                                        await webui_interface.start()
+                                        log_info("[main] WebUI interface started (fallback initialization)")
+                                    elif hasattr(webui_interface, 'start_server_async'):
+                                        webui_interface.start_server_async()
+                                        log_info("[main] WebUI server started (fallback initialization)")
+                                else:
+                                    log_warning("[main] core.webui.initialize_interface() did not register synth_webui")
+                            else:
+                                log_warning("[main] core.webui has no initialize_interface() - cannot initialize Web UI")
+                        except Exception as e:
+                            log_warning(f"[main] Fallback initialization of synth_webui failed: {e}")
                 except Exception as e:
                     log_warning(f"[main] Could not start webui interface: {e}")
                 

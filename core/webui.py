@@ -40,6 +40,7 @@ from core.logging_utils import _LOG_FILE, log_debug, log_error, log_info, log_wa
 from core.config_manager import config_registry
 from core.message_chain import get_failed_message_text, RESPONSE_TIMEOUT, FAILED_MESSAGE_TEXT
 import core.plugin_instance as plugin_instance
+from core import db as core_db
 from core.animation_handler import get_animation_handler, AnimationState
 from core.persona_manager import get_persona_manager
 from core.action_state_manager import get_action_state_manager, AnimationPhase
@@ -193,6 +194,8 @@ class SynthWebUIInterface:
         self.app.post("/api/components/dev/toggle")(self.toggle_dev_components)
         self.app.post("/api/system/restart")(self.restart_system)
         self.app.get("/api/config")(self.config_summary)
+        # Debug endpoints (only enabled when WEB_DEBUG=1)
+        self.app.get("/api/debug/db_pool")(self.db_pool_debug)
         self.app.post("/api/config")(self.update_config_entry)
         self.app.post("/api/components/llm")(self.set_llm_engine)
         self.app.get("/api/logchat/info")(self.get_logchat_info)
@@ -346,6 +349,23 @@ class SynthWebUIInterface:
     async def stats(self):
         uptime = int((datetime.utcnow() - self.start_time).total_seconds())
         return JSONResponse({"uptime": uptime, "sessions": len(self.connections)})
+
+    async def db_pool_debug(self, request: Request):
+        """Return debug information about the DB connection pool.
+
+        This endpoint is intentionally gated by the WEB_DEBUG environment
+        variable to avoid exposing internals in production by accident.
+        """
+        web_debug = os.getenv('WEB_DEBUG', '0').lower()
+        if web_debug not in ('1', 'true', 'yes'):
+            raise HTTPException(status_code=403, detail="Debug endpoints disabled")
+
+        try:
+            info = core_db.get_pool_debug_info()
+            return JSONResponse(info)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to get DB pool debug info: {exc}")
+            raise HTTPException(status_code=500, detail="Unable to retrieve DB debug info")
 
     async def logs_page(self):
         html = self._render_logs()
@@ -1328,8 +1348,16 @@ class SynthWebUIInterface:
 
         response_data = {"status": "ok"}
         
-        # Check if component reload is needed
-        if component and component not in ["core", "webui"]:
+        # Check if component reload is needed. Prefer an explicit flag coming
+        # from the config definition (needs_component_reload). This avoids
+        # suggesting reloads for synthetic components like 'exposed' unless a
+        # variable explicitly declared that changing it requires a reload.
+        try:
+            needs_reload_flag = bool(config_def.get("needs_component_reload", False)) if config_def else False
+        except Exception:
+            needs_reload_flag = False
+
+        if component and component not in ["core", "webui"] and needs_reload_flag:
             response_data["requires_reload"] = True
             response_data["component"] = component
             response_data["message"] = f"Configuration updated. Component '{component}' should be reloaded for changes to take effect."
@@ -2137,12 +2165,24 @@ class SynthWebUIInterface:
 
     def start_server_async(self) -> None:
         """Start the web server as an asyncio task. Call this from the main event loop."""
-        if not hasattr(self, '_server_task') or (hasattr(self, '_server_task') and (self._server_task is None or self._server_task.done())):
-            log_info(f"{LOG_PREFIX} Starting {BRAND_NAME} server as asyncio task on http://{self.host}:{self.port}")
-            import asyncio
-            self._server_task = asyncio.create_task(self._run_server())
-        else:
-            log_info(f"{LOG_PREFIX} Server task already running")
+        try:
+            if not hasattr(self, '_server_task') or (hasattr(self, '_server_task') and (self._server_task is None or self._server_task.done())):
+                log_info(f"{LOG_PREFIX} Starting {BRAND_NAME} server as asyncio task on http://{self.host}:{self.port}")
+                import asyncio
+                try:
+                    loop = asyncio.get_running_loop()
+                    self._server_task = loop.create_task(self._run_server())
+                    log_info(f"{LOG_PREFIX} Server task scheduled on running loop: {loop}")
+                except RuntimeError:
+                    # No running loop - fallback to create_task which may raise later
+                    log_warning(f"{LOG_PREFIX} No running event loop found when scheduling server task; attempting asyncio.create_task fallback")
+                    self._server_task = asyncio.create_task(self._run_server())
+            else:
+                log_info(f"{LOG_PREFIX} Server task already running")
+        except Exception as exc:
+            import traceback
+            log_error(f"{LOG_PREFIX} Exception while scheduling server task: {exc}")
+            log_error(f"{LOG_PREFIX} Traceback: {traceback.format_exc()}")
 
     async def _run_server(self) -> None:
         """Create and run the uvicorn server."""
@@ -2185,21 +2225,36 @@ class SynthWebUIInterface:
 
     async def start(self) -> None:
         """Start the web UI interface if autostart is enabled."""
-        # Initialize persona manager now that core initialization is complete
-        if self.persona_manager is None:
-            self.persona_manager = get_persona_manager()
-            if self.persona_manager:
-                self.persona_manager.set_webui(self)
-                self.persona_manager.set_animation_handler(self.animation_handler)
-                log_info(f"{LOG_PREFIX} Persona manager initialized")
+        try:
+            log_info(f"{LOG_PREFIX} start() called - initializing persona manager and starting server if enabled")
+            # Initialize persona manager now that core initialization is complete
+            if self.persona_manager is None:
+                self.persona_manager = get_persona_manager()
+                if self.persona_manager:
+                    try:
+                        self.persona_manager.set_webui(self)
+                        self.persona_manager.set_animation_handler(self.animation_handler)
+                    except Exception as pm_exc:
+                        log_warning(f"{LOG_PREFIX} Persona manager set_* calls failed: {pm_exc}")
+                    log_info(f"{LOG_PREFIX} Persona manager initialized")
+                else:
+                    log_warning(f"{LOG_PREFIX} Failed to initialize persona manager")
+
+            if self.autostart:
+                log_info(f"{LOG_PREFIX} Autostart enabled, starting {BRAND_NAME} server")
+                try:
+                    self.start_server_async()
+                    log_info(f"{LOG_PREFIX} start() completed - server start scheduled")
+                except Exception as start_exc:
+                    import traceback
+                    log_error(f"{LOG_PREFIX} Exception while invoking start_server_async: {start_exc}")
+                    log_error(f"{LOG_PREFIX} Traceback: {traceback.format_exc()}")
             else:
-                log_warning(f"{LOG_PREFIX} Failed to initialize persona manager")
-        
-        if self.autostart:
-            log_info(f"{LOG_PREFIX} Autostart enabled, starting {BRAND_NAME} server")
-            self.start_server_async()
-        else:
-            log_info(f"{LOG_PREFIX} Autostart disabled, skipping server start")
+                log_info(f"{LOG_PREFIX} Autostart disabled, skipping server start")
+        except Exception as exc:
+            import traceback
+            log_error(f"{LOG_PREFIX} Exception in start(): {exc}")
+            log_error(f"{LOG_PREFIX} Traceback: {traceback.format_exc()}")
 
     # ------------------------------------------------------------------
     # HTML template
