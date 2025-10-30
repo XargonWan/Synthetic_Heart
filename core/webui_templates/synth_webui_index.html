@@ -3215,6 +3215,7 @@
             if (!input) return;
             const originalDisabled = input.disabled;
             input.disabled = true;
+            let _handled_reenable = false;
             try {
                 const response = await fetch('/api/config', {
                     method: 'POST',
@@ -3235,12 +3236,27 @@
                 if (result.requires_reload && result.component) {
                     const message = result.message || `Configuration updated. Component '${result.component}' should be reloaded.`;
                     showReloadPrompt(result.component, message, input);
+                    _handled_reenable = true; // reload prompt will handle re-enable
                 } else {
                     // Show success toast
                     showToast('Settings saved');
-                    // Re-enable input immediately if no reload required
-                    if (!item.env_override) {
-                        input.disabled = originalDisabled;
+                    // Re-enable input immediately if no reload required.
+                    // UX: prefer to re-enable the control for the user even if an env override
+                    // flag is present, because the user just completed an explicit action.
+                    // If a component reload is required, the reload prompt will handle re-enabling.
+                    if (!result.requires_reload) {
+                        // Forcefully re-enable the input for better UX. Some browsers
+                        // or later re-renders may leave the element disabled; explicitly
+                        // remove the attribute and clear readOnly to ensure it's editable.
+                        try {
+                            input.disabled = false;
+                            input.removeAttribute('disabled');
+                            input.readOnly = false;
+                        } catch (e) {
+                            console.warn('[synth_webui] could not force-enable input', e);
+                            input.disabled = originalDisabled;
+                        }
+                        _handled_reenable = true;
                     }
                 }
                 
@@ -3264,7 +3280,35 @@
                     input.disabled = true;
                 }
             }
-            // Note: Don't re-enable in finally block - it's handled by showReloadPrompt or in success path
+            // Ensure the input is re-enabled if we didn't already handle it.
+            // Use a short timeout to allow any UI updates / re-renders to settle.
+            if (!_handled_reenable) {
+                setTimeout(() => {
+                    try {
+                        // First try: the original element reference (may be stale if the row was re-rendered)
+                        if (input && input.disabled) {
+                            console.debug('[synth_webui] re-enabling original input for', item.key, 'disabled->', input.disabled);
+                            input.disabled = originalDisabled;
+                            try {
+                                input.removeAttribute && input.removeAttribute('disabled');
+                                input.readOnly = false;
+                            } catch (e) { /* ignore */ }
+                        }
+
+                        // Second try: lookup the current input in DOM by data-key in case the element was replaced
+                        const selector = `[data-key="${item.key}"]`;
+                        const current = document.querySelector(selector);
+                        if (current) {
+                            const wasDisabled = !!current.disabled;
+                            current.disabled = false;
+                            try { current.removeAttribute && current.removeAttribute('disabled'); current.readOnly = false; } catch (e) { /* ignore */ }
+                            console.debug('[synth_webui] ensured current input for', item.key, 'is enabled (wasDisabled=', wasDisabled, ')');
+                        }
+                    } catch (e) {
+                        console.error('[synth_webui] Error while re-enabling input', e);
+                    }
+                }, 150);
+            }
         }
 
         function renderConfig(data) {
