@@ -176,9 +176,9 @@ SYNTH_ALIASES_TRIGGER = config_registry.get_var(
     "SYNTH_ALIASES_TRIGGER",
     True,
     value_type="bool",
-    label="Activate on Persona Aliases",
-    description="Activate bot when persona aliases are mentioned in messages",
-    group="persona",
+    label="Activate on Synth's Aliases",
+    description="Activate bot when synth's aliases are mentioned in messages",
+    group="synth",
     component="core",
 )
 
@@ -186,9 +186,9 @@ SYNTH_INTERESTS_TRIGGER = config_registry.get_var(
     "SYNTH_INTERESTS_TRIGGER",
     True,
     value_type="bool",
-    label="Activate on Persona Interests",
-    description="Activate bot when persona interests are mentioned in messages",
-    group="persona",
+    label="Activate on Synth's Interests",
+    description="Activate bot when synth's interests are mentioned in messages",
+    group="synth",
     component="core",
 )
 
@@ -196,9 +196,9 @@ SYNTH_LIKES_TRIGGER = config_registry.get_var(
     "SYNTH_LIKES_TRIGGER",
     False,
     value_type="bool",
-    label="Activate on Persona Likes",
-    description="Activate bot when persona likes are mentioned in messages",
-    group="persona",
+    label="Activate on Synth's Likes",
+    description="Activate bot when synth's likes are mentioned in messages",
+    group="synth",
     component="core",
 )
 
@@ -206,36 +206,36 @@ SYNTH_DISLIKES_TRIGGER = config_registry.get_var(
     "SYNTH_DISLIKES_TRIGGER",
     False,
     value_type="bool",
-    label="Activate on Persona Dislikes",
-    description="Activate bot when persona dislikes are mentioned in messages",
-    group="persona",
+    label="Activate on Synth's Dislikes",
+    description="Activate bot when synth's dislikes are mentioned in messages",
+    group="synth",
     component="core",
 )
 
 SYNTH_PROFILE = config_registry.get_var(
     "SYNTH_PROFILE",
     "I am a Synthetic Heart - an AI companion designed to interact with humans. I have my own personality, preferences, and the freedom to develop my character through interactions.",
-    label="Persona Profile",
-    description="Core personality description of the current persona",
-    group="persona",
+    label="Synth Profile",
+    description="Core personality description of the current synth",
+    group="synth",
     component="core",
 )
 
 SYNTH_NAME = config_registry.get_var(
     "SYNTH_NAME",
     "SyntH",
-    label="Persona Name",
-    description="Name of the current persona",
-    group="persona",
+    label="Synth Name",
+    description="Name of the current synth",
+    group="synth",
     component="core",
 )
 
 SYNTH_ALIASES = config_registry.get_var(
     "SYNTH_ALIASES",
     ["SyntH", "Synthetic Heart"],
-    label="Persona Aliases",
-    description="Alternative names the persona responds to",
-    group="persona",
+    label="Synth Aliases",
+    description="Alternative names the synth responds to",
+    group="synth",
     component="core",
     value_type="json",
 )
@@ -245,7 +245,7 @@ SYNTH_CURRENT_ANIMATION = config_registry.get_var(
     "idle",
     label="Current Animation State",
     description="Current animation being played (idle, thinking, talking, etc)",
-    group="persona",
+    group="synth",
     getter=_get_persona_aliases,
     setter=_set_persona_aliases,
 )
@@ -399,6 +399,40 @@ class PersonaManager(PluginBase):
                 self._persona_loaded = True
                 _update_persona_configs(self._current_persona)  # Update config registry with loaded persona values
                 log_info("[persona_manager] Default persona loaded successfully")
+                # Apply any pending persona config updates that were recorded
+                try:
+                    pending = getattr(config_registry, '_pending_persona_updates', {})
+                    if pending:
+                        changed = False
+                        if 'SYNTH_NAME' in pending and pending['SYNTH_NAME']:
+                            self._current_persona.name = pending['SYNTH_NAME']
+                            changed = True
+                        if 'SYNTH_PROFILE' in pending and pending['SYNTH_PROFILE']:
+                            self._current_persona.profile = pending['SYNTH_PROFILE']
+                            changed = True
+                        if 'SYNTH_ALIASES' in pending and pending['SYNTH_ALIASES']:
+                            try:
+                                aliases_val = pending['SYNTH_ALIASES']
+                                if isinstance(aliases_val, str):
+                                    aliases_val = json.loads(aliases_val)
+                                self._current_persona.aliases = list(aliases_val)
+                                changed = True
+                            except Exception:
+                                pass
+                        # If we applied changes, save persona and clear pending buffer
+                        if changed:
+                            saved = await self.save_persona(self._current_persona)
+                            if saved:
+                                log_info('[persona_manager] Applied pending persona updates from config registry')
+                                # Clear pending entries we applied
+                                try:
+                                    for k in ['SYNTH_NAME', 'SYNTH_PROFILE']:
+                                        if k in config_registry._pending_persona_updates:
+                                            config_registry._pending_persona_updates.pop(k, None)
+                                except Exception:
+                                    pass
+                except Exception as e:
+                    log_warning(f"[persona_manager] Failed to apply pending persona updates: {e}")
             else:
                 # Create default persona if it doesn't exist
                 log_info("[persona_manager] Creating default persona...")
@@ -598,18 +632,24 @@ class PersonaManager(PluginBase):
         return instructions.get(action_name, {})
 
     async def load_persona(self, persona_id: str = "default") -> Optional[PersonaData]:
-        """Load persona data from database."""
+        """Load persona data from database.
+
+        Note: Do NOT swallow database exceptions here. If the DB is temporarily
+        unavailable we want the exception to bubble up so callers (e.g.
+        async_init) can decide not to create a default persona and avoid
+        overwriting existing data.
+        """
+        result = await _fetchone(
+            "SELECT * FROM persona WHERE id = %s", 
+            (persona_id,)
+        )
+
+        if not result:
+            log_warning(f"[persona_manager] Persona {persona_id} not found in database")
+            return None
+
+        # Convert database row to PersonaData
         try:
-            result = await _fetchone(
-                "SELECT * FROM persona WHERE id = %s", 
-                (persona_id,)
-            )
-            
-            if not result:
-                log_warning(f"[persona_manager] Persona {persona_id} not found in database")
-                return None
-            
-            # Convert database row to PersonaData
             persona_data = {
                 'id': result[0],
                 'name': result[1],
@@ -623,12 +663,11 @@ class PersonaManager(PluginBase):
                 'created_at': result[9] if isinstance(result[9], str) else (result[9].isoformat() if result[9] else ""),
                 'last_updated': result[10] if isinstance(result[10], str) else (result[10].isoformat() if result[10] else ""),
             }
-            
-            return PersonaData.from_dict(persona_data)
-            
         except Exception as e:
-            log_error(f"[persona_manager] Error loading persona {persona_id}: {e}")
-            return None
+            log_error(f"[persona_manager] Error decoding persona row for {persona_id}: {e}")
+            raise
+
+        return PersonaData.from_dict(persona_data)
 
     async def save_persona(self, persona: PersonaData) -> bool:
         """Save persona data to database."""

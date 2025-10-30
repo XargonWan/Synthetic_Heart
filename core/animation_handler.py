@@ -134,6 +134,76 @@ class AnimationHandler:
         
         return unique_animations
 
+    def _resolve_animation_descriptor(self, animation_file: str):
+        """Resolve animation file path and optional JSON descriptor.
+
+        Returns a tuple (resolved_rel_path, descriptor) where descriptor may be None.
+        This centralizes the resolution logic so callers can inspect descriptor
+        before deciding loop/rotation behavior.
+        """
+        descriptor = None
+        resolved_rel_path = None
+        try:
+            try:
+                from core.persona_manager import get_persona_manager
+            except Exception:
+                get_persona_manager = None
+            persona_manager = None
+            if callable(get_persona_manager):
+                try:
+                    persona_manager = get_persona_manager()
+                except Exception:
+                    persona_manager = None
+            active_persona_folder = None
+            try:
+                if persona_manager and hasattr(persona_manager, '_current_persona') and persona_manager._current_persona:
+                    active_persona_folder = getattr(persona_manager._current_persona, 'id', None) or getattr(persona_manager._current_persona, 'name', None)
+            except Exception:
+                active_persona_folder = None
+
+            candidates = []
+            if active_persona_folder:
+                p_anim_dir = self.SKINS_DIR / str(active_persona_folder) / 'animations'
+                candidates.append((p_anim_dir, f"/skins/{active_persona_folder}/animations"))
+
+            rei_dir = self.SKINS_DIR / 'Rei' / 'animations'
+            candidates.append((rei_dir, f"/skins/Rei/animations"))
+
+            for dir_path, url_prefix in candidates:
+                try:
+                    if dir_path.exists() and dir_path.is_dir():
+                        candidate_file = dir_path / animation_file
+                        if candidate_file.exists():
+                            resolved_rel_path = f"{url_prefix}/{animation_file}"
+                            descriptor_path = candidate_file.with_suffix(candidate_file.suffix + '.json')
+                            if descriptor_path.exists():
+                                try:
+                                    with descriptor_path.open('r', encoding='utf-8') as df:
+                                        descriptor = json.load(df)
+                                except Exception:
+                                    descriptor = None
+                            break
+                        for p in dir_path.iterdir():
+                            if p.is_file() and p.name.lower() == animation_file.lower():
+                                resolved_rel_path = f"{url_prefix}/{p.name}"
+                                descriptor_path = p.with_suffix(p.suffix + '.json')
+                                if descriptor_path.exists():
+                                    try:
+                                        with descriptor_path.open('r', encoding='utf-8') as df:
+                                            descriptor = json.load(df)
+                                    except Exception:
+                                        descriptor = None
+                                break
+                except Exception:
+                    continue
+
+            if not resolved_rel_path:
+                resolved_rel_path = f"/{self.ANIMATIONS_BASE_PATH}/{animation_file}"
+        except Exception:
+            resolved_rel_path = f"/{self.ANIMATIONS_BASE_PATH}/{animation_file}"
+
+        return resolved_rel_path, descriptor
+
     async def play_animation(
         self,
         state: AnimationState,
@@ -186,22 +256,33 @@ class AnimationHandler:
             
             # Send animation command to WebUI
             if self.webui:
+                # Resolve descriptor to allow per-animation control (e.g., play_once)
+                resolved_path, descriptor = self._resolve_animation_descriptor(selected_animation)
+                # If descriptor explicitly requests play_once, do not loop and do not start rotation
+                if descriptor and descriptor.get("play_once"):
+                    effective_loop = False
+                    start_rotation = False
+                else:
+                    effective_loop = loop
+                    start_rotation = len(animations) > 1
+
                 await self._send_animation_command(
                     session_id=session_id,
                     animation_file=selected_animation,
-                    loop=loop,
+                    loop=effective_loop,
                     state=state.value
                 )
             else:
                 log_warning("[AnimationHandler] WebUI not set, cannot send animation command")
 
             # If there are multiple animations for this state, start a background
-            # rotation task that will randomly switch between them every 30-60s
+            # rotation task that will randomly switch between them every 30-60s.
+            # However, if the selected animation's descriptor requests play_once,
+            # do not start rotation even if multiple files are available.
             key = f"{session_id}:{state.value}"
-            if len(animations) > 1:
+            if start_rotation:
                 await self._start_rotation_task(session_id, state, context_id)
             else:
-                # Ensure no leftover rotation task is running for this state
                 await self._stop_rotation_task(session_id, state)
 
     async def stop_animation(self, context_id: str, session_id: str) -> None:
@@ -278,80 +359,8 @@ class AnimationHandler:
         if not self.webui:
             return
             
-        # Resolve animation file lookup with persona-aware fallback:
-        # 1) Check active persona skin animations (personas/<skin>/animations)
-        # 2) Check global animations (/animations)
-        # 3) Fallback to Rei skin animations (personas/Rei/animations)
-        descriptor = None
-        resolved_rel_path = None
-        try:
-            # Try active persona first (local import to avoid circular dependency)
-            try:
-                from core.persona_manager import get_persona_manager
-            except Exception:
-                get_persona_manager = None
-            persona_manager = None
-            if callable(get_persona_manager):
-                try:
-                    persona_manager = get_persona_manager()
-                except Exception:
-                    persona_manager = None
-            active_persona_folder = None
-            try:
-                # persona manager may expose a folder or a name; try common properties
-                if persona_manager and hasattr(persona_manager, '_current_persona') and persona_manager._current_persona:
-                    # If the persona_manager was loaded from a folder, try to find a persona folder name
-                    # We assume persona folders live under PERSONAS_DIR and may be named after the skin (e.g., Rei)
-                    active_persona_folder = getattr(persona_manager._current_persona, 'id', None) or getattr(persona_manager._current_persona, 'name', None)
-            except Exception:
-                active_persona_folder = None
-
-            candidates = []
-            if active_persona_folder:
-                p_anim_dir = self.SKINS_DIR / str(active_persona_folder) / 'animations'
-                candidates.append((p_anim_dir, f"/skins/{active_persona_folder}/animations"))
-
-            # Rei fallback (per-skin animations only)
-            rei_dir = self.SKINS_DIR / 'Rei' / 'animations'
-            candidates.append((rei_dir, f"/skins/Rei/animations"))
-
-            # Search candidate dirs for the animation file
-            for dir_path, url_prefix in candidates:
-                try:
-                    if dir_path.exists() and dir_path.is_dir():
-                        # direct filename
-                        candidate_file = dir_path / animation_file
-                        if candidate_file.exists():
-                            resolved_rel_path = f"{url_prefix}/{animation_file}"
-                            # attempt to load descriptor next to the animation file
-                            descriptor_path = candidate_file.with_suffix(candidate_file.suffix + '.json')
-                            if descriptor_path.exists():
-                                try:
-                                    with descriptor_path.open('r', encoding='utf-8') as df:
-                                        descriptor = json.load(df)
-                                except Exception as exc:
-                                    log_warning(f"[AnimationHandler] Failed to load descriptor {descriptor_path}: {exc}")
-                            break
-                        # also allow for files without exact match (case-insensitive)
-                        for p in dir_path.iterdir():
-                            if p.is_file() and p.name.lower() == animation_file.lower():
-                                resolved_rel_path = f"{url_prefix}/{p.name}"
-                                descriptor_path = p.with_suffix(p.suffix + '.json')
-                                if descriptor_path.exists():
-                                    try:
-                                        with descriptor_path.open('r', encoding='utf-8') as df:
-                                            descriptor = json.load(df)
-                                    except Exception as exc:
-                                        log_warning(f"[AnimationHandler] Failed to load descriptor {descriptor_path}: {exc}")
-                                break
-                except Exception:
-                    continue
-
-            # If still unresolved, default to global path (may 404 in client)
-            if not resolved_rel_path:
-                resolved_rel_path = f"/{self.ANIMATIONS_BASE_PATH}/{animation_file}"
-        except Exception as exc:
-            log_warning(f"[AnimationHandler] Error resolving animation path for {animation_file}: {exc}")
+        # Resolve path and descriptor (centralized helper)
+        resolved_rel_path, descriptor = self._resolve_animation_descriptor(animation_file)
 
         # If session_id is None, broadcast to all connected WebUI sessions
         try:
@@ -432,8 +441,11 @@ class AnimationHandler:
                             choices = [a for a in animations if a != self.current_animation]
                             candidate = random.choice(choices) if choices else candidate
                     self.current_animation = candidate
-                    # send new animation command (preserve loop and state)
-                    await self._send_animation_command(session_id, candidate, True, state.value)
+                    # Resolve descriptor for candidate to respect play_once if present
+                    _, candidate_descriptor = self._resolve_animation_descriptor(candidate)
+                    candidate_loop = False if (candidate_descriptor and candidate_descriptor.get("play_once")) else True
+                    # send new animation command (loop depends on descriptor)
+                    await self._send_animation_command(session_id, candidate, candidate_loop, state.value)
         except asyncio.CancelledError:
             # Normal cancellation path
             pass

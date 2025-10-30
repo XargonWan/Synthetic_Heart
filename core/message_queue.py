@@ -169,7 +169,11 @@ async def enqueue(bot, message, context_memory, priority: bool = False, interfac
     log_debug(f"[QUEUE] Rate limit check passed - continuing to enqueue message")
 
     meta = message.chat.title or message.chat.username or message.chat.first_name
-    await recent_chats.track_chat(chat_id, meta)
+    # Persist last-active chat, but don't let DB failures abort enqueueing
+    try:
+        await recent_chats.track_chat(chat_id, meta)
+    except Exception as e:
+        log_warning(f"[QUEUE] recent_chats.track_chat failed but continuing: {e}")
 
     # Extract thread_id - unified field name, check both Telegram and generic names
     # DEBUG: let's see what telegram message actually contains

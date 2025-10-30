@@ -132,6 +132,13 @@ class ConfigRegistry:
         self._definitions: Dict[str, ConfigDefinition] = {}
         self._load_lock = asyncio.Lock()
         self._pending_env_persists: Dict[str, str] = {}  # Buffer for env overrides to persist when DB is ready
+        # Buffer for persona-related updates received before PersonaManager is ready
+        self._pending_persona_updates: Dict[str, Any] = {}
+        # Background task for retrying pending persona DB persists
+        self._pending_persona_worker: asyncio.Task | None = None
+        # Note: pending persona updates are kept in-memory and retried by the
+        # background worker. We intentionally avoid adding a file persistence
+        # layer here to reduce complexity and potential I/O surprises.
 
     # ------------------------------------------------------------------
     # Public API
@@ -237,7 +244,7 @@ class ConfigRegistry:
             )
 
         # Special handling for persona-related configs
-        if key in ['SYNTH_NAME', 'SYNTH_PROFILE']:
+        if key in ['SYNTH_NAME', 'SYNTH_PROFILE', 'SYNTH_ALIASES']:
             try:
                 # Access persona manager via global reference
                 from core.persona_manager import _persona_manager_instance
@@ -248,18 +255,37 @@ class ConfigRegistry:
                         persona.name = new_value
                     elif key == 'SYNTH_PROFILE':
                         persona.profile = new_value
+                    elif key == 'SYNTH_ALIASES':
+                        # Expect JSON/list for aliases
+                        try:
+                            if isinstance(new_value, str):
+                                import json as _json
+                                aliases_val = _json.loads(new_value)
+                            else:
+                                aliases_val = list(new_value)
+                        except Exception:
+                            aliases_val = []
+                        persona.aliases = aliases_val
                     
                     # Save the persona asynchronously
                     import asyncio
                     asyncio.create_task(manager.save_persona(persona))
-                    
-                    # Also persist to config table for boot-up loading
+
+                    # Also persist to config table for boot-up loading. If persistence
+                    # fails (e.g. DB pool exhausted) record the pending update so a
+                    # background worker can retry.
                     definition.value = new_value
                     definition.raw_value = self._serialize_value(definition, new_value)
                     definition.loaded = True
-                    await self._persist_to_db(definition.key, definition.raw_value)
-
-                    log_info(f"[config] Updated persona '{key}' via Web UI (saved to config table)")
+                    persisted = await self._persist_to_db(definition.key, definition.raw_value)
+                    log_debug(f"[config] _persist_to_db returned {persisted} for key={definition.key} (len={len(definition.raw_value) if definition.raw_value else 0})")
+                    if not persisted:
+                        # Record pending update for background retry
+                        self._pending_persona_updates[definition.key] = new_value
+                        log_warning(f"[config] Persist of persona '{key}' failed; recorded pending update for retry (in-memory)")
+                        self._start_pending_persona_worker()
+                    else:
+                        log_info(f"[config] Updated persona '{key}' via Web UI (saved to config table)")
 
                     for callback in list(definition.listeners):
                         try:
@@ -268,8 +294,40 @@ class ConfigRegistry:
                             log_warning(f"[config] Listener for '{key}' failed: {exc}")
                     return
                 else:
-                    log_warning(f"[config] Cannot update '{key}': persona manager not ready")
-                    return
+                    # Persona manager not ready: persist the config value to DB so
+                    # it's available on next startup and record a pending update so
+                    # the PersonaManager can apply it when it initializes.
+                    try:
+                        serialized = self._serialize_value(definition, new_value)
+                        # Try to persist to DB immediately; if it fails, keep pending
+                        persisted = await self._persist_to_db(definition.key, serialized)
+                        log_debug(f"[config] _persist_to_db returned {persisted} for key={definition.key} (len={len(serialized) if serialized else 0})")
+                        definition.value = new_value
+                        definition.raw_value = serialized
+                        definition.loaded = True
+                        # Record pending persona update for PersonaManager to pick up
+                        self._pending_persona_updates[definition.key] = new_value
+                        if not persisted:
+                            log_warning(f"[config] Persist of persona '{key}' failed; stored pending update for retry")
+                            self._start_pending_persona_worker()
+                        else:
+                            log_info(f"[config] Stored persona update for '{key}' (manager not ready); persisted to DB")
+
+                        for callback in list(definition.listeners):
+                            try:
+                                callback(new_value)
+                            except Exception as exc:  # pragma: no cover - listener safety
+                                log_warning(f"[config] Listener for '{key}' failed: {exc}")
+                        return
+                    except Exception as exc:
+                        log_error(f"[config] Failed to update persona '{key}': {exc}")
+                        # As a last resort record pending update so it will be retried
+                        try:
+                            self._pending_persona_updates[definition.key] = new_value
+                            self._start_pending_persona_worker()
+                        except Exception:
+                            pass
+                        return
             except Exception as exc:
                 log_error(f"[config] Failed to update persona '{key}': {exc}")
                 raise
@@ -536,24 +594,96 @@ class ConfigRegistry:
             loop.create_task(self._persist_to_db(key, value))
 
     async def _persist_to_db(self, key: str, value: str) -> None:
+        # Persisting config values is best-effort. Failures (DB unavailable,
+        # pool exhausted, timeouts) should not raise to callers — instead we
+        # log a warning and continue so the Web UI/API remains responsive.
+        """
+        Persist a config key to the DB in a best-effort manner.
+
+        Returns True on success, False on any failure.
+        """
         try:
-            from core.db import get_conn, ensure_core_tables
-        except ImportError as e:
-            # Circular import during initialization - skip DB persist
-            print(f"[config] Skipping DB persist for '{key}' during initialization: {e}", flush=True)
+            try:
+                from core.db import get_conn, ensure_core_tables
+            except ImportError as e:
+                # Circular import during initialization - skip DB persist
+                print(f"[config] Skipping DB persist for '{key}' during initialization: {e}", flush=True)
+                return False
+
+            log_debug(f"[config] Ensuring core tables before persisting '{key}'")
+            await ensure_core_tables()
+
+            log_debug(f"[config] Attempting to acquire DB connection to persist '{key}'")
+            try:
+                conn = await get_conn()
+                log_debug(f"[config] Acquired DB connection for persisting '{key}': conn_id={id(conn)}")
+            except Exception as e:
+                log_warning(f"[config] Unable to acquire DB connection to persist '{key}': {e}")
+                return False
+
+            try:
+                log_debug(f"[config] Executing REPLACE for key='{key}' (value_len={len(value) if value else 0})")
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "REPLACE INTO config (config_key, value) VALUES (%s, %s)",
+                        (key, value),
+                    )
+                    await conn.commit()
+                log_debug(f"[config] REPLACE succeeded for key='{key}'")
+                return True
+            except Exception as e:
+                # Log full traceback to help diagnose failures (timeouts, connection reset, schema error)
+                import traceback
+                tb = traceback.format_exc()
+                log_error(f"[config] Failed to persist '{key}' to DB: {e} -- traceback:\n{tb}")
+                return False
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        except Exception as exc:  # pragma: no cover - defensive
+            log_error(f"[config] Unexpected error while persisting '{key}': {exc}")
+            return False
+
+    def _start_pending_persona_worker(self) -> None:
+        """Start a background task to retry persisting pending persona updates."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop — caller is not in async context, skip
             return
 
-        await ensure_core_tables()
-        conn = await get_conn()
-        try:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "REPLACE INTO config (config_key, value) VALUES (%s, %s)",
-                    (key, value),
-                )
-                await conn.commit()
-        finally:
-            conn.close()
+        if self._pending_persona_worker and not self._pending_persona_worker.done():
+            return
+
+        async def _worker():
+            log_info(f"[config] Starting pending persona persistence worker (pending={len(self._pending_persona_updates)})")
+            try:
+                while self._pending_persona_updates:
+                    for k, v in list(self._pending_persona_updates.items()):
+                        try:
+                            serialized = self._serialize_value(self._definitions.get(k), v) if self._definitions.get(k) else str(v)
+                            ok = await self._persist_to_db(k, serialized)
+                            if ok:
+                                log_info(f"[config] Pending persona update persisted: {k}")
+                                try:
+                                    del self._pending_persona_updates[k]
+                                except KeyError:
+                                    pass
+                        except Exception as e:
+                            log_warning(f"[config] Worker failed persisting '{k}': {e}")
+                    # Sleep before next retry
+                    await asyncio.sleep(5)
+            finally:
+                log_info("[config] Pending persona persistence worker exiting")
+
+        self._pending_persona_worker = loop.create_task(_worker())
+
+    # NOTE: file persistence for pending persona updates intentionally removed.
+    # If we need durable pending storage in the future we can add a separate
+    # durable queue mechanism, but we avoid it for now to keep the system
+    # behavior simpler and avoid additional I/O failure modes.
 
     def _serialize_value(self, definition: ConfigDefinition, value: Any) -> str:
         if value is None:

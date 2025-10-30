@@ -2480,7 +2480,7 @@
             
             const desc = document.createElement('div');
             desc.className = 'meta';
-            desc.textContent = 'Select which persona attributes trigger Synth to respond';
+            desc.textContent = 'Select which Synth attributes trigger Synth to respond';
             desc.style.cssText = 'margin-bottom: 1rem;';
             row.appendChild(desc);
             
@@ -2495,8 +2495,8 @@
                 'SYNTH_DISLIKES_TRIGGER': 'Dislikes'
             };
             
-            // Sort by defined order
-            const sortOrder = ['PERSONA_ALIASES_TRIGGER', 'PERSONA_INTERESTS_TRIGGER', 'PERSONA_LIKES_TRIGGER', 'PERSONA_DISLIKES_TRIGGER'];
+            // Sort by defined order (use SYNTH_* trigger keys)
+            const sortOrder = ['SYNTH_ALIASES_TRIGGER', 'SYNTH_INTERESTS_TRIGGER', 'SYNTH_LIKES_TRIGGER', 'SYNTH_DISLIKES_TRIGGER'];
             triggerItems.sort((a, b) => sortOrder.indexOf(a.key) - sortOrder.indexOf(b.key));
             
             triggerItems.forEach((item) => {
@@ -2897,7 +2897,7 @@
                         tagText.textContent = alias;
                         tag.appendChild(tagText);
                         
-                        // Don't allow removing base aliases (SyntH, Synthetic Heart) or persona name
+                        // Don't allow removing base aliases (SyntH, Synthetic Heart) or Synth name
                         const baseAliases = ["SyntH", "Synthetic Heart"];
                         const isRemovable = !baseAliases.includes(alias) && alias !== window.currentPersonaName && !item.env_override && item.editable;
                         
@@ -2946,14 +2946,14 @@
                         if (!res.ok) {
                             const errorText = await res.text();
                             console.error('[synth_webui_debug] Response error:', res.status, errorText);
-                            showToast('Failed to update persona aliases', true);
+                            showToast('Failed to update synth aliases', true);
                             return;
                         }
                         item.value = currentAliases;
                         showToast('Settings saved');
                     } catch (error) {
                         console.error('[synth_webui] Error updating SYNTH_ALIASES:', error);
-                        showToast('Error updating persona aliases', true);
+                        showToast('Error updating synth aliases', true);
                     }
                 };
                 
@@ -3292,21 +3292,21 @@
                 return !tags.includes('logs_only');
             });
             
-            // Separate PERSONA_*_TRIGGER items for grouped rendering
-            const personaTriggers = [];
+            // Separate SYNTH_*_TRIGGER items for grouped rendering
+            const synthTriggers = [];
             const otherItems = [];
-            
+
             filteredItems.forEach((item) => {
-                if (item.key && item.key.match(/^PERSONA_(ALIASES|INTERESTS|LIKES|DISLIKES)_TRIGGER$/)) {
-                    personaTriggers.push(item);
+                if (item.key && item.key.match(/^SYNTH_(ALIASES|INTERESTS|LIKES|DISLIKES)_TRIGGER$/)) {
+                    synthTriggers.push(item);
                 } else {
                     otherItems.push(item);
                 }
             });
-            
-            // Render grouped persona triggers first (if any)
-            if (personaTriggers.length > 0) {
-                const groupedRow = createPersonaTriggersGroup(personaTriggers);
+
+            // Render grouped Synth triggers first (if any)
+            if (synthTriggers.length > 0) {
+                const groupedRow = createPersonaTriggersGroup(synthTriggers);
                 if (groupedRow) {
                     configGeneralList.appendChild(groupedRow);
                 }
@@ -3827,11 +3827,13 @@
                     console.log('[synth_webui] data.animation:', data.animation);
                     
                     if (animationHandler && data.state) {
-                        console.log('[synth_webui] Calling animationHandler.startAction with:', data.state, data.animation);
+                        console.log('[synth_webui] Calling animationHandler.startAction with:', data.state, data.animation, data.loop, data.descriptor);
                         // Extract filename from animation URL (e.g., "animations/Idle2.fbx" -> "Idle2.fbx")
                         const animationFile = data.animation ? data.animation.split('/').pop() : null;
                         console.log('[synth_webui] Extracted animationFile:', animationFile);
-                        animationHandler.startAction(data.state, animationFile);
+                        // Determine playOnce from descriptor or loop flag
+                        const playOnce = (data.descriptor && data.descriptor.play_once) || (data.loop === false);
+                        animationHandler.startAction(data.state, animationFile, !!playOnce);
                     } else if (data.state) {
                         // Queue the command if animation handler is not ready yet
                         console.log('[synth_webui] Animation handler not ready, queueing command:', data.state);
@@ -3886,14 +3888,15 @@
                 pendingAnimationTimeout = null;
             }
             
-            if (pendingAnimationCommands.length > 0 && typeof animationHandler !== 'undefined' && animationHandler) {
+                if (pendingAnimationCommands.length > 0 && typeof animationHandler !== 'undefined' && animationHandler) {
                 console.log('[synth_webui] Processing', pendingAnimationCommands.length, 'pending animation commands after VRM load');
                 const commands = pendingAnimationCommands.splice(0); // Copy and clear
                 for (const cmd of commands) {
                     console.log('[synth_webui] Executing pending animation (from vrmLoaded):', cmd.state, cmd.animation);
                     if (cmd.state && animationHandler) {
-                        const animationFile = cmd.animation ? cmd.animation.split('/').pop() : null;
-                        animationHandler.startAction(cmd.state, animationFile);
+                            const animationFile = cmd.animation ? cmd.animation.split('/').pop() : null;
+                            const playOnce = (cmd.descriptor && cmd.descriptor.play_once) || (cmd.loop === false);
+                            animationHandler.startAction(cmd.state, animationFile, !!playOnce);
                     }
                 }
             }
@@ -4051,7 +4054,6 @@
                 if(!res.ok) throw new Error('Activate failed');
                 await fetchSkins();
                 if(window.refreshModels) await window.refreshModels();
-                alert('Skin activated: '+name);
             }catch(e){ alert('Error: '+e.message) }
         }
 
@@ -4223,6 +4225,8 @@
                     this.actions = {};
                     this.currentAction = null;
                     this.loadedAnimations = {};
+                    this._playOnceTimers = {}; // safety timers for play-once actions
+                    this._globalMixerFinishBound = false; // ensure we bind a single finished handler
                 }
 
                 async getAnimationsForType(actionName) {
@@ -4344,7 +4348,51 @@
                     return action;
                 }
 
-                async startAction(actionName, animationFile = null) {
+                // Preload all animations across common action types (idle, think, talk, write, touch)
+                // Loads each animation clip and caches it in this.loadedAnimations to avoid
+                // re-fetching and momentary T-pose when switching clips.
+                async preloadAllAnimations() {
+                    try {
+                        const actionTypes = ['idle', 'think', 'talk', 'write', 'touch'];
+                        for (const at of actionTypes) {
+                            try {
+                                const files = await this.getAnimationsForType(at);
+                                if (!files || files.length === 0) continue;
+                                console.log(`[AnimationHandler] Preloading ${files.length} animations for ${at}`);
+                                for (const f of files) {
+                                    try {
+                                        if (!this.loadedAnimations[f]) {
+                                            const clip = await this.loadAnimation(at, f);
+                                            if (clip) {
+                                                // create a non-playing action so the mixer compiles the clip
+                                                try {
+                                                    const actionKey = `${at}:${f}`;
+                                                    if (!this.actions[actionKey]) {
+                                                        const act = this.mixer.clipAction(clip);
+                                                        // keep default loop settings for cached actions
+                                                        act.setLoop(THREE.LoopRepeat);
+                                                        act.clampWhenFinished = false;
+                                                        this.actions[actionKey] = act;
+                                                    }
+                                                } catch (e) {
+                                                    // ignore action creation errors
+                                                }
+                                            }
+                                        }
+                                    } catch (e) {
+                                        console.warn(`[AnimationHandler] Failed to preload ${f} for ${at}:`, e);
+                                    }
+                                }
+                            } catch (e) {
+                                console.warn(`[AnimationHandler] Error listing animations for ${at}:`, e);
+                            }
+                        }
+                    } catch (err) {
+                        console.warn('[AnimationHandler] preloadAllAnimations top-level error:', err);
+                    }
+                }
+
+                async startAction(actionName, animationFile = null, playOnce = false) {
                     console.log(`[AnimationHandler] startAction called with actionName: ${actionName}, animationFile: ${animationFile}`);
                     console.log(`[AnimationHandler] this.mixer exists:`, !!this.mixer);
                     console.log(`[AnimationHandler] this.vrm exists:`, !!this.vrm);
@@ -4363,10 +4411,10 @@
                             const clip = await this.loadAnimation(actionName, animationFile);
                             if (clip) {
                                 action = this.mixer.clipAction(clip);
-                                // Set appropriate loop type based on action name
-                                if (actionName === 'think') {
-                                    action.setLoop(THREE.LoopRepeat);
-                                    action.clampWhenFinished = false;
+                                // Set loop type based on playOnce flag
+                                if (playOnce) {
+                                    action.setLoop(THREE.LoopOnce, 0);
+                                    action.clampWhenFinished = true;
                                 } else {
                                     action.setLoop(THREE.LoopRepeat);
                                     action.clampWhenFinished = false;
@@ -4394,13 +4442,22 @@
                     }
 
                     // If action is structured (intro/loop/outro), handle it differently
-                    if (action && action.loop && action.loop === undefined && typeof action === 'object' && action.loop !== undefined) {
-                        // defensive - not likely
-                    }
+                    // defensive - not likely
 
                     // If the action is the structured think object
                     if (action && action.intro && action.loop && action.outro) {
                         const structured = action;
+
+                        // If playOnce requested, make the loop action play only once so that
+                        // the mixer 'finished' event will transition to the outro.
+                        if (playOnce && structured.loop) {
+                            try {
+                                structured.loop.setLoop(THREE.LoopOnce, 0);
+                                structured.loop.clampWhenFinished = true;
+                            } catch (err) {
+                                console.warn('[AnimationHandler] Failed to set structured loop to playOnce:', err);
+                            }
+                        }
 
                         // Fade out current action if different
                         if (this.currentAction && this.currentAction !== structured.loop && this.currentAction !== structured.intro) {
@@ -4444,7 +4501,107 @@
                         structured.intro.reset().fadeIn(0.15).play();
                         this.currentAction = structured.intro;
                         console.log(`[AnimationHandler] Structured think action started`);
+                        // If playOnce requested for structured action, schedule a
+                        // safety fallback after the total duration (intro+loop+outro)
+                        try {
+                            if (playOnce) {
+                                const introDur = structured.intro.getClip ? (structured.intro.getClip().duration || 0) : 0;
+                                const loopDur = structured.loop.getClip ? (structured.loop.getClip().duration || 0) : 0;
+                                const outroDur = structured.outro.getClip ? (structured.outro.getClip().duration || 0) : 0;
+                                const totalMs = Math.round((introDur + loopDur + outroDur) * 1000) + 300;
+                                const key = `${actionName}:structured`;
+                                if (this._playOnceTimers[key]) { clearTimeout(this._playOnceTimers[key]); delete this._playOnceTimers[key]; }
+                                this._playOnceTimers[key] = setTimeout(() => {
+                                    try {
+                                        console.log(`[AnimationHandler] playOnce structured fallback for ${key} -> transitioning to idle`);
+                                        try { structured.loop.fadeOut(0.2); } catch (e) { /* ignore */ }
+                                        setTimeout(() => { try { this.startAction('idle'); } catch (e) { /* ignore */ } }, 200);
+                                    } catch (err) { console.warn('[AnimationHandler] structured fallback error:', err); }
+                                }, totalMs);
+                            }
+                        } catch (err) {
+                            console.warn('[AnimationHandler] Failed to schedule structured playOnce fallback:', err);
+                        }
                         return;
+                    }
+
+                    // Bind a global mixer finished handler once to detect when
+                    // single-clip playOnce actions finish so we can advance idle loops.
+                    try {
+                        if (this.mixer && !this._globalMixerFinishBound) {
+                            this._globalMixerFinishBound = true;
+                            this.mixer.addEventListener('finished', async (evt) => {
+                                try {
+                                    const finishedAction = evt.action;
+                                    if (!finishedAction) return;
+
+                                    // If the finished action was marked to clampWhenFinished
+                                    // we treat it as a playOnce candidate.
+                                    if (!finishedAction.clampWhenFinished) return;
+
+                                    // Find the key (actionName[:file]) corresponding to this action
+                                    let matchedKey = null;
+                                    for (const k of Object.keys(this.actions)) {
+                                        if (this.actions[k] === finishedAction) {
+                                            matchedKey = k;
+                                            break;
+                                        }
+                                    }
+
+                                    // If we couldn't map it, bail out
+                                    if (!matchedKey) return;
+
+                                    // If it was a specific-file action like 'idle:Look Around.fbx'
+                                    const parts = matchedKey.split(':');
+                                    const keyActionName = parts[0];
+                                    const keyFile = parts.length > 1 ? parts.slice(1).join(':') : null;
+
+                                    // Only advance the idle loop when the logical state is idle
+                                    // or when the finished action belongs to idle group.
+                                    if (keyActionName !== 'idle' && this.currentAction !== finishedAction) return;
+
+                                    // Clear any playOnce timers for this action
+                                    try {
+                                        const tkey = keyFile ? `${keyActionName}:${keyFile}` : keyActionName;
+                                        if (this._playOnceTimers && this._playOnceTimers[tkey]) {
+                                            clearTimeout(this._playOnceTimers[tkey]);
+                                            delete this._playOnceTimers[tkey];
+                                        }
+                                    } catch (e) { /* ignore */ }
+
+                                    // Pick a different idle animation (prefer next random different)
+                                    try {
+                                        const files = await this.getAnimationsForType('idle');
+                                        if (!files || files.length === 0) return;
+                                        // find candidates excluding the one we just played (if known)
+                                        const candidates = keyFile ? files.filter(f => f !== keyFile) : files.slice();
+                                        let nextFile = null;
+                                        if (candidates.length > 0) {
+                                            nextFile = candidates[Math.floor(Math.random() * candidates.length)];
+                                        } else {
+                                            // fallback to any file (will possibly replay same)
+                                            nextFile = files[Math.floor(Math.random() * files.length)];
+                                        }
+
+                                        if (nextFile) {
+                                            console.log('[AnimationHandler] playOnce finished -> starting next idle animation:', nextFile);
+                                            // Start the next idle animation (not playOnce)
+                                            try {
+                                                await this.startAction('idle', nextFile, false);
+                                            } catch (e) {
+                                                console.warn('[AnimationHandler] Failed to start next idle action after playOnce:', e);
+                                            }
+                                        }
+                                    } catch (e) {
+                                        console.warn('[AnimationHandler] Error advancing idle after playOnce:', e);
+                                    }
+                                } catch (err) {
+                                    console.warn('[AnimationHandler] global mixer finished handler error:', err);
+                                }
+                            });
+                        }
+                    } catch (err) {
+                        console.warn('[AnimationHandler] Failed to bind global mixer finished handler:', err);
                     }
 
                     // Stop current action
@@ -4454,10 +4611,47 @@
                     }
 
                     // Start new action (single clip)
-                    console.log(`[AnimationHandler] Starting new action for ${actionName}`);
+                    console.log(`[AnimationHandler] Starting new action for ${actionName} (playOnce=${playOnce})`);
+                    try {
+                        if (playOnce) {
+                            // Ensure action is configured to play once
+                            action.setLoop(THREE.LoopOnce, 0);
+                            action.clampWhenFinished = true;
+                        }
+                    } catch (err) {
+                        console.warn('[AnimationHandler] Failed to set action playOnce:', err);
+                    }
                     action.reset().fadeIn(0.5).play();
                     this.currentAction = action;
                     console.log(`[AnimationHandler] Action started successfully`);
+
+                    // Safety fallback: if playOnce requested, schedule a timer to
+                    // force-transition back to idle after the clip duration + buffer
+                    try {
+                        // clear previous timer for this actionName if present
+                        const key = animationFile ? `${actionName}:${animationFile}` : actionName;
+                        if (this._playOnceTimers[key]) {
+                            clearTimeout(this._playOnceTimers[key]);
+                            delete this._playOnceTimers[key];
+                        }
+                        if (playOnce) {
+                            const clip = action.getClip ? action.getClip() : null;
+                            const dur = clip && clip.duration ? (clip.duration * 1000) : 3000; // default 3s
+                            this._playOnceTimers[key] = setTimeout(() => {
+                                try {
+                                    console.log(`[AnimationHandler] playOnce fallback timer fired for ${key} -> transitioning to idle`);
+                                    // Fade out current action and return to idle
+                                    try { action.fadeOut(0.2); } catch (err) { /* ignore */ }
+                                    // Start idle after a short delay to allow fade
+                                    setTimeout(() => { try { this.startAction('idle'); } catch (e) { /* ignore */ } }, 200);
+                                } catch (err) {
+                                    console.warn('[AnimationHandler] playOnce fallback handler error:', err);
+                                }
+                            }, dur + 200);
+                        }
+                    } catch (err) {
+                        console.warn('[AnimationHandler] Failed to schedule playOnce fallback timer:', err);
+                    }
                 }
 
                 stopAction(actionName) {
@@ -4499,6 +4693,15 @@
                         action.stop();
                     }
                     this.currentAction = null;
+                    // clear any playOnce fallback timers
+                    try {
+                        for (const k of Object.keys(this._playOnceTimers || {})) {
+                            clearTimeout(this._playOnceTimers[k]);
+                            delete this._playOnceTimers[k];
+                        }
+                    } catch (err) {
+                        console.warn('[AnimationHandler] Failed to clear playOnce timers on stopAll:', err);
+                    }
                 }
             }
 
@@ -4626,20 +4829,62 @@
                         console.error('[synth_webui] ⚠️ VRM or VRM.scene is missing!');
                     }
                     
+                    console.log('[synth_webui] Preparing VRM before adding to scene...');
+
+                    // Hide the VRM initially to avoid visible T-pose while animations
+                    // are being prepared. We'll unhide after animations are ready
+                    // (or on error to avoid leaving the scene invisible forever).
+                    try {
+                        if (vrm.scene) vrm.scene.visible = false;
+
+                    } catch (visErr) {
+                        console.warn('[synth_webui] Failed to set VRM invisible before preload:', visErr);
+                    }
+
+                    // Initialize animation mixer BEFORE adding the VRM to the scene
+                    // so animations can be loaded and started and the model will be
+                    // added already animating (reduces visible T-pose on load).
+                    try {
+                        console.log('[synth_webui] Creating AnimationMixer (pre-add)...');
+                        currentMixer = new THREE.AnimationMixer(vrm.scene);
+                        window.vrmMixer = currentMixer; // Make mixer available globally for AnimationHandler
+                        console.log('[synth_webui] AnimationMixer created and set globally (pre-add)');
+
+                        console.log('[synth_webui] Loading default animations (pre-add)...');
+                        // Load and start idle/talk/think/write actions before adding to scene
+                        await loadDefaultAnimations(vrm);
+                        console.log('[synth_webui] Default animations loaded (pre-add)');
+                        // If animations loaded successfully, unhide the VRM so it
+                        // will be displayed already animated when added to the scene.
+                        try {
+                            if (vrm.scene) vrm.scene.visible = true;
+                        } catch (unvisErr) {
+                            console.warn('[synth_webui] Failed to unhide VRM after preload:', unvisErr);
+                        }
+                    } catch (animErr) {
+                        console.warn('[synth_webui] Warning: failed to preload animations before adding VRM:', animErr);
+                        // Ensure we unhide even on error to avoid invisible models
+                        try {
+                            if (vrm.scene) vrm.scene.visible = true;
+                        } catch (_e) {
+                            /* ignore */
+                        }
+                    }
+
                     console.log('[synth_webui] Clearing existing VRM from scene...');
                     clearVRM();
                     console.log('[synth_webui] ✓ Previous VRM cleared');
-                    
-                    console.log('[synth_webui] Adding new VRM to scene...');
+
+                    console.log('[synth_webui] Adding new VRM to scene (already animated)...');
                     console.log('[synth_webui] Scene before add - children count:', scene.children.length);
                     scene.add(vrm.scene);
                     console.log('[synth_webui] ✓ VRM added to scene');
                     console.log('[synth_webui] Scene after add - children count:', scene.children.length);
-                    
+
                     currentVRM = vrm;
                     currentModel = name;
                     console.log('[synth_webui] currentVRM set:', currentVRM);
-                    
+
                     // Configure VRM LookAt to face the camera
                     if (vrm.lookAt) {
                         vrm.lookAt.target = camera; // Use camera object, not camera.position
@@ -4648,16 +4893,6 @@
                         console.log('[synth_webui] ⚠️ VRM LookAt not available');
                     }
                     console.log('[synth_webui] currentModel set:', currentModel);
-                    
-                    // Initialize animation mixer
-                    console.log('[synth_webui] Creating AnimationMixer...');
-                    currentMixer = new THREE.AnimationMixer(vrm.scene);
-                    window.vrmMixer = currentMixer; // Make mixer available globally for AnimationHandler
-                    console.log('[synth_webui] AnimationMixer created and set globally');
-                    
-                    // Load default animations
-                    console.log('[synth_webui] Loading default animations...');
-                    await loadDefaultAnimations(vrm);
                     
                     setStatus(`Avatar ${name} loaded`, 'success');
                     console.log(`[synth_webui] ✓✓✓ VRM ${name} loaded and rendered successfully ✓✓✓`);
@@ -4693,6 +4928,22 @@
                     animationHandler = new AnimationHandler(currentMixer, vrm);
                     
                     console.log('[synth_webui] Loading idle action...');
+                        // Preload all animations for the current skin and action types to
+                        // reduce T-pose flashes when switching animations at runtime.
+                        // This will populate animationHandler.loadedAnimations cache.
+                        try {
+                            console.log('[synth_webui] Preloading all animations (may take a moment)...');
+                            if (typeof animationHandler.preloadAllAnimations === 'function') {
+                                await animationHandler.preloadAllAnimations();
+                                console.log('[synth_webui] ✓ Preloaded all animations');
+                            } else {
+                                console.log('[synth_webui] preloadAllAnimations not available');
+                            }
+                        } catch (err) {
+                            console.warn('[synth_webui] Preload all animations failed:', err);
+                        }
+
+                    console.log('[synth_webui] Loading idle action (post-preload)...');
                     try {
                         await animationHandler.loadAction('idle');
                         await animationHandler.startAction('idle');
@@ -4700,15 +4951,7 @@
                     } catch (e) {
                         console.error('[synth_webui] ✗ Idle action failed:', e);
                     }
-                    
-                    console.log('[synth_webui] Loading talk action...');
-                    try {
-                        await animationHandler.loadAction('talk');
-                        console.log('[synth_webui] ✓ Talk action loaded');
-                    } catch (e) {
-                        console.error('[synth_webui] ✗ Talk action failed:', e);
-                    }
-                    
+
                     console.log('[synth_webui] Loading think action...');
                     try {
                         await animationHandler.loadAction('think');
@@ -4852,6 +5095,174 @@
             window.animationHandler = animationHandler;
             console.log('[synth_webui] Animation functions exposed globally via window.VRMAnimations');
             console.log('[synth_webui] animationHandler exposed globally');
+
+            // ------------------------------------------------------------------
+            // Touch interaction: tap (pointer click without drag) on the model
+            // should trigger an animation from /skins/<skin>/animations/touch/
+            // We also capture the touched part name for future engine use.
+            // ------------------------------------------------------------------
+            (function setupTouchInteraction() {
+                try {
+                    const raycaster = new THREE.Raycaster();
+                    const mouse = new THREE.Vector2();
+                    let pointerDownInfo = null;
+                    let isDragging = false;
+
+                    // Map raw node/mesh names to human-friendly body part labels.
+                    // Heuristics: strip common suffixes like (merged), baked, numeric suffixes,
+                    // then match common tokens via ordered regex rules. Returns { label, confidence }.
+                    function mapTouchedNodeToHuman(rawName) {
+                        if (!rawName) return { label: 'unknown', confidence: 0 };
+                        let name = String(rawName).toLowerCase();
+                        // remove parenthesis content and common suffixes
+                        name = name.replace(/\(.*?\)/g, ' ');
+                        name = name.replace(/[_\-]+/g, ' ');
+                        name = name.replace(/\b(merged|baked|combined|mesh|grp|group|lod\d*|low|high|geo)\b/g, ' ');
+                        name = name.replace(/\d+/g, ' ');
+                        name = name.replace(/\s+/g, ' ').trim();
+
+                        const patterns = [
+                            { r: /\b(cheek)\b/, label: 'cheek' },
+                            { r: /\b(hair|bangs|ponytail|braid)\b/, label: 'hair' },
+                            { r: /\b(head|skull|face|jaw|chin|nose|mouth|lip|ear|eye|brow)\b/, label: 'head' },
+                            { r: /\b(shoulder|clavicle|collar)\b/, label: 'shoulder' },
+                            { r: /\b(upper ?arm|bicep|tricep)\b/, label: 'upper_arm' },
+                            { r: /\b(forearm|fore_arm|radius|ulna)\b/, label: 'forearm' },
+                            { r: /\b(hand|palm|finger|thumb|index|middle|ring|pinky)\b/, label: 'hand' },
+                            { r: /\b(chest|breast|bust|torso|thorax)\b/, label: 'bust' },
+                            { r: /\b(abdomen|belly|stomach)\b/, label: 'abdomen' },
+                            { r: /\b(pelvis|crotch|groin|hip)\b/, label: 'crotch' },
+                            { r: /\b(thigh|quadriceps|hamstring)\b/, label: 'thigh' },
+                            { r: /\b(knee)\b/, label: 'knee' },
+                            { r: /\b(calf|shin|leg|tibia)\b/, label: 'leg' },
+                            { r: /\b(foot|toe|heel)\b/, label: 'foot' },
+                            { r: /\b(back|spine|shoulderblade|scapula)\b/, label: 'back' },
+                            { r: /\b(eye|nose|mouth|ear)\b/, label: 'face' }
+                        ];
+
+                        for (let p of patterns) {
+                            if (p.r.test(name)) return { label: p.label, confidence: 0.95 };
+                        }
+
+                        // fallback: use first token or the raw cleaned name
+                        const first = (name.split(' ')[0] || '').trim();
+                        if (first) return { label: first, confidence: 0.45 };
+                        return { label: 'unknown', confidence: 0 };
+                    }
+
+                    canvas.addEventListener('pointerdown', (ev) => {
+                        pointerDownInfo = { x: ev.clientX, y: ev.clientY, t: Date.now() };
+                        isDragging = false;
+                    });
+
+                    canvas.addEventListener('pointermove', (ev) => {
+                        if (!pointerDownInfo) return;
+                        const dx = ev.clientX - pointerDownInfo.x;
+                        const dy = ev.clientY - pointerDownInfo.y;
+                        if (Math.sqrt(dx*dx + dy*dy) > 6) {
+                            isDragging = true;
+                        }
+                    });
+
+                    canvas.addEventListener('pointerup', async (ev) => {
+                        try {
+                            const down = pointerDownInfo;
+                            pointerDownInfo = null;
+                            if (!down) return;
+                            const dt = Date.now() - down.t;
+                            if (isDragging || dt > 1000) return; // treat as drag or long press
+
+                            // compute normalized device coords
+                            const rect = canvas.getBoundingClientRect();
+                            mouse.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
+                            mouse.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
+
+                            raycaster.setFromCamera(mouse, camera);
+                            // Only test against the current VRM scene to avoid hitting background
+                            // geometry or other non-avatar objects which would incorrectly
+                            // trigger touch animations when clicking empty space.
+                            if (!currentVRM || !currentVRM.scene) return;
+                            const intersects = raycaster.intersectObject(currentVRM.scene, true);
+                            if (!intersects || intersects.length === 0) return;
+
+                            const intersect = intersects[0];
+                            let node = intersect.object;
+                            // climb up to find a named node (bone/mesh) inside the VRM
+                            let touchedPart = null;
+                            while (node && node !== currentVRM?.scene && node !== scene && !touchedPart) {
+                                if (node.name && node.name.trim()) touchedPart = node.name;
+                                node = node.parent;
+                            }
+                            if (!touchedPart) touchedPart = intersect.object.name || 'unknown';
+
+                            // Map raw node name to a human-friendly label and expose both
+                            const mapped = (typeof mapTouchedNodeToHuman === 'function') ? mapTouchedNodeToHuman(touchedPart) : { label: touchedPart || 'unknown', confidence: 0 };
+                            console.log('[synth_webui] Model tapped - touched part:', touchedPart, 'mapped:', mapped);
+                            window.lastTouchedPart = { part: touchedPart, at: Date.now() };
+                            window.lastTouchedPartHuman = { part: mapped.label, raw: touchedPart, confidence: mapped.confidence, at: Date.now(), method: 'heuristic' };
+
+                            // Load available touch animations for current skin
+                            if (!animationHandler || typeof animationHandler.getAnimationsForType !== 'function') return;
+                            const files = await animationHandler.getAnimationsForType('touch');
+                            if (!files || files.length === 0) {
+                                console.log('[synth_webui] No touch animations found for current skin');
+                                return;
+                            }
+
+                            // pick a random animation
+                            const animationFile = files[Math.floor(Math.random() * files.length)];
+
+                            // Try to fetch descriptor next to the animation file (filename + .json)
+                            let descriptor = null;
+                            try {
+                                const skin = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm','') : 'Rei';
+                                const descUrl = `/skins/${skin}/animations/touch/${encodeURIComponent(animationFile)}.json`;
+                                const resp = await fetch(descUrl);
+                                if (resp.ok) descriptor = await resp.json();
+                            } catch (err) {
+                                // ignore descriptor fetch errors
+                            }
+
+                            const playOnce = !!(descriptor && descriptor.play_once);
+
+                            console.log('[synth_webui] Triggering touch animation:', animationFile, 'playOnce=', playOnce, 'descriptor=', descriptor);
+                            try {
+                                animationHandler.startAction('touch', animationFile, playOnce);
+                            } catch (err) {
+                                console.warn('[synth_webui] Failed to start touch action:', err);
+                            }
+
+                            // Notify backend about the touch (optional, reserved for future engine use)
+                            try {
+                                if (typeof ws !== 'undefined' && ws && ws.readyState === WebSocket.OPEN) {
+                                    try {
+                                        const touchPayload = {
+                                            type: 'touch',
+                                            part: touchedPart,
+                                            mapped_part: window.lastTouchedPartHuman ? window.lastTouchedPartHuman.part : null,
+                                            mapped_confidence: window.lastTouchedPartHuman ? window.lastTouchedPartHuman.confidence : null,
+                                            animation: animationFile,
+                                            descriptor: descriptor || null
+                                        };
+                                        ws.send(JSON.stringify(touchPayload));
+                                    } catch (err) {
+                                        console.warn('[synth_webui] Failed to send touch payload:', err);
+                                    }
+                                }
+                            } catch (err) {
+                                console.warn('[synth_webui] Failed to notify backend of touch:', err);
+                            }
+
+                        } catch (err) {
+                            console.warn('[synth_webui] touch handler error:', err);
+                        }
+                    });
+
+                    console.log('[synth_webui] Touch interaction initialized (tap to play touch animations)');
+                } catch (err) {
+                    console.warn('[synth_webui] Failed to setup touch interaction:', err);
+                }
+            })();
 
             function renderList(data) {
                 if (!listEl) return;

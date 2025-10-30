@@ -125,6 +125,11 @@ _last_db_log_time = 0
 _pool = None
 _pool_lock = asyncio.Lock()
 
+# Track active connections for leak detection and monitoring
+_active_conn_count = 0
+_conn_acquired_times: dict[int, float] = {}
+_conn_acquired_stacks: dict[int, str] = {}
+
 async def get_pool():
     """Get or create the database connection pool."""
     global _pool
@@ -148,6 +153,7 @@ async def get_pool():
 async def get_conn() -> aiomysql.Connection:
     """Return an async MariaDB connection from the connection pool."""
     global _last_db_log_time
+    global _active_conn_count
     try:
         now = time.time()
         if now - _last_db_log_time > _DB_LOG_THROTTLE_SEC:
@@ -163,26 +169,180 @@ async def get_conn() -> aiomysql.Connection:
     log_debug("[db] get_pool() completed, about to call pool.acquire()")
     try:
         conn = await asyncio.wait_for(pool.acquire(), timeout=10.0)
+    except asyncio.CancelledError:
+        # Preserve cancellation semantics but log for debugging
+        log_error("[db] get_conn cancelled while waiting for pool.acquire()")
+        raise
     except asyncio.TimeoutError:
         log_error("[db] TIMEOUT acquiring connection from pool after 10 seconds - pool may be exhausted")
         raise TimeoutError("Database connection pool exhausted - timeout acquiring connection")
+
+    # Track active connections for monitoring/leak detection
+    try:
+        _active_conn_count += 1
+        try:
+            _conn_acquired_times[id(conn)] = time.time()
+            # Capture a short stack trace at acquisition time to help diagnose
+            # where connections are being held without release.
+            try:
+                import traceback
+                stack = traceback.format_stack(limit=8)
+                _conn_acquired_stacks[id(conn)] = ''.join(stack)
+            except Exception:
+                pass
+        except Exception:
+            pass
+        # Warn when we're close to pool capacity
+        try:
+            maxsize = getattr(pool, 'maxsize', None)
+            if maxsize and _active_conn_count >= max(1, maxsize - 3):
+                # Compute the oldest-held connection age and include a stack
+                oldest_age = 0
+                oldest_id = None
+                try:
+                    now = time.time()
+                    for cid, ts in list(_conn_acquired_times.items()):
+                        age = now - ts
+                        if age > oldest_age:
+                            oldest_age = age
+                            oldest_id = cid
+                except Exception:
+                    oldest_age = 0
+                    oldest_id = None
+
+                msg = f"[db] Active DB connections high: {_active_conn_count}/{maxsize}"
+                if oldest_id is not None:
+                    try:
+                        stack_snip = _conn_acquired_stacks.get(oldest_id, None)
+                        if stack_snip:
+                            msg += f"; oldest held={int(oldest_age)}s; sample acquisition stack:\n{stack_snip}"
+                        else:
+                            msg += f"; oldest held={int(oldest_age)}s"
+                    except Exception:
+                        msg += f"; oldest held={int(oldest_age)}s"
+                log_warning(msg)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
     log_debug("[db] Connection acquired from pool")
-    return conn
+
+    # Wrap the raw aiomysql connection in a small proxy so that existing
+    # call sites that call `conn.close()` will trigger our `release_conn`
+    # routine (which updates internal counters and returns the connection
+    # to the pool correctly). This avoids having to change many call-sites
+    # across the codebase.
+    class _ConnProxy:
+        def __init__(self, _conn):
+            self._conn = _conn
+
+        def __getattr__(self, item):
+            return getattr(self._conn, item)
+
+        def close(self):
+            """Synchronous close that schedules the async release routine.
+
+            If there's a running loop, schedule release_conn asynchronously.
+            Otherwise run it synchronously to ensure the connection is
+            returned to the pool even during startup/one-off scripts.
+            """
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # No running loop — run the async release synchronously
+                try:
+                    asyncio.run(release_conn(self._conn))
+                except Exception:
+                    # As a last resort, attempt direct close
+                    try:
+                        self._conn.close()
+                    except Exception:
+                        pass
+            else:
+                # Schedule release in the running loop
+                try:
+                    loop.create_task(release_conn(self._conn))
+                except Exception:
+                    try:
+                        asyncio.ensure_future(release_conn(self._conn))
+                    except Exception:
+                        # Fallback: try to call close directly
+                        try:
+                            self._conn.close()
+                        except Exception:
+                            pass
+
+    return _ConnProxy(conn)
+
+
+class _ConnContext:
+    """Async context manager that yields a DB connection and ensures it is
+    released via `release_conn` when the context exits. Use this instead of
+    calling `get_conn()` directly to avoid leaking connections.
+    """
+
+    async def __aenter__(self):
+        self._conn = await get_conn()
+        return self._conn
+
+    async def __aexit__(self, exc_type, exc, tb):
+        try:
+            await release_conn(self._conn)
+        except Exception:
+            pass
+
+
+def get_conn_ctx():
+    """Return an async context manager for acquiring/releasing a DB connection.
+
+    Usage:
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(...)
+    """
+    return _ConnContext()
 
 async def release_conn(conn):
     """Release a connection back to the pool."""
-    if conn:
-        conn.close()  # This automatically returns the connection to the pool
+    global _active_conn_count
+    if not conn:
+        return
+    try:
+        # Attempt to close the connection which returns it to the pool
+        try:
+            conn.close()
+        except Exception:
+            # Some aiomysql internals may expose pool.release; attempt it as fallback
+            try:
+                pool = await get_pool()
+                if hasattr(pool, 'release'):
+                    pool.release(conn)
+            except Exception:
+                pass
+
         log_debug("[db] Connection released to pool")
+    finally:
+        try:
+            _active_conn_count = max(0, _active_conn_count - 1)
+        except Exception:
+            pass
+        try:
+            _conn_acquired_times.pop(id(conn), None)
+        except Exception:
+            pass
+        try:
+            _conn_acquired_stacks.pop(id(conn), None)
+        except Exception:
+            pass
 
 async def test_connection() -> bool:
     """Check if the database is reachable."""
     try:
-        conn = await get_conn()
-        async with conn.cursor() as cur:
-            await cur.execute("SELECT 1")
-            await cur.fetchone()
-        conn.close()
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT 1")
+                await cur.fetchone()
         return True
     except Exception as e:
         print(f"[test_connection] Error: {e}")
@@ -190,11 +350,11 @@ async def test_connection() -> bool:
 
 async def init_db() -> None:
     """Asynchronously initialize essential MariaDB tables (core only)."""
-    conn = await get_conn()
-    try:
-        async with conn.cursor() as cur:
-            # settings table for configuration values - core functionality
-            await cur.execute(
+    async with get_conn_ctx() as conn:
+        try:
+            async with conn.cursor() as cur:
+                # settings table for configuration values - core functionality
+                await cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS settings (
                     `setting_key` VARCHAR(255) PRIMARY KEY,
@@ -222,10 +382,8 @@ async def init_db() -> None:
                 INSERT IGNORE INTO settings (`setting_key`, `value`) VALUES ('active_llm', 'manual')
                 """
             )
-    except Exception as e:
-        print(f"[init_db] Error: {e}")
-    finally:
-        conn.close()
+        except Exception as e:
+            print(f"[init_db] Error: {e}")
 
 
 async def ensure_core_tables() -> None:
@@ -255,20 +413,18 @@ async def insert_memory(
 
     await ensure_core_tables()
 
-    conn = await get_conn()
-    try:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                INSERT INTO memories (timestamp, content, author, source, tags, scope, emotion, intensity, emotion_state)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                (timestamp, content, author, source, tags, scope, emotion, intensity, emotion_state),
-            )
-    except Exception as e:
-        print(f"[insert_memory] Error: {e}")
-    finally:
-        conn.close()
+    async with get_conn_ctx() as conn:
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    INSERT INTO memories (timestamp, content, author, source, tags, scope, emotion, intensity, emotion_state)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (timestamp, content, author, source, tags, scope, emotion, intensity, emotion_state),
+                )
+        except Exception as e:
+            print(f"[insert_memory] Error: {e}")
 
 # 💥 Insert a new emotional event
 async def insert_emotion_event(
@@ -283,106 +439,96 @@ async def insert_emotion_event(
     next_check: str,
 ) -> None:
     await ensure_core_tables()
-    conn = await get_conn()
-    try:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                INSERT INTO emotion_diary (id, source, event, emotion, intensity, state, trigger_condition, decision_logic, next_check)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    eid,
-                    source,
-                    event,
-                    emotion,
-                    intensity,
-                    state,
-                    trigger_condition,
-                    decision_logic,
-                    next_check,
-                ),
-            )
-    except Exception as e:
-        print(f"[insert_emotion_event] Error: {e}")
-    finally:
-        conn.close()
+    async with get_conn_ctx() as conn:
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    INSERT INTO emotion_diary (id, source, event, emotion, intensity, state, trigger_condition, decision_logic, next_check)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        eid,
+                        source,
+                        event,
+                        emotion,
+                        intensity,
+                        state,
+                        trigger_condition,
+                        decision_logic,
+                        next_check,
+                    ),
+                )
+        except Exception as e:
+            print(f"[insert_emotion_event] Error: {e}")
 
 # 🔍 Retrieve active emotions
 async def get_active_emotions() -> list[dict]:
-    conn = await get_conn()
     try:
-        async with conn.cursor(aiomysql.DictCursor) as cur:
-            await cur.execute(
-                """
-                SELECT * FROM emotion_diary
-                WHERE state = 'active'
-                """
-            )
-            rows = await cur.fetchall()
+        async with get_conn_ctx() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    """
+                    SELECT * FROM emotion_diary
+                    WHERE state = 'active'
+                    """
+                )
+                rows = await cur.fetchall()
     except Exception as e:
         print(f"[get_active_emotions] Error: {e}")
         rows = []
-    finally:
-        conn.close()
     return [dict(row) for row in rows]
 
 # ➕ Modify the intensity of an emotion
 async def update_emotion_intensity(eid: str, delta: int) -> None:
     await ensure_core_tables()
-    conn = await get_conn()
-    try:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                UPDATE emotion_diary
-                SET intensity = intensity + %s
-                WHERE id = %s
-                """,
-                (delta, eid),
-            )
-    except Exception as e:
-        print(f"[update_emotion_intensity] Error: {e}")
-    finally:
-        conn.close()
+    async with get_conn_ctx() as conn:
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    UPDATE emotion_diary
+                    SET intensity = intensity + %s
+                    WHERE id = %s
+                    """,
+                    (delta, eid),
+                )
+        except Exception as e:
+            print(f"[update_emotion_intensity] Error: {e}")
 
 # 💀 Mark an emotion as resolved
 async def mark_emotion_resolved(eid: str) -> None:
     await ensure_core_tables()
-    conn = await get_conn()
-    try:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                UPDATE emotion_diary
-                SET state = 'resolved'
-                WHERE id = %s
-                """,
-                (eid,),
-            )
-    except Exception as e:
-        print(f"[mark_emotion_resolved] Error: {e}")
-    finally:
-        conn.close()
+    async with get_conn_ctx() as conn:
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    UPDATE emotion_diary
+                    SET state = 'resolved'
+                    WHERE id = %s
+                    """,
+                    (eid,),
+                )
+        except Exception as e:
+            print(f"[mark_emotion_resolved] Error: {e}")
 
 # 💎 Crystallize an active emotion
 async def crystallize_emotion(eid: str) -> None:
     await ensure_core_tables()
-    conn = await get_conn()
-    try:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                UPDATE emotion_diary
-                SET state = 'crystallized'
-                WHERE id = %s
-                """,
-                (eid,),
-            )
-    except Exception as e:
-        print(f"[crystallize_emotion] Error: {e}")
-    finally:
-        conn.close()
+    async with get_conn_ctx() as conn:
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    UPDATE emotion_diary
+                    SET state = 'crystallized'
+                    WHERE id = %s
+                    """,
+                    (eid,),
+                )
+        except Exception as e:
+            print(f"[crystallize_emotion] Error: {e}")
 
 # 🔁 Retrieve recent responses generated by the bot
 async def get_recent_responses(since_timestamp: str) -> list[dict]:
