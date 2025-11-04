@@ -120,6 +120,11 @@ RUN chmod +x /usr/local/bin/cleanup_chrome.sh /app/synth.sh
 
 # Copy project code last to leverage layer caching
 COPY . /app
+
+# Ensure static resources directory exists and copy logo
+RUN mkdir -p /app/res/synth_webui/static && \
+    if [ -f /app/res/synth_webui/static/synth_logo_bg.png ]; then true; else touch /app/res/synth_webui/static/.keep; fi
+
 RUN rm -rf /app/s6-services /app/automation_tools
 ENV PYTHONPATH=/app
 

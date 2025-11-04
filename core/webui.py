@@ -292,7 +292,7 @@ class SynthWebUIInterface:
             
             replacements = {
                 '%%BRAND_NAME%%': BRAND_NAME,
-                '%%LOGO_URL%%': '/static/synth_logo_bg.png',  # Default logo path
+                '%%LOGO_URL%%': '/js/synth_logo_bg.png',  # Logo served from /js directory
                 '%%RESPONSE_TIMEOUT%%': str(int(RESPONSE_TIMEOUT)),
                 '%%FAILED_MESSAGE_TEXT%%': str(get_failed_message_text()),
                 # Expose WEB_DEBUG flag to the template (default false)
@@ -1024,7 +1024,25 @@ class SynthWebUIInterface:
                 "error": diary_payload.get("error"),
             },
         }
+        # Clean ConfigVar proxies from response before JSON serialization
+        response = self._clean_for_json(response)
         return JSONResponse(response)
+
+    def _clean_for_json(self, obj: Any) -> Any:
+        """Recursively convert ConfigVar proxies and other non-JSON-serializable objects to JSON-safe types."""
+        if isinstance(obj, dict):
+            return {k: self._clean_for_json(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [self._clean_for_json(item) for item in obj]
+        elif hasattr(obj, '__class__') and obj.__class__.__name__ == 'ConfigVar':
+            # ConfigVar proxy - convert to string
+            return str(obj)
+        elif isinstance(obj, (str, int, float, bool, type(None))):
+            # Already JSON-serializable
+            return obj
+        else:
+            # Fallback for unknown types
+            return str(obj)
 
     async def _fetch_persona_snapshot(self) -> Dict[str, Any]:
         """Load core persona information for display."""
@@ -1079,8 +1097,18 @@ class SynthWebUIInterface:
                 aliases_raw = config_registry.get_value("SYNTH_ALIASES", None, value_type="json")
                 profile = config_registry.get_value("SYNTH_PROFILE", None)
 
+                # Convert ConfigVar proxies to actual values
+                if hasattr(name, '__str__'):
+                    name = str(name) if name else None
+                if hasattr(profile, '__str__'):
+                    profile = str(profile) if profile else None
+                
                 aliases = []
                 if aliases_raw:
+                    # Convert ConfigVar if needed
+                    if hasattr(aliases_raw, '__str__'):
+                        aliases_raw = str(aliases_raw)
+                    
                     # aliases_raw may be a JSON string or a list
                     if isinstance(aliases_raw, str):
                         import json
@@ -1216,28 +1244,62 @@ class SynthWebUIInterface:
                 async with conn.cursor() as cur:
                     if include_archived:
                         # Get entries from both tables, ordered by timestamp DESC
-                        await cur.execute("""
-                            (SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
-                                   emotions, interface, chat_id, thread_id, interaction_summary, user_message,
-                                   FALSE as archived
-                            FROM ai_diary)
-                            UNION ALL
-                            (SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
-                                   emotions, interface, chat_id, thread_id, interaction_summary, user_message,
-                                   TRUE as archived
-                            FROM ai_diary_archive)
-                            ORDER BY timestamp DESC
-                            LIMIT %s OFFSET %s
-                        """, (limit, offset))
+                        # Note: try to include involved_users if column exists
+                        try:
+                            await cur.execute("""
+                                (SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
+                                       emotions, interface, chat_id, thread_id, interaction_summary, user_message,
+                                       FALSE as archived
+                                FROM ai_diary)
+                                UNION ALL
+                                (SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
+                                       emotions, interface, chat_id, thread_id, interaction_summary, user_message,
+                                       TRUE as archived
+                                FROM ai_diary_archive)
+                                ORDER BY timestamp DESC
+                                LIMIT %s OFFSET %s
+                            """, (limit, offset))
+                        except Exception as e:
+                            # If involved_users column doesn't exist, fallback to query without it
+                            if "Unknown column" in str(e):
+                                await cur.execute("""
+                                    (SELECT id, content, personal_thought, timestamp, context_tags, '[]' as involved_users, 
+                                           emotions, interface, chat_id, thread_id, interaction_summary, user_message,
+                                           FALSE as archived
+                                    FROM ai_diary)
+                                    UNION ALL
+                                    (SELECT id, content, personal_thought, timestamp, context_tags, '[]' as involved_users, 
+                                           emotions, interface, chat_id, thread_id, interaction_summary, user_message,
+                                           TRUE as archived
+                                    FROM ai_diary_archive)
+                                    ORDER BY timestamp DESC
+                                    LIMIT %s OFFSET %s
+                                """, (limit, offset))
+                            else:
+                                raise
                     else:
-                        await cur.execute("""
-                            SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
-                                   emotions, interface, chat_id, thread_id, interaction_summary, user_message,
-                                   FALSE as archived
-                            FROM ai_diary
-                            ORDER BY timestamp DESC
-                            LIMIT %s OFFSET %s
-                        """, (limit, offset))
+                        try:
+                            await cur.execute("""
+                                SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
+                                       emotions, interface, chat_id, thread_id, interaction_summary, user_message,
+                                       FALSE as archived
+                                FROM ai_diary
+                                ORDER BY timestamp DESC
+                                LIMIT %s OFFSET %s
+                            """, (limit, offset))
+                        except Exception as e:
+                            # If involved_users column doesn't exist, fallback
+                            if "Unknown column" in str(e):
+                                await cur.execute("""
+                                    SELECT id, content, personal_thought, timestamp, context_tags, '[]' as involved_users, 
+                                           emotions, interface, chat_id, thread_id, interaction_summary, user_message,
+                                           FALSE as archived
+                                    FROM ai_diary
+                                    ORDER BY timestamp DESC
+                                    LIMIT %s OFFSET %s
+                                """, (limit, offset))
+                            else:
+                                raise
                     
                     rows = await cur.fetchall()
             finally:
@@ -2504,7 +2566,8 @@ class SynthWebUIInterface:
     async def list_skins(self):
         """List available skins (folders under skins).
 
-        Returns: JSON list with entries: name, preview_url (if present), meta (persona.md text), vrm_present
+        Returns: JSON list with entries: name, version, author, description, preview_url, vrm_present
+        Reads metadata from persona.json if available.
         """
         skins_dir = Path(__file__).resolve().parent.parent / "skins"
         result = []
@@ -2517,33 +2580,55 @@ class SynthWebUIInterface:
             name = entry.name
             if name == 'temp':
                 continue
+            
             preview = None
-            meta = None
             vrm_present = False
-            preview_path = entry / 'preview.png'
-            if preview_path.exists():
-                preview = f"/skins/{name}/preview.png"
-            # read persona md if present
-            for m in entry.glob('*.md'):
-                try:
-                    meta = m.read_text(encoding='utf-8')
+            version = None
+            author = None
+            description = None
+            
+            try:
+                # Check for preview image
+                preview_path = entry / 'preview.png'
+                if preview_path.exists():
+                    preview = f"/skins/{name}/preview.png"
+                
+                # Try to load metadata from persona.json
+                persona_json_path = entry / 'persona.json'
+                if persona_json_path.exists():
+                    try:
+                        import json
+                        persona_data = json.loads(persona_json_path.read_text(encoding='utf-8'))
+                        # Extract metadata from persona.json
+                        version = persona_data.get("version")
+                        author = persona_data.get("author")
+                        description = persona_data.get("description")
+                        # Use name from JSON if available
+                        if not name or name == entry.name:
+                            name = persona_data.get("name", entry.name)
+                    except Exception as e:
+                        log_debug(f"[webui] Error reading persona.json for skin '{entry.name}': {e}")
+                
+                # check for vrm - only check in direct directory, not recursive, for speed
+                for v in entry.glob('*.vrm'):
+                    vrm_present = True
                     break
-                except Exception:
-                    continue
-            # check for vrm
-            for v in entry.rglob('*.vrm'):
-                vrm_present = True
-                break
+            except Exception as e:
+                log_warning(f"[webui] Error scanning skin '{name}': {e}")
+            
             result.append({
                 'name': name,
+                'folder': entry.name,  # Keep original folder name for reference
+                'version': version,
+                'author': author,
+                'description': description,
                 'preview_url': preview,
-                'meta': meta,
                 'vrm_present': vrm_present,
                 'valid': vrm_present,
             })
 
         # Ensure Rei exists and is valid
-        rei = next((s for s in result if s['name'] == 'Rei'), None)
+        rei = next((s for s in result if s['folder'] == 'Rei'), None)
         if not rei:
             raise HTTPException(status_code=500, detail="Default skin 'Rei' missing")
         if not rei.get('valid'):

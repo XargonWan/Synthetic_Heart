@@ -1,8 +1,0 @@
-One of the two default SyntH skins — the first distributable models, feel free to edit it.
-
-Pronunciation: /'dzɛro/
-
-Browsing this skin's files you can see the structure of any skin you might want to create.
-Any animation not present in your skins will fall back here.
-
-Author: Xargon
