@@ -13,6 +13,8 @@ A "persona" in this context refers to the complete digital essence of a SyntH -
 a synthetic being with its own identity, personality, and emotional framework.
 """
 
+print("[persona_manager] DEBUG: Module import started", flush=True)
+
 import os
 import json
 import asyncio
@@ -254,7 +256,7 @@ SYNTH_PROFILE = config_registry.get_var(
 # config_registry. We register the variable and then attach persona-aware
 # getter/setter so the value reflects the active Persona object.
 try:
-    from core.exposed_variables import register_exposed_var
+    from core.variables_engine import register_exposed_var
 
     register_exposed_var(
         "SYNTH_NAME",
@@ -724,79 +726,59 @@ class PersonaManager(PluginBase):
         return instructions.get(action_name, {})
 
     async def load_persona(self, persona_id: str = "default") -> Optional[PersonaData]:
-        """Load persona data from database.
+        """Load persona data from config registry.
 
-        Note: Do NOT swallow database exceptions here. If the DB is temporarily
-        unavailable we want the exception to bubble up so callers (e.g.
-        async_init) can decide not to create a default persona and avoid
-        overwriting existing data.
+        Persona data is now stored in the config table, not in a separate persona table.
         """
-        result = await _fetchone(
-            "SELECT * FROM persona WHERE id = %s", 
-            (persona_id,)
-        )
-
-        if not result:
-            log_warning(f"[persona_manager] Persona {persona_id} not found in database")
+        if persona_id != "default":
+            log_warning(f"[persona_manager] Only 'default' persona is supported; requested '{persona_id}'")
             return None
 
-        # Convert database row to PersonaData
         try:
-            persona_data = {
-                'id': result[0],
-                'name': result[1],
-                'aliases': json.loads(result[2]) if result[2] else [],
-                'profile': result[3] or "",
-                'likes': json.loads(result[4]) if result[4] else [],
-                'dislikes': json.loads(result[5]) if result[5] else [],
-                'interests': json.loads(result[6]) if result[6] else [],
-                'emotive_state': json.loads(result[7]) if result[7] else [],
-                'current_animation': result[8],
-                'created_at': result[9] if isinstance(result[9], str) else (result[9].isoformat() if result[9] else ""),
-                'last_updated': result[10] if isinstance(result[10], str) else (result[10].isoformat() if result[10] else ""),
-            }
-        except Exception as e:
-            log_error(f"[persona_manager] Error decoding persona row for {persona_id}: {e}")
-            raise
+            # Load persona data from config_registry
+            name = config_registry.get_var("SYNTH_NAME", "Synth")
+            profile = config_registry.get_var("SYNTH_PROFILE", "")
+            aliases_raw = config_registry.get_var("SYNTH_ALIASES", [])
+            
+            # Parse aliases if it's a string (shouldn't happen with value_type="json", but be safe)
+            if isinstance(aliases_raw, str):
+                try:
+                    aliases = json.loads(aliases_raw)
+                except (json.JSONDecodeError, TypeError):
+                    aliases = []
+            else:
+                aliases = aliases_raw if isinstance(aliases_raw, list) else []
 
-        return PersonaData.from_dict(persona_data)
+            # Convert to PersonaData
+            persona_data = {
+                'id': persona_id,
+                'name': name,
+                'aliases': aliases,
+                'profile': profile,
+                'likes': [],  # Default empty lists - not stored in config
+                'dislikes': [],
+                'interests': [],
+                'emotive_state': [],
+                'current_animation': 'idle',
+                'created_at': datetime.utcnow().isoformat(),
+                'last_updated': datetime.utcnow().isoformat(),
+            }
+            
+            return PersonaData.from_dict(persona_data)
+            
+        except Exception as e:
+            log_error(f"[persona_manager] Error loading persona from config: {e}")
+            return None
 
     async def save_persona(self, persona: PersonaData) -> bool:
-        """Save persona data to database."""
+        """Save persona data to config registry."""
         try:
-            persona.last_updated = datetime.utcnow().isoformat()
+            # Save to config_registry (which persists to database)
+            config_registry.set_var("SYNTH_NAME", persona.name)
+            config_registry.set_var("SYNTH_PROFILE", persona.profile)
+            config_registry.set_var("SYNTH_ALIASES", persona.aliases)
             
-            await _execute(
-                """
-                INSERT INTO persona (id, name, aliases, profile, likes, dislikes, interests, emotive_state, current_animation, created_at, last_updated)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON DUPLICATE KEY UPDATE
-                    name = VALUES(name),
-                    aliases = VALUES(aliases),
-                    profile = VALUES(profile),
-                    likes = VALUES(likes),
-                    dislikes = VALUES(dislikes),
-                    interests = VALUES(interests),
-                    emotive_state = VALUES(emotive_state),
-                    current_animation = VALUES(current_animation),
-                    last_updated = VALUES(last_updated)
-                """,
-                (
-                    persona.id,
-                    persona.name,
-                    json.dumps(persona.aliases),
-                    persona.profile,
-                    json.dumps(persona.likes),
-                    json.dumps(persona.dislikes),
-                    json.dumps(persona.interests),
-                    json.dumps([asdict(es) for es in persona.emotive_state]),
-                    persona.current_animation,
-                    persona.created_at,
-                    persona.last_updated
-                )
-            )
-            
-            log_debug(f"[persona_manager] Saved persona {persona.id}")
+            log_debug(f"[persona_manager] Saved persona {persona.id} to config registry")
             _update_persona_configs(persona)  # Update config registry with saved persona values
             return True
             

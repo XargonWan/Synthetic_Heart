@@ -13,6 +13,13 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any
 from enum import Enum
 
+# Import exposed variables EARLY to ensure correct type registrations
+# before any circular import chains can cause persona_manager to load prematurely
+try:
+    import core.variables_engine  # noqa: F401
+except Exception as e:
+    log_warning(f"[core_initializer] Failed to import variables_engine at module level: {e}")
+
 
 class ComponentStatus(Enum):
     """Status of a system component."""
@@ -107,10 +114,44 @@ class CoreInitializer:
             self._ensure_core_actions()
             log_debug("[core_initializer] ✅ _ensure_core_actions() completed")
             
-            # 4. Initialize core persona manager
+            # 4. Initialize core persona manager BEFORE loading DB configs
+            # This ensures persona variables (SYNTH_NAME, SYNTH_PROFILE, SYNTH_ALIASES) are registered first
+            # Ensure core DB tables exist before attempting to load persona
+            from core.db import ensure_core_tables
+            try:
+                await ensure_core_tables()
+                log_debug("[core_initializer] ensure_core_tables() completed before persona init")
+            except Exception as _e:
+                log_warning(f"[core_initializer] ensure_core_tables() failed: {_e}")
+
             log_debug("[core_initializer] 🔍 About to call _initialize_persona_manager()")
-            self._initialize_persona_manager()
-            log_debug("[core_initializer] ✅ _initialize_persona_manager() completed")
+            try:
+                await self._initialize_persona_manager()
+                log_debug("[core_initializer] ✅ _initialize_persona_manager() completed")
+            except Exception as e:
+                log_warning(f"[core_initializer] Persona manager async init failed: {e}")
+            
+            # 3.5. Load all configurations from DB AFTER persona manager initialization
+            # This ensures SYNTH_NAME, SYNTH_PROFILE, SYNTH_ALIASES have been registered and can be loaded from DB
+            log_info("[core_initializer] Loading all configurations from database...")
+            try:
+                from core.config_manager import config_registry
+                
+                # Reset loaded flag for persona configs so they're reloaded from DB
+                for persona_key in ['SYNTH_NAME', 'SYNTH_PROFILE', 'SYNTH_ALIASES']:
+                    if persona_key in config_registry._definitions:
+                        config_registry._definitions[persona_key].loaded = False
+                        log_debug(f"[core_initializer] Reset loaded flag for {persona_key}")
+                
+                await config_registry.load_all_from_db()
+                log_info("[core_initializer] ✅ All configurations loaded from database")
+                
+                # Notify all listeners so components can update their global variables
+                log_info("[core_initializer] Notifying all config listeners...")
+                config_registry.notify_all_listeners()
+                log_info("[core_initializer] ✅ All config listeners notified")
+            except Exception as load_exc:
+                log_warning(f"[core_initializer] Failed to load configurations from DB: {load_exc}")
         
             log_debug("[core_initializer] About to call _build_actions_block()")
             try:
@@ -133,20 +174,6 @@ class CoreInitializer:
             except Exception as e:
                 log_error(f"[core_initializer] Error in _discover_interfaces: {e}")
                 self.startup_errors.append(f"Interface discovery failed: {e}")
-
-            # 5. NOW load all configurations from DB (after all components have registered their variables)
-            log_info("[core_initializer] Loading all configurations from database...")
-            try:
-                from core.config_manager import config_registry
-                await config_registry.load_all_from_db()
-                log_info("[core_initializer] ✅ All configurations loaded from database")
-                
-                # Notify all listeners so components can update their global variables
-                log_info("[core_initializer] Notifying all config listeners...")
-                config_registry.notify_all_listeners()
-                log_info("[core_initializer] ✅ All config listeners notified")
-            except Exception as load_exc:
-                log_warning(f"[core_initializer] Failed to load configurations from DB: {load_exc}")
             
             # 6. Initialize interface instances now that config is loaded
             log_info("[core_initializer] Initializing interface instances...")
@@ -278,7 +305,17 @@ class CoreInitializer:
             
             # NOTE: flush_env_overrides_to_db() will be called AFTER LLM engine is loaded
             # to avoid connection pool deadlocks during initialization
-                
+            # After registries are in place, migrate any existing config_registry
+            # definitions into the new Exposed Variables registry so metadata/UI
+            # info is centralized. This is a best-effort, idempotent migration.
+            try:
+                # Note: variables_engine is already imported earlier (step 3.5),
+                # so exposed variables are already registered at this point.
+                from core.exposed_migration import migrate_all_registered_configs
+                migrate_all_registered_configs()
+                log_debug("[core_initializer] Exposed variables migration completed")
+            except Exception as _e:
+                log_warning(f"[core_initializer] Exposed variables migration failed: {_e}")
         except Exception as e:
             log_error(f"[core_initializer] Failed to initialize registries: {e}", e)
             self.startup_errors.append(f"Registry initialization failed: {e}")
@@ -443,12 +480,17 @@ class CoreInitializer:
                     )
                     self.startup_errors.append(f"Plugin {module_name}: {e}")
     
-    def _initialize_persona_manager(self):
-        """Initialize the core persona manager."""
+    async def _initialize_persona_manager(self):
+        """Initialize the core persona manager and await async init."""
         try:
             import importlib
             importlib.import_module("core.persona_manager")
-            log_debug("[core_initializer] Persona manager initialized")
+            # Ensure the PersonaManager instance exists and run its async_init
+            from core.persona_manager import get_persona_manager
+            manager = get_persona_manager()
+            if manager and hasattr(manager, 'async_init'):
+                await manager.async_init()
+            log_debug("[core_initializer] Persona manager initialized and async_init awaited")
         except Exception as e:
             log_error(f"[core_initializer] Failed to initialize persona manager: {e}")
             self.startup_errors.append(f"Persona manager: {e}")

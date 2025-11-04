@@ -9,10 +9,31 @@ def get_current_aliases() -> list[str]:
     """Get the current persona's aliases, falling back to hardcoded ones."""
     try:
         from core.persona_manager import get_persona_manager
+        from core.config_manager import config_registry
         persona_manager = get_persona_manager()
         current_persona = persona_manager.get_current_persona()
         if current_persona and current_persona.aliases:
             return current_persona.aliases
+
+        # If persona not loaded or aliases empty, try reading from config registry
+        try:
+            # config_registry.get_value may return a JSON string for json types
+            raw = config_registry.get_value("SYNTH_ALIASES", ["SyntH", "Synthetic Heart"], value_type="json")
+            # If it's a string that looks like JSON, try to parse it
+            if isinstance(raw, str):
+                import json
+                try:
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, list):
+                        return parsed
+                except Exception:
+                    # Not JSON, fall through
+                    pass
+            if isinstance(raw, list):
+                return raw
+        except Exception:
+            # If config registry isn't available or value missing, fall back
+            pass
     except Exception as e:
         log_debug(f"[mention] Error getting current persona aliases: {e}")
     # Fallback to hardcoded aliases
@@ -42,13 +63,24 @@ def is_synth_mentioned(text: str) -> bool:
     """Return ``True`` if ``text`` contains any alias for synth."""
     if not text:
         return False
+    import re
     lowered = text.lower()
     aliases = get_current_aliases()
-    aliases_lower = [alias.lower() for alias in aliases]
-    for alias in aliases_lower:
-        if alias in lowered:
-            log_debug(f"[mention] synth alias matched: '{alias}'")
-            return True
+    # Use word-boundary-aware matching to reduce false positives (e.g. avoid
+    # matching 'synth' inside longer words). Support multi-word aliases.
+    for alias in aliases:
+        if not alias:
+            continue
+        pattern = r"\b" + re.escape(alias.lower()) + r"\b"
+        try:
+            if re.search(pattern, lowered, flags=re.UNICODE):
+                log_debug(f"[mention] synth alias matched: '{alias}'")
+                return True
+        except Exception:
+            # Fallback: simple substring match if regex fails for some alias
+            if alias.lower() in lowered:
+                log_debug(f"[mention] synth alias matched by fallback: '{alias}'")
+                return True
     return False
 
 

@@ -41,8 +41,6 @@ from core.config_manager import config_registry
 from core.message_chain import get_failed_message_text, RESPONSE_TIMEOUT, FAILED_MESSAGE_TEXT
 import core.plugin_instance as plugin_instance
 from core import db as core_db
-from core.animation_handler import get_animation_handler, AnimationState
-from core.persona_manager import get_persona_manager
 from core.action_state_manager import get_action_state_manager, AnimationPhase
 import mimetypes
 
@@ -213,6 +211,7 @@ class SynthWebUIInterface:
         log_info(f"{LOG_PREFIX} Interface registered")
         
         # Initialize animation handler
+        from core.animation_handler import get_animation_handler
         self.animation_handler = get_animation_handler()
         self.animation_handler.set_webui(self)
         log_info(f"{LOG_PREFIX} Animation handler initialized")
@@ -1073,6 +1072,42 @@ class SynthWebUIInterface:
             log_warning(f"{LOG_PREFIX} Unable to load persona: {exc}")
 
         if not persona:
+            # Fallback: try to populate snapshot from exposed config values
+            try:
+                from core.config_manager import config_registry
+                name = config_registry.get_value("SYNTH_NAME", None)
+                aliases_raw = config_registry.get_value("SYNTH_ALIASES", None, value_type="json")
+                profile = config_registry.get_value("SYNTH_PROFILE", None)
+
+                aliases = []
+                if aliases_raw:
+                    # aliases_raw may be a JSON string or a list
+                    if isinstance(aliases_raw, str):
+                        import json
+                        try:
+                            parsed = json.loads(aliases_raw)
+                            if isinstance(parsed, list):
+                                aliases = parsed
+                        except Exception:
+                            # not JSON - try splitting
+                            aliases = [a.strip() for a in aliases_raw.split(',') if a.strip()]
+                    elif isinstance(aliases_raw, list):
+                        aliases = aliases_raw
+
+                if name or aliases or profile:
+                    snapshot.update(
+                        {
+                            "available": True,
+                            "id": "default",
+                            "name": name or None,
+                            "aliases": aliases,
+                            "profile": profile or None,
+                        }
+                    )
+                    return snapshot
+            except Exception as exc:
+                log_debug(f"{LOG_PREFIX} Persona fallback from config failed: {exc}")
+
             return snapshot
 
         def _format_emotions(emotions: Optional[List[Any]]) -> List[Dict[str, Any]]:
@@ -2229,6 +2264,7 @@ class SynthWebUIInterface:
             log_info(f"{LOG_PREFIX} start() called - initializing persona manager and starting server if enabled")
             # Initialize persona manager now that core initialization is complete
             if self.persona_manager is None:
+                from core.persona_manager import get_persona_manager
                 self.persona_manager = get_persona_manager()
                 if self.persona_manager:
                     try:

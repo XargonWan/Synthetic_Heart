@@ -257,264 +257,6 @@ class ConfigRegistry:
                 f"Configuration '{key}' is overridden by environment and cannot be modified."
             )
 
-        # Special handling for persona-related configs
-        if key in ['SYNTH_NAME', 'SYNTH_PROFILE', 'SYNTH_ALIASES']:
-            try:
-                # Access persona manager via global reference
-                from core.persona_manager import _persona_manager_instance
-                manager = _persona_manager_instance
-                if manager and manager._current_persona:
-                    persona = manager._current_persona
-                    if key == 'SYNTH_NAME':
-                        persona.name = new_value
-                    elif key == 'SYNTH_PROFILE':
-                        persona.profile = new_value
-                    elif key == 'SYNTH_ALIASES':
-                        # Expect JSON/list for aliases. We store only the user-provided
-                        # aliases on the Persona object (exclude base canonical and name)
-                        try:
-                            if isinstance(new_value, str):
-                                import json as _json
-                                aliases_val = _json.loads(new_value)
-                            else:
-                                aliases_val = list(new_value)
-                        except Exception:
-                            aliases_val = []
-                        # Filter out canonical/base aliases and the persona name
-                        base_aliases = ["SyntH", "Synthetic Heart"]
-                        filtered = []
-                        for a in aliases_val:
-                            if not a:
-                                continue
-                            if a in base_aliases:
-                                continue
-                            if persona.name and a == persona.name:
-                                continue
-                            if a not in filtered:
-                                filtered.append(a)
-                        persona.aliases = filtered
-                    
-                    # Save the persona asynchronously using the globally-imported asyncio
-                    # Save persona record in background; don't await here to keep API responsive
-                    try:
-                        asyncio.create_task(manager.save_persona(persona))
-                    except Exception:
-                        # Best-effort: if scheduling fails, run non-blocking fallback
-                        _ = manager.save_persona(persona)
-
-                    # Update in-memory definition immediately and schedule DB persist
-                    definition.value = new_value
-                    definition.raw_value = self._serialize_value(definition, new_value)
-                    definition.loaded = True
-
-                    # Ensure SYNTH_ALIASES in config table includes the new name.
-                    # Build canonical alias list: base aliases + persona name + additional aliases.
-                    try:
-                        import json as _json
-                        base_aliases = ["SyntH", "Synthetic Heart"]
-                        all_aliases = list(base_aliases)
-                        if persona.name and persona.name not in all_aliases:
-                            all_aliases.append(persona.name)
-                        # persona.aliases contains only user-provided extras
-                        extra = persona.aliases or []
-                        for a in extra:
-                            if a not in all_aliases:
-                                all_aliases.append(a)
-
-                        # Update in-memory definition for SYNTH_ALIASES if present
-                        if "SYNTH_ALIASES" in self._definitions:
-                            alias_def = self._definitions["SYNTH_ALIASES"]
-                            alias_def.value = all_aliases
-                            alias_def.raw_value = _json.dumps(all_aliases)
-                            alias_def.loaded = True
-
-                        # Persist aliases to DB in background (best-effort)
-                        try:
-                            loop = asyncio.get_running_loop()
-
-                            async def _persist_aliases():
-                                try:
-                                    await self._persist_to_db("SYNTH_ALIASES", _json.dumps(all_aliases))
-                                    log_debug(f"[config] Persisted SYNTH_ALIASES after name change: {all_aliases}")
-                                except Exception as _exc:
-                                    log_warning(f"[config] Failed to persist SYNTH_ALIASES after name change: {_exc}")
-
-                            loop.create_task(_persist_aliases())
-                        except RuntimeError:
-                            # No running loop - persist synchronously
-                            try:
-                                import asyncio as _asyncio
-                                _asyncio.run(self._persist_to_db("SYNTH_ALIASES", _json.dumps(all_aliases)))
-                            except Exception:
-                                log_warning("[config] Sync persist failed for SYNTH_ALIASES after name change")
-                    except Exception:
-                        # Non-critical: alias persist failure shouldn't block setting name
-                        pass
-
-                    # Schedule background persistence to DB so the API call returns quickly.
-                    try:
-                        loop = asyncio.get_running_loop()
-                        async def _bg_persist():
-                            try:
-                                ok = await self._persist_to_db(definition.key, definition.raw_value)
-                                log_debug(f"[config] Background persist for {definition.key} returned {ok}")
-                                if not ok:
-                                    self._pending_persona_updates[definition.key] = new_value
-                                    log_warning(f"[config] Background persist of persona '{key}' failed; recorded pending update for retry (in-memory)")
-                                    self._start_pending_persona_worker()
-                                else:
-                                    log_info(f"[config] Background persisted persona '{key}' to config table")
-                            except Exception as exc:
-                                log_warning(f"[config] Background persist error for persona '{key}': {exc}")
-
-                        loop.create_task(_bg_persist())
-                    except RuntimeError:
-                        # No running loop - persist synchronously (rare path)
-                        try:
-                            import asyncio as _asyncio
-                            _asyncio.run(self._persist_to_db(definition.key, definition.raw_value))
-                        except Exception as exc:
-                            log_warning(f"[config] Sync background persist failed for '{key}': {exc}")
-
-                    for callback in list(definition.listeners):
-                        try:
-                            callback(new_value)
-                        except Exception as exc:  # pragma: no cover - listener safety
-                            log_warning(f"[config] Listener for '{key}' failed: {exc}")
-                    return
-                else:
-                    # Persona manager not ready: persist the config value to DB so
-                    # it's available on next startup and record a pending update so
-                    # the PersonaManager can apply it when it initializes.
-                    try:
-                        # If incoming value is aliases (list/JSON), normalize to list and
-                        # store pending user aliases (exclude base/name if present).
-                        if key == 'SYNTH_ALIASES':
-                            try:
-                                import json as _json
-                                if isinstance(new_value, str):
-                                    aliases_val = _json.loads(new_value)
-                                else:
-                                    aliases_val = list(new_value)
-                            except Exception:
-                                aliases_val = []
-
-                            # Determine current persona name if available in definitions
-                            current_name = None
-                            try:
-                                name_def = self._definitions.get('SYNTH_NAME')
-                                if name_def and name_def.value:
-                                    current_name = name_def.value
-                            except Exception:
-                                current_name = None
-
-                            base_aliases = ["SyntH", "Synthetic Heart"]
-                            filtered = []
-                            for a in aliases_val:
-                                if not a:
-                                    continue
-                                if a in base_aliases:
-                                    continue
-                                if current_name and a == current_name:
-                                    continue
-                                if a not in filtered:
-                                    filtered.append(a)
-
-                            # Set module in-memory state and record pending user aliases
-                            serialized = self._serialize_value(definition, filtered)
-                            definition.value = filtered
-                            definition.raw_value = serialized
-                            definition.loaded = True
-                            self._pending_persona_updates[definition.key] = filtered
-
-                            # Build full alias list for UI/DB persistence: base + name + extras
-                            try:
-                                import json as _json
-                                all_aliases = list(base_aliases)
-                                if current_name and current_name not in all_aliases:
-                                    all_aliases.append(current_name)
-                                for a in filtered:
-                                    if a not in all_aliases:
-                                        all_aliases.append(a)
-
-                                # Update in-memory SYNTH_ALIASES full definition for UI
-                                if "SYNTH_ALIASES" in self._definitions:
-                                    alias_def = self._definitions["SYNTH_ALIASES"]
-                                    alias_def.value = all_aliases
-                                    alias_def.raw_value = _json.dumps(all_aliases)
-                                    alias_def.loaded = True
-
-                                # Schedule background persist for SYNTH_ALIASES (full list)
-                                try:
-                                    loop = asyncio.get_running_loop()
-
-                                    async def _persist_aliases_notready():
-                                        try:
-                                            ok = await self._persist_to_db("SYNTH_ALIASES", _json.dumps(all_aliases))
-                                            if not ok:
-                                                log_warning("[config] Failed to persist SYNTH_ALIASES (manager not ready)")
-                                        except Exception as _exc:
-                                            log_warning(f"[config] Error persisting SYNTH_ALIASES (manager not ready): {_exc}")
-
-                                    loop.create_task(_persist_aliases_notready())
-                                except RuntimeError:
-                                    try:
-                                        import asyncio as _asyncio
-                                        _asyncio.run(self._persist_to_db("SYNTH_ALIASES", _json.dumps(all_aliases)))
-                                    except Exception:
-                                        log_warning("[config] Sync persist failed for SYNTH_ALIASES (manager not ready)")
-                            except Exception:
-                                pass
-                        else:
-                            serialized = self._serialize_value(definition, new_value)
-                            # Schedule background persist - set memory state immediately
-                            definition.value = new_value
-                            definition.raw_value = serialized
-                            definition.loaded = True
-                            # Record pending persona update for PersonaManager to pick up
-                            self._pending_persona_updates[definition.key] = new_value
-                        try:
-                            loop = asyncio.get_running_loop()
-
-                            async def _bg_persist_notready():
-                                try:
-                                    ok = await self._persist_to_db(definition.key, serialized)
-                                    log_debug(f"[config] Background persist for {definition.key} returned {ok}")
-                                    if not ok:
-                                        log_warning(f"[config] Persist of persona '{key}' failed in background; will retry")
-                                        self._start_pending_persona_worker()
-                                    else:
-                                        log_info(f"[config] Background persisted persona '{key}' to config table (manager not ready)")
-                                except Exception as exc:
-                                    log_warning(f"[config] Background persist error for persona '{key}': {exc}")
-
-                            loop.create_task(_bg_persist_notready())
-                        except RuntimeError:
-                            # No running loop - persist synchronously (rare path)
-                            try:
-                                import asyncio as _asyncio
-                                _asyncio.run(self._persist_to_db(definition.key, serialized))
-                            except Exception as exc:
-                                log_warning(f"[config] Sync background persist failed for '{key}': {exc}")
-
-                        for callback in list(definition.listeners):
-                            try:
-                                callback(new_value)
-                            except Exception as exc:  # pragma: no cover - listener safety
-                                log_warning(f"[config] Listener for '{key}' failed: {exc}")
-                        return
-                    except Exception as exc:
-                        log_error(f"[config] Failed to update persona '{key}': {exc}")
-                        # As a last resort record pending update so it will be retried
-                        try:
-                            self._pending_persona_updates[definition.key] = new_value
-                            self._start_pending_persona_worker()
-                        except Exception:
-                            pass
-                        return
-            except Exception as exc:
-                log_error(f"[config] Failed to update persona '{key}': {exc}")
-                raise
 
         # If definition has a setter, use it instead of persisting to DB
         if definition.setter is not None:
@@ -585,7 +327,6 @@ class ConfigRegistry:
 
     def export_definitions(self) -> List[Dict[str, Any]]:
         """Return all registered definitions with current state for the API."""
-
         exported: List[Dict[str, Any]] = []
         for defn in self._definitions.values():
             if not defn.loaded:
@@ -917,6 +658,8 @@ class ConfigRegistry:
         return str(value)
 
     def _convert_value(self, definition: ConfigDefinition, raw_value: str) -> Any:
+        if definition.key == "SYNTH_ALIASES":
+            print(f"[DEBUG] _convert_value called for SYNTH_ALIASES: value_type={definition.value_type!r}, raw_value={raw_value!r}", flush=True)
         try:
             if definition.value_type is bool:
                 return str(raw_value).strip().lower() in {"1", "true", "yes", "on"}
@@ -924,6 +667,12 @@ class ConfigRegistry:
                 return int(raw_value)
             if definition.value_type is float:
                 return float(raw_value)
+            # Handle explicit JSON type: deserialize string to native object (list/dict)
+            if definition.value_type == "json":
+                import json
+                if not raw_value or raw_value.strip() == "":
+                    return definition.default
+                return json.loads(raw_value)
             if callable(definition.value_type) and definition.value_type not in (bool, int, float, str):
                 return definition.value_type(raw_value)
         except Exception as exc:
@@ -941,14 +690,44 @@ class ConfigRegistry:
             return bool(definition.value)
         if definition.value_type in (int, float):
             return definition.value
-        return "" if definition.value is None else str(definition.value)
+        # Preserve JSON/list/dict types so the API can return native arrays/objects
+        # (previous behavior returned a stringified representation which broke
+        # the Web UI for list-valued settings like SYNTH_ALIASES).
+        if definition.value is None:
+            return ""
+        # If already a native container or explicitly JSON-typed, return as-is
+        if definition.value_type == "json" or isinstance(definition.value, (list, dict)):
+            return definition.value
+
+        # If the stored value is a string that looks like JSON (or a Python
+        # literal), try to deserialize it to return native arrays/objects.
+        if isinstance(definition.value, str):
+            s = definition.value.strip()
+            if s.startswith("[") or s.startswith("{"):
+                try:
+                    import json as _json
+                    return _json.loads(s)
+                except Exception:
+                    try:
+                        # Fall back to Python literal eval for strings like "['a','b']"
+                        import ast as _ast
+                        return _ast.literal_eval(s)
+                    except Exception:
+                        pass
+
+        return str(definition.value)
 
     def _export_default(self, definition: ConfigDefinition) -> Any:
         if definition.value_type is bool:
             return bool(definition.default)
         if definition.value_type in (int, float):
             return definition.default
-        return "" if definition.default is None else str(definition.default)
+        # Preserve list/dict/json defaults as native types for API consumers
+        if definition.default is None:
+            return ""
+        if definition.value_type == "json" or isinstance(definition.default, (list, dict)):
+            return definition.default
+        return str(definition.default)
 
     def _type_name(self, value_type: ValueType) -> str:
         if value_type is bool:
@@ -957,6 +736,8 @@ class ConfigRegistry:
             return "int"
         if value_type is float:
             return "float"
+        if value_type == "json":
+            return "json"
         return "str"
 
     async def persist_bootstrap_configs(self) -> None:
@@ -1001,9 +782,13 @@ class ConfigRegistry:
                 skipped_count += 1
                 continue
                 
+            # FORCE reload persona configs from DB (they may have been set to defaults at import time)
+            persona_keys = {'SYNTH_NAME', 'SYNTH_PROFILE', 'SYNTH_ALIASES'}
+            if definition.key in persona_keys:
+                log_debug(f"[config] FORCE reloading persona config '{definition.key}' from DB")
             # Skip if already properly loaded from DB during sync phase
             # BUT allow reload if it only has default value (to handle ENV removal case)
-            if definition.loaded and definition.raw_value is not None and definition.raw_value != "":
+            elif definition.loaded and definition.raw_value is not None and definition.raw_value != "":
                 # Check if this is actually a default value that needs DB reload
                 default_raw = self._serialize_value(definition, definition.default)
                 if definition.raw_value != default_raw:

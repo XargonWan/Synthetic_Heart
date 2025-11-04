@@ -13,6 +13,13 @@ from core.logging_utils import (
     log_error,
 )
 
+# Import exposed variables EARLY to ensure correct type registrations
+# before any circular import chains or dynamic calls can cause premature registration
+try:
+    import core.variables_engine  # noqa: F401
+except Exception as e:
+    print(f"[main] Warning: Failed to import variables_engine early: {e}", flush=True)
+
 # Global restart flag
 _restart_requested = False
 _restart_event = None
@@ -120,10 +127,9 @@ async def initialize_database():
         await config_registry.persist_bootstrap_configs()
         log_debug("[main] Bootstrap configurations persisted")
         
-        # Load all other configurations from DB
-        log_debug("[main] Loading all configurations from DB...")
-        await config_registry.load_all_from_db()
-        log_debug("[main] All configurations loaded from DB")
+        # NOTE: load_all_from_db() is called later in core_initializer.initialize_all()
+        # after all variable registrations are complete. Do not call it here as it would
+        # skip loading persona configurations due to incomplete registration.
         
         # Blocklist table now handled by blocklist plugin
         # log_info("[main] Initializing blocklist table...")
