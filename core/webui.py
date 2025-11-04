@@ -292,7 +292,7 @@ class SynthWebUIInterface:
             
             replacements = {
                 '%%BRAND_NAME%%': BRAND_NAME,
-                '%%LOGO_URL%%': '/static/synth_logo.png',  # Default logo path
+                '%%LOGO_URL%%': '/static/synth_logo_bg.png',  # Default logo path
                 '%%RESPONSE_TIMEOUT%%': str(int(RESPONSE_TIMEOUT)),
                 '%%FAILED_MESSAGE_TEXT%%': str(get_failed_message_text()),
                 # Expose WEB_DEBUG flag to the template (default false)
