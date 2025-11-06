@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from core.ai_plugin_base import AIPluginBase
 from core.db import insert_scheduled_event, get_due_events, mark_event_delivered
 from core.logging_utils import log_debug, log_info, log_error, log_warning
-from interface.telegram_utils import send_with_thread_fallback
+from interface.message_send_utils import send_with_thread_fallback
 from core.auto_response import request_llm_delivery
 import traceback
 import asyncio

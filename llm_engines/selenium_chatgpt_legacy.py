@@ -194,7 +194,7 @@ load_dotenv()
 
 # ChatLinkStore: manages mapping between interface chats and ChatGPT conversations
 from plugins.chat_link import ChatLinkStore
-from interface.telegram_utils import safe_send
+from interface.message_send_utils import safe_send
 from core.db import get_conn
 
 # Fallback for notify_trainer when core.notifier module is unavailable

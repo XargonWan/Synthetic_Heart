@@ -8,7 +8,7 @@ from core.ai_plugin_base import AIPluginBase
 import json
 from telegram.constants import ParseMode
 from core.logging_utils import log_debug, log_info, log_warning, log_error
-from interface.telegram_utils import safe_send
+from interface.message_send_utils import safe_send
 import time
 
 # Manual AI-specific configuration
