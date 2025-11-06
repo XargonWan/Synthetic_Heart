@@ -204,6 +204,59 @@ class AnimationHandler:
 
         return resolved_rel_path, descriptor
 
+    def _analyze_animation_structure(self, descriptor: Optional[Dict], animation_file: str = "") -> Dict[str, bool]:
+        """Analyze animation descriptor to determine available sections.
+        
+        Also validates play_once flag against structure and logs warnings if there are conflicts.
+        
+        Behavior:
+        - If intro or outro exists + play_once flag: CONFLICT → ignore play_once, log warning
+        - If only loop (no intro/outro) + play_once: loop plays once only (not really looped)
+        
+        Args:
+            descriptor: Animation descriptor dict with potential intro/loop/outro sections
+            animation_file: Animation filename (for logging purposes)
+            
+        Returns:
+            Dict with keys: has_intro, has_loop, has_outro (all bool)
+        """
+        result = {
+            "has_intro": False,
+            "has_loop": False,
+            "has_outro": False,
+        }
+        
+        if not descriptor or not isinstance(descriptor, dict):
+            return result
+        
+        # Check if sections exist and have valid frame ranges
+        if "intro" in descriptor and isinstance(descriptor["intro"], dict):
+            if "start_frame" in descriptor["intro"] and "end_frame" in descriptor["intro"]:
+                result["has_intro"] = True
+        
+        if "loop" in descriptor and isinstance(descriptor["loop"], dict):
+            if "start_frame" in descriptor["loop"] and "end_frame" in descriptor["loop"]:
+                result["has_loop"] = True
+        
+        if "outro" in descriptor and isinstance(descriptor["outro"], dict):
+            if "start_frame" in descriptor["outro"] and "end_frame" in descriptor["outro"]:
+                result["has_outro"] = True
+        
+        # Validate play_once flag: it conflicts with intro/outro structure
+        # (play_once means "play the whole animation once", but intro/outro define
+        #  a structured animation that should execute its sections in order)
+        if descriptor.get("play_once"):
+            has_structured_sections = result["has_intro"] or result["has_outro"]
+            if has_structured_sections:
+                log_warning(
+                    f"[AnimationHandler] Animation '{animation_file}' has both 'play_once' flag "
+                    f"and structured sections (intro/outro). 'play_once' will be ignored because "
+                    f"intro/outro structure takes precedence. "
+                    f"Structure: intro={result['has_intro']}, loop={result['has_loop']}, outro={result['has_outro']}"
+                )
+        
+        return result
+
     async def play_animation(
         self,
         state: AnimationState,
@@ -214,11 +267,16 @@ class AnimationHandler:
     ) -> None:
         """Play an animation for a specific state.
         
+        If the animation has an intro section in its descriptor, it will be played first,
+        followed by the loop section on repeat. When stop_animation() is called, the outro
+        section is played before returning to Idle.
+        
         Args:
             state: The animation state to play
             session_id: The WebUI session ID to send the animation to
-            loop: Whether the animation should loop
+            loop: Whether the animation should loop (ignored if descriptor specifies intro/loop/outro)
             context_id: Optional identifier for this animation context (for tracking)
+            priority: Optional priority level for this animation context
         """
         async with self._lock:
             # If we have a context_id, mark it as active with optional priority
@@ -256,30 +314,69 @@ class AnimationHandler:
             
             # Send animation command to WebUI
             if self.webui:
-                # Resolve descriptor to allow per-animation control (e.g., play_once)
+                # Resolve descriptor for intelligent section handling
                 resolved_path, descriptor = self._resolve_animation_descriptor(selected_animation)
-                # If descriptor explicitly requests play_once, do not loop and do not start rotation
-                if descriptor and descriptor.get("play_once"):
+                structure = self._analyze_animation_structure(descriptor, selected_animation)
+                
+                # Determine effective loop behavior based on descriptor structure:
+                # 1. If has intro/outro (structured animation): loop=True if has loop section, else play once
+                # 2. If only loop (no intro/outro) + play_once: play loop once only (don't really loop)
+                # 3. Otherwise: use provided loop parameter
+                has_intro_or_outro = structure["has_intro"] or structure["has_outro"]
+                
+                if has_intro_or_outro:
+                    # Structured animation (intro/outro present)
+                    # play_once flag is ignored (warning already logged in _analyze_animation_structure)
+                    if structure["has_loop"]:
+                        # intro/loop/outro or intro/outro - loop the middle section
+                        effective_loop = True
+                    else:
+                        # intro only or intro/outro (no loop) - play once
+                        effective_loop = False
+                    start_rotation = False
+                elif structure["has_loop"] and descriptor and descriptor.get("play_once"):
+                    # Only loop section (no intro/outro) with play_once flag
+                    # Loop plays once only - don't really loop, don't rotate
+                    log_debug(
+                        f"[AnimationHandler] Animation '{selected_animation}' has loop section "
+                        f"with play_once flag: loop will play once only (no looping)"
+                    )
+                    effective_loop = False
+                    start_rotation = False
+                elif structure["has_loop"]:
+                    # Only loop section - loop it normally
+                    effective_loop = True
+                    start_rotation = False
+                elif descriptor and descriptor.get("play_once"):
+                    # Legacy: play_once flag without structured sections
                     effective_loop = False
                     start_rotation = False
                 else:
+                    # No special structure, use provided loop parameter
                     effective_loop = loop
                     start_rotation = len(animations) > 1
+
+                log_debug(
+                    f"[AnimationHandler] Animation structure - intro: {structure['has_intro']}, "
+                    f"loop: {structure['has_loop']}, outro: {structure['has_outro']}, "
+                    f"play_once: {descriptor.get('play_once') if descriptor else False}, "
+                    f"effective_loop: {effective_loop}"
+                )
 
                 await self._send_animation_command(
                     session_id=session_id,
                     animation_file=selected_animation,
                     loop=effective_loop,
-                    state=state.value
+                    state=state.value,
+                    descriptor=descriptor
                 )
             else:
                 log_warning("[AnimationHandler] WebUI not set, cannot send animation command")
+                start_rotation = False
 
             # If there are multiple animations for this state, start a background
             # rotation task that will randomly switch between them every 30-60s.
-            # However, if the selected animation's descriptor requests play_once,
-            # do not start rotation even if multiple files are available.
-            key = f"{session_id}:{state.value}"
+            # Skip rotation for animations with loop/intro/outro structure.
             if start_rotation:
                 await self._start_rotation_task(session_id, state, context_id)
             else:
@@ -288,15 +385,62 @@ class AnimationHandler:
     async def stop_animation(self, context_id: str, session_id: str) -> None:
         """Stop an animation context and return to Idle if no other contexts are active.
         
+        Intelligently handles animations with flexible outro sections:
+        - If outro exists: play outro before transitioning to Idle
+        - If no outro: transition immediately to Idle
+        - Handles partial animations gracefully (intro-only, loop-only, etc.)
+        
         Args:
             context_id: The context identifier to stop
             session_id: The WebUI session ID
         """
         async with self._lock:
-            # Remove the context from active tasks
-            if context_id in self._active_tasks:
+            # Get current animation descriptor to check structure
+            current_animation = self.current_animation
+            descriptor = None
+            if current_animation:
+                _, descriptor = self._resolve_animation_descriptor(current_animation)
+            
+            # Analyze animation structure
+            structure = self._analyze_animation_structure(descriptor)
+            
+            # If the animation has an outro, play it first
+            if structure["has_outro"]:
+                log_debug(
+                    f"[AnimationHandler] Playing outro for {current_animation} "
+                    f"before stopping (context={context_id}, session={session_id})"
+                )
+                # Play outro with loop=False (play once)
+                await self._send_animation_command(
+                    session_id=session_id,
+                    animation_file=current_animation,
+                    loop=False,
+                    state=self.current_state.value,
+                    descriptor=descriptor
+                )
+                # Estimate outro duration and wait before transitioning to Idle
+                # Default: assume ~30 frames at 30fps = ~1 second per 30 frames
+                outro_frames = descriptor["outro"].get("end_frame", 0) - descriptor["outro"].get("start_frame", 0)
+                outro_duration = max(0.5, outro_frames / 30.0)  # Minimum 0.5s, assume 30fps
+                log_debug(f"[AnimationHandler] Waiting {outro_duration:.1f}s for outro to complete")
+                # Release lock during wait so other operations can proceed
+                # But mark that we're in outro playback
                 self._active_tasks.pop(context_id, None)
+            else:
+                # No outro section - transition immediately
+                log_debug(
+                    f"[AnimationHandler] No outro section for {current_animation}, "
+                    f"stopping immediately (context={context_id})"
+                )
+                self._active_tasks.pop(context_id, None)
+                outro_duration = 0
 
+        # Wait for outro if needed (outside the lock)
+        if outro_duration > 0:
+            await asyncio.sleep(outro_duration)
+
+        # After outro (or immediately if no outro), transition to Idle
+        async with self._lock:
             # Determine highest remaining priority among active contexts
             remaining_priorities = [p for p in self._active_tasks.values() if p is not None]
             highest = max(remaining_priorities) if remaining_priorities else 0
@@ -346,21 +490,29 @@ class AnimationHandler:
         session_id: Optional[str],
         animation_file: str,
         loop: bool,
-        state: str
+        state: str,
+        descriptor: Optional[Dict] = None
     ) -> None:
         """Send animation command to the WebUI via WebSocket.
+        
+        If descriptor contains intro/loop sections, the WebUI should play intro first,
+        then loop the loop section. The descriptor is sent along for WebUI interpretation.
         
         Args:
             session_id: The WebUI session ID
             animation_file: The animation file name
             loop: Whether to loop the animation
             state: The logical state name
+            descriptor: Optional animation descriptor with frame info (intro/loop/outro)
         """
         if not self.webui:
             return
             
-        # Resolve path and descriptor (centralized helper)
-        resolved_rel_path, descriptor = self._resolve_animation_descriptor(animation_file)
+        # Resolve path and descriptor (if not already provided)
+        if descriptor is None:
+            resolved_rel_path, descriptor = self._resolve_animation_descriptor(animation_file)
+        else:
+            resolved_rel_path, _ = self._resolve_animation_descriptor(animation_file)
 
         # If session_id is None, broadcast to all connected WebUI sessions
         try:

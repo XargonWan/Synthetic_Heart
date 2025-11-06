@@ -5083,9 +5083,9 @@
                         console.log('[synth_webui] Processing VRM scene...');
                         console.log('[synth_webui] Scene children count:', vrm.scene.children.length);
                         
-                        console.log('[synth_webui] Removing unnecessary joints...');
-                        VRMUtils.removeUnnecessaryJoints(vrm.scene);
-                        console.log('[synth_webui] ✓ Unnecessary joints removed');
+                        console.log('[synth_webui] Combining and optimizing skeleton...');
+                        VRMUtils.combineSkeletons(vrm.scene);
+                        console.log('[synth_webui] ✓ Skeleton combined and optimized');
                         
                         console.log('[synth_webui] Removing unnecessary vertices...');
                         VRMUtils.removeUnnecessaryVertices(vrm.scene);
@@ -5636,14 +5636,17 @@
                 
                 if (showArchived) params.push('include_archived=true');
                 
-                // If there's a search term, load more entries to search through
-                const effectivePerPage = searchTerm ? Math.max(perPage === 'unlimited' ? 1000 : perPage * 5, 100) : perPage;
-                
-                if (effectivePerPage !== 'unlimited') {
+                // Always use server-side pagination for better performance
+                if (currentPerPage !== 'unlimited') {
                     params.push(`page=${page}`);
-                    params.push(`per_page=${effectivePerPage}`);
+                    params.push(`per_page=${currentPerPage}`);
                 } else {
                     params.push('limit=1000'); // High limit for unlimited
+                }
+                
+                // Add search term to server request if present
+                if (searchTerm) {
+                    params.push(`search=${encodeURIComponent(searchTerm)}`);
                 }
                 
                 url += params.join('&');
@@ -5669,23 +5672,9 @@
                 const groupByDate = document.getElementById('group-by-date').checked;
                 const searchTerm = document.getElementById('diary-search').value.toLowerCase();
                 
-                let filteredEntries = diaryEntries.filter(entry => {
-                    if (!searchTerm) return true;
-                    const content = (entry.content + ' ' + entry.personal_thought + ' ' + entry.emotions.map(e => e.type).join(' ') + ' ' + (entry.interaction_summary || '') + ' ' + entry.involved_users.join(' ')).toLowerCase();
-                    return content.includes(searchTerm);
-                });
-                
-                // Apply client-side pagination only when searching (since we load more entries)
-                let displayEntries = filteredEntries;
-                if (searchTerm && currentPerPage !== 'unlimited') {
-                    const startIdx = (currentPage - 1) * currentPerPage;
-                    const endIdx = startIdx + currentPerPage;
-                    displayEntries = filteredEntries.slice(startIdx, endIdx);
-                    
-                    // Update pagination info for search results
-                    totalEntries = filteredEntries.length;
-                    totalPages = Math.ceil(totalEntries / currentPerPage);
-                }
+                // Since we now use server-side pagination and search, diaryEntries already contains
+                // the correct filtered and paginated results
+                let displayEntries = diaryEntries;
                 
                 if (displayEntries.length === 0) {
                     container.innerHTML = searchTerm ? '<div class="meta">No entries found matching your search.</div>' : '<div class="loading">No diary entries found.</div>';

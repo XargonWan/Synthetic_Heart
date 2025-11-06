@@ -217,6 +217,58 @@ Example for an interface that wants to show the avatar is "thinking":
                     context_id=f"interface_{message.message_id}"
                 )
 
+Flexible Animation Sections (Intro/Loop/Outro)
+================================================
+
+The animation system supports flexible combinations of intro, loop, and outro sections,
+allowing for more sophisticated animation sequences:
+
+**Full Animation Flow**
+
+An animation can define up to three sections:
+
+- **Intro**: Initial/setup frames (e.g., transition into thinking pose)
+- **Loop**: Repeating frames that play continuously (e.g., thinking motion)
+- **Outro**: Wind-down/transition frames (e.g., returning to rest pose)
+
+.. code-block:: json
+
+    {
+      "intro": {"start_frame": 0, "end_frame": 20},
+      "loop": {"start_frame": 21, "end_frame": 120},
+      "outro": {"start_frame": 121, "end_frame": 160}
+    }
+
+**Smart Playback**
+
+When ``play_animation()`` is called:
+
+- If ``loop`` section exists → always loop until ``stop_animation()`` is called
+- If only ``intro`` → play once and stop automatically
+- WebUI uses the descriptor to determine which frames to play
+
+
+**Graceful Stopping**
+
+When ``stop_animation()`` is called:
+
+- If ``outro`` exists → play outro sequence before returning to Idle
+- If no outro → immediately return to Idle
+- Duration calculated from frame count (approximately 30fps)
+
+**Supported Combinations**
+
+All combinations work correctly:
+
+- intro + loop + outro: Full animation flow
+- loop + outro: Repeating with graceful ending
+- intro + loop: Intro then repeating motion
+- loop only: Simple repeating animation
+- intro + outro: One-shot animation
+- Any solo section: Works as expected
+
+See :doc:`animation_flow_flexible` for detailed documentation.
+
 Debugging
 =========
 

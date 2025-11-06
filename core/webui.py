@@ -1007,9 +1007,10 @@ class SynthWebUIInterface:
         # Pagination parameters
         page = _bounded_int(params.get("page"), default=1, minimum=1, maximum=1000)
         per_page = _bounded_int(params.get("per_page"), default=10, minimum=1, maximum=1000)
+        search = params.get("search", "").strip()
 
         persona_snapshot = await self._fetch_persona_snapshot()
-        diary_payload = await self._fetch_diary_entries(days=days, limit=limit, max_chars=max_chars, include_archived=include_archived, page=page, per_page=per_page)
+        diary_payload = await self._fetch_diary_entries(days=days, limit=limit, max_chars=max_chars, include_archived=include_archived, page=page, per_page=per_page, search=search)
 
         if not persona_snapshot.get("created_at") and diary_payload.get("earliest_timestamp"):
             persona_snapshot["created_at"] = diary_payload["earliest_timestamp"]
@@ -1190,7 +1191,7 @@ class SynthWebUIInterface:
         )
         return snapshot
 
-    async def _fetch_diary_entries(self, *, days: int, limit: int, max_chars: int, include_archived: bool = False, page: int = 1, per_page: int = 10) -> Dict[str, Any]:
+    async def _fetch_diary_entries(self, *, days: int, limit: int, max_chars: int, include_archived: bool = False, page: int = 1, per_page: int = 10, search: str = "") -> Dict[str, Any]:
         """Retrieve diary entries via the AI diary plugin when available."""
         payload: Dict[str, Any] = {
             "available": False,
@@ -1252,62 +1253,84 @@ class SynthWebUIInterface:
             conn = await get_conn()
             try:
                 async with conn.cursor() as cur:
+                    # Build search condition
+                    search_condition = ""
+                    search_params = []
+                    if search:
+                        search_condition = """
+                            AND (content LIKE %s OR personal_thought LIKE %s OR 
+                                 interaction_summary LIKE %s OR user_message LIKE %s OR
+                                 JSON_EXTRACT(emotions, '$[*].type') LIKE %s)
+                        """
+                        search_term = f"%{search}%"
+                        search_params = [search_term, search_term, search_term, search_term, search_term]
+                    
                     if include_archived:
                         # Get entries from both tables, ordered by timestamp DESC
                         # Note: try to include involved_users if column exists
                         try:
-                            await cur.execute("""
+                            query = f"""
                                 (SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
                                        emotions, interface, chat_id, thread_id, interaction_summary, user_message,
                                        FALSE as archived
-                                FROM ai_diary)
+                                FROM ai_diary
+                                WHERE 1=1 {search_condition})
                                 UNION ALL
                                 (SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
                                        emotions, interface, chat_id, thread_id, interaction_summary, user_message,
                                        TRUE as archived
-                                FROM ai_diary_archive)
+                                FROM ai_diary_archive
+                                WHERE 1=1 {search_condition})
                                 ORDER BY timestamp DESC
                                 LIMIT %s OFFSET %s
-                            """, (limit, offset))
+                            """
+                            await cur.execute(query, search_params + [limit, offset])
                         except Exception as e:
                             # If involved_users column doesn't exist, fallback to query without it
                             if "Unknown column" in str(e):
-                                await cur.execute("""
+                                query = f"""
                                     (SELECT id, content, personal_thought, timestamp, context_tags, '[]' as involved_users, 
                                            emotions, interface, chat_id, thread_id, interaction_summary, user_message,
                                            FALSE as archived
-                                    FROM ai_diary)
+                                    FROM ai_diary
+                                    WHERE 1=1 {search_condition})
                                     UNION ALL
                                     (SELECT id, content, personal_thought, timestamp, context_tags, '[]' as involved_users, 
                                            emotions, interface, chat_id, thread_id, interaction_summary, user_message,
                                            TRUE as archived
-                                    FROM ai_diary_archive)
+                                    FROM ai_diary_archive
+                                    WHERE 1=1 {search_condition})
                                     ORDER BY timestamp DESC
                                     LIMIT %s OFFSET %s
-                                """, (limit, offset))
+                                """
+                                await cur.execute(query, search_params + [limit, offset])
                             else:
                                 raise
                     else:
                         try:
-                            await cur.execute("""
+                            query = f"""
                                 SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
                                        emotions, interface, chat_id, thread_id, interaction_summary, user_message,
                                        FALSE as archived
                                 FROM ai_diary
+                                WHERE 1=1 {search_condition}
                                 ORDER BY timestamp DESC
                                 LIMIT %s OFFSET %s
-                            """, (limit, offset))
+                            """
+                            await cur.execute(query, search_params + [limit, offset])
                         except Exception as e:
                             # If involved_users column doesn't exist, fallback
                             if "Unknown column" in str(e):
-                                await cur.execute("""
+                                query = f"""
                                     SELECT id, content, personal_thought, timestamp, context_tags, '[]' as involved_users, 
                                            emotions, interface, chat_id, thread_id, interaction_summary, user_message,
                                            FALSE as archived
                                     FROM ai_diary
+                                    WHERE 1=1 {search_condition}
                                     ORDER BY timestamp DESC
                                     LIMIT %s OFFSET %s
-                                """, (limit, offset))
+                                """
+                                await cur.execute(query, search_params + [limit, offset])
                             else:
                                 raise
                     
