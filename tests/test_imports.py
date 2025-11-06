@@ -30,9 +30,9 @@ except Exception as e:
     traceback.print_exc()
 
 try:
-    print("3. Testing interface.telegram_utils...")
-    from interface.telegram_utils import safe_send
-    print("   ✅ interface.telegram_utils imported successfully")
+    print("3. Testing interface.message_send_utils...")
+    from interface.message_send_utils import safe_send
+    print("   ✅ interface.message_send_utils imported successfully")
 except Exception as e:
     print(f"   ❌ interface.telegram_utils failed: {e}")
     import traceback
