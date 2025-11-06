@@ -14,7 +14,7 @@ CHATGPT_MODEL_LIMITS = {
     "gpt-3.5-turbo": 16000,  # GPT-3.5 Turbo: 16k tokens context (~48k characters)
     "o1-preview": 128000,    # o1-preview: 128k tokens context (~400k characters)
     "o1-mini": 128000,       # o1-mini: 128k tokens context (~400k characters)
-    "unlogged": 1000,        # Unlogged state: very limited context
+    "unlogged": 21500,       # Unlogged state: limited context for free tier
     "default": 128000        # Safe default for unknown models (assume newer models)
 }
 
@@ -105,36 +105,24 @@ class SeleniumChatGPTPlugin(SeleniumLLMBase):
         
         super().__init__(config=chatgpt_config, notify_fn=notify_fn)
         
-        # Login detection selectors for ChatGPT
-        self.login_button_selectors = [
+        # ChatGPT-specific login detection selectors
+        # These will be used by the centralized is_user_logged_in() method from SeleniumLLMBase
+        self.login_detection_selectors = [
             (By.CSS_SELECTOR, "button[data-testid='login-button']"),
             (By.CSS_SELECTOR, "a[href*='login']"),
-            (By.CSS_SELECTOR, "button:contains('Log in')"),
-            (By.CSS_SELECTOR, "a:contains('Log in')"),
             (By.ID, "login-button"),
             (By.CLASS_NAME, "login-button"),
+            (By.XPATH, "//button[contains(text(), 'Log in')]"),
+            (By.XPATH, "//button[contains(text(), 'Sign in')]"),
+            (By.XPATH, "//a[contains(text(), 'Log in')]"),
+            (By.XPATH, "//a[contains(text(), 'Sign in')]"),
         ]
-        
-        self.login_texts = ["log in", "sign in", "login", "signin", "sign up", "signup"]
         
         # Track if we've already checked login status on startup
         self._login_status_checked = False
 
-    def _check_login_status_on_startup(self, driver):
-        """Check login status on plugin startup and warn if not logged in."""
-        if self._login_status_checked:
-            return
-            
-        self._login_status_checked = True
-        
-        # Use base class method with ChatGPT-specific selectors
-        self.check_login_status(driver, self.login_button_selectors, self.login_texts)
-
     def _ensure_logged_in(self, driver) -> bool:
         """Ensure the user is logged in to ChatGPT."""
-        # Check login status on first call (startup check)
-        self._check_login_status_on_startup(driver)
-        
         try:
             current_url = driver.current_url
         except Exception:
@@ -525,9 +513,20 @@ class SeleniumChatGPTPlugin(SeleniumLLMBase):
         return list(CHATGPT_MODEL_LIMITS.keys())
 
     def get_current_model(self) -> str:
-        """Get the current ChatGPT model being used."""
+        """Get the current ChatGPT model being used.
+        
+        Automatically returns 'unlogged' model if user is not logged in,
+        otherwise returns configured model.
+        """
         from core.config_manager import config_registry
         from core.logging_utils import log_debug
+        
+        # Check if user is logged in using centralized method
+        if not self.is_user_logged_in():
+            log_debug("[selenium_chatgpt] User not logged in, returning 'unlogged' model (21500 chars limit)")
+            return "unlogged"
+        
+        # User is logged in, return configured model
         CHATGPT_MODEL = config_registry.get_value("CHATGPT_MODEL", "")
         configured_model = CHATGPT_MODEL or self.config.get("default_model", "gpt-4o")
         
@@ -537,54 +536,5 @@ class SeleniumChatGPTPlugin(SeleniumLLMBase):
     def get_interface_limits(self) -> dict:
         """Get the limits and capabilities for Selenium ChatGPT interface."""
         return get_interface_limits()
-
-    def _is_user_logged_in(self) -> bool:
-        """Check if user is logged in to ChatGPT using selector and text detection strategy."""
-        # If driver is not initialized, assume not logged in
-        if self.driver is None:
-            return False
-            
-        try:
-            # Strategy 1: Check for login button selectors
-            login_button_selectors = [
-                (By.CSS_SELECTOR, "button[data-testid='login-button']"),
-                (By.CSS_SELECTOR, "a[href*='login']"),
-                (By.CSS_SELECTOR, "button:contains('Log in')"),
-                (By.CSS_SELECTOR, "a:contains('Log in')"),
-                (By.ID, "login-button"),
-                (By.CLASS_NAME, "login-button"),
-            ]
-            
-            for by, selector in login_button_selectors:
-                try:
-                    elements = self.driver.find_elements(by, selector)
-                    if elements:
-                        log_debug(f"[selenium_chatgpt] Login button found with selector: {by} = '{selector}'")
-                        return False
-                except Exception:
-                    continue
-            
-            # Strategy 2: Check for login/signup text on page
-            try:
-                page_text = self.driver.find_element(By.TAG_NAME, "body").text.lower()
-                login_texts = ["log in", "sign in", "login", "signin", "sign up", "signup"]
-                
-                for text in login_texts:
-                    if text in page_text:
-                        log_debug(f"[selenium_chatgpt] Login text '{text}' found on page")
-                        return False
-            except Exception as e:
-                log_debug(f"[selenium_chatgpt] Could not check page text: {e}")
-            
-            # Strategy 3: Check URL for login/auth pages (fallback)
-            current_url = self.driver.current_url
-            if current_url and ("login" in current_url or "auth0" in current_url):
-                log_debug(f"[selenium_chatgpt] Login URL detected: {current_url}")
-                return False
-                
-            return True
-        except Exception:
-            # If we can't check, assume not logged in for safety
-            return False
 
 PLUGIN_CLASS = SeleniumChatGPTPlugin

@@ -2,6 +2,12 @@
             <header class="section-header">
                 <h2>Configuration</h2>
                 <div class="section-controls">
+                    <button id="config-expand-all" class="pill secondary" title="Expand all sections">
+                        <span class="icon">▼</span>
+                    </button>
+                    <button id="config-collapse-all" class="pill secondary" title="Collapse all sections">
+                        <span class="icon">▶</span>
+                    </button>
                     <button id="config-save" class="pill primary">
                         <span class="icon">💾</span>
                         Save Changes
@@ -13,13 +19,6 @@
                 </div>
             </header>
             <div class="config-content">
-                <div class="config-section">
-                    <h3>General Settings</h3>
-                    <div class="config-list" id="config-general-list">
-                        <!-- General config options will be loaded here -->
-                    </div>
-                </div>
-
                 <div class="config-disclaimer" id="config-env-disclaimer">
                     <div class="warning-icon">⚠️</div>
                     <div class="warning-content">
@@ -28,14 +27,23 @@
                     </div>
                 </div>
 
-                <article class="card warning-card" id="config-advanced-card">
-                    <div class="warning-header">
-                        <div class="warning-icon">🚨</div>
-                        <h4>Advanced Settings</h4>
+                <div class="config-sections-container" id="config-sections-container">
+                    <!-- Plugin/component sections will be loaded here -->
+                </div>
+
+                <article class="card warning-card config-accordion" id="config-advanced-card">
+                    <div class="accordion-header" onclick="this.parentElement.classList.toggle('collapsed')">
+                        <div class="accordion-toggle">▼</div>
+                        <div class="warning-header">
+                            <div class="warning-icon">🚨</div>
+                            <h4>Advanced Settings</h4>
+                        </div>
                     </div>
-                    <p class="warning-text" id="config-advanced-warning">Changing ports may render the service unavailable. Update Docker compose exposure before applying modifications.</p>
-                    <div class="config-list" id="config-advanced-list">
-                        <!-- Advanced config options will be loaded here -->
+                    <div class="accordion-content">
+                        <p class="warning-text" id="config-advanced-warning">Changing ports may render the service unavailable. Update Docker compose exposure before applying modifications.</p>
+                        <div class="config-list" id="config-advanced-list">
+                            <!-- Advanced config options will be loaded here -->
+                        </div>
                     </div>
                 </article>
             </div>
@@ -47,6 +55,86 @@
                 overflow-y: auto;
                 padding: 1rem min(4vw, 2.4rem);
             }
+            
+            .config-sections-container {
+                display: flex;
+                flex-direction: column;
+                gap: 0.75rem;
+                margin-bottom: 1.5rem;
+            }
+            
+            .config-accordion {
+                background: var(--surface);
+                border: 1px solid var(--border);
+                border-radius: 12px;
+                padding: 0;
+                overflow: hidden;
+                transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            }
+            
+            .config-accordion.collapsed {
+                max-height: 60px;
+            }
+            
+            .accordion-header {
+                display: flex;
+                align-items: center;
+                gap: 1rem;
+                padding: 1rem 1.5rem;
+                background: var(--surface-alt);
+                border-bottom: 1px solid var(--border);
+                cursor: pointer;
+                user-select: none;
+                transition: background 0.2s;
+            }
+            
+            .config-accordion.collapsed .accordion-header {
+                border-bottom: none;
+            }
+            
+            .accordion-header:hover {
+                background: rgba(255, 107, 214, 0.08);
+            }
+            
+            .accordion-toggle {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 0.9rem;
+                color: var(--text-soft);
+                min-width: 24px;
+                transition: transform 0.3s;
+            }
+            
+            .config-accordion.collapsed .accordion-toggle {
+                transform: rotate(-90deg);
+            }
+            
+            .accordion-content {
+                padding: 1.5rem;
+                max-height: 10000px;
+                overflow: hidden;
+                transition: max-height 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            }
+            
+            .config-accordion.collapsed .accordion-content {
+                max-height: 0;
+                padding: 0 1.5rem;
+                overflow: hidden;
+            }
+            
+            .accordion-header h3,
+            .accordion-header h4 {
+                margin: 0;
+                font-size: 1.1rem;
+                font-weight: 600;
+                color: var(--accent);
+                flex: 1;
+                display: flex;
+                align-items: center;
+                gap: 0.5rem;
+            }
+            
             .config-section {
                 background: var(--surface);
                 border: 1px solid var(--border);
@@ -54,17 +142,20 @@
                 padding: 1.5rem;
                 margin-bottom: 1.5rem;
             }
+            
             .config-section h3 {
                 margin: 0 0 1rem 0;
                 font-size: 1.2rem;
                 font-weight: 600;
                 color: var(--accent);
             }
+            
             .config-list {
                 display: flex;
                 flex-direction: column;
                 gap: 1rem;
             }
+            
             .config-item {
                 display: flex;
                 align-items: center;
@@ -74,27 +165,33 @@
                 border-radius: 8px;
                 border: 1px solid var(--border);
             }
+            
             .config-item.locked {
                 opacity: 0.7;
                 cursor: not-allowed;
             }
+            
             .config-item .lock-icon {
                 color: var(--warn);
                 font-size: 1.2rem;
             }
+            
             .config-label {
                 flex: 1;
                 min-width: 0;
             }
+            
             .config-label-text {
                 font-weight: 500;
                 margin-bottom: 0.25rem;
             }
+            
             .config-description {
                 font-size: 0.85rem;
                 color: var(--text-soft);
                 line-height: 1.4;
             }
+            
             .config-input {
                 min-width: 200px;
             }
@@ -146,13 +243,11 @@
                 background: rgba(255, 123, 147, 0.1);
                 border: 1px solid var(--error);
                 border-radius: 12px;
-                padding: 1.5rem;
             }
             .warning-card .warning-header {
                 display: flex;
                 align-items: center;
                 gap: 1rem;
-                margin-bottom: 1rem;
             }
             .warning-card .warning-icon {
                 font-size: 1.5rem;

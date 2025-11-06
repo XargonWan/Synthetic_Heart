@@ -145,6 +145,8 @@ class ConfigRegistry:
         # Note: pending persona updates are kept in-memory and retried by the
         # background worker. We intentionally avoid adding a file persistence
         # layer here to reduce complexity and potential I/O surprises.
+        # Registry of component reload handlers: maps component name to async callback
+        self._reload_handlers: Dict[str, Callable[[], Any]] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -273,6 +275,9 @@ class ConfigRegistry:
                         callback(new_value)
                     except Exception as exc:  # pragma: no cover - listener safety
                         log_warning(f"[config] Listener for '{key}' failed: {exc}")
+                
+                # Trigger automatic reload if needed
+                await self._trigger_reload_if_needed(definition)
                 return
             except Exception as exc:
                 log_error(f"[config] Failed to set value for '{key}' using setter: {exc}")
@@ -294,12 +299,58 @@ class ConfigRegistry:
                 callback(typed_value)
             except Exception as exc:  # pragma: no cover - listener safety
                 log_warning(f"[config] Listener for '{key}' failed: {exc}")
+        
+        # Trigger automatic reload if needed
+        await self._trigger_reload_if_needed(definition)
 
     def add_listener(self, key: str, callback: Callable[[Any], None]) -> None:
         definition = self._definitions.get(key)
         if definition is None:
             raise KeyError(f"Unknown configuration key: {key}")
         definition.listeners.append(callback)
+
+    def register_reload_handler(self, component: str, handler: Callable[[], Any]) -> None:
+        """Register an async reload handler for a component.
+        
+        When a configuration variable with needs_component_reload=True is changed,
+        and the variable's component matches this component name, the handler will
+        be called automatically.
+        
+        Args:
+            component: Component name (e.g., "telegram_bot", "discord_bot")
+            handler: Async callable that performs the reload (e.g., reload_interface)
+        
+        Example:
+            config_registry.register_reload_handler("telegram_bot", reload_interface)
+        """
+        self._reload_handlers[component] = handler
+        log_debug(f"[config] Registered reload handler for component '{component}'")
+
+    async def _trigger_reload_if_needed(self, definition: ConfigDefinition) -> None:
+        """Trigger component reload if the variable requires it.
+        
+        Called after set_value when needs_component_reload is True.
+        """
+        if not definition.needs_component_reload:
+            return
+        
+        component = definition.component
+        handler = self._reload_handlers.get(component)
+        
+        if handler is None:
+            log_warning(f"[config] No reload handler registered for component '{component}'")
+            return
+        
+        try:
+            log_info(f"[config] Triggering automatic reload for component '{component}' (variable: {definition.key})")
+            # Call the handler - it could be sync or async
+            result = handler()
+            if asyncio.iscoroutine(result):
+                await result
+            log_info(f"[config] ✓ Reload handler for '{component}' completed successfully")
+        except Exception as exc:
+            log_error(f"[config] Reload handler for '{component}' failed: {exc}")
+            # Don't re-raise - allow the app to continue even if reload fails
 
     async def flush_env_overrides_to_db(self) -> None:
         """Persist all buffered env override values to the database.

@@ -320,6 +320,23 @@ class SeleniumLLMBase(AIPluginBase):
         self._driver_lock = asyncio.Lock()
         self._initialized = False
 
+        # Login detection configuration - to be set by subclasses
+        # Format: list of tuples (By, selector) for detecting login buttons
+        self.login_detection_selectors: list = []
+        # Fallback common login button selectors used if no specific ones provided
+        self.common_login_selectors = [
+            (By.CSS_SELECTOR, "button:contains('Log in')"),
+            (By.CSS_SELECTOR, "button:contains('Sign in')"),
+            (By.CSS_SELECTOR, "button:contains('Login')"),
+            (By.CSS_SELECTOR, "a:contains('Log in')"),
+            (By.CSS_SELECTOR, "a:contains('Sign in')"),
+            (By.CSS_SELECTOR, "a:contains('Login')"),
+            (By.CSS_SELECTOR, "[data-testid*='login']"),
+            (By.CSS_SELECTOR, "[data-testid*='signin']"),
+            (By.CLASS_NAME, "login"),
+            (By.CLASS_NAME, "signin"),
+        ]
+
         # Initialize components
         self._init_components()
 
@@ -1339,6 +1356,43 @@ class SeleniumLLMBase(AIPluginBase):
             "supports_functions": False,
             "model_name": "default"
         }
+
+    def is_user_logged_in(self) -> bool:
+        """
+        Centralized login state detection.
+        
+        Checks if user is logged in by looking for login/signin buttons.
+        Uses selectors provided by subclass or common fallbacks.
+        
+        Returns True if user is LOGGED IN, False if login button found (NOT logged in).
+        """
+        # If driver is not initialized, assume not logged in
+        if self.driver is None:
+            log_debug(f"[{self.component_name}] Driver not initialized, assuming not logged in")
+            return False
+        
+        try:
+            # Combine specific selectors with common fallbacks
+            all_selectors = self.login_detection_selectors + self.common_login_selectors
+            
+            # Check for login buttons - if we find ANY, user is NOT logged in
+            for by, selector in all_selectors:
+                try:
+                    elements = self.driver.find_elements(by, selector)
+                    if elements:
+                        log_debug(f"[{self.component_name}] Found login button with selector {selector}, user NOT logged in")
+                        return False
+                except Exception:
+                    # This selector doesn't exist, try next one
+                    pass
+            
+            # If we didn't find any login button, assume user IS logged in
+            log_debug(f"[{self.component_name}] No login buttons found, user appears to be logged in")
+            return True
+            
+        except Exception as e:
+            log_warning(f"[{self.component_name}] Error checking login status: {e}, assuming not logged in")
+            return False
 
     # === COMMON LIFECYCLE METHODS ===
 

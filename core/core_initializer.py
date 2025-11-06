@@ -180,6 +180,11 @@ class CoreInitializer:
             self._initialize_interface_instances()
             log_info("[core_initializer] ✅ Interface instances initialized")
 
+            # 6.5. Register reload handlers for interfaces
+            log_info("[core_initializer] Registering automatic reload handlers...")
+            self._register_reload_handlers()
+            log_info("[core_initializer] ✅ Reload handlers registered")
+
             # Note: Startup summary will be displayed by main.py after all interfaces are started
             log_info("[core_initializer] Core initialization completed successfully")
 
@@ -626,6 +631,52 @@ class CoreInitializer:
             log_info(f"[core_initializer] Diagnostic: startup_errors: {self.startup_errors}")
         except Exception:
             pass
+
+    def _register_reload_handlers(self):
+        """Register automatic reload handlers for components that need them.
+        
+        This ensures that when a configuration variable with needs_component_reload=True
+        is changed, the corresponding component's reload handler is triggered automatically.
+        """
+        from core.config_manager import config_registry
+        
+        # Define reload handlers for each interface
+        reload_handlers = {}
+        
+        # Telegram interface reload handler
+        try:
+            from interface import telegram_bot
+            if hasattr(telegram_bot, 'reload_interface'):
+                reload_handlers['telegram_bot'] = telegram_bot.reload_interface
+                log_debug("[core_initializer] Registered reload handler for telegram_bot")
+        except Exception as e:
+            log_debug(f"[core_initializer] Failed to register telegram_bot reload handler: {e}")
+        
+        # Discord interface reload handler
+        try:
+            from interface import discord_bot
+            if hasattr(discord_bot, 'reload_interface'):
+                reload_handlers['discord_bot'] = discord_bot.reload_interface
+                log_debug("[core_initializer] Registered reload handler for discord_bot")
+        except Exception as e:
+            log_debug(f"[core_initializer] Failed to register discord_bot reload handler: {e}")
+        
+        # Matrix interface reload handler
+        try:
+            from interface import matrix_bot
+            if hasattr(matrix_bot, 'reload_interface'):
+                reload_handlers['matrix_bot'] = matrix_bot.reload_interface
+                log_debug("[core_initializer] Registered reload handler for matrix_bot")
+        except Exception as e:
+            log_debug(f"[core_initializer] Failed to register matrix_bot reload handler: {e}")
+        
+        # Register all handlers with config registry
+        for component_name, handler in reload_handlers.items():
+            try:
+                config_registry.register_reload_handler(component_name, handler)
+                log_info(f"[core_initializer] ✅ Reload handler registered for component: {component_name}")
+            except Exception as e:
+                log_error(f"[core_initializer] Failed to register reload handler for {component_name}: {e}")
     
     def register_interface(self, interface_name: str):
         """Register an active interface."""

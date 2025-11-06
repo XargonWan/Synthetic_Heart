@@ -6,7 +6,7 @@ from core.selenium_llm_base import SeleniumLLMBase
 GROK_MODEL_LIMITS = {
     "grok-beta": 128000,        # Grok: 128k tokens context (~400k characters)
     "grok-vision-beta": 128000,  # Grok Vision: 128k tokens context (~400k characters)
-    "unlogged": 1000,           # Unlogged state: very limited context
+    "unlogged": 21500,          # Unlogged state: limited context for free tier
     "default": 128000        # Safe default for unknown models
 }
 
@@ -85,6 +85,17 @@ class SeleniumGrokPlugin(SeleniumLLMBase):
         })
         
         super().__init__(config=grok_config, notify_fn=notify_fn)
+        
+        # Grok (X/Twitter) login detection selectors
+        from selenium.webdriver.common.by import By
+        self.login_detection_selectors = [
+            (By.CSS_SELECTOR, "a[href*='login']"),
+            (By.CSS_SELECTOR, "button[data-testid='login-button']"),
+            (By.XPATH, "//button[contains(text(), 'Log in')]"),
+            (By.XPATH, "//button[contains(text(), 'Sign in')]"),
+            (By.XPATH, "//a[contains(text(), 'Log in')]"),
+            (By.XPATH, "//a[contains(text(), 'Sign in')]"),
+        ]
 
     def _locate_prompt_area(self):
         """Locate the Grok prompt input area."""
@@ -222,33 +233,24 @@ class SeleniumGrokPlugin(SeleniumLLMBase):
         return list(GROK_MODEL_LIMITS.keys())
 
     def get_current_model(self) -> str:
-        """Get the current Grok model being used."""
+        """Get the current Grok model being used.
+        
+        Automatically returns 'unlogged' model if user is not logged in,
+        otherwise returns configured model.
+        """
         from core.config_manager import config_registry
+        from core.logging_utils import log_debug
+        
+        # Check if user is logged in using centralized method
+        if not self.is_user_logged_in():
+            log_debug("[selenium_grok] User not logged in, returning 'unlogged' model (21500 chars limit)")
+            return "unlogged"
+        
+        # User is logged in, return configured model
         GROK_MODEL = config_registry.get_value("GROK_MODEL", "")
         configured_model = GROK_MODEL or self.config.get("default_model", "grok-beta")
         
-        # Check if user is logged in, if not return "unlogged" model
-        if not self._is_user_logged_in():
-            from core.logging_utils import log_warning
-            log_warning(f"[selenium_grok] ⚠️ User not logged in to Grok, using 'unlogged' model with limited context (1000 chars)")
-            return "unlogged"
-        
+        log_debug(f"[selenium_grok] get_current_model returning: '{configured_model}' (GROK_MODEL config: '{GROK_MODEL}')")
         return configured_model
-
-    def _is_user_logged_in(self) -> bool:
-        """Check if user is logged in to Grok without initializing driver if not needed."""
-        # If driver is not initialized, assume not logged in
-        if self.driver is None:
-            return False
-            
-        try:
-            current_url = self.driver.current_url
-            # If we're on a Twitter/X login page, user is not logged in
-            if current_url and ("twitter.com" in current_url and ("login" in current_url or "signin" in current_url)):
-                return False
-            return True
-        except Exception:
-            # If we can't get the URL, assume not logged in
-            return False
 
 PLUGIN_CLASS = SeleniumGrokPlugin

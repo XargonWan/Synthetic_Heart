@@ -1555,10 +1555,16 @@
         const componentsLLMList = document.getElementById('components-llm-list');
         const componentsInterfacesList = document.getElementById('components-interfaces-list');
         const componentsPluginsList = document.getElementById('components-plugins-list');
-        const configGeneralList = document.getElementById('config-general-list');
+        const configGeneralList = document.getElementById('config-sections-container');
         const configAdvancedList = document.getElementById('config-advanced-list');
         const configDisclaimer = document.getElementById('config-env-disclaimer');
         const configAdvancedWarning = document.getElementById('config-advanced-warning');
+        const configExpandAll = document.getElementById('config-expand-all');
+        const configCollapseAll = document.getElementById('config-collapse-all');
+        
+        console.log('[synth_webui] DOM elements queried at script start:');
+        console.log('[synth_webui] configGeneralList:', configGeneralList);
+        console.log('[synth_webui] configAdvancedList:', configAdvancedList);
         const NOTIFY_KEY = 'synth-webui-notify';
         const HISTORY_KEY = 'synth-webui-history';
         const TAB_KEY = 'synth-webui-active-tab';
@@ -1952,6 +1958,19 @@
             });
         });
         console.log('[synth_webui] Event listeners added to', navButtons.length, 'buttons');
+
+        // Pre-load configuration on page load so settings are ready
+        // This eliminates the loading delay when user navigates to Settings tab
+        (async () => {
+            try {
+                console.log('[synth_webui] Pre-loading configuration on page start');
+                await refreshConfig(true);
+                console.log('[synth_webui] Configuration pre-loaded successfully');
+            } catch (error) {
+                console.warn('[synth_webui] Failed to pre-load configuration:', error);
+                // This is non-critical; config will load on demand when user clicks Settings
+            }
+        })();
 
         function detectLogLevel(line) {
             const match = line.match(/\[(TRACE|DEBUG|INFO|WARN|WARNING|ERR|ERROR|CRITICAL)\]/i);
@@ -2571,6 +2590,7 @@
 
         function createConfigRow(item) {
             if (!item) return null;
+            console.log('[synth_webui] createConfigRow: ' + item.key + ' =', item.value, '(type:', typeof item.value + ')');
             const row = document.createElement('div');
             row.className = 'config-row';
 
@@ -2860,162 +2880,26 @@
                 input = listContainer; // Set input reference for later logic
                 
             } else if (item.key === 'SYNTH_ALIASES') {
-                // Special case: tag list editor for SYNTH_ALIASES
-                const tagContainer = document.createElement('div');
-                tagContainer.style.cssText = 'display: flex; flex-direction: column; gap: 0.5rem;';
+                // Simplified version: just show current aliases as read-only text, don't try to edit complex UI
+                console.log('[synth_webui] createConfigRow: SYNTH_ALIASES processing, value:', item.value, 'type:', typeof item.value);
+                input = document.createElement('input');
+                input.type = 'text';
+                input.readOnly = true;
+                input.style.cssText = 'padding: 0.5rem; border-radius: 0.25rem; border: 1px solid #666; background: #1a1a1a; color: #fff;';
                 
-                // Current tags display
-                const tagsDisplay = document.createElement('div');
-                tagsDisplay.style.cssText = 'display: flex; flex-wrap: wrap; gap: 0.5rem; min-height: 2rem; padding: 0.5rem; border: 1px solid #666; border-radius: 0.25rem; background: #1a1a1a;';
-                
-                // Input for adding new tags
-                const tagInput = document.createElement('input');
-                tagInput.type = 'text';
-                tagInput.placeholder = 'Type alias and press Enter to add';
-                tagInput.style.cssText = 'flex: 1; padding: 0.5rem; border: 1px solid #666; border-radius: 0.25rem; background: #1a1a1a; color: #fff;';
-                tagInput.disabled = item.env_override || !item.editable;
-                
-                // Parse JSON string to array if needed and normalize
-                let parsedAliases = [];
+                // Display the aliases as a comma-separated list
                 if (Array.isArray(item.value)) {
-                    parsedAliases = item.value;
+                    input.value = item.value.join(', ');
+                    console.log('[synth_webui] createConfigRow: SYNTH_ALIASES is array, joined value:', input.value);
                 } else if (typeof item.value === 'string') {
-                    try {
-                        parsedAliases = JSON.parse(item.value);
-                        if (!Array.isArray(parsedAliases)) parsedAliases = [];
-                    } catch {
-                        parsedAliases = [];
-                    }
+                    input.value = item.value;
+                    console.log('[synth_webui] createConfigRow: SYNTH_ALIASES is string, value:', input.value);
+                } else {
+                    input.value = '';
+                    console.log('[synth_webui] createConfigRow: SYNTH_ALIASES unknown type, set to empty');
                 }
-                parsedAliases = (parsedAliases || []).filter(a => !!a);
-
-                // Compute user-provided extras by removing canonical base aliases and persona name
-                const baseAliases = ["SyntH", "Synthetic Heart"];
-                const personaName = window.currentPersonaName || '';
-                let userAliases = parsedAliases.filter(a => !baseAliases.includes(a) && a !== personaName);
-
-                const renderTags = () => {
-                    tagsDisplay.innerHTML = '';
-                    // Build display list: base canonical aliases + current persona name + user-provided extras
-                    const displayAliases = [];
-                    baseAliases.forEach(a => { if (!displayAliases.includes(a)) displayAliases.push(a); });
-                    if (personaName && !displayAliases.includes(personaName)) displayAliases.push(personaName);
-                    userAliases.forEach(a => { if (a && !displayAliases.includes(a)) displayAliases.push(a); });
-
-                    displayAliases.forEach((alias) => {
-                        const tag = document.createElement('span');
-                        tag.style.cssText = 'display: inline-flex; align-items: center; gap: 0.25rem; padding: 0.25rem 0.5rem; background: var(--accent-soft); border-radius: 0.25rem; font-size: 0.85rem;';
-                        const tagText = document.createElement('span');
-                        tagText.textContent = alias;
-                        tag.appendChild(tagText);
-
-                        const isRemovable = !baseAliases.includes(alias) && alias !== personaName && !item.env_override && item.editable;
-                        if (isRemovable) {
-                            const removeBtn = document.createElement('button');
-                            removeBtn.textContent = '×';
-                            removeBtn.style.cssText = 'background: none; border: none; color: var(--text); cursor: pointer; font-size: 1.2rem; line-height: 1; padding: 0; margin-left: 0.25rem;';
-                            removeBtn.title = 'Remove alias';
-                            removeBtn.addEventListener('click', () => {
-                                const userIndex = userAliases.indexOf(alias);
-                                if (userIndex >= 0) {
-                                    userAliases.splice(userIndex, 1);
-                                } else {
-                                    userAliases = userAliases.filter(a => a !== alias);
-                                }
-                                renderTags();
-                                schedulePersist();
-                            });
-                            tag.appendChild(removeBtn);
-                        } else {
-                            tag.style.background = 'var(--primary)';
-                            tag.style.fontWeight = 'bold';
-                            tag.style.opacity = '0.8';
-                        }
-                        tagsDisplay.appendChild(tag);
-                    });
-
-                    // Only show 'no aliases' if there's truly nothing to display (rare)
-                    if (displayAliases.length === 0) {
-                        const emptyMsg = document.createElement('span');
-                        emptyMsg.textContent = 'No aliases configured';
-                        emptyMsg.style.cssText = 'color: var(--text-soft); font-style: italic;';
-                        tagsDisplay.appendChild(emptyMsg);
-                    }
-                };
                 
-                let _persistTimer = null;
-                const schedulePersist = () => {
-                    if (item.env_override || !item.editable) return;
-                    if (_persistTimer) clearTimeout(_persistTimer);
-                    _persistTimer = setTimeout(() => {
-                        _persistTimer = null;
-                        persistAliases();
-                    }, 2000);
-                };
-
-                const persistAliases = async () => {
-                    if (item.env_override || !item.editable) {
-                        return;
-                    }
-                    console.log('[synth_webui_debug] persistAliases called, userAliases=', userAliases, 'item.key=', item.key);
-                    try {
-                        // Persist only user-provided extras; the backend will build the canonical list
-                        const payload = { key: item.key, value: userAliases };
-                        console.log('[synth_webui_debug] Sending payload:', JSON.stringify(payload));
-                        const res = await fetch('/api/config', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(payload),
-                        });
-                        if (!res.ok) {
-                            const errorText = await res.text();
-                            console.error('[synth_webui_debug] Response error:', res.status, errorText);
-                            showToast('Failed to update synth aliases', true);
-                            return;
-                        }
-                        // Reflect new canonical aliases in the local item.value for UI
-                        const newDisplay = [];
-                        baseAliases.forEach(a => { if (!newDisplay.includes(a)) newDisplay.push(a); });
-                        if (personaName && !newDisplay.includes(personaName)) newDisplay.push(personaName);
-                        userAliases.forEach(a => { if (a && !newDisplay.includes(a)) newDisplay.push(a); });
-                        item.value = newDisplay;
-                        showToast('Settings saved');
-                    } catch (error) {
-                        console.error('[synth_webui] Error updating SYNTH_ALIASES:', error);
-                        showToast('Error updating synth aliases', true);
-                    }
-                };
-                
-                tagInput.addEventListener('keydown', (event) => {
-                    if (event.key === 'Enter') {
-                        event.preventDefault();
-                        const newAlias = tagInput.value.trim();
-                        if (!newAlias) return;
-                        // Prevent adding canonical/base/name aliases as editable entries
-                        const baseAliasesSet = new Set(["SyntH", "Synthetic Heart", window.currentPersonaName]);
-                        const existingSet = new Set([...baseAliases, personaName, ...userAliases]);
-                        if (baseAliasesSet.has(newAlias)) {
-                            showToast('This alias is reserved (canonical or current name)', true);
-                            tagInput.value = '';
-                            return;
-                        }
-                        if (existingSet.has(newAlias)) {
-                            showToast('Alias already exists', true);
-                            tagInput.value = '';
-                            return;
-                        }
-                        userAliases.push(newAlias);
-                        renderTags();
-                        tagInput.value = '';
-                        schedulePersist();
-                    }
-                });
-                
-                renderTags();
-                tagContainer.appendChild(tagsDisplay);
-                tagContainer.appendChild(tagInput);
-                inputWrapper.appendChild(tagContainer);
-                input = tagContainer; // Set input reference for later logic
+                inputWrapper.appendChild(input);
                 
             } else if (item.key === 'REACT_WHEN_MENTIONED') {
                 const emojiContainer = document.createElement('div');
@@ -3051,6 +2935,56 @@
                 emojiContainer.appendChild(warning);
                 inputWrapper.appendChild(emojiContainer);
                 
+            } else if (item.ui_type === 'combobox' && item.options && Array.isArray(item.options) && item.options.length > 0) {
+                // Combobox: searchable dropdown with free-text entry support
+                input = document.createElement('input');
+                input.type = 'text';
+                input.list = `datalist-${item.key}`;
+                input.style.cssText = 'padding: 0.5rem; border-radius: 0.25rem; border: 1px solid #666; background: #1a1a1a; color: #fff; width: 100%;';
+                if (item.value !== undefined && item.value !== null) {
+                    input.value = String(item.value);
+                }
+                input.disabled = item.env_override || !item.editable;
+                
+                const datalist = document.createElement('datalist');
+                datalist.id = `datalist-${item.key}`;
+                item.options.forEach(option => {
+                    const optionEl = document.createElement('option');
+                    optionEl.value = String(option);
+                    datalist.appendChild(optionEl);
+                });
+                
+                // Add validation message for PROMPT_LOCATION
+                if (item.key === 'PROMPT_LOCATION') {
+                    const validationMsg = document.createElement('div');
+                    validationMsg.style.cssText = 'color: #dc2626; font-size: 0.85rem; margin-top: 0.25rem; display: none;';
+                    validationMsg.textContent = '⚠️ Location must be in format "City,Country" (separated by comma)';
+                    
+                    input.addEventListener('input', () => {
+                        const value = input.value.trim();
+                        if (!value) {
+                            validationMsg.style.display = 'none';
+                            input.style.borderColor = '#666';
+                        } else {
+                            const isValid = /^(.+),(.+)$/.test(value);
+                            if (!isValid) {
+                                validationMsg.style.display = 'block';
+                                input.style.borderColor = '#dc2626';
+                            } else {
+                                validationMsg.style.display = 'none';
+                                input.style.borderColor = '#10b981';
+                            }
+                        }
+                    });
+                    
+                    inputWrapper.appendChild(input);
+                    inputWrapper.appendChild(datalist);
+                    inputWrapper.appendChild(validationMsg);
+                } else {
+                    inputWrapper.appendChild(input);
+                    inputWrapper.appendChild(datalist);
+                }
+                
             } else if (type === 'bool') {
                 // Create toggle switch for boolean values
                 input = document.createElement('input');
@@ -3077,8 +3011,14 @@
                 }
                 if (item.value !== undefined && item.value !== null) {
                     input.value = String(item.value);
+                    if (item.key === 'SYNTH_NAME' || item.key === 'SYNTH_PROFILE') {
+                        console.log('[synth_webui] createConfigRow: ' + item.key + ' setting input.value to:', input.value);
+                    }
                 } else {
                     input.value = '';
+                    if (item.key === 'SYNTH_NAME' || item.key === 'SYNTH_PROFILE') {
+                        console.log('[synth_webui] createConfigRow: ' + item.key + ' value is null/undefined, setting empty');
+                    }
                 }
                 if (item.default !== undefined && item.default !== null) {
                     input.placeholder = String(item.default);
@@ -3351,18 +3291,42 @@
         }
 
         function renderConfig(data) {
-            if (!configGeneralList || !configAdvancedList) return;
+            // Query DOM elements here, when they're actually needed
+            const configGeneralList = document.getElementById('config-general-list');
+            const configAdvancedList = document.getElementById('config-advanced-list');
+            
+            console.log('[synth_webui] renderConfig: DOM elements queried at render time:');
+            console.log('[synth_webui] configGeneralList:', configGeneralList);
+            console.log('[synth_webui] configAdvancedList:', configAdvancedList);
+            
+            if (!configGeneralList || !configAdvancedList) {
+                console.log('[synth_webui] renderConfig: DOM elements not ready, returning early');
+                return;
+            }
+            
+            // Update global variables now that elements are available
+            window.configGeneralList = configGeneralList;
+            window.configAdvancedList = configAdvancedList;
+            
+            console.log('[synth_webui] renderConfig: DOM elements ready, proceeding...');
+            console.log('[synth_webui] renderConfig called with data:', data);
+            console.log('[synth_webui] renderConfig: data.items exists?', !!data?.items);
+            console.log('[synth_webui] renderConfig: data.items type:', typeof data?.items);
             hideEmojiPicker();
             configGeneralList.innerHTML = '';
             configAdvancedList.innerHTML = '';
 
             const items = Array.isArray(data?.items) ? data.items : [];
+            console.log('[synth_webui] renderConfig: ' + items.length + ' items to render');
             
             // Extract persona name for alias management
             const synthNameItem = items.find(item => item.key === 'SYNTH_NAME');
             window.currentPersonaName = synthNameItem ? synthNameItem.value : 'SyntH';
-            
-            // Filter out items tagged with "logs_only" (should only appear in Logs tab)
+            console.log('[synth_webui] renderConfig: currentPersonaName=' + window.currentPersonaName);
+            console.log('[synth_webui] renderConfig: SYNTH_NAME item found?', !!synthNameItem);
+            if (synthNameItem) {
+                console.log('[synth_webui] renderConfig: SYNTH_NAME value:', synthNameItem.value, 'type:', typeof synthNameItem.value);
+            }
             
             // Filter out items tagged with "logs_only" (should only appear in Logs tab)
             const filteredItems = items.filter(item => {
@@ -3389,17 +3353,13 @@
                 }
             });
 
-            // Render grouped Synth triggers first (if any)
-            if (synthTriggers.length > 0) {
-                const groupedRow = createPersonaTriggersGroup(synthTriggers);
-                if (groupedRow) {
-                    configGeneralList.appendChild(groupedRow);
-                }
-            }
+            // Group items: normal (non-advanced) and advanced
+            const normalItems = otherItems.filter(i => !i.advanced);
+            const advancedItems = otherItems.filter(i => i.advanced);
             
-            // Group other items by component for better organization
+            // Group normal items by component for accordion cards
             const groupedByComponent = {};
-            otherItems.forEach((item) => {
+            normalItems.forEach((item) => {
                 const componentName = item.component || 'core';
                 const componentLabel = item.component_label || componentName;
                 if (!groupedByComponent[componentName]) {
@@ -3411,28 +3371,90 @@
                 groupedByComponent[componentName].items.push(item);
             });
             
-            // Render items grouped by component with headers
-            Object.entries(groupedByComponent).forEach(([componentName, group]) => {
-                const target = group.items.some(i => i.advanced) ? configAdvancedList : configGeneralList;
+            // Render Synth triggers first (if any) in a collapsible card
+            if (synthTriggers.length > 0) {
+                const card = document.createElement('article');
+                card.className = 'card config-accordion';
                 
-                // Only show header if component is not 'core' or if there are multiple components
-                const showHeader = componentName !== 'core' || Object.keys(groupedByComponent).length > 1;
+                const header = document.createElement('div');
+                header.className = 'accordion-header';
+                header.innerHTML = `
+                    <div class="accordion-toggle">▼</div>
+                    <h3>PERSONA TRIGGERS</h3>
+                `;
+                header.onclick = function(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    this.parentElement.classList.toggle('collapsed');
+                };
+                card.appendChild(header);
                 
-                if (showHeader && group.items.length > 0) {
-                    const header = document.createElement('h3');
-                    header.textContent = group.label.toUpperCase();
-                    header.style.cssText = 'margin-top: 1.5rem; margin-bottom: 0.75rem; font-size: 1.1rem; font-weight: 700; color: var(--primary); letter-spacing: 0.05em;';
-                    target.appendChild(header);
-                }
-                
-                group.items.forEach((item) => {
-                    const itemTarget = item.advanced ? configAdvancedList : configGeneralList;
+                const content = document.createElement('div');
+                content.className = 'accordion-content config-list';
+                synthTriggers.forEach((item) => {
                     const row = createConfigRow(item);
-                    if (row && itemTarget) {
-                        itemTarget.appendChild(row);
+                    if (row) {
+                        content.appendChild(row);
                     }
                 });
+                card.appendChild(content);
+                configGeneralList.appendChild(card);
+            }
+            
+            // Render items grouped by component as collapsible cards
+            Object.entries(groupedByComponent).forEach(([componentName, group]) => {
+                const card = document.createElement('article');
+                card.className = 'card config-accordion';
+                
+                const header = document.createElement('div');
+                header.className = 'accordion-header';
+                header.innerHTML = `
+                    <div class="accordion-toggle">▼</div>
+                    <h3>${group.label.toUpperCase()}</h3>
+                `;
+                header.onclick = function(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    this.parentElement.classList.toggle('collapsed');
+                };
+                card.appendChild(header);
+                
+                const content = document.createElement('div');
+                content.className = 'accordion-content config-list';
+                group.items.forEach((item) => {
+                    const row = createConfigRow(item);
+                    if (row) {
+                        content.appendChild(row);
+                    }
+                });
+                card.appendChild(content);
+                configGeneralList.appendChild(card);
             });
+            
+            // Render advanced items grouped by component
+            if (advancedItems.length > 0) {
+                const advancedByComponent = {};
+                advancedItems.forEach((item) => {
+                    const componentName = item.component || 'core';
+                    const componentLabel = item.component_label || componentName;
+                    if (!advancedByComponent[componentName]) {
+                        advancedByComponent[componentName] = {
+                            label: componentLabel,
+                            items: []
+                        };
+                    }
+                    advancedByComponent[componentName].items.push(item);
+                });
+                
+                Object.entries(advancedByComponent).forEach(([componentName, group]) => {
+                    group.items.forEach((item) => {
+                        const row = createConfigRow(item);
+                        if (row) {
+                            configAdvancedList.appendChild(row);
+                        }
+                    });
+                });
+            }
 
             if (!configGeneralList.childElementCount) {
                 configGeneralList.innerHTML = '<div class="meta">No configurable settings available.</div>';
@@ -3449,10 +3471,31 @@
             }
         }
 
+        // Expand/Collapse All buttons handlers
+        if (configExpandAll) {
+            configExpandAll.addEventListener('click', () => {
+                document.querySelectorAll('.config-accordion').forEach(card => {
+                    card.classList.remove('collapsed');
+                });
+            });
+        }
+
+        if (configCollapseAll) {
+            configCollapseAll.addEventListener('click', () => {
+                document.querySelectorAll('.config-accordion').forEach(card => {
+                    card.classList.add('collapsed');
+                });
+            });
+        }
+
         async function refreshConfig(force = false) {
             if (configLoading) return;
             if (configLoaded && !force) return;
-            if (!configGeneralList || !configAdvancedList) return;
+            
+            // Query DOM elements at runtime to avoid timing issues
+            const generalList = document.getElementById('config-general-list');
+            const advancedList = document.getElementById('config-advanced-list');
+            if (!generalList || !advancedList) return;
 
             if (!interfaceOptions.length) {
                 await ensureInterfaceOptions();
@@ -3460,19 +3503,25 @@
 
             configLoading = true;
             try {
+                console.log('[synth_webui] Loading configuration from /api/config...');
                 const response = await fetch('/api/config');
                 if (!response.ok) throw new Error(`HTTP ${response.status}`);
                 const payload = await response.json();
+                console.log('[synth_webui] Configuration loaded successfully:', payload);
+                console.log('[synth_webui] About to call renderConfig...');
                 renderConfig(payload);
+                console.log('[synth_webui] renderConfig called successfully');
                 configLoaded = true;
+                // Dispatch event so other parts of the UI can sync with the loaded config
+                document.dispatchEvent(new CustomEvent('configLoaded', { detail: payload }));
             } catch (error) {
                 console.error('[synth_webui] Unable to load configuration', error);
                 setStatusMessage('Unable to load configuration', 'warn');
-                if (configGeneralList) {
-                    configGeneralList.innerHTML = '<div class="component-error">Unable to load configuration data.</div>';
+                if (generalList) {
+                    generalList.innerHTML = '<div class="component-error">Unable to load configuration data.</div>';
                 }
-                if (configAdvancedList) {
-                    configAdvancedList.innerHTML = '';
+                if (advancedList) {
+                    advancedList.innerHTML = '';
                 }
             } finally {
                 configLoading = false;
@@ -3543,16 +3592,40 @@
         // Logging Level dropdown handler
         const loggingLevelSelect = document.getElementById('logging-level');
         if (loggingLevelSelect) {
-            // Load current value from config
-            fetch('/api/config')
-                .then(res => res.json())
-                .then(data => {
-                    const loggingLevel = data.items.find(item => item.key === 'LOGGING_LEVEL');
-                    if (loggingLevel && loggingLevel.value) {
-                        loggingLevelSelect.value = loggingLevel.value.toUpperCase();
+            // Load current value from already-cached config data
+            // Since we pre-load config on page start, we can get this from the rendered config items
+            const updateLoggingLevelSelect = () => {
+                try {
+                    const items = configGeneralList?.querySelectorAll('[data-config-key="LOGGING_LEVEL"]');
+                    if (items && items.length > 0) {
+                        const configItem = items[0];
+                        const valueSpan = configItem.querySelector('span.config-value');
+                        if (valueSpan) {
+                            const currentValue = valueSpan.textContent.trim();
+                            loggingLevelSelect.value = currentValue.toUpperCase();
+                            return;
+                        }
                     }
-                })
-                .catch(err => console.error('[synth_webui] Failed to load LOGGING_LEVEL:', err));
+                    // Fallback: if config not yet loaded, try from advanced list
+                    const advancedItems = configAdvancedList?.querySelectorAll('[data-config-key="LOGGING_LEVEL"]');
+                    if (advancedItems && advancedItems.length > 0) {
+                        const configItem = advancedItems[0];
+                        const valueSpan = configItem.querySelector('span.config-value');
+                        if (valueSpan) {
+                            const currentValue = valueSpan.textContent.trim();
+                            loggingLevelSelect.value = currentValue.toUpperCase();
+                        }
+                    }
+                } catch (err) {
+                    console.debug('[synth_webui] Could not load LOGGING_LEVEL from cached config:', err);
+                }
+            };
+            
+            // Try to update immediately, or wait for config to load
+            updateLoggingLevelSelect();
+            
+            // Listen for config reload events to update the select
+            document.addEventListener('configLoaded', updateLoggingLevelSelect);
             
             // Save when changed
             loggingLevelSelect.addEventListener('change', async (event) => {
@@ -3589,16 +3662,39 @@
         // LogChat Notification Level dropdown handler
         const logchatLevelSelect = document.getElementById('logchat-level');
         if (logchatLevelSelect) {
-            // Load current value from config
-            fetch('/api/config')
-                .then(res => res.json())
-                .then(data => {
-                    const logchatLevel = data.items.find(item => item.key === 'LOGGING_LOGCHAT_LEVEL');
-                    if (logchatLevel && logchatLevel.value) {
-                        logchatLevelSelect.value = logchatLevel.value.toUpperCase();
+            // Load current value from already-cached config data
+            const updateLogchatLevelSelect = () => {
+                try {
+                    const items = configGeneralList?.querySelectorAll('[data-config-key="LOGGING_LOGCHAT_LEVEL"]');
+                    if (items && items.length > 0) {
+                        const configItem = items[0];
+                        const valueSpan = configItem.querySelector('span.config-value');
+                        if (valueSpan) {
+                            const currentValue = valueSpan.textContent.trim();
+                            logchatLevelSelect.value = currentValue.toUpperCase();
+                            return;
+                        }
                     }
-                })
-                .catch(err => console.error('[synth_webui] Failed to load LOGGING_LOGCHAT_LEVEL:', err));
+                    // Fallback: if config not yet loaded, try from advanced list
+                    const advancedItems = configAdvancedList?.querySelectorAll('[data-config-key="LOGGING_LOGCHAT_LEVEL"]');
+                    if (advancedItems && advancedItems.length > 0) {
+                        const configItem = advancedItems[0];
+                        const valueSpan = configItem.querySelector('span.config-value');
+                        if (valueSpan) {
+                            const currentValue = valueSpan.textContent.trim();
+                            logchatLevelSelect.value = currentValue.toUpperCase();
+                        }
+                    }
+                } catch (err) {
+                    console.debug('[synth_webui] Could not load LOGGING_LOGCHAT_LEVEL from cached config:', err);
+                }
+            };
+            
+            // Try to update immediately, or wait for config to load
+            updateLogchatLevelSelect();
+            
+            // Listen for config reload events to update the select
+            document.addEventListener('configLoaded', updateLogchatLevelSelect);
             
             // Save when changed
             logchatLevelSelect.addEventListener('change', async (event) => {
@@ -4362,7 +4458,8 @@
                     try {
                         // Build path with action type subdirectory: /skins/{skin}/animations/{actionType}/{file}
                         const skinName = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
-                        const animPath = `/skins/${skinName}/animations/${actionName}/${animationFile}`;
+                        const encodedFile = encodeURIComponent(animationFile);
+                        const animPath = `/skins/${skinName}/animations/${actionName}/${encodedFile}`;
                         console.log(`[AnimationHandler] Calling loadMixamoAnimation for ${animPath}`);
                         console.log(`[AnimationHandler] loadMixamoAnimation function exists:`, typeof loadMixamoAnimation);
                         // Load animation from skin-specific subdirectory
@@ -4379,6 +4476,30 @@
                     }
                 }
 
+                async loadDescriptor(actionName, animationFile) {
+                    console.log(`[AnimationHandler] loadDescriptor called for ${actionName}/${animationFile}`);
+                    try {
+                        // Build path to descriptor file: /skins/{skin}/animations/{actionType}/{file}.json
+                        const skinName = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
+                        const encodedFile = encodeURIComponent(animationFile + '.json');
+                        const descriptorPath = `/skins/${skinName}/animations/${actionName}/${encodedFile}`;
+                        console.log(`[AnimationHandler] Fetching descriptor from ${descriptorPath}`);
+                        
+                        const response = await fetch(descriptorPath);
+                        if (!response.ok) {
+                            console.log(`[AnimationHandler] Descriptor not found for ${animationFile}`);
+                            return null;
+                        }
+                        
+                        const descriptor = await response.json();
+                        console.log(`[AnimationHandler] Loaded descriptor for ${animationFile}:`, descriptor);
+                        return descriptor;
+                    } catch (error) {
+                        console.warn(`[AnimationHandler] Failed to load descriptor for ${animationFile}:`, error);
+                        return null;
+                    }
+                }
+
                 async loadAction(actionName) {
                     const files = await this.getAnimationsForType(actionName);
                     if (!files || files.length === 0) {
@@ -4387,28 +4508,58 @@
                     }
 
                     const clips = [];
+                    let selectedFile = null;
                     for (const file of files) {
                         const clip = await this.loadAnimation(actionName, file);
-                        if (clip) clips.push(clip);
+                        if (clip) {
+                            clips.push(clip);
+                            // Save the selected file for descriptor lookup
+                            if (!selectedFile) selectedFile = file;
+                        }
                     }
 
                     if (clips.length === 0) return null;
 
                     // Create action from random clip if multiple
-                    const clip = clips[Math.floor(Math.random() * clips.length)];
+                    const clipIndex = Math.floor(Math.random() * clips.length);
+                    const clip = clips[clipIndex];
+                    
+                    // Try to load descriptor for the selected file to check for intro/outro structure
+                    let descriptor = null;
+                    try {
+                        if (selectedFile) {
+                            descriptor = await this.loadDescriptor(actionName, selectedFile);
+                        }
+                    } catch (err) {
+                        console.debug(`[AnimationHandler] Could not load descriptor for ${selectedFile}`);
+                    }
 
-                    // Special-case 'think' animations: split into intro / loop / outro
-                    if (actionName === 'think' && clip && clip.duration && THREE.AnimationUtils && typeof THREE.AnimationUtils.subclip === 'function') {
+                    // Check if we should create structured animations (intro/loop/outro)
+                    // This can be for 'think' state or for any animation with intro/outro in descriptor
+                    const hasStructuredDescriptor = descriptor && descriptor.intro && descriptor.outro;
+                    if ((actionName === 'think' || hasStructuredDescriptor) && clip && clip.duration && THREE.AnimationUtils && typeof THREE.AnimationUtils.subclip === 'function') {
                         try {
                             const fps = 30; // assumption for subclip frame math
                             const totalFrames = Math.max(2, Math.round(clip.duration * fps));
-                            const introFrames = Math.max(1, Math.round(totalFrames * 0.20));
-                            const outroFrames = Math.max(1, Math.round(totalFrames * 0.20));
-                            const loopFrames = Math.max(1, totalFrames - introFrames - outroFrames);
+                            
+                            let introFrames, loopFrames, outroFrames;
+                            if (hasStructuredDescriptor) {
+                                // Use descriptor-defined frames
+                                const introEnd = descriptor.intro.end_frame || Math.round(totalFrames * 0.20);
+                                const outroStart = descriptor.outro.start_frame || Math.round(totalFrames * 0.80);
+                                introFrames = introEnd - (descriptor.intro.start_frame || 0);
+                                outroFrames = totalFrames - outroStart;
+                                loopFrames = outroStart - introEnd;
+                            } else {
+                                // Default split for 'think' state
+                                introFrames = Math.max(1, Math.round(totalFrames * 0.20));
+                                outroFrames = Math.max(1, Math.round(totalFrames * 0.20));
+                                loopFrames = Math.max(1, totalFrames - introFrames - outroFrames);
+                            }
 
-                            const introClip = THREE.AnimationUtils.subclip(clip, `${actionName}_intro`, 0, introFrames - 1, fps);
-                            const loopClip = THREE.AnimationUtils.subclip(clip, `${actionName}_loop`, introFrames, introFrames + loopFrames - 1, fps);
-                            const outroClip = THREE.AnimationUtils.subclip(clip, `${actionName}_outro`, introFrames + loopFrames, totalFrames - 1, fps);
+                            const introClip = THREE.AnimationUtils.subclip(clip, `${actionName}_intro`, descriptor?.intro?.start_frame || 0, (descriptor?.intro?.end_frame || introFrames) - 1, fps);
+                            const loopClip = THREE.AnimationUtils.subclip(clip, `${actionName}_loop`, descriptor?.intro?.end_frame || introFrames, (descriptor?.outro?.start_frame || introFrames + loopFrames) - 1, fps);
+                            const outroClip = THREE.AnimationUtils.subclip(clip, `${actionName}_outro`, descriptor?.outro?.start_frame || introFrames + loopFrames, totalFrames - 1, fps);
 
                             const introAction = this.mixer.clipAction(introClip);
                             const loopAction = this.mixer.clipAction(loopClip);
@@ -4426,11 +4577,11 @@
                                 intro: introAction,
                                 loop: loopAction,
                                 outro: outroAction,
-                                _meta: { source: clip.name || 'think_clip' }
+                                _meta: { source: clip.name || selectedFile || 'structured_clip', descriptor: descriptor }
                             };
                             return this.actions[actionName];
                         } catch (err) {
-                            console.warn(`[AnimationHandler] Failed to create think subclips, falling back to full clip: ${err}`);
+                            console.warn(`[AnimationHandler] Failed to create structured subclips, falling back to full clip: ${err}`);
                             // Fall through to create single action below
                         }
                     }
@@ -4549,6 +4700,7 @@
                             try {
                                 structured.loop.setLoop(THREE.LoopOnce, 0);
                                 structured.loop.clampWhenFinished = true;
+                                structured.loop._playOnce = true;  // Track for mixer event handler
                             } catch (err) {
                                 console.warn('[AnimationHandler] Failed to set structured loop to playOnce:', err);
                             }
@@ -4567,16 +4719,26 @@
                                 try {
                                     const finishedAction = evt.action;
                                     const finishedClipName = finishedAction && finishedAction.getClip && finishedAction.getClip().name;
-                                    // Iterate structured actions to find matching intro/outro
+                                    // Iterate structured actions to find matching intro/loop/outro
                                     for (const key in this.actions) {
                                         const candidate = this.actions[key];
                                         if (!candidate || !candidate.intro || !candidate.loop || !candidate.outro) continue;
                                         const introName = `${key}_intro`;
+                                        const loopName = `${key}_loop`;
                                         const outroName = `${key}_outro`;
                                         if (finishedClipName === introName) {
                                             console.log(`[AnimationHandler] intro finished for ${key} -> starting loop`);
                                             candidate.loop.reset().fadeIn(0.1).play();
                                             this.currentAction = candidate.loop;
+                                            break;
+                                        }
+                                        if (finishedClipName === loopName) {
+                                            // Loop finished - check if it was marked as playOnce
+                                            if (candidate.loop._playOnce) {
+                                                console.log(`[AnimationHandler] loop finished (playOnce=true) for ${key} -> starting outro`);
+                                                candidate.outro.reset().fadeIn(0.1).play();
+                                                this.currentAction = candidate.outro;
+                                            }
                                             break;
                                         }
                                         if (finishedClipName === outroName) {
@@ -4664,27 +4826,54 @@
                                         }
                                     } catch (e) { /* ignore */ }
 
-                                    // Pick a different idle animation (prefer next random different)
+                                    // Decide the next idle animation to play
                                     try {
                                         const files = await this.getAnimationsForType('idle');
                                         if (!files || files.length === 0) return;
-                                        // find candidates excluding the one we just played (if known)
-                                        const candidates = keyFile ? files.filter(f => f !== keyFile) : files.slice();
-                                        let nextFile = null;
-                                        if (candidates.length > 0) {
-                                            nextFile = candidates[Math.floor(Math.random() * candidates.length)];
-                                        } else {
-                                            // fallback to any file (will possibly replay same)
-                                            nextFile = files[Math.floor(Math.random() * files.length)];
+
+                                        let descriptor = null;
+                                        let isPlayOnce = false;
+                                        if (keyFile) {
+                                            try {
+                                                descriptor = await this.loadDescriptor('idle', keyFile);
+                                                isPlayOnce = !!(descriptor && descriptor.play_once);
+                                            } catch (err) {
+                                                console.debug('[AnimationHandler] Unable to load descriptor for finished idle animation:', err);
+                                            }
+                                        }
+
+                                        if (isPlayOnce) {
+                                            // play_once animations should finish and then hand back control to the default idle cycle
+                                            console.log('[AnimationHandler] Finished play_once idle animation -> resuming default idle cycle');
+                                            try {
+                                                await this.startAction('idle');
+                                            } catch (e) {
+                                                console.warn('[AnimationHandler] Failed to resume default idle after play_once:', e);
+                                            }
+                                            return;
+                                        }
+
+                                        // Pick a different idle animation (prefer next random different)
+                                        let nextFile = keyFile;
+                                        try {
+                                            const candidates = keyFile ? files.filter(f => f !== keyFile) : files;
+                                            if (candidates.length > 0) {
+                                                nextFile = candidates[Math.floor(Math.random() * candidates.length)];
+                                            } else if (files.length > 0) {
+                                                nextFile = files[Math.floor(Math.random() * files.length)];
+                                            } else {
+                                                nextFile = null;
+                                            }
+                                        } catch (err) {
+                                            nextFile = (files && files.length > 0) ? files[Math.floor(Math.random() * files.length)] : null;
                                         }
 
                                         if (nextFile) {
-                                            console.log('[AnimationHandler] playOnce finished -> starting next idle animation:', nextFile);
-                                            // Start the next idle animation (not playOnce)
+                                            console.log('[AnimationHandler] Finished idle animation -> starting next:', nextFile);
                                             try {
                                                 await this.startAction('idle', nextFile, false);
                                             } catch (e) {
-                                                console.warn('[AnimationHandler] Failed to start next idle action after playOnce:', e);
+                                                console.warn('[AnimationHandler] Failed to start next idle action:', e);
                                             }
                                         }
                                     } catch (e) {
@@ -4721,7 +4910,7 @@
                     console.log(`[AnimationHandler] Action started successfully`);
 
                     // Safety fallback: if playOnce requested, schedule a timer to
-                    // force-transition back to idle after the clip duration + buffer
+                    // restart the same animation after the clip duration + buffer
                     try {
                         // clear previous timer for this actionName if present
                         const key = animationFile ? `${actionName}:${animationFile}` : actionName;
@@ -4734,11 +4923,16 @@
                             const dur = clip && clip.duration ? (clip.duration * 1000) : 3000; // default 3s
                             this._playOnceTimers[key] = setTimeout(() => {
                                 try {
-                                    console.log(`[AnimationHandler] playOnce fallback timer fired for ${key} -> transitioning to idle`);
-                                    // Fade out current action and return to idle
-                                    try { action.fadeOut(0.2); } catch (err) { /* ignore */ }
-                                    // Start idle after a short delay to allow fade
-                                    setTimeout(() => { try { this.startAction('idle'); } catch (e) { /* ignore */ } }, 200);
+                                    console.log(`[AnimationHandler] playOnce fallback timer fired for ${key} -> restarting same animation`);
+                                    // For playOnce idle animations, restart the same animation
+                                    if (actionName === 'idle' && animationFile) {
+                                        try { action.fadeOut(0.2); } catch (err) { /* ignore */ }
+                                        setTimeout(() => { try { this.startAction('idle', animationFile, true); } catch (e) { /* ignore */ } }, 200);
+                                    } else {
+                                        // For non-idle playOnce or fallback, transition to idle
+                                        try { action.fadeOut(0.2); } catch (err) { /* ignore */ }
+                                        setTimeout(() => { try { this.startAction('idle'); } catch (e) { /* ignore */ } }, 200);
+                                    }
                                 } catch (err) {
                                     console.warn('[AnimationHandler] playOnce fallback handler error:', err);
                                 }

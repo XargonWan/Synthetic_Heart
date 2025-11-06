@@ -9,7 +9,7 @@ GEMINI_MODEL_LIMITS = {
     "2.0-flash": 32000,      # Gemini 2.0 Flash: 32k characters
     "1.5-flash": 100000,     # Gemini 1.5 Flash: ~100k characters
     "1.5-pro": 500000,       # Gemini 1.5 Pro: ~500k characters (2M tokens)
-    "unlogged": 1000,        # Unlogged state: very limited context
+    "unlogged": 21500,       # Unlogged state: limited context for free tier
     "default": 32000         # Safe default for unknown models
 }
 
@@ -76,6 +76,16 @@ class SeleniumGeminiPlugin(SeleniumLLMBase):
         })
         
         super().__init__(config=gemini_config, notify_fn=notify_fn)
+        
+        # Google login detection selectors
+        from selenium.webdriver.common.by import By
+        self.login_detection_selectors = [
+            (By.CSS_SELECTOR, "button[data-testid='login-button']"),
+            (By.CSS_SELECTOR, "a[href*='signin']"),
+            (By.XPATH, "//button[contains(text(), 'Sign in')]"),
+            (By.XPATH, "//a[contains(text(), 'Sign in')]"),
+            (By.CSS_SELECTOR, ".sign-in-button"),
+        ]
 
     def _locate_prompt_area(self):
         """Locate the Gemini prompt input area."""
@@ -214,31 +224,22 @@ class SeleniumGeminiPlugin(SeleniumLLMBase):
         return list(GEMINI_MODEL_LIMITS.keys())
 
     def get_current_model(self) -> str:
-        """Get the current Gemini model being used."""
-        configured_model = os.getenv("GEMINI_MODEL", self.config.get("default_model", "2.5-flash"))
+        """Get the current Gemini model being used.
         
-        # Check if user is logged in, if not return "unlogged" model
-        if not self._is_user_logged_in():
-            from core.logging_utils import log_warning
-            log_warning(f"[selenium_gemini] ⚠️ User not logged in to Gemini, using 'unlogged' model with limited context (1000 chars)")
+        Automatically returns 'unlogged' model if user is not logged in,
+        otherwise returns configured model.
+        """
+        from core.logging_utils import log_debug
+        
+        # Check if user is logged in using centralized method
+        if not self.is_user_logged_in():
+            log_debug("[selenium_gemini] User not logged in, returning 'unlogged' model (21500 chars limit)")
             return "unlogged"
         
+        # User is logged in, return configured model
+        configured_model = os.getenv("GEMINI_MODEL", self.config.get("default_model", "2.5-flash"))
+        
+        log_debug(f"[selenium_gemini] get_current_model returning: '{configured_model}'")
         return configured_model
-
-    def _is_user_logged_in(self) -> bool:
-        """Check if user is logged in to Gemini without initializing driver if not needed."""
-        # If driver is not initialized, assume not logged in
-        if self.driver is None:
-            return False
-            
-        try:
-            current_url = self.driver.current_url
-            # If we're on a Google login/auth page, user is not logged in
-            if current_url and ("accounts.google.com" in current_url or "signin" in current_url or "login" in current_url):
-                return False
-            return True
-        except Exception:
-            # If we can't get the URL, assume not logged in
-            return False
 
 PLUGIN_CLASS = SeleniumGeminiPlugin

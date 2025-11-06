@@ -434,7 +434,7 @@ async def init_db() -> None:
             # Insert default settings if they don't exist
             await cur.execute(
                 """
-                INSERT IGNORE INTO settings (`setting_key`, `value`) VALUES ('active_llm', 'manual')
+                INSERT IGNORE INTO settings (`setting_key`, `value`) VALUES ('active_llm', 'selenium_chatgpt')
                 """
             )
         except Exception as e:

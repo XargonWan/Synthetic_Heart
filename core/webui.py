@@ -203,6 +203,7 @@ class SynthWebUIInterface:
         self.app.delete("/api/diary/archive")(self.delete_archived_entries)
         self.app.get("/api/selkies")(self.get_selkies_config)
         self.app.get("/api/animations/{skin}/{animation_type}")(self.get_animations_for_type)
+        self.app.get("/api/locations")(self.get_suggested_locations)
 
         # Template sections route for modular loading
         self.app.get("/templates/{section}.html")(self.serve_template_section)
@@ -909,6 +910,13 @@ class SynthWebUIInterface:
             if "bootstrap" in entry.get("tags", []):
                 continue
             component_label = self._get_display_name(entry["component"], None)
+            
+            # Get exposed variable definition to extract ui_type and options
+            from core.variables_engine import exposed_vars
+            exposed_def = exposed_vars.get_definition(entry["key"])
+            ui_type = exposed_def.ui_type if exposed_def else entry.get("ui_type", "string")
+            options = exposed_def.options if exposed_def else []
+            
             items.append(
                 {
                     "key": entry["key"],
@@ -925,6 +933,8 @@ class SynthWebUIInterface:
                     "value_type": entry["value_type"],
                     "editable": not entry["env_override"],
                     "constraints": entry.get("constraints"),
+                    "ui_type": ui_type,
+                    "options": options,
                 }
             )
 
@@ -2635,6 +2645,26 @@ class SynthWebUIInterface:
             raise HTTPException(status_code=500, detail="Default skin 'Rei' invalid (missing VRM)")
 
         return JSONResponse(result)
+
+    async def get_suggested_locations(self):
+        """Return a list of suggested locations derived from timezone database.
+        
+        Locations are formatted as "City,Country" pairs extracted from timezone names.
+        """
+        try:
+            from core.time_zone_utils import get_suggested_locations
+            locations = get_suggested_locations()
+            return JSONResponse({
+                "locations": locations,
+                "count": len(locations)
+            })
+        except Exception as e:
+            log_error(f"{LOG_PREFIX} Error getting suggested locations: {e}")
+            return JSONResponse({
+                "locations": [],
+                "count": 0,
+                "error": str(e)
+            }, status_code=500)
 
     async def clear_uploaded_vrm(self):
         """Clear any user-uploaded VRM in skins/temp/model.vrm and restore Rei's VRM.

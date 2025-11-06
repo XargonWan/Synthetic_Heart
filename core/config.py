@@ -102,7 +102,7 @@ async def get_active_llm():
                     _active_llm = row["value"]
                     log_debug(f"[config] 🧠 Active LLM plugin loaded from DB: {_active_llm}")
                 else:
-                    _active_llm = "manual"
+                    _active_llm = "selenium_chatgpt"
         except Exception as e:
             log_error(f"[config] ❌ Error in get_active_llm(): {repr(e)}")
         finally:

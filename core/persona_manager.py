@@ -28,7 +28,7 @@ from core.plugin_base import PluginBase
 from core.db import get_conn, get_conn_ctx
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.config_manager import config_registry
-from core.animation_handler import get_animation_handler, AnimationState, AnimationHandler
+from core.animation_handler import get_animation_handler, AnimationState
 
 # Global reference to persona manager for config getters/setters
 _persona_manager_instance = None
@@ -62,6 +62,7 @@ def build_canonical_aliases(persona: Optional['PersonaData']) -> list:
         return base
     return res
 
+
 def _get_persona_name():
     """Get current persona name from manager."""
     # Only try to get persona manager if it has been initialized
@@ -72,7 +73,7 @@ def _get_persona_name():
             _persona_manager_instance = get_persona_manager()
         except:
             pass
-    
+
     if _persona_manager_instance and _persona_manager_instance._current_persona:
         return _persona_manager_instance._current_persona.name
     return "SyntH"
@@ -93,7 +94,7 @@ def _get_persona_profile():
             _persona_manager_instance = get_persona_manager()
         except:
             pass
-    
+
     if _persona_manager_instance and _persona_manager_instance._current_persona:
         return _persona_manager_instance._current_persona.profile
     return SYNTH_BASE_PROFILE_TEMPLATE.format(name="SyntH")
@@ -114,7 +115,7 @@ def _get_persona_aliases():
             _persona_manager_instance = get_persona_manager()
         except:
             pass
-    
+
     if _persona_manager_instance and _persona_manager_instance._current_persona:
         # Use canonical builder to produce the aliases list
         global CANONICAL_ALIASES
@@ -159,8 +160,6 @@ def _update_persona_configs(persona: 'PersonaData') -> None:
     This updates the config_registry with current persona values so they're
     accessible via the webui API and properly persisted to config table.
     """
-    import json
-    
     try:
         # Update config registry definitions directly with persona values
         # This avoids async issues during initialization
@@ -188,7 +187,8 @@ def _update_persona_configs(persona: 'PersonaData') -> None:
         if "SYNTH_ALIASES" in config_registry._definitions:
             defn = config_registry._definitions["SYNTH_ALIASES"]
             defn.value = all_aliases
-            defn.raw_value = json.dumps(all_aliases)
+            # Use _serialize_value to safely serialize aliases
+            defn.raw_value = config_registry._serialize_value(defn, all_aliases)
             defn.loaded = True
         
         log_debug(f"[persona_manager] Synced persona configs: name={persona.name}, aliases={len(all_aliases)}")
@@ -281,19 +281,8 @@ try:
         defn.setter = _set_persona_name
         log_debug("[persona_manager] Attached persona getter/setter to SYNTH_NAME exposed var")
     # For backward compatibility expose a module-level ConfigVar named SYNTH_NAME
-    try:
-        SYNTH_NAME = config_registry.get_var(
-            "SYNTH_NAME",
-            "SyntH",
-            label="Synth Name",
-            description="Name of the current synth",
-            group="synth",
-            component="core",
-        )
-    except Exception:
-        # If get_var fails for any reason, leave SYNTH_NAME as the earlier
-        # module-level string placeholder defined above.
-        pass
+    # Removed conflicting get_var call - using only register_exposed_var now
+    SYNTH_NAME = "SyntH"  # Simple default value for backward compatibility
 except Exception as e:
     # Fall back to previous behavior if exposed_variables is not available
     log_warning(f"[persona_manager] Failed to register SYNTH_NAME with exposed_variables: {e}")
@@ -798,10 +787,13 @@ class PersonaManager(PluginBase):
             return None
 
         try:
-            # Get name and aliases from config_registry
-            name = config_registry.get_var("SYNTH_NAME", "SyntH")
-            aliases_raw = config_registry.get_var("SYNTH_ALIASES", [])
-            
+            # Get name and aliases from config_registry as concrete values
+            name = config_registry.get_value("SYNTH_NAME", "SyntH")
+            aliases_raw = config_registry.get_value("SYNTH_ALIASES", [])
+
+            # Ensure we are working with primitive types for serialization
+            name = str(name) if name is not None else "SyntH"
+
             # Parse aliases if it's a string (shouldn't happen with value_type="json", but be safe)
             if isinstance(aliases_raw, str):
                 try:
@@ -811,6 +803,9 @@ class PersonaManager(PluginBase):
             else:
                 aliases = aliases_raw if isinstance(aliases_raw, list) else []
 
+            # Normalize aliases to simple strings for downstream serialization
+            aliases = [str(alias).strip() for alias in aliases if alias]
+
             # Try to load and assemble profile from skin's persona.json
             persona_json = self._load_persona_json(name)
             if persona_json:
@@ -818,7 +813,8 @@ class PersonaManager(PluginBase):
                 log_debug(f"[persona_manager] Loaded profile from skin persona.json for '{name}'")
             else:
                 # Fallback to config registry profile if no JSON found
-                profile = config_registry.get_var("SYNTH_PROFILE", "")
+                profile = config_registry.get_value("SYNTH_PROFILE", "")
+                profile = str(profile) if profile is not None else ""
                 log_debug(f"[persona_manager] Using fallback profile from config registry for '{name}'")
 
             # Convert to PersonaData
@@ -845,15 +841,13 @@ class PersonaManager(PluginBase):
     async def save_persona(self, persona: PersonaData) -> bool:
         """Save persona data to config registry."""
         try:
-            # Save to config_registry (which persists to database)
-            config_registry.set_var("SYNTH_NAME", persona.name)
-            # Note: profile is assembled from persona.json, so we don't save it directly
-            config_registry.set_var("SYNTH_ALIASES", persona.aliases)
-            
+            # Update config registry directly via _update_persona_configs
+            # This syncs both value and raw_value without requiring async calls
+            _update_persona_configs(persona)
+
             log_debug(f"[persona_manager] Saved persona {persona.id} to config registry")
-            _update_persona_configs(persona)  # Update config registry with saved persona values
             return True
-            
+
         except Exception as e:
             log_error(f"[persona_manager] Error saving persona {persona.id}: {e}")
             return False
@@ -1238,12 +1232,12 @@ class PersonaManager(PluginBase):
     # Animation management methods
     async def set_animation_state(self, animation_state: str, session_id: Optional[str] = None, context_id: Optional[str] = None) -> bool:
         """Set the current animation state for the persona.
-        
+
         Args:
             animation_state: The animation state (idle, think, write, talk)
             session_id: WebUI session ID for animation commands
             context_id: Context ID for tracking animation contexts
-            
+
         Returns:
             True if animation was set successfully
         """
@@ -1251,96 +1245,82 @@ class PersonaManager(PluginBase):
             log_debug("[persona_manager] Persona not loaded in set_animation_state, loading...")
             await self.async_init()
             log_debug(f"[persona_manager] After async_init, current_persona: {self._current_persona}")
-        
+
         if not self._current_persona:
             log_warning("[persona_manager] No current persona loaded")
             return False
-            
+
         # Update persona state
         self._current_persona.current_animation = animation_state
         await self.save_persona(self._current_persona)
-        
-        # Get animation files for this state
+
         try:
             animation_enum = AnimationState(animation_state)
-            animation_files = AnimationHandler.ANIMATION_MAP.get(animation_enum, [])
-            if not animation_files:
-                animation_files = AnimationHandler.ANIMATION_MAP[AnimationState.IDLE]
         except ValueError:
             log_error(f"[persona_manager] Invalid animation state: {animation_state}")
             return False
-        
-        # Select random animation file
-        selected_animation = random.choice(animation_files) if animation_files else "Idle.fbx"
-        
-        # Send animation command to WebUI (prefer animation handler if available)
-        if self._animation_handler and session_id:
-            try:
-                # Map logical animation states to implicit priorities (higher = more important)
-                priority_map = {
-                    "idle": 0,
-                    "think": 10,
-                    "write": 10,
-                    "talk": 20,
-                }
-                priority = priority_map.get(animation_state, 0)
 
-                # Use animation handler's API (new signature supports priority optionally)
+        handler = self._animation_handler or get_animation_handler()
+        if not self._animation_handler and handler:
+            self._animation_handler = handler
+
+        animation_files: List[str] = []
+        if handler:
+            try:
+                animation_files = handler.get_animations_for_state(animation_enum)
+            except Exception as exc:
+                log_warning(f"[persona_manager] Failed to list animations for {animation_state}: {exc}")
+            if not animation_files:
                 try:
-                    await self._animation_handler.play_animation(
-                        animation_enum,
-                        session_id,
-                        loop=True,
-                        context_id=context_id,
-                        priority=priority,
-                    )
-                except TypeError:
-                    # Backwards compatibility: older handler without priority param
-                    await self._animation_handler.play_animation(
-                        animation_enum,
-                        session_id,
-                        loop=True,
-                        context_id=context_id,
-                    )
+                    animation_files = handler.get_animations_for_state(AnimationState.IDLE)
+                except Exception:
+                    animation_files = []
 
-                log_info(f"[persona_manager] ✅ Successfully set animation state to {animation_state} (file {selected_animation}) for session {session_id} with priority {priority}")
+        available_count = len(animation_files)
 
-                # Start rotation task if multiple animations available
-                if len(animation_files) > 1:
-                    log_debug(f"[persona_manager] Starting animation rotation for {animation_state} with {len(animation_files)} files")
-                    await self._start_animation_rotation(session_id, animation_enum, context_id)
-                else:
-                    log_debug(f"[persona_manager] Not starting rotation for {animation_state} - only {len(animation_files)} file(s)")
-                    await self._stop_animation_rotation(session_id, animation_enum)
-
-                return True
-            except Exception as e:
-                log_error(f"[persona_manager] ❌ Failed to send animation update via handler: {e}")
-                # Fallback to direct websocket send below
-        
-        if self._webui and session_id:
-            try:
-                await self._send_animation_update(session_id, selected_animation, animation_state)
-                log_info(f"[persona_manager] ✅ Successfully set animation state to {animation_state} with file {selected_animation} for session {session_id}")
-                
-                # Start rotation task if multiple animations available
-                if len(animation_files) > 1:
-                    log_debug(f"[persona_manager] Starting animation rotation for {animation_state} with {len(animation_files)} files")
-                    await self._start_animation_rotation(session_id, animation_enum, context_id)
-                else:
-                    log_debug(f"[persona_manager] Not starting rotation for {animation_state} - only {len(animation_files)} file(s)")
-                    await self._stop_animation_rotation(session_id, animation_enum)
-                
-                return True
-            except Exception as e:
-                log_error(f"[persona_manager] ❌ Failed to send animation update: {e}")
-                return False
-        elif not self._webui:
-            log_debug(f"[persona_manager] Animation state set to {animation_state} (no webui)")
-            return True
-        else:
+        if not session_id:
             log_debug(f"[persona_manager] Animation state set to {animation_state} (no session)")
             return True
+
+        if not handler:
+            log_warning("[persona_manager] Animation handler unavailable; cannot send animation command")
+            return False
+
+        try:
+            # Map logical animation states to implicit priorities (higher = more important)
+            priority_map = {
+                "idle": 0,
+                "think": 10,
+                "write": 10,
+                "talk": 20,
+            }
+            priority = priority_map.get(animation_state, 0)
+
+            try:
+                await handler.play_animation(
+                    animation_enum,
+                    session_id,
+                    loop=True,
+                    context_id=context_id,
+                    priority=priority,
+                )
+            except TypeError:
+                await handler.play_animation(
+                    animation_enum,
+                    session_id,
+                    loop=True,
+                    context_id=context_id,
+                )
+
+            log_info(
+                f"[persona_manager] ✅ Set animation state to {animation_state} "
+                f"with {available_count} candidate file(s) for session {session_id} "
+                f"at priority {priority}"
+            )
+            return True
+        except Exception as exc:
+            log_warning(f"[persona_manager] Failed to set animation via handler: {exc}")
+            return False
 
     async def stop_animation_context(self, context_id: str, session_id: str) -> bool:
         """Stop an animation context and return to idle.
@@ -1393,33 +1373,28 @@ class PersonaManager(PluginBase):
         else:
             return {"status": "error", "message": "Failed to set animation state"}
 
-    async def _send_animation_update(self, session_id: str, animation_file: str, animation_state: str) -> None:
-        """Send animation update to WebUI via WebSocket.
-        
-        Args:
-            session_id: WebUI session ID
-            animation_file: Animation file name
-            animation_state: Animation state name
+    async def _send_animation_update(self, session_id: str, animation_state: str) -> None:
+        """Trigger animation handler to refresh the current state animation.
+
+        Delegates to the animation handler so descriptor metadata (e.g. play_once)
+        and skin-specific paths are respected.
         """
-        if not self._webui:
+        handler = self._animation_handler or get_animation_handler()
+        if not handler:
+            log_warning("[persona_manager] Animation handler unavailable for update")
             return
-            
-        animation_url = f"{AnimationHandler.ANIMATIONS_BASE_PATH}/{animation_file}"
-        
+
         try:
-            websocket = self._webui.connections.get(session_id)
-            if websocket:
-                await websocket.send_json({
-                    "type": "animation",
-                    "animation": animation_url,
-                    "loop": True,
-                    "state": animation_state
-                })
-                log_debug(f"[persona_manager] Sent animation update to session {session_id}: {animation_url}")
-            else:
-                log_warning(f"[persona_manager] No websocket for session {session_id}")
+            state_enum = AnimationState(animation_state)
+        except ValueError:
+            log_warning(f"[persona_manager] Unknown animation state '{animation_state}' during refresh")
+            return
+
+        try:
+            await handler.play_animation(state_enum, session_id, loop=True)
+            log_debug(f"[persona_manager] Requested animation refresh for session {session_id} state {animation_state}")
         except Exception as e:
-            log_warning(f"[persona_manager] Failed to send animation update: {e}")
+            log_warning(f"[persona_manager] Failed to refresh animation state {animation_state} for session {session_id}: {e}")
 
     async def _start_animation_rotation(self, session_id: str, animation_state: AnimationState, context_id: Optional[str]) -> None:
         """Start background rotation task for animations with multiple files.
@@ -1468,13 +1443,22 @@ class PersonaManager(PluginBase):
                 
                 # Check if we should still rotate (persona still in this state)
                 if self._current_persona and self._current_persona.current_animation == animation_state.value:
-                    animation_files = AnimationHandler.ANIMATION_MAP.get(animation_state, [])
+                    handler = self._animation_handler or get_animation_handler()
+                    animation_files: List[str] = []
+                    if handler:
+                        try:
+                            animation_files = handler.get_animations_for_state(animation_state)
+                        except Exception as exc:
+                            log_warning(f"[persona_manager] Rotation lookup failed for {animation_state.value}: {exc}")
+                    if not animation_files and handler:
+                        try:
+                            animation_files = handler.get_animations_for_state(AnimationState.IDLE)
+                        except Exception:
+                            animation_files = []
+
                     if len(animation_files) > 1:
-                        # Select different animation
-                        selected_animation = random.choice(animation_files)
-                        log_debug(f"[persona_manager] Rotating animation for {key} to {selected_animation}")
-                        await self._send_animation_update(session_id, selected_animation, animation_state.value)
-                        log_debug(f"[persona_manager] Rotated animation for {key} to {selected_animation}")
+                        log_debug(f"[persona_manager] Rotating animation for {key}; delegating to handler")
+                        await self._send_animation_update(session_id, animation_state.value)
                     else:
                         log_debug(f"[persona_manager] Stopping rotation for {key} - only {len(animation_files)} file(s)")
                         break
