@@ -10,7 +10,7 @@ CHATGPT_MODEL_LIMITS = {
     "gpt-4o": 128000,        # GPT-4o: 128k tokens context (~400k characters)
     "gpt-4o-mini": 128000,   # GPT-4o-mini: 128k tokens context (~400k characters)
     "gpt-4-turbo": 128000,   # GPT-4 Turbo: 128k tokens context (~400k characters)
-    "gpt-4": 8000,           # GPT-4: 8k tokens context (~24k characters)
+    "gpt-4": 128000,           # GPT-4: 8k tokens context (~24k characters)
     "gpt-3.5-turbo": 16000,  # GPT-3.5 Turbo: 16k tokens context (~48k characters)
     "o1-preview": 128000,    # o1-preview: 128k tokens context (~400k characters)
     "o1-mini": 128000,       # o1-mini: 128k tokens context (~400k characters)
@@ -104,6 +104,12 @@ class SeleniumChatGPTPlugin(SeleniumLLMBase):
         })
         
         super().__init__(config=chatgpt_config, notify_fn=notify_fn)
+        
+        # Update global Selenium LLM limits so other components can use them
+        from core.selenium_llm_base import set_active_selenium_limits
+        model_name = CHATGPT_MODEL or "gpt-4o"
+        max_chars = get_model_char_limit(model_name)
+        set_active_selenium_limits(max_chars, model_name)
         
         # ChatGPT-specific login detection selectors
         # These will be used by the centralized is_user_logged_in() method from SeleniumLLMBase

@@ -415,6 +415,64 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
 
 # Re-entry guard removed: rely solely on the corrector retry counter to avoid loops
 
+def _get_attempted_action_full_description(error_text: str) -> Optional[Dict[str, Any]]:
+    """Extract which action was attempted and return its FULL description.
+    
+    When the corrector is triggered due to JSON parsing errors, this function:
+    1. Tries to parse the partial/corrupted JSON to identify the action type attempted
+    2. Looks up the FULL (non-minified) action description from the core_initializer
+    3. Returns the full description so the corrector can provide complete details
+    
+    Args:
+        error_text: The malformed JSON text that the LLM tried to produce
+        
+    Returns:
+        Dict with keys:
+            - 'action_type': str - The action type that was attempted (e.g., 'message_telegram_bot')
+            - 'full_description': dict - The complete, non-minified action schema with all details
+        Or None if we can't identify an action
+    """
+    try:
+        # Try to extract partial JSON to find action type
+        import re
+        
+        # Look for "type": "..." or "action": "..." patterns
+        type_match = re.search(r'"type"\s*:\s*"([^"]+)"', error_text)
+        if not type_match:
+            type_match = re.search(r'"action"\s*:\s*"([^"]+)"', error_text)
+        
+        if not type_match:
+            log_debug("[_get_attempted_action] Could not extract action type from error text")
+            return None
+        
+        action_type = type_match.group(1)
+        log_debug(f"[_get_attempted_action] Identified attempted action type: {action_type}")
+        
+        # Now get the FULL description from core_initializer (not minified)
+        try:
+            from core.core_initializer import core_initializer
+            
+            full_actions = core_initializer.actions_block.get("available_actions", {})
+            
+            if action_type in full_actions:
+                full_description = full_actions[action_type]
+                log_debug(f"[_get_attempted_action] Found full description for {action_type}")
+                return {
+                    'action_type': action_type,
+                    'full_description': full_description
+                }
+            else:
+                log_debug(f"[_get_attempted_action] Action type '{action_type}' not found in available actions")
+                return None
+        except Exception as e:
+            log_debug(f"[_get_attempted_action] Could not load full action description: {e}")
+            return None
+            
+    except Exception as e:
+        log_debug(f"[_get_attempted_action] Error analyzing attempted action: {e}")
+        return None
+
+
 async def run_corrector_middleware(text: str, bot=None, context: dict = None, chat_id=None, thread_id=None) -> str:
     """Attempt to obtain a corrected LLM output that contains valid JSON actions.
 
@@ -503,10 +561,20 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
 
             # Build a correction payload similar to action_parser.corrector
             full_json = ""
+            attempted_action_info = None
+            
             try:
                 full_json = build_full_json_instructions()
             except Exception:
                 full_json = {}
+            
+            # Try to identify which action was attempted and include its full description
+            try:
+                attempted_action_info = _get_attempted_action_full_description(text)
+                if attempted_action_info:
+                    log_info(f"[corrector_middleware] Including full description for attempted action: {attempted_action_info['action_type']}")
+            except Exception as e:
+                log_debug(f"[corrector_middleware] Could not extract attempted action info: {e}")
 
             # Use the thread_id from the original conversation if available
             payload_thread_id = thread_id if thread_id is not None else 0
@@ -517,24 +585,34 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
                     "message": f"CRITICAL ERROR: Your previous response was not valid JSON. You MUST respond with ONLY valid JSON. {last_error_hint}",
                     "your_reply": text,
                     "full_json_instructions": full_json,
-                    "required_format": {
-                        "actions": [
-                            {
-                                "action": "message_telegram_bot",
-                                "payload": {
-                                    "text": "Your message content here (optional - only if you want to reply to user)",
-                                    "target": str(chat_id or "-1003098886330"),
-                                    "thread_id": payload_thread_id
-                                }
-                            }
-                        ]
-                    },
-                    "strict_requirements": [
-                        "MUST start with { and end with }",
-                        "MUST contain 'actions' array",
-                        "NO text outside JSON structure",
-                        "NO markdown formatting",
-                        "NO explanations outside JSON"
+                }
+            }
+            
+            # If we identified an action attempt, include its complete (non-minified) description
+            if attempted_action_info:
+                correction_payload["system_message"]["attempted_action"] = attempted_action_info["action_type"]
+                correction_payload["system_message"]["action_full_schema"] = attempted_action_info["full_description"]
+                log_debug(f"[corrector_middleware] Added full action schema for {attempted_action_info['action_type']}")
+            
+            # Add required format examples
+            correction_payload["system_message"]["required_format"] = {
+                "actions": [
+                    {
+                        "action": "message_telegram_bot",
+                        "payload": {
+                            "text": "Your message content here (optional - only if you want to reply to user)",
+                            "target": str(chat_id or "-1003098886330"),
+                            "thread_id": payload_thread_id
+                        }
+                    }
+                ]
+            }
+            correction_payload["system_message"]["strict_requirements"] = [
+                "MUST start with { and end with }",
+                "MUST contain 'actions' array",
+                "NO text outside JSON structure",
+                "NO markdown formatting",
+                "NO explanations outside JSON"
                     ]
                 }
             }

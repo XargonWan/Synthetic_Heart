@@ -241,7 +241,9 @@ async def handle_incoming_message(bot, message, context_memory_or_prompt, interf
     prompt = sanitize_for_json(prompt)
     log_debug("🌐 JSON PROMPT built for the plugin:")
     try:
-        log_debug(json_dumps(prompt))
+        prompt_json = json_dumps(prompt)
+        # Log in full without truncation for debugging
+        log_debug(prompt_json)
     except Exception as e:
         log_error(f"Failed to serialize prompt: {e}")
 

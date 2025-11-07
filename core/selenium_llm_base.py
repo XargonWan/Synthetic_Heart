@@ -84,6 +84,45 @@ _shared_driver = None
 _shared_driver_lock = threading.Lock()
 _shared_driver_ref_count = 0
 
+# Global prompt character limit from the active Selenium LLM engine
+# Updated when an engine is loaded or model is switched
+_active_selenium_max_prompt_chars = 128000  # Default safe value
+_active_selenium_llm_name = "unknown"  # Track which Selenium engine is active
+
+
+def set_active_selenium_limits(max_prompt_chars: int, llm_name: str = "") -> None:
+    """Update the global prompt character limit for the active Selenium LLM engine.
+    
+    This is called by Selenium engine implementations (ChatGPT, Grok, etc.)
+    when they are initialized or when the model is switched.
+    
+    Parameters
+    ----------
+    max_prompt_chars : int
+        Maximum prompt characters supported by the active LLM engine
+    llm_name : str
+        Name of the active LLM engine (e.g., "gpt-4o", "grok-beta")
+    """
+    global _active_selenium_max_prompt_chars, _active_selenium_llm_name
+    _active_selenium_max_prompt_chars = max_prompt_chars
+    _active_selenium_llm_name = llm_name
+    from core.logging_utils import log_info
+    log_info(f"[selenium_llm_base] Active Selenium LLM limits updated: {llm_name} max_prompt_chars={max_prompt_chars}")
+
+
+def get_active_selenium_limits() -> dict:
+    """Get the current limits from the active Selenium LLM engine.
+    
+    Returns
+    -------
+    dict
+        Dictionary with keys: max_prompt_chars, llm_name
+    """
+    return {
+        "max_prompt_chars": _active_selenium_max_prompt_chars,
+        "llm_name": _active_selenium_llm_name
+    }
+
 
 class SeleniumLLMBase(AIPluginBase):
     """

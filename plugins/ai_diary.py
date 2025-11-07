@@ -118,8 +118,15 @@ def get_max_diary_chars(interface_name: str = None, current_prompt_length: int =
             active_llm = "manual"  # Safe fallback
         
         if not active_llm or active_llm == "manual":
-            log_debug("[ai_diary] Using manual fallback limits")
-            return 8000
+            log_debug("[ai_diary] Using manual fallback limits from Selenium engine if available")
+            # Try to get limits from active Selenium LLM engine first
+            try:
+                from core.selenium_llm_base import get_active_selenium_limits
+                selenium_limits = get_active_selenium_limits()
+                max_selenium_chars = selenium_limits.get("max_prompt_chars", 128000)
+                return max_selenium_chars
+            except Exception:
+                return 128000  # Safe fallback
         
         registry = get_llm_registry()
         engine = registry.get_engine(active_llm)
@@ -127,10 +134,17 @@ def get_max_diary_chars(interface_name: str = None, current_prompt_length: int =
         if not engine:
             engine = registry.load_engine(active_llm)
         
-        max_prompt_chars = 8000  # Default fallback
-        if engine and hasattr(engine, 'get_interface_limits'):
-            limits = engine.get_interface_limits()
-            max_prompt_chars = limits.get("max_prompt_chars", 8000)
+        # Try to get limits from active Selenium LLM engine first
+        max_prompt_chars = 128000  # Safe fallback default
+        try:
+            from core.selenium_llm_base import get_active_selenium_limits
+            selenium_limits = get_active_selenium_limits()
+            max_prompt_chars = selenium_limits.get("max_prompt_chars", 128000)
+        except Exception:
+            # If not a Selenium engine, try to get from the engine itself
+            if engine and hasattr(engine, 'get_interface_limits'):
+                limits = engine.get_interface_limits()
+                max_prompt_chars = limits.get("max_prompt_chars", 128000)
         
         # Use 30% of available prompt space for diary, with fallback
         diary_limit = int(max_prompt_chars * 0.30)

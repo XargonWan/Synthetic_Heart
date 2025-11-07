@@ -426,7 +426,11 @@ async def llm_response_send(bot, chat_id: int, text: str, chunk_size: int = 4000
 
     # Log text content for debugging
     if text:
-        log_debug(f"[llm_response_send] Text ({len(text)} chars): {text}")
+        # For JSON content, always log fully without truncation for debugging
+        if text.strip().startswith(('{', '[')):
+            log_debug(f"[llm_response_send] JSON content ({len(text)} chars, full dump below):\n{text}")
+        else:
+            log_debug(f"[llm_response_send] Text ({len(text)} chars): {text}")
 
     if 'reply_to_message_id' in kwargs and not kwargs['reply_to_message_id']:
         log_warning("[llm_response_send] reply_to_message_id not found. Sending without replying.")

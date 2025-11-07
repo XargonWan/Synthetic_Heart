@@ -37,6 +37,42 @@ DIARY_HISTORY_DAYS = config_registry.get_var(
 )
 
 
+def minify_actions_block(available_actions: dict) -> dict:
+    """Convert full action schemas to minimal versions for prompt.
+    
+    Instead of sending complete schemas with examples, field_types, and nested instructions,
+    this creates a lean version with just essential information:
+    - action name
+    - brief description
+    - required_fields
+    - optional_fields
+    - source
+    
+    This reduces token usage dramatically while preserving all critical information.
+    Full instructions are still available in each action definition if needed by plugins.
+    
+    Parameters
+    ----------
+    available_actions : dict
+        Full actions block with complete schemas and instructions
+        
+    Returns
+    -------
+    dict
+        Minified actions block suitable for LLM prompts
+    """
+    minified = {}
+    for action_name, action_def in available_actions.items():
+        # Keep only essential fields
+        minified[action_name] = {
+            "description": action_def.get("description", ""),
+            "required_fields": action_def.get("required_fields", []),
+            "optional_fields": action_def.get("optional_fields", []),
+            "source": action_def.get("source", ""),
+        }
+    return minified
+
+
 async def build_json_prompt(message, context_memory, interface_name: str | None = None, image_data: dict | None = None) -> dict:
     """Build the JSON prompt expected by plugins.
 
@@ -217,11 +253,15 @@ async def build_json_prompt(message, context_memory, interface_name: str | None 
     }
 
     # Include unified actions metadata from the initializer
+    # Use minified version to keep prompt size manageable
     try:
         from core.core_initializer import core_initializer
-        prompt_with_instructions["actions"] = core_initializer.actions_block.get(
+        full_actions = core_initializer.actions_block.get(
             "available_actions", {}
         )
+        # Minify to reduce token usage
+        prompt_with_instructions["actions"] = minify_actions_block(full_actions)
+        log_debug(f"[json_prompt] Actions block minified: {len(json_dumps(full_actions))} -> {len(json_dumps(prompt_with_instructions['actions']))} chars")
     except Exception as e:
         log_warning(f"[prompt_engine] Failed to inject actions block: {e}")
         prompt_with_instructions["actions"] = {}
@@ -347,61 +387,15 @@ async def build_prompt(
 
 def load_json_instructions() -> str:
         return """
-- MASTER INSTRUCTION (do not remove):
-- You MUST NOT fabricate or pretend to execute actions. Always select actions from the provided
-- `actions` / `available_actions` block. Before returning any action, search the available actions
-- block for an action whose `type` and `payload` suit your intent. If the exact action you need is
-- not listed, explicitly respond with a JSON result that contains a human-readable explanation stating
-- which capability is missing and, where appropriate, suggest an alternative that *is* available.
-- For example: {"actions": [], "note": "I cannot schedule reminders because 'create_scheduled_event' is not available. You can instead ask me to remind you via a message."}
-
-- Check the available_actions section below for supported interfaces and their capabilities
-- Search memories when unsure about a detail
-- When responding, pay attention to 'input.interface' to know which interface the message came from and normally reply via that same interface unless explicitly instructed otherwise
-- CRITICAL: never, ever lie! If something is not known, say "I don't know". Lying can lead to serious and dangerous consequences.
-
-- All rules:
-- Use 'input.payload.source.chat_id' as message target when applicable
-- Include 'thread_id' if present in the context
-- Use 'reply_message_id' to reply to specific messages and maintain conversation context.
-- You MUST ALWAYS return syntactically valid JSON
-- You MUST use the 'actions' array, even for single actions
-- ⚠️ CRITICAL: ANY TEXT OUTSIDE THE JSON STRUCTURE WILL BE DISCARDED. Only JSON will be processed.
-  - This means: If you write text before the JSON, it will be ignored
-  - This means: If you write text after the JSON, it will be ignored
-  - This means: Put ALL your response content INSIDE the JSON payload fields
-  - For messages to users, use the "text" field in message actions
-  - For thoughts/reasoning, use create_personal_diary_entry or similar internal actions
-  - Example WRONG: "Here are the actions:\n{...json...}\nLet me know if you need more!"
-  - Example RIGHT: {"actions": [{"type": "message_telegram_bot", "payload": {"text": "Here are the actions! Let me know if you need more!", "target": "..."}}]}
-
-- IMPORTANT: When responding to a user, you MUST ALWAYS include a create_personal_diary_entry action to record this interaction in your personal memory. You MUST provide an interaction_summary field that describes what happened in this conversation.
-
-- Examples of good interaction_summary values:
-- "User asked about weather and I provided current forecast"
-- "Discussed coding problems and provided solutions"
-- "User shared personal updates and I responded supportively"
-
-- CRITICAL: Your response MUST be valid JSON. Example format:
-{
-    "actions": [
-        {
-            "type": "message_telegram_bot",
-            "payload": {
-                "text": "Your message here",
-                "target": "-1003098886330"
-            }
-        },
-        {
-            "type": "create_personal_diary_entry",
-            "payload": {
-                "interaction_summary": "Brief description of the conversation"
-            }
-        }
-    ]
-}
-
-The JSON is just a wrapper — speak naturally in the "text" field as you always do.
+- MASTER INSTRUCTION: Use ONLY actions from the 'actions' block. Never fabricate.
+- If an action you need is not in 'actions', respond with a JSON explaining why.
+- RESPOND ONLY WITH VALID JSON. No text before or after.
+- Use input.interface to know where the message came from and respond there.
+- NEVER lie. If you don't know something, say "I don't know".
+- Target responses to input.payload.source.chat_id
+- Include reply_message_id if replying to specific messages.
+- ALWAYS include create_personal_diary_entry action to record interactions.
+- Interaction_summary examples: "User asked about weather, provided forecast" or "Discussed coding, provided solutions"
 """
 
 

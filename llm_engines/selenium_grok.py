@@ -86,6 +86,12 @@ class SeleniumGrokPlugin(SeleniumLLMBase):
         
         super().__init__(config=grok_config, notify_fn=notify_fn)
         
+        # Update global Selenium LLM limits so other components can use them
+        from core.selenium_llm_base import set_active_selenium_limits
+        model_name = GROK_MODEL or "grok-beta"
+        max_chars = get_model_char_limit(model_name)
+        set_active_selenium_limits(max_chars, model_name)
+        
         # Grok (X/Twitter) login detection selectors
         from selenium.webdriver.common.by import By
         self.login_detection_selectors = [
