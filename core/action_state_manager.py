@@ -28,6 +28,16 @@ class AnimationPhase(str, Enum):
     TALKING = "TALKING"
 
 
+# Priority levels for animation phases (higher = more important, cannot be interrupted)
+PHASE_PRIORITIES = {
+    AnimationPhase.IDLE: 0,         # Idle - lowest priority, can be interrupted by anything
+    AnimationPhase.WRITING: 3,      # Writing - low priority
+    AnimationPhase.TALKING: 5,      # Talking - medium priority
+    AnimationPhase.CORRECTING: 7,   # Correcting - high priority
+    AnimationPhase.THINKING: 10,    # Thinking - highest priority, cannot be interrupted
+}
+
+
 class ActionStackEntry:
     """Represents one action in the global stack."""
     
@@ -81,52 +91,103 @@ class ActionStateManager:
         phase: AnimationPhase,
         component: str,
         parent_id: Optional[str] = None
-    ) -> None:
+    ) -> bool:
         """
         Add a new action to the stack.
+        
+        Only allows pushing if the new phase has equal or higher priority than the current phase.
+        Lower priority actions are silently rejected (logged at debug level).
         
         Args:
             action_id: Unique identifier for this action
             phase: Initial animation phase (THINKING, WRITING, etc)
             component: Component triggering this action (webui, telegram, corrector, etc)
             parent_id: If this is a nested action (e.g., corrector), reference parent
+            
+        Returns:
+            True if action was pushed, False if rejected due to lower priority
         """
         async with self._lock:
+            # Get current phase priority (default to 0 if stack is empty)
+            current_priority = 0
+            if self._action_stack:
+                current_phase = self._action_stack[-1].phase
+                current_priority = PHASE_PRIORITIES.get(current_phase, 0)
+            
+            # Get new phase priority
+            new_priority = PHASE_PRIORITIES.get(phase, 0)
+            
+            # Check if new phase can interrupt current phase
+            if new_priority < current_priority:
+                log_debug(
+                    f"{LOG_PREFIX} Action rejected (priority): {action_id} phase={phase.value} "
+                    f"priority={new_priority} < current_priority={current_priority} "
+                    f"(current phase={self._action_stack[-1].phase.value if self._action_stack else 'IDLE'})"
+                )
+                return False
+            
             entry = ActionStackEntry(action_id, phase, component, parent_id)
             self._action_stack.append(entry)
             log_info(
-                f"{LOG_PREFIX} Action pushed: {action_id} phase={phase.value} "
+                f"{LOG_PREFIX} Action pushed: {action_id} phase={phase.value} priority={new_priority} "
                 f"component={component} stack_depth={len(self._action_stack)}"
             )
             log_info(f"{LOG_PREFIX} About to notify state changed with {len(self._state_changed_callbacks)} callbacks")
             await self._notify_state_changed()
             log_info(f"{LOG_PREFIX} Notified state changed")
+            return True
     
     async def update_phase(self, action_id: str, new_phase: AnimationPhase) -> bool:
         """
         Update the phase of an existing action.
+        
+        Only allows updating if the new phase has equal or higher priority than other actions in the stack.
         
         Args:
             action_id: ID of action to update
             new_phase: New phase to set
             
         Returns:
-            True if updated, False if action not found
+            True if updated, False if action not found or priority is too low
         """
         async with self._lock:
-            for entry in self._action_stack:
+            # Find the action to update and get its index
+            target_index = None
+            for i, entry in enumerate(self._action_stack):
                 if entry.action_id == action_id:
-                    old_phase = entry.phase
-                    entry.phase = new_phase
-                    log_info(
-                        f"{LOG_PREFIX} Action phase updated: {action_id} "
-                        f"{old_phase.value} -> {new_phase.value}"
-                    )
-                    await self._notify_state_changed()
-                    return True
+                    target_index = i
+                    break
             
-            log_warning(f"{LOG_PREFIX} Action not found for update: {action_id}")
-            return False
+            if target_index is None:
+                log_warning(f"{LOG_PREFIX} Action not found for update: {action_id}")
+                return False
+            
+            # Get priorities
+            old_entry = self._action_stack[target_index]
+            old_priority = PHASE_PRIORITIES.get(old_entry.phase, 0)
+            new_priority = PHASE_PRIORITIES.get(new_phase, 0)
+            
+            # Check if new phase can interrupt actions above it
+            # (i.e., check against the top of stack, excluding this action)
+            max_other_priority = 0
+            for i, entry in enumerate(self._action_stack):
+                if i != target_index:  # Skip the action we're updating
+                    max_other_priority = max(max_other_priority, PHASE_PRIORITIES.get(entry.phase, 0))
+            
+            if new_priority < max_other_priority:
+                log_debug(
+                    f"{LOG_PREFIX} Action update rejected (priority): {action_id} "
+                    f"new_phase={new_phase.value} priority={new_priority} < max_other_priority={max_other_priority}"
+                )
+                return False
+            
+            old_entry.phase = new_phase
+            log_info(
+                f"{LOG_PREFIX} Action phase updated: {action_id} "
+                f"{old_entry.phase.value} (priority={old_priority}) -> {new_phase.value} (priority={new_priority})"
+            )
+            await self._notify_state_changed()
+            return True
     
     async def pop_action(self, action_id: str) -> bool:
         """

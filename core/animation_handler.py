@@ -31,6 +31,16 @@ class AnimationState(Enum):
     TALK = "talk"
 
 
+# Priority levels for animation states (matching action_state_manager.py priorities)
+# Higher = more important, cannot be interrupted by lower priority animations
+ANIMATION_STATE_PRIORITIES = {
+    AnimationState.IDLE: 0,     # Idle - lowest priority
+    AnimationState.WRITE: 3,    # Writing - low priority
+    AnimationState.TALK: 5,     # Talking - medium priority
+    AnimationState.THINK: 10,   # Thinking - highest priority, cannot be interrupted
+}
+
+
 class AnimationHandler:
     """Manages VRM avatar animations and their lifecycle.
     
@@ -276,12 +286,18 @@ class AnimationHandler:
             session_id: The WebUI session ID to send the animation to
             loop: Whether the animation should loop (ignored if descriptor specifies intro/loop/outro)
             context_id: Optional identifier for this animation context (for tracking)
-            priority: Optional priority level for this animation context
+            priority: Optional priority level for this animation context.
+                      If not provided, uses the priority from ANIMATION_STATE_PRIORITIES mapping.
         """
         async with self._lock:
-            # If we have a context_id, mark it as active with optional priority
+            # Use state priority if not explicitly provided
+            if priority is None:
+                priority = ANIMATION_STATE_PRIORITIES.get(state, 0)
+            
+            # If we have a context_id, mark it as active with priority
             if context_id:
-                self._active_tasks[context_id] = int(priority) if priority is not None else 0
+                self._active_tasks[context_id] = priority
+
             
             # Select animation file
             animations = self.get_animations_for_state(state)
@@ -623,9 +639,13 @@ class AnimationHandler:
             try:
                 task.cancel()
                 await task
-            except Exception:
+            except asyncio.CancelledError:
+                # Normal cancellation - task was cancelled successfully
                 pass
-            self._rotation_tasks.pop(key, None)
+            except Exception as exc:
+                log_warning(f"[AnimationHandler] Error cancelling rotation task {key}: {exc}")
+            finally:
+                self._rotation_tasks.pop(key, None)
 
     def get_current_state(self) -> AnimationState:
         """Get the current animation state.

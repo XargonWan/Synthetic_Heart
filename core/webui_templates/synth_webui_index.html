@@ -1584,6 +1584,18 @@
         let pendingAnimationCommands = []; // Queue for animation commands received before handler is ready
         let pendingAnimationTimeout = null; // Timeout for processing pending animations
         let animationHandler = null; // Global animation handler, initialized when VRM loads
+        // Phase priorities mirrored from server-side ActionStateManager
+        const PHASE_PRIORITIES = {
+            'IDLE': 0,
+            'WRITING': 3,
+            'TALKING': 5,
+            'CORRECTING': 7,
+            'THINKING': 10
+        };
+        // Track currently-displayed animation state and action id so we can avoid
+        // letting lower-priority incoming states interrupt higher-priority ones.
+        let currentDisplayedPhase = 'IDLE';
+        let currentDisplayedActionId = null;
         let activeTab = localStorage.getItem(TAB_KEY) || 'home';
         const logBuffer = [];
         const logFilterState = { debug: true, info: true, warning: true, error: true, other: true };
@@ -3978,8 +3990,8 @@
                 if (data.type === 'action_state') {
                     // Handle new action state from backend (THINKING, WRITING, IDLE, etc)
                     console.log('[synth_webui] ✅ MATCHED action_state!');
-                    console.log('[synth_webui] Received action_state:', data.phase);
-                    
+                    console.log('[synth_webui] Received action_state:', data);
+
                     // Map action phases to animation states (matching AnimationState enum in animation_handler.py)
                     const phaseToAnimationState = {
                         'THINKING': 'think',
@@ -3988,15 +4000,34 @@
                         'TALKING': 'talk',
                         'IDLE': 'idle'
                     };
-                    
-                    const animationState = phaseToAnimationState[data.phase] || 'idle';
-                    
+
+                    const incomingPhase = data.phase || 'IDLE';
+                    const incomingActionId = data.action_id || null;
+                    const animationState = phaseToAnimationState[incomingPhase] || 'idle';
+
+                    // Priority-aware guard: prevent lower-priority incoming states from
+                    // interrupting a currently-displayed higher-priority animation.
+                    const incomingPriority = PHASE_PRIORITIES[incomingPhase] || 0;
+                    const currentPriority = PHASE_PRIORITIES[currentDisplayedPhase] || 0;
+
+                    // If we are currently displaying an action (have an action id) and the
+                    // incoming state is for a different action (or idle) with LOWER priority,
+                    // ignore it — this ensures low-priority phases like IDLE won't flash over THINKING.
+                    if (currentDisplayedActionId && incomingActionId !== currentDisplayedActionId && incomingPriority < currentPriority) {
+                        console.log('[synth_webui] Ignoring lower-priority incoming state', incomingPhase, 'that would interrupt', currentDisplayedPhase);
+                        return;
+                    }
+
+                    // Accept and apply the incoming state
+                    currentDisplayedPhase = incomingPhase;
+                    currentDisplayedActionId = incomingActionId;
+
                     if (animationHandler) {
-                        console.log('[synth_webui] ✅ Setting animation state to:', animationState, 'from phase:', data.phase);
+                        console.log('[synth_webui] ✅ Setting animation state to:', animationState, 'from phase:', incomingPhase, 'action_id:', incomingActionId);
                         animationHandler.startAction(animationState);
                     } else {
                         console.log('[synth_webui] Animation handler not ready, queueing action_state command:', animationState);
-                        pendingAnimationCommands.push({ state: animationState, phase: data.phase });
+                        pendingAnimationCommands.push({ state: animationState, phase: incomingPhase, action_id: incomingActionId });
                     }
                     return;
                 }

@@ -620,14 +620,17 @@ class SynthWebUIInterface:
         # Global action ID for this message
         action_id = f"webui_msg_{session_id}_{message.message_id}"
         
+        thinking_pushed = False
         try:
             # Push THINKING action to global state
             log_info(f"{LOG_PREFIX} Pushing THINKING action: {action_id}")
-            await self.action_state_manager.push_action(
+            thinking_pushed = await self.action_state_manager.push_action(
                 action_id=action_id,
                 phase=AnimationPhase.THINKING,
                 component="webui"
             )
+            if not thinking_pushed:
+                log_warning(f"{LOG_PREFIX} THINKING action was rejected (lower priority than current action)")
         except Exception as exc:
             log_warning(f"{LOG_PREFIX} Failed to push action state: {exc}")
         
@@ -654,12 +657,15 @@ class SynthWebUIInterface:
         if response:
             # Push WRITING so clients can display write animation while we deliver the message
             writing_action_id = f"webui_write_{session_id}_{int(datetime.utcnow().timestamp() * 1000) % 1_000_000}"
+            writing_pushed = False
             try:
-                await self.action_state_manager.push_action(
+                writing_pushed = await self.action_state_manager.push_action(
                     action_id=writing_action_id,
                     phase=AnimationPhase.WRITING,
                     component="webui"
                 )
+                if not writing_pushed:
+                    log_debug(f"{LOG_PREFIX} WRITING action was rejected (lower priority than THINKING)")
             except Exception as exc:
                 log_warning(f"{LOG_PREFIX} Failed to push WRITING action state: {exc}")
 
@@ -668,34 +674,30 @@ class SynthWebUIInterface:
             except Exception as send_exc:
                 log_warning(f"{LOG_PREFIX} Failed to send response to session {session_id}: {send_exc}")
             finally:
-                # Pop WRITING first, then THINKING
-                try:
-                    await self.action_state_manager.pop_action(writing_action_id)
-                except Exception as exc:
-                    log_warning(f"{LOG_PREFIX} Failed to pop WRITING action state: {exc}")
-                try:
-                    await self.action_state_manager.pop_action(action_id)
-                    log_info(f"{LOG_PREFIX} Popped action: {action_id} - returning to IDLE")
-                except Exception as exc:
-                    log_warning(f"{LOG_PREFIX} Failed to pop THINKING action state: {exc}")
+                # Pop WRITING first (if it was pushed), then THINKING. Do not force any
+                # artificial timing here; the client will handle smoothing and priority.
+                if writing_pushed:
+                    try:
+                        await self.action_state_manager.pop_action(writing_action_id)
+                    except Exception as exc:
+                        log_warning(f"{LOG_PREFIX} Failed to pop WRITING action state: {exc}")
+                if thinking_pushed:
+                    try:
+                        await self.action_state_manager.pop_action(action_id)
+                        log_info(f"{LOG_PREFIX} Popped action: {action_id} - returning to IDLE")
+                    except Exception as exc:
+                        log_warning(f"{LOG_PREFIX} Failed to pop THINKING action state: {exc}")
         else:
             # Some LLM engines return None but process asynchronously; keep THINKING for a short grace period
-            async def delayed_pop():
-                await asyncio.sleep(0.5)
-                try:
-                    await self.action_state_manager.pop_action(action_id)
-                    log_info(f"{LOG_PREFIX} Delayed pop action: {action_id} - returning to IDLE")
-                except Exception as exc:
-                    log_warning(f"{LOG_PREFIX} Failed to delayed pop action state: {exc}")
-
+            # If no immediate response (response is falsy), just pop THINKING without
+            # introducing a forced artificial delay; let the client decide how to
+            # visually smooth very-short transitions.
             try:
-                asyncio.create_task(delayed_pop())
-            except Exception:
-                # Fallback to immediate pop if task creation fails
-                try:
+                if thinking_pushed:
                     await self.action_state_manager.pop_action(action_id)
-                except Exception as exc:
-                    log_warning(f"{LOG_PREFIX} Failed to pop action state after fallback: {exc}")
+                    log_info(f"{LOG_PREFIX} Popped action: {action_id} after no-response branch")
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to pop action state in no-response branch: {exc}")
 
     async def _replay_history(self, session_id: str) -> None:
         history = self.message_history.get(session_id)
