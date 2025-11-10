@@ -721,14 +721,12 @@ async def llm_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        from core.config import set_active_llm
-        await set_active_llm(choice)
-        
-        # Reload system with new LLM
-        from core.core_initializer import core_initializer
-        await core_initializer.initialize_all(notify_fn=telegram_notify)
-        
+        from core.config import switch_active_llm
+        # Use the centralized switch function with full reinitialization for Telegram
+        await switch_active_llm(choice, use_hot_swap=False)
         await update.message.reply_text(f"✅ LLM mode dynamically updated to `{choice}`.")
+    except ValueError as e:
+        await update.message.reply_text(f"❌ LLM not available: {e}")
     except Exception as e:
         await update.message.reply_text(f"❌ Error loading plugin: {e}")
 
