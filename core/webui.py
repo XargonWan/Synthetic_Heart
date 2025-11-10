@@ -2121,21 +2121,18 @@ class SynthWebUIInterface:
             raise HTTPException(status_code=400, detail="Missing 'name'")
 
         try:
-            from core.config import list_available_llms, set_active_llm
-            from core.plugin_instance import load_plugin
+            from core.config import switch_active_llm
         except Exception as exc:  # pragma: no cover - defensive
             log_error(f"{LOG_PREFIX} unable to import LLM configuration helpers: {exc}")
             raise HTTPException(status_code=500, detail="Unable to access LLM configuration") from exc
 
-        available = list_available_llms()
-        if name not in available:
-            raise HTTPException(status_code=404, detail=f"LLM '{name}' is not available")
-
         try:
-            # Hot-swap: Just load the new plugin without full restart
-            await set_active_llm(name)
-            await load_plugin(name)
+            # Use the centralized switch function with hot-swap
+            await switch_active_llm(name, use_hot_swap=True)
             log_info(f"{LOG_PREFIX} Successfully switched LLM to {name}")
+        except ValueError as exc:
+            log_warning(f"{LOG_PREFIX} LLM not available: {exc}")
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
         except Exception as exc:
             log_error(f"{LOG_PREFIX} failed to switch LLM to {name}: {exc}")
             raise HTTPException(status_code=500, detail=f"Failed to activate LLM '{name}'") from exc
