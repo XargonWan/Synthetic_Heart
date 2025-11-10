@@ -140,16 +140,13 @@ class SeleniumLLMBase(AIPluginBase):
         """Get the single global shared driver instance."""
         async with cls._global_driver_lock:
             if cls._global_shared_driver is None:
-                log_info("[selenium] 🌍 CREATING GLOBAL shared driver instance")
-                import traceback
-                creation_stack = "".join(traceback.format_stack()[-5:-1])
-                log_debug(f"[selenium] Global driver creation from:\n{creation_stack}")
+                log_info("[selenium] 🌍 Creating global shared driver instance")
                 cls._global_shared_driver = await asyncio.to_thread(cls._create_shared_driver)
                 cls._global_ref_count = 1
-                log_info(f"[selenium] 🌍 GLOBAL driver CREATED, windows: {len(cls._global_shared_driver.window_handles)}")
+                log_info(f"[selenium] 🌍 Global driver created with {len(cls._global_shared_driver.window_handles)} window(s)")
             else:
                 cls._global_ref_count += 1
-                log_debug(f"[selenium] 🌍 Reusing GLOBAL driver (ref count: {cls._global_ref_count})")
+                log_debug(f"[selenium] 🌍 Reusing global driver (ref count: {cls._global_ref_count})")
 
                 # Always ensure single window for global driver
                 await asyncio.to_thread(cls._ensure_single_window, cls._global_shared_driver)

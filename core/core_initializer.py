@@ -150,6 +150,20 @@ class CoreInitializer:
                 log_info("[core_initializer] Notifying all config listeners...")
                 config_registry.notify_all_listeners()
                 log_info("[core_initializer] ✅ All config listeners notified")
+                
+                # CRITICAL: Reload persona after config values are updated from DB
+                # This ensures SYNTH_NAME, SYNTH_PROFILE, etc. are correct in the persona object
+                log_info("[core_initializer] Reloading persona with updated config values...")
+                try:
+                    from core.persona_manager import get_persona_manager
+                    persona_mgr = get_persona_manager()
+                    if persona_mgr:
+                        await persona_mgr.reload_persona_from_config()
+                        log_info("[core_initializer] ✅ Persona reloaded with updated config values")
+                    else:
+                        log_warning("[core_initializer] Persona manager not available for reload")
+                except Exception as persona_reload_exc:
+                    log_warning(f"[core_initializer] Failed to reload persona from config: {persona_reload_exc}")
             except Exception as load_exc:
                 log_warning(f"[core_initializer] Failed to load configurations from DB: {load_exc}")
         

@@ -598,7 +598,7 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
             correction_payload["system_message"]["required_format"] = {
                 "actions": [
                     {
-                        "action": "message_telegram_bot",
+                        "type": "message_telegram_bot",
                         "payload": {
                             "text": "Your message content here (optional - only if you want to reply to user)",
                             "target": str(chat_id or "-1003098886330"),
@@ -613,9 +613,7 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
                 "NO text outside JSON structure",
                 "NO markdown formatting",
                 "NO explanations outside JSON"
-                    ]
-                }
-            }
+            ]
             correction_prompt = json.dumps(correction_payload, ensure_ascii=False)
 
             # Construct a lightweight message object expected by plugins

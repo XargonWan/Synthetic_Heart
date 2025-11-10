@@ -13,6 +13,7 @@ def get_current_aliases() -> list[str]:
         persona_manager = get_persona_manager()
         current_persona = persona_manager.get_current_persona()
         if current_persona and current_persona.aliases:
+            log_debug(f"[mention] Loaded aliases from persona: {current_persona.aliases}")
             return current_persona.aliases
 
         # If persona not loaded or aliases empty, try reading from config registry
@@ -25,18 +26,21 @@ def get_current_aliases() -> list[str]:
                 try:
                     parsed = json.loads(raw)
                     if isinstance(parsed, list):
+                        log_debug(f"[mention] Loaded aliases from config (JSON parsed): {parsed}")
                         return parsed
                 except Exception:
                     # Not JSON, fall through
                     pass
             if isinstance(raw, list):
+                log_debug(f"[mention] Loaded aliases from config (direct list): {raw}")
                 return raw
-        except Exception:
+        except Exception as config_e:
             # If config registry isn't available or value missing, fall back
-            pass
+            log_debug(f"[mention] Error reading aliases from config registry: {config_e}")
     except Exception as e:
         log_debug(f"[mention] Error getting current persona aliases: {e}")
     # Fallback to hardcoded aliases
+    log_debug(f"[mention] Using fallback aliases: {synth_ALIASES}")
     return synth_ALIASES
 
 
@@ -173,11 +177,31 @@ async def is_message_for_bot(
         text_lower = message_text.lower()
         log_debug(f"[mention] Checking aliases in text: '{text_lower}'")
         aliases = get_current_aliases()
+        log_debug(f"[mention] Current aliases to check: {aliases}")
         for alias in aliases:
             if alias.lower() in text_lower:
                 log_debug(f"[mention] ✅ Alias found: '{alias}' - PRIORITY 4 - message is for bot")
                 return True, None
         log_debug(f"[mention] No aliases found in '{text_lower}'")
+    
+    # Priority 4b: Check for persona name in message text
+    if message_text:
+        try:
+            from core.persona_manager import get_persona_manager
+            persona_manager = get_persona_manager()
+            current_persona = persona_manager.get_current_persona()
+            if current_persona and current_persona.name:
+                persona_name = current_persona.name
+                text_lower = message_text.lower()
+                if persona_name.lower() in text_lower:
+                    log_debug(f"[mention] ✅ Persona name found: '{persona_name}' - PRIORITY 4b - message is for bot")
+                    return True, None
+                else:
+                    log_debug(f"[mention] Persona name '{persona_name}' not found in '{text_lower}'")
+            else:
+                log_debug(f"[mention] No persona name available to check")
+        except Exception as e:
+            log_debug(f"[mention] Error checking persona name: {e}")
     
     # Priority 5: Check for chat 1:1 using human count (fallback)
     if human_count is not None and human_count == 1:

@@ -118,7 +118,15 @@ async def handle_incoming_message(bot, message: Optional[SimpleNamespace], text:
     ctx['original_text'] = text  # Track original text in context, not on message (for consistency with immutable Telegram Message objects)
     
     # Mark LLM-origin in context (not on message object, as Telegram Message objects are immutable)
-    ctx['from_llm'] = True if source == 'llm' else ctx.get('from_llm', False)
+    is_from_llm = True if source == 'llm' else ctx.get('from_llm', False)
+    ctx['from_llm'] = is_from_llm
+    
+    # Also set on message object if possible (for corrector_orchestrator and action_parser detection)
+    try:
+        if hasattr(message, '__dict__') or isinstance(message, type({})):
+            message.from_llm = is_from_llm
+    except (AttributeError, TypeError):
+        pass  # Message object is immutable (Telegram Message); use ctx instead
     
     # Preserve chat_id and thread_id in context to avoid losing them during processing
     if hasattr(message, 'chat_id'):

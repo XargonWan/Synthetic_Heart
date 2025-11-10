@@ -74,8 +74,37 @@ async def load_plugin(name: str, notify_fn=None):
         registry = get_llm_registry()
         plugin_instance = registry.load_engine(name, notify_fn)
     except Exception as e:
-        log_error(f"[plugin] ❌ Failed to load plugin {name}: {e}", e)
-        raise
+        # Fallback: try to load the plugin directly from llm_engines module
+        # This allows plugins to work even if they weren't registered during auto-discovery
+        log_warning(f"[plugin] Registry load failed ({e}), attempting direct module load for {name}")
+        try:
+            import importlib
+            module_path = f"llm_engines.{name}"
+            module = importlib.import_module(module_path)
+            
+            if not hasattr(module, "PLUGIN_CLASS"):
+                log_error(f"[plugin] ❌ Module {module_path} does not define PLUGIN_CLASS")
+                raise ValueError(f"Plugin `{name}` does not define `PLUGIN_CLASS`")
+            
+            plugin_class = getattr(module, "PLUGIN_CLASS")
+            
+            # Verify display_name
+            if not hasattr(plugin_class, "display_name"):
+                error_msg = f"Plugin `{name}` does not define `display_name`"
+                log_error(f"[plugin] ❌ {error_msg}")
+                raise ValueError(error_msg)
+            
+            # Create instance with or without notify_fn
+            plugin_args = plugin_class.__init__.__code__.co_varnames
+            if "notify_fn" in plugin_args:
+                plugin_instance = plugin_class(notify_fn=notify_fn)
+            else:
+                plugin_instance = plugin_class()
+            
+            log_info(f"[plugin] ✅ Plugin loaded directly from module: {name}")
+        except Exception as fallback_e:
+            log_error(f"[plugin] ❌ Direct module load also failed for {name}: {fallback_e}", fallback_e)
+            raise
 
     plugin = plugin_instance
     log_debug(f"[plugin] Plugin initialized: {plugin.__class__.__name__}")

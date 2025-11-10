@@ -396,6 +396,34 @@ def load_json_instructions() -> str:
 - Include reply_message_id if replying to specific messages.
 - ALWAYS include create_personal_diary_entry action to record interactions.
 - Interaction_summary examples: "User asked about weather, provided forecast" or "Discussed coding, provided solutions"
+
+RESPONSE FORMAT - Your response MUST be valid JSON in this exact structure:
+{
+  "actions": [
+    {
+      "type": "action_name_from_actions_block",
+      "payload": {
+        "field1": "value1",
+        "field2": "value2"
+      }
+    },
+    {
+      "type": "another_action",
+      "payload": {
+        "required_field": "value",
+        "optional_field": "value"
+      }
+    }
+  ]
+}
+
+Key rules:
+- ALWAYS use "type" (not "name", "action", or any other field)
+- ALWAYS use "payload" to wrap your parameters (not "parameters", "args", or any other field)
+- Each action MUST have exactly two fields: "type" and "payload"
+- Do NOT add any text, explanation, or markdown outside the JSON
+- Do NOT include "description" or "instructions" in your response
+- The "type" must match exactly one from the 'actions' block
 """
 
 

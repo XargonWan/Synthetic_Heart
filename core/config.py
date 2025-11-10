@@ -88,48 +88,84 @@ LLM_MODE = config_registry.get_var(
 
 # === Persistent LLM mode ===
 
-_active_llm = None  # local global variable
+# Exposed configuration for active LLM (hidden from UI - set via Components tab)
+ACTIVE_LLM = config_registry.get_var(
+    "ACTIVE_LLM",
+    "selenium_chatgpt",
+    label="Active LLM",
+    description="The currently active LLM engine. Set via the Components tab in the Web UI.",
+    group="core",
+    component="core",
+    tags=["bootstrap"],
+    hidden=True,  # Hidden from UI config - only set via Components tab
+)
 
 async def get_active_llm():
-    global _active_llm
-    if _active_llm is None:
-        conn = await get_conn()
-        try:
-            async with conn.cursor(aiomysql.DictCursor) as cur:
-                await cur.execute("SELECT value FROM settings WHERE `setting_key` = 'active_llm'")
-                row = await cur.fetchone()
-                if row:
-                    _active_llm = row["value"]
-                    log_debug(f"[config] 🧠 Active LLM plugin loaded from DB: {_active_llm}")
-                else:
-                    _active_llm = "selenium_chatgpt"
-        except Exception as e:
-            log_error(f"[config] ❌ Error in get_active_llm(): {repr(e)}")
-        finally:
-            conn.close()
-    return _active_llm
+    """Get the currently active LLM engine from config registry."""
+    try:
+        current_value = str(ACTIVE_LLM)
+        if current_value and current_value != "":
+            log_debug(f"[config] 🧠 Active LLM: {current_value}")
+            return current_value
+    except Exception as e:
+        log_error(f"[config] ❌ Error reading ACTIVE_LLM: {repr(e)}")
+    
+    # Default fallback
+    return "selenium_chatgpt"
 
 async def set_active_llm(name: str):
-    global _active_llm
-    if name == _active_llm:
-        log_debug(f"[config] 🔄 LLM already set: {name}, no update needed.")
-        return
-    _active_llm = name
-    from core.db import ensure_core_tables
-    await ensure_core_tables()
-    conn = await get_conn()
+    """Save the active LLM engine to config registry."""
     try:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "REPLACE INTO settings (`setting_key`, value) VALUES (%s, %s)",
-                ("active_llm", name),
-            )
-            await conn.commit()
-            log_debug(f"[config] 💾 Saved active plugin in DB: {name}")
+        await config_registry.set_value("ACTIVE_LLM", name)
+        log_debug(f"[config] 💾 Saved active plugin: {name}")
     except Exception as e:
-        log_error(f"[config] ❌ Error in set_active_llm(): {repr(e)}")
-    finally:
-        conn.close()
+        log_error(f"[config] ❌ Error saving ACTIVE_LLM: {repr(e)}")
+        raise
+
+async def switch_active_llm(name: str, use_hot_swap: bool = True):
+    """
+    Switch to a different active LLM engine.
+    
+    This is the centralized entry point for changing the active LLM, used by both
+    the WebUI and Telegram commands to ensure consistency.
+    
+    Args:
+        name: The name of the LLM engine to activate
+        use_hot_swap: If True, performs hot-swap (direct plugin reload without full reinitialization).
+                      If False, performs full reinitialization (useful for some edge cases).
+    
+    Raises:
+        ValueError: If the LLM name is not available
+    """
+    from core.config import list_available_llms
+    
+    available = list_available_llms()
+    if name not in available:
+        raise ValueError(f"LLM '{name}' is not available. Available: {', '.join(available)}")
+    
+    current = await get_active_llm()
+    if name == current:
+        log_debug(f"[config] 🔄 LLM already active: {name}, no switch needed.")
+        return
+    
+    # Persist the new LLM choice to config
+    await set_active_llm(name)
+    log_info(f"[config] 🔄 Switching LLM from {current} to {name}")
+    
+    try:
+        if use_hot_swap:
+            # Hot-swap: direct plugin reload
+            from core.plugin_instance import load_plugin
+            await load_plugin(name)
+            log_info(f"[config] ✅ LLM hot-swapped to {name}")
+        else:
+            # Full reinitialization
+            from core.core_initializer import core_initializer
+            await core_initializer.initialize_all()
+            log_info(f"[config] ✅ LLM switched to {name} (full reinitialization)")
+    except Exception as e:
+        log_error(f"[config] ❌ Failed to switch LLM to {name}: {e}")
+        raise
 
 _log_chat_id: int | None = None  # cached log chat ID
 _log_chat_thread_id: int | None = None  # cached log chat thread ID

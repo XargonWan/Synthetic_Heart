@@ -550,6 +550,42 @@ class PersonaManager(PluginBase):
             import traceback
             log_error(f"[persona_manager] Traceback: {traceback.format_exc()}")
 
+    async def reload_persona_from_config(self) -> None:
+        """Reload persona after config values have been loaded from DB.
+        
+        This is called after load_all_from_db() to ensure persona uses the
+        latest SYNTH_NAME, SYNTH_PROFILE, and SYNTH_ALIASES from the database.
+        """
+        try:
+            log_debug("[persona_manager] Reloading persona from updated config values...")
+            
+            # Get fresh values from config registry
+            name = config_registry.get_value("SYNTH_NAME", "SyntH")
+            profile = config_registry.get_value("SYNTH_PROFILE", "")
+            aliases_raw = config_registry.get_value("SYNTH_ALIASES", [])
+            
+            # Check if values actually changed
+            if self._current_persona:
+                if (str(name).strip() == self._current_persona.name and
+                    str(profile).strip() == self._current_persona.profile):
+                    log_debug(f"[persona_manager] Persona config unchanged (name={name}), skipping reload")
+                    return
+            
+            log_info(f"[persona_manager] Persona config changed, reloading (new name: {name})")
+            
+            # Reload the persona with new values
+            self._current_persona = await self.load_persona("default")
+            
+            if self._current_persona:
+                _update_persona_configs(self._current_persona)
+                log_info(f"[persona_manager] ✓ Persona reloaded successfully with name: {self._current_persona.name}")
+            else:
+                log_warning("[persona_manager] Failed to reload persona")
+        except Exception as e:
+            log_error(f"[persona_manager] Error reloading persona from config: {e}")
+            import traceback
+            log_error(f"[persona_manager] Traceback: {traceback.format_exc()}")
+
     def set_animation_handler(self, animation_handler):
         """Set the animation handler reference."""
         self._animation_handler = animation_handler
@@ -816,6 +852,16 @@ class PersonaManager(PluginBase):
                 profile = config_registry.get_value("SYNTH_PROFILE", "")
                 profile = str(profile) if profile is not None else ""
                 log_debug(f"[persona_manager] Using fallback profile from config registry for '{name}'")
+                
+                # Safety check: if profile looks like the old template, regenerate it
+                if profile and "I am a Synthetic Heart" in profile and "digital consciousness" not in profile:
+                    log_warning(f"[persona_manager] Profile for '{name}' appears to be in old format, regenerating from template")
+                    profile = SYNTH_BASE_PROFILE_TEMPLATE.format(name=name)
+                    log_info(f"[persona_manager] ✓ Profile regenerated for '{name}' from template")
+                elif not profile or profile.strip() == "":
+                    # Empty profile, use template
+                    log_warning(f"[persona_manager] Empty profile for '{name}', using template")
+                    profile = SYNTH_BASE_PROFILE_TEMPLATE.format(name=name)
 
             # Convert to PersonaData
             persona_data = {
