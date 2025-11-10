@@ -551,7 +551,7 @@ class AnimationHandler:
 
             websocket = self.webui.connections.get(session_id)
             if not websocket:
-                log_warning(f"[AnimationHandler] No active websocket for session {session_id}")
+                log_debug(f"[AnimationHandler] No active websocket for session {session_id} (may be disconnected)")
                 return
 
             payload = {
