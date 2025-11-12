@@ -114,12 +114,12 @@ async def get_active_llm():
     return "selenium_chatgpt"
 
 async def set_active_llm(name: str):
-    """Save the active LLM engine to config registry."""
+    """Save the active LLM engine to config registry and database."""
     try:
         await config_registry.set_value("ACTIVE_LLM", name)
-        log_debug(f"[config] 💾 Saved active plugin: {name}")
+        log_info(f"[config] 💾 Saved active LLM to database: {name}")
     except Exception as e:
-        log_error(f"[config] ❌ Error saving ACTIVE_LLM: {repr(e)}")
+        log_error(f"[config] ❌ Error saving ACTIVE_LLM to database: {repr(e)}")
         raise
 
 async def switch_active_llm(name: str, use_hot_swap: bool = True):
