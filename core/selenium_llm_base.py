@@ -350,6 +350,19 @@ class SeleniumLLMBase(AIPluginBase):
         self.link_column = self.config.get('link_column', '')
         self.component_name = self.config.get('component_name', 'selenium_llm')
 
+        # Model management - to be set by subclasses
+        # model_limits_map: Dict[model_name] -> max_chars
+        # Example: {"gpt-4o": 128000, "gpt-4": 8000, "default": 128000}
+        self.model_limits_map: dict = {}
+        
+        # model_config_var: name of the config variable that holds the current model name
+        # Example: "CHATGPT_MODEL" or "GEMINI_MODEL"
+        self.model_config_var: str = ""
+        
+        # default_model: fallback model to use if config var not set
+        # Example: "gpt-4o" or "gemini-1.5-pro"
+        self.default_model: str = ""
+
         # Driver and state
         self.driver: Optional[webdriver.Remote] = None
         self._worker_task: Optional[asyncio.Task] = None
@@ -372,6 +385,29 @@ class SeleniumLLMBase(AIPluginBase):
             (By.CLASS_NAME, "login"),
             (By.CLASS_NAME, "signin"),
         ]
+
+        # Selenium automation selectors - to be set by subclasses
+        # Each selector set is a list of CSS selector strings tried in order
+        self.selectors = {
+            # Prompt input area - where user types the message
+            "prompt_area": [],
+            # Send button - to submit the prompt
+            "send_button": [],
+            # Response text area - where the LLM response appears
+            "response_text": [],
+            # Modal dismissal buttons - for closing any modal dialogs
+            "modal_dismissal": [],
+        }
+        
+        # Interface limits - to be set by subclasses
+        # Default values can be overridden by subclasses via set_interface_limits()
+        self.interface_limits = {
+            "max_prompt_chars": 10000,
+            "max_response_chars": 4000,
+            "supports_images": True,
+            "supports_functions": False,
+            "model_name": "default"
+        }
 
         # Initialize components
         self._init_components()
@@ -1095,6 +1131,12 @@ class SeleniumLLMBase(AIPluginBase):
                 log_warning("[selenium] Timeout while waiting for response")
                 return final_text
 
+            # Dismiss any modal that might have appeared during response waiting
+            # Uses the engine-specific selectors set in selectors["modal_dismissal"]
+            modal_selectors = self.selectors.get("modal_dismissal", [])
+            if modal_selectors:
+                self._dismiss_modal_with_selectors(driver, modal_selectors)
+
             text = self._extract_response_text(driver)
             current_len = len(text)
             changed = current_len != last_len
@@ -1117,6 +1159,45 @@ class SeleniumLLMBase(AIPluginBase):
 
             time.sleep(0.5)
 
+    def _dismiss_modal_with_selectors(self, driver, modal_selectors: list) -> bool:
+        """Dismiss any modal/dialog overlay using provided selectors.
+        
+        This is a generic method that can be called from any step of the Selenium flow.
+        Each LLM engine (ChatGPT, Grok, Gemini, etc.) provides its own list of selectors.
+        
+        Only logs if a modal was actually dismissed.
+        
+        Args:
+            driver: Selenium WebDriver instance
+            modal_selectors: List of CSS selector strings to try for dismissing modals
+        
+        Returns:
+            True if a modal was dismissed, False if no modal was found
+        """
+        try:
+            for selector in modal_selectors:
+                try:
+                    buttons = driver.find_elements(By.CSS_SELECTOR, selector)
+                    if buttons:
+                        for button in buttons:
+                            try:
+                                # Try to click the button if it's visible
+                                if button.is_displayed():
+                                    driver.execute_script("arguments[0].click();", button)
+                                    time.sleep(0.5)
+                                    log_debug(f"[selenium] Modal dismissed with selector: {selector}")
+                                    return True
+                            except Exception:
+                                continue
+                except Exception:
+                    continue
+            
+            return False
+        except Exception as e:
+            log_debug(f"[selenium] Modal dismissal check failed: {e}")
+            return False
+
+    
     def _get_response_selectors(self) -> list:
         """Get the CSS selectors for extracting response text.
         
@@ -1331,11 +1412,67 @@ class SeleniumLLMBase(AIPluginBase):
             loop = asyncio.get_event_loop()
             loop.call_soon_threadsafe(lambda: asyncio.create_task(self._queue_worker_loop()))
 
-    # === ABSTRACT METHODS (to be implemented by subclasses) ===
+    # === GENERIC SELECTOR-BASED METHODS (using selectors from plugin config) ===
 
     def _locate_prompt_area(self, driver, timeout: int = 10):
-        """Locate the prompt area (to be overridden by subclasses)."""
-        raise NotImplementedError
+        """Locate the prompt area using CSS selectors from self.selectors["prompt_area"].
+        
+        The plugin must set self.selectors["prompt_area"] with CSS selectors to try.
+        This method tries each selector in order until one works.
+        """
+        selectors = self.selectors.get("prompt_area", [])
+        if not selectors:
+            log_error("[selenium] No prompt area selectors configured in plugin")
+            return None
+        
+        for selector in selectors:
+            try:
+                log_debug(f"[selenium] Trying prompt area selector: {selector}")
+                element = WebDriverWait(driver, timeout).until(
+                    EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
+                )
+                log_debug(f"[selenium] Found prompt area with selector: {selector}")
+                return element
+            except Exception as e:
+                log_debug(f"[selenium] Prompt area selector failed: {selector} - {e}")
+                continue
+        
+        log_error("[selenium] Could not locate prompt input area with any selector")
+        return None
+
+    def _find_send_button(self, driver, timeout=5):
+        """Find the send/submit button using CSS selectors from self.selectors["send_button"].
+        
+        The plugin must set self.selectors["send_button"] with CSS selectors to try.
+        This method tries each selector in order until one works.
+        """
+        selectors = self.selectors.get("send_button", [])
+        if not selectors:
+            log_debug("[selenium] No send button selectors configured in plugin")
+            return None
+        
+        for selector in selectors:
+            try:
+                log_debug(f"[selenium] Trying send button selector: {selector}")
+                button = WebDriverWait(driver, timeout).until(
+                    EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
+                )
+                log_debug(f"[selenium] Found send button with selector: {selector}")
+                return button
+            except Exception as e:
+                log_debug(f"[selenium] Send button selector failed: {selector} - {e}")
+                continue
+        
+        log_debug("[selenium] No send button found with any selector")
+        return None
+    
+    def _get_response_selectors(self) -> list:
+        """Get CSS selectors for extracting response text.
+        
+        Returns selectors from self.selectors["response_text"] that the plugin configured.
+        Can be overridden by subclass if needed.
+        """
+        return self.selectors.get("response_text", [])
 
     def _navigate_to_service_url(self, driver, service_url: str) -> None:
         """Navigate to service URL safely without opening new tabs/windows."""
@@ -1371,27 +1508,269 @@ class SeleniumLLMBase(AIPluginBase):
             log_error(f"[selenium] Failed to navigate to {service_url}: {e}")
             raise
 
-    def _send_prompt_with_confirmation(self, textarea, prompt_text: str) -> None:
-        """Send prompt and wait for response (to be overridden by subclasses)."""
-        raise NotImplementedError
+    def _send_prompt_with_confirmation(self, textarea, prompt_text: str) -> bool:
+        """Send the prompt to the LLM service and wait for confirmation.
+        
+        This generic implementation:
+        1. Clears any existing text in the textarea
+        2. Sends the prompt text using send_keys or JavaScript
+        3. Finds and clicks the send button (using selectors from plugin config)
+        4. Returns True on success
+        
+        The plugin must have configured:
+        - self.selectors["send_button"]: CSS selectors for the send button
+        """
+        try:
+            if not textarea:
+                log_error("[selenium] No textarea provided")
+                return False
+            
+            # Dismiss any modal/dialog that might be blocking interaction
+            modal_selectors = self.selectors.get("modal_dismissal", [])
+            if modal_selectors:
+                self._dismiss_modal_with_selectors(self.driver, modal_selectors)
+            
+            # Filter out non-BMP characters that ChromeDriver can't handle
+            def filter_bmp_chars(text):
+                """Filter out characters outside the Basic Multilingual Plane (BMP)."""
+                return ''.join(char for char in text if ord(char) <= 0xFFFF)
+            
+            filtered_prompt = filter_bmp_chars(prompt_text)
+            if len(filtered_prompt) != len(prompt_text):
+                removed_chars = len(prompt_text) - len(filtered_prompt)
+                log_warning(f"[selenium] Filtered {removed_chars} non-BMP characters from prompt")
+            
+            # Check prompt length and truncate if too long
+            max_prompt_length = 100000  # Realistic limit for textarea content
+            if len(filtered_prompt) > max_prompt_length:
+                original_length = len(filtered_prompt)
+                filtered_prompt = filtered_prompt[:max_prompt_length]
+                log_warning(f"[selenium] Prompt truncated from {original_length} to {max_prompt_length} characters")
+            
+            log_debug(f"[selenium] About to clear textarea and send prompt")
+            
+            # Wait for textarea to be ready for input
+            WebDriverWait(self.driver, 10).until(
+                EC.element_to_be_clickable(textarea)
+            )
+            log_debug(f"[selenium] Textarea is clickable")
+            
+            # Determine if it's a textarea or contenteditable div
+            tag_name = textarea.tag_name.lower()
+            is_textarea = tag_name == "textarea"
+            is_contenteditable = textarea.get_attribute("contenteditable") == "true"
+            
+            log_debug(f"[selenium] Element type: tag={tag_name}, is_textarea={is_textarea}, is_contenteditable={is_contenteditable}")
+            
+            # Check current content before clearing
+            if is_textarea:
+                current_value = textarea.get_attribute("value") or ""
+            else:
+                current_value = textarea.get_attribute("textContent") or textarea.text or ""
+            log_debug(f"[selenium] Current textarea value before clear: '{current_value[:100] if len(current_value) > 100 else current_value}' (length: {len(current_value)})")
+            
+            # Clear any existing text
+            log_debug(f"[selenium] Clearing textarea")
+            if is_textarea:
+                textarea.clear()
+            else:
+                # For contenteditable divs, use JavaScript to clear
+                self.driver.execute_script("arguments[0].textContent = '';", textarea)
+            log_debug(f"[selenium] Textarea cleared")
+            
+            # Check content after clearing
+            if is_textarea:
+                after_clear_value = textarea.get_attribute("value") or ""
+            else:
+                after_clear_value = textarea.get_attribute("textContent") or textarea.text or ""
+            log_debug(f"[selenium] Textarea value after clear: '{after_clear_value}' (length: {len(after_clear_value)})")
+            
+            # Paste the filtered prompt text
+            log_debug(f"[selenium] Sending text to textarea: '{filtered_prompt[:100]}...' (length: {len(filtered_prompt)})")
+            
+            if is_textarea:
+                # For textarea elements, use send_keys
+                try:
+                    textarea.send_keys(filtered_prompt)
+                    log_debug(f"[selenium] Keys sent to textarea via send_keys")
+                except Exception as send_keys_error:
+                    log_debug(f"[selenium] send_keys failed: {send_keys_error}")
+                    # Try alternative method: use JavaScript to set value
+                    try:
+                        self.driver.execute_script("arguments[0].value = arguments[1];", textarea, filtered_prompt)
+                        # Trigger input event to make sure service detects the change
+                        self.driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", textarea)
+                        log_debug(f"[selenium] Text set via JavaScript")
+                    except Exception as js_error:
+                        log_debug(f"[selenium] JavaScript method also failed: {js_error}")
+                        raise send_keys_error  # Re-raise original error
+            else:
+                # For contenteditable divs, use JavaScript to insert text
+                log_debug(f"[selenium] Inserting text via JavaScript for contenteditable div")
+                try:
+                    # Focus the element first
+                    self.driver.execute_script("arguments[0].focus();", textarea)
+                    # Set the text content
+                    self.driver.execute_script("arguments[0].textContent = arguments[1];", textarea, filtered_prompt)
+                    # Trigger input and change events
+                    self.driver.execute_script("""
+                        const elem = arguments[0];
+                        elem.dispatchEvent(new Event('input', { bubbles: true }));
+                        elem.dispatchEvent(new Event('change', { bubbles: true }));
+                    """, textarea)
+                    log_debug(f"[selenium] Text injected via JavaScript for contenteditable")
+                except Exception as js_error:
+                    log_error(f"[selenium] Failed to inject text via JavaScript: {js_error}")
+                    raise
+            
+            # Check final content
+            if is_textarea:
+                final_value = textarea.get_attribute("value") or ""
+            else:
+                final_value = textarea.get_attribute("textContent") or textarea.text or ""
+            log_debug(f"[selenium] Final textarea value: '{final_value[:100] if len(final_value) > 100 else final_value}' (length: {len(final_value)})")
+            
+            # Wait a bit for service to process the input before trying to send
+            import time
+            log_debug("[selenium] Waiting 2 seconds for service to process input...")
+            time.sleep(2)
+            log_debug("[selenium] Wait completed, now trying to send")
+            
+            log_debug(f"[selenium] Prompt pasted, now trying to send")
+            
+            # Try to find and click send button first
+            send_button = self._find_send_button(self.driver, timeout=3)
+            if send_button:
+                log_debug(f"[selenium] Send button found: {send_button.tag_name} with text: '{send_button.text}'")
+                
+                # Check if button is enabled
+                is_enabled = send_button.is_enabled()
+                log_debug(f"[selenium] Send button enabled: {is_enabled}")
+                
+                if is_enabled:
+                    log_debug("[selenium] Clicking send button")
+                    try:
+                        send_button.click()
+                        log_debug("[selenium] Send button clicked successfully")
+                    except Exception as click_error:
+                        log_debug(f"[selenium] Send button click failed: {click_error}")
+                        # Fallback to RETURN
+                        log_debug("[selenium] Falling back to RETURN key")
+                        from selenium.webdriver.common.keys import Keys
+                        textarea.click()
+                        textarea.send_keys(Keys.RETURN)
+                else:
+                    log_debug("[selenium] Send button is disabled, using RETURN key")
+                    from selenium.webdriver.common.keys import Keys
+                    textarea.click()
+                    textarea.send_keys(Keys.RETURN)
+            else:
+                # Fallback: Send the message using RETURN key
+                log_debug("[selenium] No send button found, using RETURN key")
+                from selenium.webdriver.common.keys import Keys
+                textarea.click()
+                textarea.send_keys(Keys.RETURN)
+            
+            log_debug(f"[selenium] Send action completed, waiting for confirmation")
+            
+            # Wait for confirmation that the prompt was sent
+            try:
+                WebDriverWait(self.driver, 10).until(
+                    lambda d: (
+                        textarea.get_attribute("value") == "" or
+                        textarea.text == "" or
+                        len(d.find_elements(By.CSS_SELECTOR, "[data-testid*='sending'], [data-testid*='send'], .sending, .loading")) > 0
+                    )
+                )
+                log_debug("[selenium] Prompt sent successfully")
+            except Exception as wait_error:
+                log_debug(f"[selenium] Wait for confirmation timed out or failed: {wait_error}")
+                # Continue anyway - the message might have been sent
+            
+            return True  # Prompt was sent successfully
+        
+        except Exception as e:
+            log_error(f"[selenium] Failed to send prompt: {e}")
+            raise
 
     def get_supported_models(self):
         """Get supported models (to be overridden by subclasses)."""
         return []
+
+    def _get_model_char_limit(self, model_name: str) -> int:
+        """Get character limit for a specific model.
+        
+        Uses the model_limits_map set by subclass. Returns default if model not found.
+        
+        Args:
+            model_name: Name of the model (e.g., "gpt-4o", "gemini-1.5-pro")
+            
+        Returns:
+            Integer character limit for the model
+        """
+        if not self.model_limits_map:
+            return 10000  # Fallback default
+            
+        # Normalize model name (lowercase, strip)
+        normalized = model_name.lower().strip()
+        
+        # Direct match
+        if normalized in self.model_limits_map:
+            return self.model_limits_map[normalized]
+        
+        # Try partial match
+        for key in self.model_limits_map.keys():
+            if key in normalized or normalized.endswith(key):
+                return self.model_limits_map[key]
+        
+        # Return default if exists
+        if "default" in self.model_limits_map:
+            return self.model_limits_map["default"]
+            
+        # Last resort fallback
+        return 10000
+
+    def _get_current_model_name(self) -> str:
+        """Get current model name from config or use default.
+        
+        Uses model_config_var to look up the config value, falls back to default_model.
+        Subclasses can override this for custom logic.
+        
+        Returns:
+            String name of the current model
+        """
+        if self.model_config_var:
+            from core.config_manager import config_registry
+            configured_model = config_registry.get_value(self.model_config_var, "")
+            if configured_model:
+                return configured_model
+        
+        return self.default_model or "default"
+
+    def _update_interface_limits(self):
+        """Update interface limits based on current model.
+        
+        Subclasses can override this for custom logic.
+        This method is called automatically to sync limits when model changes.
+        """
+        model_name = self._get_current_model_name()
+        max_chars = self._get_model_char_limit(model_name)
+        
+        # Update interface limits
+        self.interface_limits["max_prompt_chars"] = max_chars
+        self.interface_limits["model_name"] = model_name
 
     def get_current_model(self):
         """Get current model (to be overridden by subclasses)."""
         return None
 
     def get_interface_limits(self):
-        """Get interface limits (to be overridden by subclasses)."""
-        return {
-            "max_prompt_chars": 1000,
-            "max_response_chars": 1000,
-            "supports_images": False,
-            "supports_functions": False,
-            "model_name": "default"
-        }
+        """Get interface limits.
+        
+        Returns the interface_limits dict that was set by subclass.
+        Subclasses should call _update_interface_limits() to sync with current model.
+        """
+        return self.interface_limits
 
     def is_user_logged_in(self) -> bool:
         """

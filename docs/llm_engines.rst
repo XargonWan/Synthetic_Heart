@@ -395,3 +395,341 @@ Best Practices
     Regularly verify authentication status and handle re-authentication gracefully.
 
 For complete examples, examine ``llm_engines/selenium_chatgpt.py`` (standardized architecture), ``llm_engines/selenium_gemini.py``, or ``llm_engines/selenium_grok.py`` in the repository.
+
+Tutorial: Creating a New Selenium LLM Plugin
+==============================================
+
+This tutorial walks through creating a new Selenium-based LLM plugin from scratch, using the standardized ``SeleniumLLMBase`` architecture. We'll create a plugin for a hypothetical service called "MyLLM".
+
+Step 1: Create the Plugin File
+-------------------------------
+
+Create a new file ``llm_engines/selenium_myllm.py``:
+
+.. code-block:: python
+
+   from core.selenium_llm_base import SeleniumLLMBase
+   
+   # Configuration constants
+   SERVICE_URL = "https://myllm.example.com"
+   MODEL_CONFIG_VAR = "MYLLM_MODEL"
+   DEFAULT_MODEL = "myllm-standard"
+   
+   # Model limits mapping (character limits)
+   MODEL_LIMITS_MAP = {
+       "myllm-standard": 50000,
+       "myllm-premium": 200000,
+       "myllm-enterprise": 1000000,
+       "default": 50000
+   }
+   
+   class SeleniumMyLLMPlugin(SeleniumLLMBase):
+       display_name = "Selenium MyLLM"
+       
+       def __init__(self, notify_fn=None):
+           """Initialize the MyLLM plugin."""
+           super().__init__(
+               config={
+                   "service_url": SERVICE_URL,
+                   "interface_name": "myllm"
+               },
+               notify_fn=notify_fn
+           )
+           
+           # Model configuration
+           self.model_limits_map = MODEL_LIMITS_MAP
+           self.model_config_var = MODEL_CONFIG_VAR
+           self.default_model = DEFAULT_MODEL
+           
+           # Update limits
+           self._update_interface_limits()
+           
+           # Define selectors for MyLLM service
+           self.selectors["prompt_area"] = [
+               "textarea#message-input",
+               "div[contenteditable='true'].input-area",
+               "textarea[placeholder*='Type your message']",
+               "div.input-field[role='textbox']",
+           ]
+           
+           self.selectors["send_button"] = [
+               "button#send-message",
+               "button[data-action='send']",
+               "button[type='submit']",
+               "button[aria-label*='Send']",
+           ]
+           
+           self.selectors["response_text"] = [
+               "div.message-response",
+               ".chat-message.assistant",
+               "[data-role='assistant-message']",
+               ".response-content",
+           ]
+           
+           # Optional: Modal dismissal selectors
+           self.selectors["modal_dismissal"] = [
+               "button.modal-close",
+               ".modal button.close",
+               "[data-dismiss='modal']",
+           ]
+           
+           # Login detection selectors
+           self.login_detection_selectors = [
+               (By.CSS_SELECTOR, "button#login-btn"),
+               (By.CSS_SELECTOR, "a[href*='login']"),
+               (By.XPATH, "//button[contains(text(), 'Sign In')]"),
+           ]
+   
+       def _ensure_logged_in(self, driver) -> bool:
+           """Check if user is logged in to MyLLM."""
+           try:
+               current_url = driver.current_url
+           except Exception:
+               current_url = ""
+           
+           # Navigate to service if not there
+           if not current_url.startswith("https://myllm.example.com"):
+               driver.get(SERVICE_URL)
+               time.sleep(2)
+               current_url = driver.current_url
+           
+           # Check for login indicators
+           if "login" in current_url or "auth" in current_url:
+               if self._notify_fn:
+                   self._notify_fn("🔐 Login required for MyLLM. Open UI to log in.")
+               return False
+           
+           return True
+   
+       def get_supported_models(self) -> list:
+           """Return list of supported models."""
+           return list(MODEL_LIMITS_MAP.keys())
+   
+       def get_current_model(self) -> str:
+           """Get current model, considering login status."""
+           if not self.is_user_logged_in():
+               return "default"
+           return self._get_current_model_name()
+   
+       def get_interface_limits(self) -> dict:
+           """Get interface limits."""
+           self._update_interface_limits()
+           return self.interface_limits
+   
+       # Optional: Override if service has response choices
+       def _get_response_choice_selectors(self) -> list:
+           """Selectors for response choice buttons."""
+           return [
+               "button.response-option",
+               ".choice-buttons button:first-child",
+           ]
+   
+   # Required: Export the plugin class
+   PLUGIN_CLASS = SeleniumMyLLMPlugin
+
+Step 2: Implement Service-Specific Logic
+-----------------------------------------
+
+Override methods as needed for your service:
+
+**Login Detection (_ensure_logged_in):**
+
+.. code-block:: python
+
+   def _ensure_logged_in(self, driver) -> bool:
+       """Service-specific login checking logic."""
+       # Check current URL
+       current_url = driver.current_url
+       
+       # Navigate if not on service
+       if not current_url.startswith(self.service_url):
+           driver.get(self.service_url)
+           time.sleep(2)
+       
+       # Check for login page indicators
+       login_indicators = driver.find_elements(By.CSS_SELECTOR, ".login-form, .auth-required")
+       if login_indicators:
+           self._notify_fn("🔐 Please log in to MyLLM service")
+           return False
+       
+       return True
+
+**Response Choice Handling (if applicable):**
+
+.. code-block:: python
+
+   def _get_response_choice_selectors(self) -> list:
+       """Return selectors for multiple response choice buttons."""
+       return [
+           "button.choice-option",  # Primary
+           ".response-choices button",  # Fallback
+       ]
+
+Step 3: Define Robust Selectors
+---------------------------------
+
+**Prompt Area Selectors:**
+
+Test multiple selectors in order of preference:
+
+.. code-block:: python
+
+   self.selectors["prompt_area"] = [
+       "textarea#specific-id",           # Most specific
+       "div[contenteditable='true']",    # Contenteditable divs
+       "textarea[placeholder*='message']", # Placeholder matching
+       "div.input-area",                 # Generic class
+       "textarea",                       # Generic fallback
+   ]
+
+**Response Text Selectors:**
+
+Provide multiple fallbacks for response extraction:
+
+.. code-block:: python
+
+   self.selectors["response_text"] = [
+       "div.assistant-message",          # Service-specific
+       "[data-author='assistant']",      # Data attributes
+       ".chat-message.ai",               # Class-based
+       ".response-content",              # Generic content
+       "article p",                      # Generic article text
+   ]
+
+Step 4: Test the Plugin
+-----------------------
+
+1. **Start the system:**
+
+   .. code-block:: bash
+
+      docker compose -f docker-compose-dev.yml up -d
+
+2. **Switch to your engine:**
+
+   .. code-block:: text
+
+      /llm selenium_myllm
+
+3. **Monitor logs for selector attempts:**
+
+   .. code-block:: bash
+
+      docker compose -f docker-compose-dev.yml logs -f synth
+
+4. **Test with a simple prompt:**
+
+   Send a test message and check if the plugin:
+
+   - Navigates to the correct URL
+   - Finds the input area
+   - Sends the prompt
+   - Extracts the response
+
+Step 5: Debug and Refine
+-------------------------
+
+**Common Issues:**
+
+- **Selector not found**: Add more fallback selectors
+- **Response not extracted**: Check response selectors in browser dev tools
+- **Login not detected**: Verify login detection selectors
+- **Modal blocking**: Add modal dismissal selectors
+
+**Debug Logging:**
+
+The base class logs selector attempts. Check logs for:
+
+.. code-block:: text
+
+   [selenium_base] Trying prompt selector: textarea#specific-id
+   [selenium_base] Found prompt area with selector: textarea#specific-id
+   [selenium_base] Trying response selector: div.assistant-message
+
+**Browser Inspection:**
+
+Run in non-headless mode to inspect elements:
+
+.. code-block:: bash
+
+   # In docker-compose-dev.yml, set headless: false temporarily
+   environment:
+     - SELENIUM_HEADLESS=false
+
+Step 6: Add Configuration Variables
+------------------------------------
+
+Add configuration variables in ``core/config.py`` or use the web UI:
+
+.. code-block:: python
+
+   # In core/config.py
+   MYLLM_MODEL = config_registry.get_var(
+       "MYLLM_MODEL",
+       "myllm-standard",
+       label="MyLLM Model",
+       description="Default model for MyLLM service",
+       group="llm",
+       component="selenium_myllm"
+   )
+
+Step 7: Document the Plugin
+----------------------------
+
+Update this documentation file to include your new plugin in the "Available Engines" section.
+
+**Example Documentation Addition:**
+
+.. code-block:: rst
+
+   Selenium MyLLM Engine
+   ---------------------
+
+   The ``selenium_myllm`` engine controls a MyLLM browser session:
+
+   - **Standardized Architecture**: Built on ``SeleniumLLMBase``
+   - **Model Support**: Standard, Premium, and Enterprise models
+   - **Character Limits**: Up to 1M characters for Enterprise
+   - **Browser Control**: Selenium-driven web interface interaction
+
+   Configuration:
+
+   .. code-block:: bash
+
+      MYLLM_MODEL=myllm-premium  # Optional, defaults to myllm-standard
+
+Best Practices for New Plugins
+-------------------------------
+
+**Selector Strategy:**
+
+1. **Specific first**: Use IDs, data attributes, unique classes
+2. **Semantic second**: Use ARIA roles, content patterns
+3. **Generic last**: Use tag names, common classes as fallbacks
+
+**Error Handling:**
+
+- Always provide fallbacks for critical selectors
+- Log failures with context for debugging
+- Use timeouts appropriate for your service
+
+**Testing:**
+
+- Test with different models/configurations
+- Verify login detection works
+- Check response extraction with various response types
+- Test modal dismissal if applicable
+
+**Maintenance:**
+
+- Monitor service UI changes that might break selectors
+- Update selectors when the service updates its interface
+- Keep model limits current with service changes
+
+**Performance:**
+
+- Minimize selector complexity for faster element finding
+- Use appropriate wait times for your service's responsiveness
+- Consider caching frequently used elements when possible
+
+By following this architecture, new LLM plugins can be created quickly and maintain consistency with existing engines while being easy to maintain and extend.
