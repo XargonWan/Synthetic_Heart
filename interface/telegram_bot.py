@@ -335,20 +335,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     log_info(f"[telegram_bot] Processing message from {username} ({user_id}){content_description}")
 
-    # Track context
-    log_debug(f"[telegram_bot] Tracking context for chat {message.chat_id}")
-    if message.chat_id not in context_memory:
-        context_memory[message.chat_id] = deque(maxlen=10)
-    context_memory[message.chat_id].append({
-        "message_id": message.message_id,
-        "user_id": user_id,
-        "username": username,
-        "usertag": usertag,
-        "text": text,
-        "timestamp": message.date.isoformat()
-    })
-    log_debug(f"[telegram_bot] Context added to memory")
-    log_debug(f"context_memory[{message.chat_id}] = {list(context_memory[message.chat_id])}")
+    # Track context - using centralized context manager
+    log_debug(f"[telegram_bot] Tracking message for chat {message.chat_id}")
+    from core.chat_context_manager import add_message_to_context
+    try:
+        await add_message_to_context(
+            chat_id=str(message.chat_id),
+            message_text=text,
+            sender_name=username,
+            sender_id=str(user_id),
+            interface="telegram_bot",
+            thread_id=None,
+            message_id=message.message_id,
+            timestamp=message.date.isoformat() if hasattr(message, 'date') else None
+        )
+    except Exception as e:
+        log_warning(f"[telegram_bot] Failed to add message to context: {e}")
+        # Continue processing even if context tracking fails
 
     # === PRIORITY 1: Handle /say step (chat selection) ===
     log_debug(f"Checking say_step conditions - chat_type: {message.chat.type}, user_id: {user_id}, trainer_id: {get_trainer_id()}, say_choices: {context.user_data.get('say_choices') is not None}")
@@ -523,9 +526,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         log_debug(f"Calling message_queue.enqueue...")
-        log_debug(f"Parameters: bot={type(context.bot)}, message={type(message)}, context_memory={type(context_memory)}, interface_id='telegram_bot'")
         
-        await message_queue.enqueue(context.bot, message, context_memory, interface_id="telegram_bot", original_message=message)
+        await message_queue.enqueue(context.bot, message, interface_id="telegram_bot", original_message=message)
         
         log_debug(f"Message successfully enqueued - processing should continue in queue")
         

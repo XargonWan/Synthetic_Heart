@@ -379,7 +379,7 @@ class DiscordInterface:
             )
 
             try:
-                await message_queue.enqueue(self.client, wrapped, context_memory, interface_id="discord_bot", original_message=message)
+                await message_queue.enqueue(self.client, wrapped, interface_id="discord_bot", original_message=message)
             except Exception as e:  # pragma: no cover - queue errors
                 log_error(f"[discord_interface] message_queue enqueue failed: {e}")
 
@@ -396,6 +396,19 @@ class DiscordInterface:
             target = payload.get("target")
             text = payload.get("text")
             if text and target is not None:
+                # Try to set animation to 'write' if WebUI context is available
+                # Discord itself doesn't have session_id, but context might have it from WebUI
+                try:
+                    from core.persona_manager import PersonaManager
+                    webui_session_id = context.get("webui_session_id") or context.get("session_id")
+                    if webui_session_id:
+                        persona_manager = PersonaManager.get_instance()
+                        if persona_manager:
+                            await persona_manager.set_animation_state("write", session_id=webui_session_id)
+                            log_debug(f"[discord_interface] Set avatar animation to 'write' for WebUI session {webui_session_id}")
+                except Exception as anim_exc:
+                    log_debug(f"[discord_interface] Could not set animation: {anim_exc}")
+                
                 await self.send_message(target, text)
 
     async def add_reaction(self, message, emoji: str) -> bool:

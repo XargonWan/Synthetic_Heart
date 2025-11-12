@@ -435,7 +435,7 @@ class MatrixInterface:
                     log_error(f"[matrix_interface] Command {command} failed: {exc}")
             return
 
-        await message_queue.enqueue(self, wrapped, context_memory, interface_id=INTERFACE_NAME)
+        await message_queue.enqueue(self, wrapped, interface_id=INTERFACE_NAME)
 
     # ------------------------------------------------------------------
     # Messaging helpers
