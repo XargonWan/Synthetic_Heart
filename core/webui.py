@@ -594,6 +594,8 @@ class SynthWebUIInterface:
     async def _handle_user_message(self, session_id: str, text: str) -> None:
         from types import SimpleNamespace
 
+        log_info(f"{LOG_PREFIX} [_handle_user_message] START: session_id={session_id}, text_len={len(text)}, text={text[:100]}")
+
         message = SimpleNamespace(
             chat_id=session_id,
             message_id=int(datetime.utcnow().timestamp() * 1000) % 1_000_000,
@@ -631,6 +633,14 @@ class SynthWebUIInterface:
             )
             if not thinking_pushed:
                 log_warning(f"{LOG_PREFIX} THINKING action was rejected (lower priority than current action)")
+            
+            # Set avatar animation to 'think'
+            if self.persona_manager:
+                try:
+                    await self.persona_manager.set_animation_state("think", session_id=session_id)
+                    log_debug(f"{LOG_PREFIX} Set avatar animation to 'think' for session {session_id}")
+                except Exception as anim_exc:
+                    log_warning(f"{LOG_PREFIX} Failed to set 'think' animation: {anim_exc}")
         except Exception as exc:
             log_warning(f"{LOG_PREFIX} Failed to push action state: {exc}")
         
@@ -651,6 +661,12 @@ class SynthWebUIInterface:
             response = str(get_failed_message_text())
         except Exception as exc:  # pragma: no cover - runtime issues
             log_error(f"{LOG_PREFIX} error handling message: {exc}")
+            response = str(get_failed_message_text())
+
+        # Handle LLM_FAILED responses - use fallback message text
+        # LLM_FAILED means the message_chain already sent fallback to other interfaces,
+        # but for WebUI we need to send it here
+        if response == "LLM_FAILED":
             response = str(get_failed_message_text())
 
         # Ensure we keep the THINKING action active until we've delivered the response
@@ -752,6 +768,20 @@ class SynthWebUIInterface:
     async def execute_action(self, action: dict, context: dict, bot, original_message):
         if action.get("type") == "message_synth_webui":
             payload = action.get("payload", {})
+            # Always use context chat_id (the actual session_id) for WebUI messages
+            # The target field might contain @usertag, but we need the session UUID
+            session_id = context.get("chat_id")
+            
+            # Set animation to 'write' before sending message
+            if self.persona_manager and session_id:
+                try:
+                    await self.persona_manager.set_animation_state("write", session_id=session_id)
+                    log_debug(f"{LOG_PREFIX} Set avatar animation to 'write' for session {session_id}")
+                except Exception as anim_exc:
+                    log_debug(f"{LOG_PREFIX} Failed to set 'write' animation: {anim_exc}")
+            
+            # Ensure the payload has the correct session_id for sending
+            payload["target"] = session_id
             await self.send_message(payload, original_message=original_message)
 
     # ------------------------------------------------------------------

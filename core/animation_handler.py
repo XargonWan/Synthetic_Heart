@@ -426,13 +426,14 @@ class AnimationHandler:
                     f"[AnimationHandler] Playing outro for {current_animation} "
                     f"before stopping (context={context_id}, session={session_id})"
                 )
-                # Play outro with loop=False (play once)
+                # Play outro with loop=False (play once), explicitly requesting 'outro' section
                 await self._send_animation_command(
                     session_id=session_id,
                     animation_file=current_animation,
                     loop=False,
                     state=self.current_state.value,
-                    descriptor=descriptor
+                    descriptor=descriptor,
+                    play_section="outro"
                 )
                 # Estimate outro duration and wait before transitioning to Idle
                 # Default: assume ~30 frames at 30fps = ~1 second per 30 frames
@@ -507,7 +508,8 @@ class AnimationHandler:
         animation_file: str,
         loop: bool,
         state: str,
-        descriptor: Optional[Dict] = None
+        descriptor: Optional[Dict] = None,
+        play_section: Optional[str] = None
     ) -> None:
         """Send animation command to the WebUI via WebSocket.
         
@@ -520,6 +522,7 @@ class AnimationHandler:
             loop: Whether to loop the animation
             state: The logical state name
             descriptor: Optional animation descriptor with frame info (intro/loop/outro)
+            play_section: Optional section to play - 'intro', 'loop', 'outro', or None for full animation
         """
         if not self.webui:
             return
@@ -543,6 +546,8 @@ class AnimationHandler:
                         }
                         if descriptor is not None:
                             payload["descriptor"] = descriptor
+                        if play_section is not None:
+                            payload["play_section"] = play_section
                         await websocket.send_json(payload)
                         log_debug(f"[AnimationHandler] Broadcast animation to session {sid}: {resolved_rel_path}")
                     except Exception as exc:
@@ -562,6 +567,8 @@ class AnimationHandler:
             }
             if descriptor is not None:
                 payload["descriptor"] = descriptor
+            if play_section is not None:
+                payload["play_section"] = play_section
             await websocket.send_json(payload)
             log_debug(f"[AnimationHandler] Sent animation command to session {session_id}: {resolved_rel_path}")
         except Exception as exc:
