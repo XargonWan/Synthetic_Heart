@@ -100,19 +100,33 @@ Some LLM services (like ChatGPT) offer users multiple response versions. The Sel
                ".response-text",  # Generic fallback
            ]
 
+Authentication and Guest Mode
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Selenium-based LLM plugins can function in guest mode (without user authentication), but this comes with limitations:
+
+- **Character Limits**: Guest mode typically has significantly reduced character limits compared to authenticated sessions, making SyntH appear less intelligent due to truncated prompts and responses
+- **Recommended Setup**: Use a logged-in account through the webui (``http://<host>:5006``) for full functionality and higher character limits
+- **Account Separation**: Create a dedicated account for SyntH separate from your personal account, as SyntH tends to flood chat history with frequent interactions
+
 Available Engines
 -----------------
 
 **Stable Engines:**
 
-* ``selenium_chatgpt_legacy`` – Legacy version of the ChatGPT Selenium engine. This is the only fully functional LLM engine at present.
+* ``selenium_chatgpt_legacy`` – Legacy version of the ChatGPT Selenium engine. For backward compatibility only; consider migrating to the standardized ``selenium_chatgpt`` engine.
 
-**Experimental/Development Engines:**
+**Standardized Selenium Engines:**
+
+All Selenium-based LLM engines now follow a consistent architecture for reliability and maintainability:
+
+* ``selenium_chatgpt`` – Drive a browser-based ChatGPT session. Supports GPT-4, GPT-3.5-Turbo, and other OpenAI models with automatic response choice handling and large prompt support (up to 100k characters).
+* ``selenium_grok`` – Browser-controlled xAI Grok with 128k token context window. Supports Grok and Grok Vision models for advanced reasoning and vision capabilities.
+* ``selenium_gemini`` – Browser-controlled Google Gemini with multiple model support (Gemini 2.5 Flash, 1.5 Pro). Supports up to 500k characters for Pro models with multimodal capabilities.
+
+**Other Engines:**
 
 * ``manual`` – Forward prompts to a human trainer for manual responses (useful for debugging and development).
-* ``selenium_chatgpt`` – Drive a browser-based ChatGPT session using the standardized Selenium architecture. Supports automatic response choice handling and large prompts.
-* ``selenium_gemini`` – Browser-controlled Google Gemini using the standardized Selenium architecture. Experimental, supports multiple Gemini models.
-* ``selenium_grok`` – Browser-controlled xAI Grok using the standardized Selenium architecture. Experimental, supports Grok models.
 
 Manual Engine
 -------------
@@ -129,19 +143,19 @@ Selenium ChatGPT Engine
 
 The ``selenium_chatgpt`` engine controls a real ChatGPT browser session using the standardized Selenium architecture:
 
-- **Standardized Architecture**: Built on ``SeleniumLLMBase`` for consistent behavior
+- **Standardized Architecture**: Built on ``SeleniumLLMBase`` for consistent behavior across all Selenium engines
 - **Full Browser Control**: Uses Selenium to interact with ChatGPT web interface
 - **Response Choice Handling**: Automatically selects first response when ChatGPT offers multiple options
-- **Enhanced Prompt Limits**: Supports prompts up to 100,000 characters (previously limited to 10,000)
+- **Enhanced Prompt Limits**: Supports prompts up to 128,000 characters
 - **Captcha Handling**: Manual intervention required for initial setup and captchas
 - **Visual Desktop**: Optional web interface at ``http://<host>:5006`` for monitoring
-- **Model Selection**: Supports different ChatGPT models via ``CHATGPT_MODEL``
+- **Model Selection**: Supports different ChatGPT models via ``CHATGPT_MODEL`` environment variable
 
 **Key Features:**
 
 - **Robust Response Extraction**: Multiple CSS selectors with fallback logic
 - **Automatic Choice Selection**: Handles ChatGPT's multiple response options
-- **Large Prompt Support**: Complete JSON prompts up to 100,000 characters
+- **Large Prompt Support**: Complete JSON prompts up to 128,000 characters
 - **Error Recovery**: Graceful handling of network issues and browser problems
 
 Setup Steps:
@@ -155,7 +169,7 @@ Setup Steps:
 
 .. code-block:: bash
 
-   CHATGPT_MODEL=gpt-4  # Optional, defaults to gpt-4
+   CHATGPT_MODEL=gpt-4o  # Optional, defaults to gpt-4o
 
 **Response Selectors:**
 
@@ -167,15 +181,10 @@ The engine uses these CSS selectors for response extraction (tried in order):
 
 **Troubleshooting:**
 
-- **Prompt Truncation**: If prompts appear truncated, check that the limit is set to 100,000 characters
+- **Prompt Truncation**: If prompts appear truncated, check the character limits for your model
 - **Response Selection**: Verify CSS selectors are current if responses aren't extracted properly
 - **Choice Handling**: Check logs for "Checking for response choice buttons" messages
-
-Selenium ChatGPT Legacy Engine
-------------------------------
-
-The ``selenium_chatgpt_legacy`` engine is a legacy version of the ChatGPT Selenium engine for backward compatibility with older setups. It does not use the standardized ``SeleniumLLMBase`` architecture and may have limitations with prompt length and response handling. Consider migrating to ``selenium_chatgpt`` for improved functionality.
-The legacy engine will be removed as soon as the new engine is fully stable.
+- **Login Issues**: Ensure the browser window at ``http://<host>:5006`` has completed login
 
 Selenium Gemini Engine
 ----------------------
@@ -189,11 +198,17 @@ The ``selenium_gemini`` engine controls a Google Gemini browser session using th
 - **Browser Control**: Uses Selenium for web interface interaction
 - **Response Extraction**: Robust selector-based text extraction
 
-Configuration:
+**Configuration:**
 
 .. code-block:: bash
 
    GEMINI_MODEL=2.5-flash  # Optional, defaults to 2.5-flash
+
+**Setup:**
+
+1. Access ``http://<host>:5006`` to sign in to your Google account
+2. Complete any authentication challenges
+3. Switch to this engine with ``/llm selenium_gemini``
 
 Selenium Grok Engine
 --------------------
@@ -207,11 +222,17 @@ The ``selenium_grok`` engine controls an xAI Grok browser session using the stan
 - **Browser-Based**: Selenium-driven interaction with web interface
 - **Response Extraction**: Robust selector-based text extraction
 
-Configuration:
+**Configuration:**
 
 .. code-block:: bash
 
    GROK_MODEL=grok-beta  # Optional, defaults to grok-beta
+
+**Setup:**
+
+1. Access ``http://<host>:5006`` to log in to X/Grok
+2. Complete login and any authentication challenges
+3. Switch to this engine with ``/llm selenium_grok``
 
 Engine Registration and Discovery
 ---------------------------------
