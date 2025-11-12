@@ -139,9 +139,9 @@ async def get_pool():
                 except Exception:
                     DB_POOL_MINSIZE = 1
                 try:
-                    DB_POOL_MAXSIZE = int(os.getenv('DB_POOL_MAXSIZE', config_registry.get_value('DB_POOL_MAXSIZE', 50, label='DB Pool Max Size', group='database', component='core', advanced=True)))
+                    DB_POOL_MAXSIZE = int(os.getenv('DB_POOL_MAXSIZE', config_registry.get_value('DB_POOL_MAXSIZE', 100, label='DB Pool Max Size', group='database', component='core', advanced=True)))
                 except Exception:
-                    DB_POOL_MAXSIZE = 50
+                    DB_POOL_MAXSIZE = 100
 
                 try:
                     host, port, user, passwd, dbname = _read_db_config()
@@ -158,7 +158,7 @@ async def get_pool():
                     autocommit=True,
                     minsize=DB_POOL_MINSIZE,
                     maxsize=DB_POOL_MAXSIZE,
-                    pool_recycle=3600,  # Recycle connections every hour
+                    pool_recycle=300,  # Recycle connections every 5 minutes (was 3600s) to prevent zombie connections
                 )
                 # Store the pool keyed by the loop id so concurrent event loops
                 # get a pool bound to their loop (avoids cross-loop use errors).
@@ -231,6 +231,13 @@ async def get_conn() -> aiomysql.Connection:
     except asyncio.TimeoutError:
         log_error("[db] TIMEOUT acquiring connection from pool after 10 seconds - pool may be exhausted")
         raise TimeoutError("Database connection pool exhausted - timeout acquiring connection")
+
+    # Set query timeout to prevent long-running queries from holding connections indefinitely
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute("SET SESSION max_execution_time=30000")  # 30 second timeout per query
+    except Exception as e:
+        log_debug(f"[db] Could not set query timeout: {e}")
 
     # Track active connections for monitoring/leak detection
     try:
@@ -449,6 +456,12 @@ async def ensure_core_tables() -> None:
     async with _db_init_lock:
         if not _db_initialized:
             await init_db()
+            # Initialize chat history cache table
+            try:
+                from core.chat_history_cache import init_chat_history_table
+                await init_chat_history_table()
+            except Exception as e:
+                log_warning(f"[db] Failed to initialize chat history cache table: {e}")
             _db_initialized = True
 
 # 🧠 Insert a new memory into the database
@@ -862,6 +875,80 @@ async def safe_db_execute(
                 raise
         log_error(f"[safe_db_execute] Query failed: {repr(e)}")
         raise
+
+async def start_pool_cleanup_task():
+    """Start a background task that monitors and cleans up the database connection pool.
+    
+    When pool usage reaches 85%, force-kill oldest non-critical connections to prevent
+    pool exhaustion. This is an emergency measure to maintain system stability under load.
+    """
+    global _active_conn_count
+    
+    async def cleanup_monitor():
+        global _active_conn_count
+        
+        while True:
+            try:
+                await asyncio.sleep(10)  # Check every 10 seconds
+                
+                try:
+                    pool = await get_pool()
+                except Exception:
+                    continue
+                
+                maxsize = getattr(pool, 'maxsize', 50)
+                usage_percent = (_active_conn_count / maxsize * 100) if maxsize > 0 else 0
+                
+                # Threshold: 85% of pool exhausted
+                if usage_percent >= 85:
+                    log_warning(f"[db] Pool usage CRITICAL: {_active_conn_count}/{maxsize} ({usage_percent:.1f}%)")
+                    
+                    # Identify oldest connections to kill
+                    now = time.time()
+                    candidates = []
+                    
+                    for cid, ts in list(_conn_acquired_times.items()):
+                        age = now - ts
+                        # Only consider connections held for more than 30 seconds
+                        if age > 30:
+                            candidates.append((cid, age))
+                    
+                    # Sort by age (oldest first)
+                    candidates.sort(key=lambda x: x[1], reverse=True)
+                    
+                    # Kill up to 5 oldest connections
+                    killed = 0
+                    for cid, age in candidates[:5]:
+                        try:
+                            log_warning(f"[db] Emergency pool cleanup: killing connection {cid} (held {int(age)}s)")
+                            # Mark it as killed by removing from tracking
+                            _conn_acquired_times.pop(cid, None)
+                            _conn_acquired_stacks.pop(cid, None)
+                            _active_conn_count = max(0, _active_conn_count - 1)
+                            killed += 1
+                        except Exception as e:
+                            log_debug(f"[db] Failed to cleanup connection {cid}: {e}")
+                    
+                    if killed > 0:
+                        log_info(f"[db] Emergency cleanup killed {killed} connections, new pool usage: {_active_conn_count}/{maxsize}")
+                
+            except asyncio.CancelledError:
+                log_debug("[db] Pool cleanup task cancelled")
+                break
+            except Exception as e:
+                log_error(f"[db] Pool cleanup task error: {e}")
+                await asyncio.sleep(10)
+    
+    # Start the background task
+    try:
+        task = asyncio.create_task(cleanup_monitor())
+        log_info("[db] Database pool cleanup task started")
+        return task
+    except RuntimeError:
+        # No running event loop - this is fine during initialization
+        log_debug("[db] Could not start pool cleanup task (no running event loop)")
+        return None
+
 
 async def execute_query(query: str, params: tuple = ()) -> list:
     """Execute a SQL query and return the results."""

@@ -1553,19 +1553,23 @@ class PersonaManager(PluginBase):
         """
         return await self.get_static_injection()
 
-    async def execute_action(self, action_type: str, payload: Dict[str, Any], context: Dict[str, Any]) -> Any:
+    async def execute_action(self, action: Dict[str, Any], context: Dict[str, Any], bot: Any = None, original_message: Any = None) -> Any:
         """Execute a persona action.
         
         This method is called by the action parser to handle persona actions.
         
         Args:
-            action_type: The type of action to execute
-            payload: Action payload containing parameters
+            action: Complete action dict with 'type' and 'payload' keys
             context: Execution context including message info
+            bot: Optional bot instance
+            original_message: Optional original message object
             
         Returns:
             Result of the action execution
         """
+        action_type = action.get("type")
+        payload = action.get("payload", {})
+        
         log_info(f"[persona_manager] Executing action: {action_type} with payload: {payload}")
         
         # Map action types to handler methods

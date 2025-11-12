@@ -72,13 +72,17 @@ async def send_llm_fallback_message(bot, message: SimpleNamespace, failure_reaso
     # Send fallback message through transport layer
     try:
         from core.transport_layer import universal_send
-        await universal_send(
-            bot=bot,
-            target=chat_id,
-            text=fallback_text,
-            thread_id=getattr(message, 'thread_id', None),
-            is_llm_response=True  # Mark as LLM response so interface handles normally
-        )
+        # Get the send_message method from the bot (interface)
+        if bot and hasattr(bot, 'send_message'):
+            await universal_send(
+                bot.send_message,
+                chat_id,
+                text=fallback_text,
+                thread_id=getattr(message, 'thread_id', None),
+                is_llm_response=True  # Mark as LLM response so interface handles normally
+            )
+        else:
+            log_warning(f"[message_chain] Bot does not have send_message method, cannot send fallback")
         log_debug(f"[message_chain] Fallback message sent to chat {chat_id}")
         return fallback_text
     except Exception as e:

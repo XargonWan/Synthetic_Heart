@@ -47,6 +47,7 @@ def minify_actions_block(available_actions: dict) -> dict:
     - required_fields
     - optional_fields
     - source
+    - instructions (ONLY if action description contains "REQUIRED" or "MUST" - critical for LLM behavior)
     
     This reduces token usage dramatically while preserving all critical information.
     Full instructions are still available in each action definition if needed by plugins.
@@ -64,12 +65,21 @@ def minify_actions_block(available_actions: dict) -> dict:
     minified = {}
     for action_name, action_def in available_actions.items():
         # Keep only essential fields
-        minified[action_name] = {
+        minified_action = {
             "description": action_def.get("description", ""),
             "required_fields": action_def.get("required_fields", []),
             "optional_fields": action_def.get("optional_fields", []),
             "source": action_def.get("source", ""),
         }
+        
+        # Include instructions if action description contains "REQUIRED" or "MUST" - these are critical for LLM behavior
+        description = action_def.get("description", "").upper()
+        if "REQUIRED" in description or "MUST" in description:
+            instructions = action_def.get("instructions", {})
+            if instructions:
+                minified_action["instructions"] = instructions
+        
+        minified[action_name] = minified_action
     return minified
 
 

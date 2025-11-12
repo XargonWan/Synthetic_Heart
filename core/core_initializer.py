@@ -124,6 +124,15 @@ class CoreInitializer:
             except Exception as _e:
                 log_warning(f"[core_initializer] ensure_core_tables() failed: {_e}")
 
+            # 4.1. Initialize centralized chat context manager
+            log_debug("[core_initializer] Initializing centralized chat context manager...")
+            try:
+                from core.chat_context_manager import initialize_context_manager
+                await initialize_context_manager()
+                log_info("[core_initializer] ✅ Chat context manager initialized")
+            except Exception as e:
+                log_warning(f"[core_initializer] Failed to initialize chat context manager: {e}")
+
             log_debug("[core_initializer] 🔍 About to call _initialize_persona_manager()")
             try:
                 await self._initialize_persona_manager()
@@ -207,6 +216,13 @@ class CoreInitializer:
             log_debug("[core_initializer] Set _initial_initialization=False - auto-refresh now allowed")
             self.initialization_completed = True
             log_info("[core_initializer] ✅ All core components initialized successfully")
+            
+            # Start database pool cleanup monitor to prevent exhaustion under load
+            try:
+                from core.db import start_pool_cleanup_task
+                await start_pool_cleanup_task()
+            except Exception as e:
+                log_warning(f"[core_initializer] Failed to start pool cleanup task: {e}")
             
             # Start all registered interfaces
             await self._start_interfaces()

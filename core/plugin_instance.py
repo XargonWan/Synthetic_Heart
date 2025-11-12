@@ -320,6 +320,9 @@ async def handle_incoming_message(bot, message, context_memory_or_prompt, interf
             )
             
             log_debug(f"[plugin_instance] Message chain processed LLM response: {chain_result}")
+            # Don't return ACTIONS_EXECUTED as a message to the webui
+            if chain_result == "ACTIONS_EXECUTED":
+                return None
             return chain_result
         
         return result

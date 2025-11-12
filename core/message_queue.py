@@ -11,6 +11,7 @@ from core.mention_utils import is_message_for_bot
 from core.reaction_handler import react_when_mentioned, get_reaction_emoji
 from core.core_initializer import INTERFACE_REGISTRY
 from core.interfaces_registry import get_interface_registry
+from core.chat_context_manager import get_context_memory
 from plugins.blocklist import is_user_blocked
 from plugins.chat_link import ChatLinkStore
 
@@ -42,18 +43,21 @@ async def _delayed_put(item: dict, delay: float) -> None:
     await _queue.put((priority, item))
 
 
-async def enqueue(bot, message, context_memory, priority: bool = False, interface_id: str = None, skip_mention_check: bool = False, original_message=None) -> None:
+async def enqueue(bot, message, context_memory=None, priority: bool = False, interface_id: str = None, skip_mention_check: bool = False, original_message=None) -> None:
     """Enqueue a message for serialized processing with rate limiting.
 
     Args:
         bot: The bot instance
         message: The message to process
-        context_memory: Message context
+        context_memory: (Deprecated) Message context dict. If not provided, uses centralized context manager.
         priority: If True, message is added to front of queue (for events)
         interface_id: The interface identifier (e.g., 'webui', 'interface_name')
         skip_mention_check: If True, skip is_message_for_bot check (for 1:1 interfaces like ollama, webui)
         original_message: The original message object from the interface (for reactions)
     """
+    # Use centralized context manager if context_memory not provided
+    if context_memory is None:
+        context_memory = get_context_memory()
     message_text = getattr(message, 'text', '')
     user_id = getattr(message.from_user, 'id', 'unknown') if message.from_user else 'unknown'
     chat_id = getattr(message, 'chat_id', 'unknown')
