@@ -273,10 +273,22 @@ async def init_diary_table():
                 thread_id VARCHAR(255),
                 user_message TEXT COMMENT 'What the user said that triggered this response',
                 context_tags TEXT DEFAULT '[]' COMMENT 'Tags about the context/topic',
+                involved_users TEXT DEFAULT '[]' COMMENT 'JSON list of users involved in the interaction',
                 INDEX idx_timestamp (timestamp),
                 INDEX idx_interface_chat (interface, chat_id)
             )
         ''')
+        
+        # Ensure involved_users column exists (migration for existing tables)
+        try:
+            await cursor.execute('''
+                ALTER TABLE ai_diary ADD COLUMN involved_users TEXT DEFAULT '[]' COMMENT 'JSON list of users involved in the interaction'
+            ''')
+            log_info("[ai_diary] Added missing involved_users column to ai_diary table")
+        except Exception as e:
+            # Column might already exist, that's fine
+            if "Duplicate column name" not in str(e):
+                log_debug(f"[ai_diary] Column migration check: {e}")
         
         # Legacy memories table (moved from core)
         await cursor.execute('''
@@ -323,6 +335,7 @@ async def init_diary_table():
                 thread_id VARCHAR(255),
                 user_message TEXT COMMENT 'What the user said that triggered this response',
                 context_tags TEXT DEFAULT '[]' COMMENT 'Tags about the context/topic',
+                involved_users TEXT DEFAULT '[]' COMMENT 'JSON list of users involved in the interaction',
                 INDEX idx_timestamp (timestamp),
                 INDEX idx_interface_chat (interface, chat_id)
             )
@@ -431,6 +444,39 @@ def add_diary_entry(
         thread_id: Thread identifier
     """
     global PLUGIN_ENABLED
+    
+    # Attempt lazy initialization if plugin was disabled at startup
+    if not PLUGIN_ENABLED:
+        try:
+            log_debug("[ai_diary] Attempting lazy initialization of plugin (sync)...")
+            _run(_execute("SELECT 1 FROM ai_diary LIMIT 1"))
+            PLUGIN_ENABLED = True
+            log_info("[ai_diary] Plugin lazy-initialized successfully (sync)")
+        except Exception as init_error:
+            log_debug(f"[ai_diary] Lazy initialization failed (sync): {init_error}, attempting table creation...")
+            try:
+                _run(_execute("""
+                    CREATE TABLE IF NOT EXISTS ai_diary (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        content LONGTEXT,
+                        personal_thought TEXT,
+                        emotions JSON,
+                        interaction_summary TEXT,
+                        user_message TEXT,
+                        context_tags JSON,
+                        involved_users JSON,
+                        interface VARCHAR(50),
+                        chat_id VARCHAR(100),
+                        thread_id VARCHAR(100)
+                    )
+                """))
+                PLUGIN_ENABLED = True
+                log_info("[ai_diary] Plugin table created and enabled successfully via lazy init (sync)")
+            except Exception as create_error:
+                log_error(f"[ai_diary] Failed to create table during lazy init (sync): {create_error}")
+                return
+    
     if not PLUGIN_ENABLED:
         return
         
@@ -493,6 +539,39 @@ async def add_diary_entry_async(
 ) -> None:
     """Add a new personal diary entry (async version). Safe to call even if plugin is disabled."""
     global PLUGIN_ENABLED
+    
+    # Attempt lazy initialization if plugin was disabled at startup
+    if not PLUGIN_ENABLED:
+        try:
+            log_debug("[ai_diary] Attempting lazy initialization of plugin...")
+            await _execute("SELECT 1 FROM ai_diary LIMIT 1")
+            PLUGIN_ENABLED = True
+            log_info("[ai_diary] Plugin lazy-initialized successfully")
+        except Exception as init_error:
+            log_debug(f"[ai_diary] Lazy initialization failed: {init_error}, attempting table creation...")
+            try:
+                await _execute("""
+                    CREATE TABLE IF NOT EXISTS ai_diary (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        content LONGTEXT,
+                        personal_thought TEXT,
+                        emotions JSON,
+                        interaction_summary TEXT,
+                        user_message TEXT,
+                        context_tags JSON,
+                        involved_users JSON,
+                        interface VARCHAR(50),
+                        chat_id VARCHAR(100),
+                        thread_id VARCHAR(100)
+                    )
+                """)
+                PLUGIN_ENABLED = True
+                log_info("[ai_diary] Plugin table created and enabled successfully via lazy init")
+            except Exception as create_error:
+                log_error(f"[ai_diary] Failed to create table during lazy init: {create_error}")
+                return
+    
     if not PLUGIN_ENABLED:
         return
         
@@ -549,6 +628,18 @@ def get_recent_entries(days: int = 2, max_chars: int = None) -> List[Dict[str, A
     global PLUGIN_ENABLED
     
     log_debug(f"[ai_diary] get_recent_entries called with days={days}, max_chars={max_chars}, PLUGIN_ENABLED={PLUGIN_ENABLED}")
+    
+    # Attempt lazy initialization if plugin was disabled at startup
+    if not PLUGIN_ENABLED:
+        try:
+            log_debug("[ai_diary] Attempting lazy initialization for get_recent_entries...")
+            _run(_execute("SELECT 1 FROM ai_diary LIMIT 1"))
+            PLUGIN_ENABLED = True
+            log_info("[ai_diary] Plugin lazy-initialized successfully in get_recent_entries")
+        except Exception as init_error:
+            log_debug(f"[ai_diary] Lazy initialization failed in get_recent_entries: {init_error}")
+            log_debug("[ai_diary] Plugin disabled, returning empty list")
+            return []
     
     if not PLUGIN_ENABLED:
         log_debug("[ai_diary] Plugin disabled, returning empty list")
@@ -1015,8 +1106,10 @@ def disable_plugin() -> None:
 try:
     _run(init_diary_table())
     log_info("[ai_diary] Plugin initialized successfully")
+    PLUGIN_ENABLED = True
 except Exception as e:
-    log_warning(f"[ai_diary] Plugin initialization failed, disabling: {e}")
+    log_warning(f"[ai_diary] Plugin initialization failed at startup (DB may not be ready yet): {e}")
+    # Don't disable immediately - allow lazy initialization
     PLUGIN_ENABLED = False
 
 class DiaryPlugin:
