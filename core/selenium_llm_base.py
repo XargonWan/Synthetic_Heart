@@ -18,6 +18,7 @@ import threading
 import asyncio
 import logging
 import requests
+import random
 
 try:
     from selenium_stealth import stealth
@@ -1414,12 +1415,16 @@ class SeleniumLLMBase(AIPluginBase):
 
     # === GENERIC SELECTOR-BASED METHODS (using selectors from plugin config) ===
 
-    def _locate_prompt_area(self, driver, timeout: int = 10):
+    def _locate_prompt_area(self, driver, timeout: int = None):
         """Locate the prompt area using CSS selectors from self.selectors["prompt_area"].
         
         The plugin must set self.selectors["prompt_area"] with CSS selectors to try.
         This method tries each selector in order until one works.
+        Uses random timeout (1-5 seconds per selector) to avoid timing issues.
         """
+        if timeout is None:
+            timeout = random.uniform(1, 5)  # Random timeout between 1-5 seconds
+        
         selectors = self.selectors.get("prompt_area", [])
         if not selectors:
             log_error("[selenium] No prompt area selectors configured in plugin")
@@ -1427,8 +1432,9 @@ class SeleniumLLMBase(AIPluginBase):
         
         for selector in selectors:
             try:
-                log_debug(f"[selenium] Trying prompt area selector: {selector}")
-                element = WebDriverWait(driver, timeout).until(
+                random_timeout = random.uniform(1, 5)  # Fresh random timeout per selector
+                log_debug(f"[selenium] Trying prompt area selector: {selector} (timeout: {random_timeout:.2f}s)")
+                element = WebDriverWait(driver, random_timeout).until(
                     EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
                 )
                 log_debug(f"[selenium] Found prompt area with selector: {selector}")
@@ -1840,11 +1846,27 @@ class SeleniumLLMBase(AIPluginBase):
             log_error(f"[selenium] Error stopping {self.component_name}: {e}", e)
 
     def cleanup(self):
-        """Clean up resources."""
+        """Clean up resources when switching plugins."""
         try:
-            # Release shared driver reference instead of closing directly
-            # Note: This is synchronous, so we can't await _release_shared_driver
-            # The __del__ method will handle cleanup when the instance is destroyed
+            log_info(f"[selenium] Cleaning up {self.component_name}")
+            
+            # Close the driver immediately (synchronously) to ensure it doesn't stay open
+            # This is critical when switching between Selenium plugins
+            if self.driver is not None:
+                try:
+                    self.driver.quit()
+                    log_info(f"[selenium] ✅ Driver closed successfully during cleanup")
+                except Exception as e:
+                    log_warning(f"[selenium] ⚠️ Error quitting driver during cleanup: {e}")
+                    # Still try to close windows
+                    try:
+                        # Force close any remaining windows
+                        import subprocess
+                        subprocess.run(["pkill", "-f", "chromium", "-15"], timeout=5)
+                        log_debug(f"[selenium] Force killed chromium processes")
+                    except Exception as pk_err:
+                        log_debug(f"[selenium] Could not force kill chromium: {pk_err}")
+            
             self.driver = None
 
             # Note: We no longer clean up the shared profile directory to maintain login sessions
