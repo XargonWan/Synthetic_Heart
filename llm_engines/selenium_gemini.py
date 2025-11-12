@@ -1,84 +1,85 @@
 # Import the base Selenium LLM library
-import os
 from core.selenium_llm_base import SeleniumLLMBase
+from core.logging_utils import log_debug
+from selenium.webdriver.common.by import By
+import time
 
-# Selenium Gemini-specific configuration
-# Model-specific character limits (based on official documentation and testing)
-GEMINI_MODEL_LIMITS = {
-    "2.5-flash": 32000,      # Gemini 2.5 Flash: 32k characters practical limit
-    "2.0-flash": 32000,      # Gemini 2.0 Flash: 32k characters
-    "1.5-flash": 100000,     # Gemini 1.5 Flash: ~100k characters
-    "1.5-pro": 500000,       # Gemini 1.5 Pro: ~500k characters (2M tokens)
-    "unlogged": 21500,       # Unlogged state: limited context for free tier
-    "default": 32000         # Safe default for unknown models
+# Gemini configuration - constants only
+SERVICE_URL = "https://gemini.google.com"
+MODEL_CONFIG_VAR = "GEMINI_MODEL"
+DEFAULT_MODEL = "2.5-flash"
+
+# Gemini-specific model limits (character context limits)
+MODEL_LIMITS_MAP = {
+    "2.5-flash": 32000,        # Gemini 2.5 Flash: 32k characters practical limit
+    "2.0-flash": 32000,        # Gemini 2.0 Flash: 32k characters
+    "1.5-flash": 100000,       # Gemini 1.5 Flash: ~100k characters
+    "1.5-pro": 500000,         # Gemini 1.5 Pro: ~500k characters (2M tokens)
+    "unlogged": 21500,         # Limited context for free tier
+    "default": 32000           # Safe default for unknown models
 }
-
-SELENIUM_CONFIG = {
-    "max_prompt_chars": 32000,  # Default to 2.5-flash limit
-    "max_response_chars": 4000,
-    "supports_images": True,
-    "supports_functions": False,  # Browser-based doesn't support functions
-    "model_name": "2.5-flash",
-    "default_model": "2.5-flash",
-    "browser_timeout": 30,
-    "page_load_timeout": 60,
-    "element_wait_timeout": 10,
-    "retry_attempts": 3,
-    "retry_delay": 2
-}
-
-def get_model_char_limit(model_name: str) -> int:
-    """Get the character limit for a specific Gemini model."""
-    # Normalize model name (remove version prefixes, lowercase)
-    normalized = model_name.lower().strip()
-    
-    # Check direct match first
-    if normalized in GEMINI_MODEL_LIMITS:
-        return GEMINI_MODEL_LIMITS[normalized]
-    
-    # Try to match partial names (e.g., "gemini-2.5-flash" -> "2.5-flash")
-    for key in GEMINI_MODEL_LIMITS.keys():
-        if key in normalized or normalized.endswith(key):
-            return GEMINI_MODEL_LIMITS[key]
-    
-    # Return default if no match found
-    from core.logging_utils import log_warning
-    log_warning(f"[selenium_gemini] Unknown model '{model_name}', using default limit of {GEMINI_MODEL_LIMITS['default']} chars")
-    return GEMINI_MODEL_LIMITS["default"]
-
-def get_interface_limits() -> dict:
-    """Get the limits and capabilities for Selenium Gemini interface."""
-    # Get current model and its specific limit
-    model_name = os.getenv("GEMINI_MODEL", SELENIUM_CONFIG.get("default_model", "2.5-flash"))
-    max_chars = get_model_char_limit(model_name)
-    
-    from core.logging_utils import log_info
-    log_info(f"[selenium_gemini] Interface limits for model '{model_name}': max_prompt_chars={max_chars}, supports_images={SELENIUM_CONFIG['supports_images']}")
-    return {
-        "max_prompt_chars": max_chars,
-        "max_response_chars": SELENIUM_CONFIG["max_response_chars"],
-        "supports_images": SELENIUM_CONFIG["supports_images"],
-        "supports_functions": SELENIUM_CONFIG["supports_functions"],
-        "model_name": model_name
-    }
 
 class SeleniumGeminiPlugin(SeleniumLLMBase):
     display_name = "Selenium Gemini"
     
     def __init__(self, notify_fn=None):
-        """Initialize the Gemini plugin."""
-        # Gemini-specific configuration
-        gemini_config = SELENIUM_CONFIG.copy()
-        gemini_config.update({
-            "service_url": "https://gemini.google.com",
-            "model": os.getenv("GEMINI_MODEL", "2.5-flash"),
-            "interface_name": "gemini"
-        })
+        """Initialize the Gemini plugin - pass only configuration to base."""
+        super().__init__(
+            config={
+                "service_url": SERVICE_URL,
+                "interface_name": "gemini"
+            },
+            notify_fn=notify_fn
+        )
         
-        super().__init__(config=gemini_config, notify_fn=notify_fn)
+        # Set model configuration - used by base class for auto-selection
+        self.model_limits_map = MODEL_LIMITS_MAP
+        self.model_config_var = MODEL_CONFIG_VAR
+        self.default_model = DEFAULT_MODEL
+        
+        # Update interface limits based on current model
+        self._update_interface_limits()
+        
+        # Set up Gemini-specific selectors - the base will use these for automation
+        # IMPORTANT: Order matters - fast/working selectors first to avoid long timeouts
+        self.selectors["prompt_area"] = [
+            # Primary: Works on current Gemini UI
+            "div[contenteditable='true'][data-placeholder]",
+            "div[contenteditable='true'][aria-label*='Ask']",
+            # Secondary: Fallback for older or alternative Gemini layouts
+            "rich-textarea[data-placeholder]",
+            "textarea[data-placeholder*='Ask me anything']",
+            "textarea[data-placeholder*='Message Gemini']",
+            "textarea[placeholder*='Ask me anything']",
+            "textarea[placeholder*='Message Gemini']",
+            # Generic fallbacks
+            "div[role='textbox'][contenteditable='true']",
+            "div.ql-editor.ql-blank",
+            "div.ql-editor",
+            "textarea",
+            "div[contenteditable='true']",
+        ]
+        
+        self.selectors["send_button"] = [
+            "button[data-testid='send-button']",
+            "button[type='submit']",
+            "button[aria-label*='Send']",
+            "button[aria-label*='send']",
+            "button[title*='Send']",
+            "button[title*='send']",
+        ]
+        
+        self.selectors["response_text"] = [
+            "div.assistant-message",
+            "[data-author='assistant']",
+            ".chat-message.ai",
+            ".response-content",
+            "article p",
+            ".message-content",
+            ".gemini-response",
+        ]
         
         # Google login detection selectors
-        from selenium.webdriver.common.by import By
         self.login_detection_selectors = [
             (By.CSS_SELECTOR, "button[data-testid='login-button']"),
             (By.CSS_SELECTOR, "a[href*='signin']"),
@@ -87,159 +88,67 @@ class SeleniumGeminiPlugin(SeleniumLLMBase):
             (By.CSS_SELECTOR, ".sign-in-button"),
         ]
 
-    def _locate_prompt_area(self):
-        """Locate the Gemini prompt input area."""
-        from selenium.webdriver.common.by import By
-        from selenium.webdriver.support.ui import WebDriverWait
-        from selenium.webdriver.support import expected_conditions as EC
-        
-        # Try multiple selectors for Gemini's input area (current interface)
-        selectors = [
-            # Primary Gemini selectors
-            (By.CSS_SELECTOR, "rich-textarea[data-placeholder]"),
-            (By.CSS_SELECTOR, "textarea[data-placeholder*='Ask me anything']"),
-            (By.CSS_SELECTOR, "textarea[data-placeholder*='Message Gemini']"),
-            (By.CSS_SELECTOR, "textarea[placeholder*='Ask me anything']"),
-            (By.CSS_SELECTOR, "textarea[placeholder*='Message Gemini']"),
-            # Contenteditable divs used by Gemini
-            (By.CSS_SELECTOR, "div[contenteditable='true'][data-placeholder]"),
-            (By.CSS_SELECTOR, "div[contenteditable='true'][aria-label*='Ask']"),
-            (By.CSS_SELECTOR, "div[role='textbox'][contenteditable='true']"),
-            # Fallback selectors
-            (By.CSS_SELECTOR, "div.ql-editor.ql-blank"),
-            (By.CSS_SELECTOR, "div.ql-editor"),
-            (By.TAG_NAME, "textarea"),
-        ]
-        
-        for by, selector in selectors:
-            try:
-                element = WebDriverWait(self.driver, 5).until(
-                    EC.element_to_be_clickable((by, selector))
-                )
-                return element
-            except:
-                continue
-        
-        raise Exception("Could not locate Gemini prompt input area")
-
-    def _send_prompt_with_confirmation(self, prompt_text: str, image_path: str = None) -> bool:
-        """Send the prompt to Gemini and confirm it was sent successfully."""
+    def _ensure_logged_in(self, driver) -> bool:
+        """Ensure the user is logged in to Google Gemini."""
         try:
-            # Locate the prompt input area
-            prompt_area = self._locate_prompt_area()
-            if not prompt_area:
-                from core.logging_utils import log_error
-                log_error("[selenium] Could not locate prompt input area")
+            current_url = driver.current_url
+        except Exception:
+            current_url = ""
+        
+        log_debug(f"[selenium_gemini] Checking login status at URL: {current_url}")
+
+        if not current_url.startswith("https://gemini.google.com"):
+            log_debug("[selenium_gemini] Not at Gemini, navigating to home")
+            try:
+                driver.get(SERVICE_URL)
+                current_url = driver.current_url
+                log_debug(f"[selenium_gemini] Navigated to {current_url}")
+            except Exception as e:
+                log_debug(f"[selenium_gemini] Failed to navigate to Gemini: {e}")
                 return False
-            
-            # Clear any existing text
-            prompt_area.clear()
-            
-            # Paste the prompt text using Gemini-specific method
-            from selenium.webdriver.common.keys import Keys
-            prompt_area.send_keys(prompt_text)
-            
-            # If there's an image, handle it (Gemini supports image uploads)
-            if image_path and os.path.exists(image_path):
-                # Find and click the image upload button
-                try:
-                    from selenium.webdriver.common.by import By
-                    from selenium.webdriver.support.ui import WebDriverWait
-                    from selenium.webdriver.support import expected_conditions as EC
-                    
-                    upload_button = WebDriverWait(self.driver, 5).until(
-                        EC.element_to_be_clickable((By.CSS_SELECTOR, "button[data-testid='file-upload-button'], .upload-button, [aria-label*='upload'], [aria-label*='image']"))
-                    )
-                    upload_button.click()
-                    
-                    # Wait for file input and upload
-                    file_input = WebDriverWait(self.driver, 5).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='file']"))
-                    )
-                    file_input.send_keys(image_path)
-                    
-                    # Wait for upload to complete
-                    WebDriverWait(self.driver, 10).until(
-                        lambda d: len(d.find_elements(By.CSS_SELECTOR, ".uploaded-image, [data-testid*='uploaded']")) > 0
-                    )
-                    from core.logging_utils import log_debug
-                    log_debug("[selenium] Image uploaded successfully")
-                except Exception as e:
-                    from core.logging_utils import log_warning
-                    log_warning(f"[selenium] Failed to upload image: {e}")
-            
-            # Send the message
-            prompt_area.send_keys(Keys.RETURN)
-            
-            # Wait for confirmation that the prompt was sent
-            # Check that the input area is cleared or that a sending indicator appears
-            WebDriverWait(self.driver, 10).until(
-                lambda d: (
-                    prompt_area.get_attribute("textContent") == "" or
-                    len(d.find_elements(By.CSS_SELECTOR, "[data-testid*='sending'], .sending, .loading")) > 0
-                )
-            )
-            
-            from core.logging_utils import log_debug
-            log_debug("[selenium] Prompt sent successfully")
-            return True
-            
-        except Exception as e:
-            from core.logging_utils import log_error
-            log_error(f"[selenium] Failed to send prompt: {e}")
+
+        if current_url and ("signin" in current_url or "login" in current_url):
+            log_debug("[selenium_gemini] Login page detected, user needs to log in")
+            if self._notify_fn:
+                self._notify_fn("🔐 Login required for Google Gemini. Open UI to log in.")
             return False
 
-    def _extract_response_text(self) -> str:
-        """Extract the latest response from Gemini."""
-        try:
-            from selenium.webdriver.common.by import By
-            from selenium.webdriver.support.ui import WebDriverWait
-            from selenium.webdriver.support import expected_conditions as EC
-            
-            # Wait for response to appear
-            response_element = WebDriverWait(self.driver, self.config.get("response_timeout", 60)).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, ".response-content, [data-testid*='response'], .message-content"))
-            )
-            
-            # Get the text content
-            response_text = response_element.text
-            
-            # Wait for response to stabilize (no more typing indicators)
-            self.wait_until_response_stabilizes()
-            
-            # Get final text after stabilization
-            final_response = response_element.text
-            
-            from core.logging_utils import log_debug
-            log_debug(f"[selenium] Extracted response: {len(final_response)} characters")
-            return final_response
-            
-        except Exception as e:
-            from core.logging_utils import log_error
-            log_error(f"[selenium] Failed to extract response: {e}")
-            return ""
+        log_debug("[selenium_gemini] User is logged in")
+        return True
 
     def get_supported_models(self) -> list:
         """Get list of supported Gemini models."""
-        return list(GEMINI_MODEL_LIMITS.keys())
+        return list(MODEL_LIMITS_MAP.keys())
 
     def get_current_model(self) -> str:
         """Get the current Gemini model being used.
         
-        Automatically returns 'unlogged' model if user is not logged in,
-        otherwise returns configured model.
+        If logged in, returns the configured model or default.
+        If not logged in, returns 'unlogged' with reduced limits.
         """
-        from core.logging_utils import log_debug
-        
-        # Check if user is logged in using centralized method
+        # Auto-detection: if not logged in, use unlogged model
         if not self.is_user_logged_in():
-            log_debug("[selenium_gemini] User not logged in, returning 'unlogged' model (21500 chars limit)")
+            log_debug("[selenium_gemini] User not logged in, using 'unlogged' model")
             return "unlogged"
         
         # User is logged in, return configured model
-        configured_model = os.getenv("GEMINI_MODEL", self.config.get("default_model", "2.5-flash"))
+        return self._get_current_model_name()
+
+    def get_interface_limits(self) -> dict:
+        """Get the limits and capabilities for Selenium Gemini interface."""
+        self._update_interface_limits()
+        return self.interface_limits
+
+    def _get_response_choice_selectors(self) -> list:
+        """Get CSS selectors for Gemini response choice buttons.
         
-        log_debug(f"[selenium_gemini] get_current_model returning: '{configured_model}'")
-        return configured_model
+        Gemini may offer multiple response options in some cases.
+        This returns selectors to find choice buttons so we can auto-select.
+        """
+        return [
+            "button.gemini-choice-option",
+            ".choice-buttons button:first-child",
+            "button[data-testid*='choice']",
+        ]
 
 PLUGIN_CLASS = SeleniumGeminiPlugin
