@@ -194,10 +194,11 @@
             min-height: 0;
         }
         #chat {
-            position: absolute;
-            bottom: 1rem;
-            left: 1rem;
+            position: fixed;
+            top: 2rem;
+            left: 2rem;
             right: auto;
+            bottom: auto;
             width: 20%;
             min-width: 250px;
             max-width: 50%;
@@ -211,18 +212,45 @@
             border: none;
             border-radius: 22px;
             box-shadow: 0 24px 45px -38px rgba(0, 0, 0, 0.9);
-            transition: transform 0.3s ease, opacity 0.3s ease, width 0.3s ease, right 0.3s ease;
+            transition: transform 0.3s ease, opacity 0.3s ease, width 0.3s ease;
             padding-top: 4rem;
             overflow: hidden;
             z-index: 50;
-            /* allow manual control via the corner handle (desktop only) */
+            /* allow manual control via the corner handle and drag (desktop only) */
             resize: none; /* we implement custom resize */
             cursor: default;
+            touch-action: none; /* Allow pointer events for dragging */
+        }
+        /* Draggable title bar (drag handle) */
+        #chat-title-bar {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3.5rem;
+            background: linear-gradient(135deg, rgba(24, 24, 36, 0.95), rgba(18, 18, 28, 0.9));
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 22px 22px 0 0;
+            display: flex;
+            align-items: center;
+            padding: 0.8rem 1.2rem;
+            cursor: grab;
+            user-select: none;
+            z-index: 51;
+            font-size: 0.95rem;
+            color: var(--text-soft);
+            font-weight: 500;
+        }
+        #chat-title-bar:active {
+            cursor: grabbing;
+        }
+        #chat.dragging #chat-title-bar {
+            cursor: grabbing;
         }
         /* Dynamic resize cursors are handled by JS based on pointer location */
         #chat:hover {
-            /* default to diagonal on hover but JS will override based on edge */
-            cursor: nwse-resize;
+            /* default to grab on hover but JS will override based on edge */
+            cursor: grab;
         }
         /* Corner resize handle styling (bottom-right) */
         #chat::after {
@@ -244,7 +272,7 @@
         #chat.resizing::after {
             background: rgba(255, 107, 214, 0.18);
         }
-        /* On mobile, chat is not resizable */
+        /* On mobile, chat is not resizable or draggable */
         @media (max-width: 768px) {
             #chat {
                 width: 30%;
@@ -1316,6 +1344,7 @@
                         💬
                     </button>
                     <section id="chat" aria-label="Chat panel">
+                        <div id="chat-title-bar">💬 Chat</div>
                         <div id="messages" aria-live="polite"></div>
                         <form id="composer" autocomplete="off">
                             <textarea id="input" placeholder="Type a message…" rows="2"></textarea>
@@ -1996,10 +2025,16 @@
 
         function renderLog() {
             if (!logOutput) return;
-            const shouldScroll = logAutoscroll ? logAutoscroll.checked : true;
+            
+            // Check if auto-scroll is enabled
+            const autoScrollEnabled = logAutoscroll ? logAutoscroll.checked : true;
             const searchLower = logSearchTerm.toLowerCase();
+            
+            // Clear the log output
             logOutput.textContent = '';
             const fragment = document.createDocumentFragment();
+            
+            // Add filtered log lines
             logBuffer.forEach(({ text, level }) => {
                 if (!logFilterState[level]) return;
                 // Apply search filter if search term is not empty
@@ -2028,31 +2063,26 @@
                 }
                 fragment.appendChild(div);
             });
+            
             logOutput.appendChild(fragment);
-            // Auto-scroll if the user has enabled it, or if the view is already near the bottom
-            try {
-                const clientH = logOutput.clientHeight || 0;
-                const scrollTop = logOutput.scrollTop || 0;
-                const scrollHeight = logOutput.scrollHeight || 0;
-                const scrollBottomDistance = Math.max(0, scrollHeight - (scrollTop + clientH));
-                const isNearBottom = scrollBottomDistance <= 64; // within 64px is considered bottom
-                // Debugging info to help diagnose autoscroll problems
-                console.debug('[synth_webui] renderLog: shouldScroll=', shouldScroll, 'autoscrollChecked=', (logAutoscroll ? logAutoscroll.checked : 'N/A'), 'clientH=', clientH, 'scrollTop(before)=', scrollTop, 'scrollHeight=', scrollHeight, 'isNearBottom=', isNearBottom);
-                if (shouldScroll || isNearBottom) {
-                    // Use rAF to ensure layout has updated before forcing scroll
-                    requestAnimationFrame(() => {
+            
+            // Auto-scroll logic: if enabled, ALWAYS scroll to bottom
+            if (autoScrollEnabled) {
+                try {
+                    // Use setTimeout to ensure DOM has been updated before scrolling
+                    setTimeout(() => {
                         try {
                             logOutput.scrollTop = logOutput.scrollHeight;
-                            console.debug('[synth_webui] renderLog: scrolled to', logOutput.scrollTop, 'scrollHeight was', logOutput.scrollHeight);
+                            console.debug('[synth_webui] Auto-scrolled to bottom. scrollTop=', logOutput.scrollTop, 'scrollHeight=', logOutput.scrollHeight);
                         } catch (e) {
-                            console.debug('[synth_webui] renderLog: scroll failed', e);
+                            console.debug('[synth_webui] Error during auto-scroll:', e);
                         }
-                    });
+                    }, 0);
+                } catch (e) {
+                    console.error('[synth_webui] Unexpected error in renderLog auto-scroll:', e);
                 }
-            } catch (e) {
-                // Fallback: best-effort scroll
-                console.debug('[synth_webui] renderLog: unexpected error computing scroll, falling back', e);
-                try { requestAnimationFrame(() => { logOutput.scrollTop = logOutput.scrollHeight; }); } catch (_) {}
+            } else {
+                console.debug('[synth_webui] Auto-scroll disabled - not scrolling');
             }
         }
 
@@ -2072,6 +2102,24 @@
                 renderLog();
             });
         });
+
+        // Add listener for auto-scroll checkbox to scroll immediately when enabled
+        if (logAutoscroll) {
+            logAutoscroll.addEventListener('change', (event) => {
+                console.debug('[synth_webui] Auto-scroll checkbox changed to:', event.target.checked);
+                if (event.target.checked) {
+                    // When auto-scroll is enabled, scroll to bottom immediately
+                    setTimeout(() => {
+                        try {
+                            logOutput.scrollTop = logOutput.scrollHeight;
+                            console.debug('[synth_webui] Auto-scroll enabled - scrolled to bottom');
+                        } catch (e) {
+                            console.debug('[synth_webui] Error scrolling to bottom on auto-scroll enable:', e);
+                        }
+                    }, 0);
+                }
+            });
+        }
 
         if (logSearchInput) {
             logSearchInput.addEventListener('input', (event) => {
@@ -4037,15 +4085,17 @@
                     console.log('[synth_webui] animationHandler exists:', !!animationHandler);
                     console.log('[synth_webui] data.state:', data.state);
                     console.log('[synth_webui] data.animation:', data.animation);
+                    console.log('[synth_webui] data.play_section:', data.play_section);
                     
                     if (animationHandler && data.state) {
-                        console.log('[synth_webui] Calling animationHandler.startAction with:', data.state, data.animation, data.loop, data.descriptor);
+                        console.log('[synth_webui] Calling animationHandler.startAction with:', data.state, data.animation, data.loop, data.descriptor, data.play_section);
                         // Extract filename from animation URL (e.g., "animations/Idle2.fbx" -> "Idle2.fbx")
                         const animationFile = data.animation ? data.animation.split('/').pop() : null;
                         console.log('[synth_webui] Extracted animationFile:', animationFile);
                         // Determine playOnce from descriptor or loop flag
                         const playOnce = (data.descriptor && data.descriptor.play_once) || (data.loop === false);
-                        animationHandler.startAction(data.state, animationFile, !!playOnce);
+                        // If play_section is specified (intro, loop, or outro), pass it through
+                        animationHandler.startAction(data.state, animationFile, !!playOnce, data.play_section);
                     } else if (data.state) {
                         // Queue the command if animation handler is not ready yet
                         console.log('[synth_webui] Animation handler not ready, queueing command:', data.state);
@@ -4446,9 +4496,13 @@
                     this.vrm = vrm;
                     this.actions = {};
                     this.currentAction = null;
+                    this.currentActionName = null; // track which action (think, write, etc.) is currently playing
+                    this.currentActionPhase = null; // track 'intro', 'loop', or 'outro'
+                    this.currentStructuredAction = null; // reference to the structured action object
                     this.loadedAnimations = {};
                     this._playOnceTimers = {}; // safety timers for play-once actions
                     this._globalMixerFinishBound = false; // ensure we bind a single finished handler
+                    this._mixerEventBound = false; // ensure structured action mixer event is bound once
                 }
 
                 async getAnimationsForType(actionName) {
@@ -4573,24 +4627,30 @@
                             const fps = 30; // assumption for subclip frame math
                             const totalFrames = Math.max(2, Math.round(clip.duration * fps));
                             
-                            let introFrames, loopFrames, outroFrames;
+                            // Extract frames from descriptor or use defaults
+                            let introStart, introEnd, loopStart, loopEnd, outroStart, outroEnd;
+                            
                             if (hasStructuredDescriptor) {
-                                // Use descriptor-defined frames
-                                const introEnd = descriptor.intro.end_frame || Math.round(totalFrames * 0.20);
-                                const outroStart = descriptor.outro.start_frame || Math.round(totalFrames * 0.80);
-                                introFrames = introEnd - (descriptor.intro.start_frame || 0);
-                                outroFrames = totalFrames - outroStart;
-                                loopFrames = outroStart - introEnd;
+                                // Use descriptor-defined frames with fallback to defaults
+                                introStart = descriptor.intro?.start_frame ?? 0;
+                                introEnd = descriptor.intro?.end_frame ?? Math.round(totalFrames * 0.20);
+                                loopStart = descriptor.loop?.start_frame ?? introEnd;
+                                loopEnd = descriptor.loop?.end_frame ?? Math.round(totalFrames * 0.80);
+                                outroStart = descriptor.outro?.start_frame ?? loopEnd;
+                                outroEnd = descriptor.outro?.end_frame ?? totalFrames;
                             } else {
                                 // Default split for 'think' state
-                                introFrames = Math.max(1, Math.round(totalFrames * 0.20));
-                                outroFrames = Math.max(1, Math.round(totalFrames * 0.20));
-                                loopFrames = Math.max(1, totalFrames - introFrames - outroFrames);
+                                introStart = 0;
+                                introEnd = Math.max(1, Math.round(totalFrames * 0.20));
+                                loopStart = introEnd;
+                                loopEnd = Math.max(1, Math.round(totalFrames * 0.80));
+                                outroStart = loopEnd;
+                                outroEnd = totalFrames;
                             }
 
-                            const introClip = THREE.AnimationUtils.subclip(clip, `${actionName}_intro`, descriptor?.intro?.start_frame || 0, (descriptor?.intro?.end_frame || introFrames) - 1, fps);
-                            const loopClip = THREE.AnimationUtils.subclip(clip, `${actionName}_loop`, descriptor?.intro?.end_frame || introFrames, (descriptor?.outro?.start_frame || introFrames + loopFrames) - 1, fps);
-                            const outroClip = THREE.AnimationUtils.subclip(clip, `${actionName}_outro`, descriptor?.outro?.start_frame || introFrames + loopFrames, totalFrames - 1, fps);
+                            const introClip = THREE.AnimationUtils.subclip(clip, `${actionName}_intro`, introStart, introEnd - 1, fps);
+                            const loopClip = THREE.AnimationUtils.subclip(clip, `${actionName}_loop`, loopStart, loopEnd - 1, fps);
+                            const outroClip = THREE.AnimationUtils.subclip(clip, `${actionName}_outro`, outroStart, outroEnd - 1, fps);
 
                             const introAction = this.mixer.clipAction(introClip);
                             const loopAction = this.mixer.clipAction(loopClip);
@@ -4669,8 +4729,8 @@
                     }
                 }
 
-                async startAction(actionName, animationFile = null, playOnce = false) {
-                    console.log(`[AnimationHandler] startAction called with actionName: ${actionName}, animationFile: ${animationFile}`);
+                async startAction(actionName, animationFile = null, playOnce = false, playSection = null) {
+                    console.log(`[AnimationHandler] startAction called with actionName: ${actionName}, animationFile: ${animationFile}, playOnce: ${playOnce}, playSection: ${playSection}`);
                     console.log(`[AnimationHandler] this.mixer exists:`, !!this.mixer);
                     console.log(`[AnimationHandler] this.vrm exists:`, !!this.vrm);
                     
@@ -4725,6 +4785,85 @@
                     if (action && action.intro && action.loop && action.outro) {
                         const structured = action;
 
+                        // Check if we need to interrupt a currently playing structured action
+                        // and transition to its outro before starting the new one
+                        if (this.currentActionName && this.currentActionName !== actionName && this.currentStructuredAction) {
+                            console.log(`[AnimationHandler] Structured action change detected: ${this.currentActionName} -> ${actionName}`);
+                            
+                            // If we're in intro or loop, transition to outro
+                            if (this.currentActionPhase === 'intro' || this.currentActionPhase === 'loop') {
+                                console.log(`[AnimationHandler] Currently in ${this.currentActionPhase} phase, transitioning to outro...`);
+                                try {
+                                    // Stop the current phase
+                                    if (this.currentActionPhase === 'intro' && this.currentStructuredAction.intro) {
+                                        this.currentStructuredAction.intro.fadeOut(0.15);
+                                    } else if (this.currentActionPhase === 'loop' && this.currentStructuredAction.loop) {
+                                        this.currentStructuredAction.loop.fadeOut(0.15);
+                                    }
+                                    
+                                    // Start outro
+                                    if (this.currentStructuredAction.outro) {
+                                        this.currentStructuredAction.outro.reset().fadeIn(0.1).play();
+                                        this.currentAction = this.currentStructuredAction.outro;
+                                        this.currentActionPhase = 'outro';
+                                        console.log(`[AnimationHandler] Started outro for ${this.currentActionName}`);
+                                        // Schedule the next action after outro completes
+                                        const outroClip = this.currentStructuredAction.outro.getClip();
+                                        const outroDuration = (outroClip ? outroClip.duration : 1) * 1000;
+                                        setTimeout(() => {
+                                            console.log(`[AnimationHandler] Outro completed for ${this.currentActionName}, now starting ${actionName}`);
+                                            this.startAction(actionName, animationFile, playOnce, playSection);
+                                        }, Math.round(outroDuration) + 100);
+                                        return;
+                                    }
+                                } catch (err) {
+                                    console.warn('[AnimationHandler] Error during transition to outro:', err);
+                                }
+                            }
+                        }
+
+                        // If playSection is specified (intro, loop, or outro), play only that section
+                        if (playSection === 'intro') {
+                            console.log(`[AnimationHandler] Playing only intro section for ${actionName}`);
+                            if (this.currentAction && this.currentAction !== structured.intro) {
+                                this.currentAction.fadeOut(0.25);
+                            }
+                            structured.intro.setLoop(THREE.LoopOnce, 0);
+                            structured.intro.clampWhenFinished = true;
+                            structured.intro.reset().fadeIn(0.15).play();
+                            this.currentAction = structured.intro;
+                            this.currentActionName = actionName;
+                            this.currentActionPhase = 'intro';
+                            this.currentStructuredAction = structured;
+                            return;
+                        } else if (playSection === 'loop') {
+                            console.log(`[AnimationHandler] Playing only loop section for ${actionName}`);
+                            if (this.currentAction && this.currentAction !== structured.loop) {
+                                this.currentAction.fadeOut(0.25);
+                            }
+                            structured.loop.setLoop(THREE.LoopRepeat);
+                            structured.loop.clampWhenFinished = false;
+                            structured.loop.reset().fadeIn(0.15).play();
+                            this.currentAction = structured.loop;
+                            this.currentActionName = actionName;
+                            this.currentActionPhase = 'loop';
+                            this.currentStructuredAction = structured;
+                            return;
+                        } else if (playSection === 'outro') {
+                            console.log(`[AnimationHandler] Playing only outro section for ${actionName}`);
+                            if (this.currentAction && this.currentAction !== structured.outro) {
+                                this.currentAction.fadeOut(0.25);
+                            }
+                            structured.outro.setLoop(THREE.LoopOnce, 0);
+                            structured.outro.clampWhenFinished = true;
+                            structured.outro.reset().fadeIn(0.15).play();
+                            this.currentAction = structured.outro;
+                            this.currentActionName = actionName;
+                            this.currentActionPhase = 'outro';
+                            this.currentStructuredAction = structured;
+                            return;
+                        }
+
                         // If playOnce requested, make the loop action play only once so that
                         // the mixer 'finished' event will transition to the outro.
                         if (playOnce && structured.loop) {
@@ -4761,6 +4900,7 @@
                                             console.log(`[AnimationHandler] intro finished for ${key} -> starting loop`);
                                             candidate.loop.reset().fadeIn(0.1).play();
                                             this.currentAction = candidate.loop;
+                                            this.currentActionPhase = 'loop';
                                             break;
                                         }
                                         if (finishedClipName === loopName) {
@@ -4769,12 +4909,16 @@
                                                 console.log(`[AnimationHandler] loop finished (playOnce=true) for ${key} -> starting outro`);
                                                 candidate.outro.reset().fadeIn(0.1).play();
                                                 this.currentAction = candidate.outro;
+                                                this.currentActionPhase = 'outro';
                                             }
                                             break;
                                         }
                                         if (finishedClipName === outroName) {
                                             console.log(`[AnimationHandler] outro finished for ${key} -> clearing currentAction`);
                                             if (this.currentAction === candidate.outro) this.currentAction = null;
+                                            this.currentActionPhase = null;
+                                            this.currentActionName = null;
+                                            this.currentStructuredAction = null;
                                             break;
                                         }
                                     }
@@ -4788,6 +4932,9 @@
                         console.log(`[AnimationHandler] Starting structured think action (intro -> loop)`);
                         structured.intro.reset().fadeIn(0.15).play();
                         this.currentAction = structured.intro;
+                        this.currentActionName = actionName;
+                        this.currentActionPhase = 'intro';
+                        this.currentStructuredAction = structured;
                         console.log(`[AnimationHandler] Structured think action started`);
                         // If playOnce requested for structured action, schedule a
                         // safety fallback after the total duration (intro+loop+outro)
@@ -6000,54 +6147,158 @@
             });
         }
 
-        // Chat resize functionality
+        // Chat resize and drag functionality
         (function() {
             const chat = document.getElementById('chat');
+            const titleBar = document.getElementById('chat-title-bar');
+            
+            if (!chat) {
+                console.error('[chat-control] Chat element not found');
+                return;
+            }
+            
+            if (!titleBar) {
+                console.error('[chat-control] Chat title bar not found');
+                return;
+            }
+            
+            console.log('[chat-control] Initializing chat drag/resize with titleBar:', titleBar);
+            
+            let isDragging = false;
             let isResizing = false;
-            let resizeMode = null; // 'right' | 'bottom' | 'corner'
-            let startX = 0;
-            let startY = 0;
-            let startWidth = 0;
-            let startHeight = 0;
+            let resizeMode = null; // 'top' | 'bottom' | 'left' | 'right' | 'topleft' | 'topright' | 'bottomleft' | 'bottomright'
+            let dragStartX = 0;
+            let dragStartY = 0;
+            let dragStartLeft = 0;
+            let dragStartTop = 0;
+            let resizeStartX = 0;
+            let resizeStartY = 0;
+            let resizeStartWidth = 0;
+            let resizeStartHeight = 0;
+            let resizeStartLeft = 0;
+            let resizeStartTop = 0;
 
             const MIN_WIDTH = 250;
-            const MAX_WIDTH_PCT = 0.85; // fraction of window width
+            const MAX_WIDTH_PCT = 0.95; // fraction of window width
             const MIN_HEIGHT = 140;
-            const MAX_HEIGHT_PCT = 0.85;
-            const EDGE_ZONE = 12; // px sensitivity for edges
+            const MAX_HEIGHT_PCT = 0.95;
+            const EDGE_ZONE = 15; // px sensitivity for edges
+
+            function beginDrag(e) {
+                console.log('[chat-control] Beginning drag');
+                isDragging = true;
+                dragStartX = e.clientX;
+                dragStartY = e.clientY;
+                dragStartLeft = chat.offsetLeft;
+                dragStartTop = chat.offsetTop;
+                chat.classList.add('dragging');
+                document.body.style.userSelect = 'none';
+                document.body.style.cursor = 'grabbing';
+                e.preventDefault();
+            }
+
+            function doDrag(e) {
+                if (!isDragging) return;
+                const deltaX = e.clientX - dragStartX;
+                const deltaY = e.clientY - dragStartY;
+                
+                let newLeft = dragStartLeft + deltaX;
+                let newTop = dragStartTop + deltaY;
+                
+                // Constrain to window bounds
+                newLeft = Math.max(0, Math.min(newLeft, window.innerWidth - chat.offsetWidth));
+                newTop = Math.max(0, Math.min(newTop, window.innerHeight - chat.offsetHeight));
+                
+                chat.style.left = newLeft + 'px';
+                chat.style.top = newTop + 'px';
+                chat.style.right = 'auto';
+                chat.style.bottom = 'auto';
+                
+                if (window.resizeVRMRenderer) {
+                    try { window.resizeVRMRenderer(); } catch (err) { /* ignore */ }
+                }
+            }
+
+            function endDrag() {
+                if (!isDragging) return;
+                console.log('[chat-control] Ending drag');
+                isDragging = false;
+                chat.classList.remove('dragging');
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+                if (window.resizeVRMRenderer) {
+                    try { window.resizeVRMRenderer(); } catch (err) { /* ignore */ }
+                }
+            }
 
             function beginResize(e, mode) {
+                console.log('[chat-control] Beginning resize, mode:', mode);
                 isResizing = true;
                 resizeMode = mode;
-                startX = e.clientX;
-                startY = e.clientY;
-                startWidth = chat.offsetWidth;
-                startHeight = chat.offsetHeight || Math.floor(window.innerHeight * 0.35);
+                resizeStartX = e.clientX;
+                resizeStartY = e.clientY;
+                resizeStartWidth = chat.offsetWidth;
+                resizeStartHeight = chat.offsetHeight || Math.floor(window.innerHeight * 0.35);
+                resizeStartLeft = chat.offsetLeft;
+                resizeStartTop = chat.offsetTop;
                 chat.classList.add('resizing');
                 document.body.style.userSelect = 'none';
-                document.body.style.cursor = (mode === 'corner') ? 'nwse-resize' : (mode === 'bottom' ? 'ns-resize' : 'ew-resize');
+                
+                // Set appropriate cursor based on mode
+                if (mode.includes('top') && mode.includes('left')) {
+                    document.body.style.cursor = 'nwse-resize';
+                } else if (mode.includes('top') && mode.includes('right')) {
+                    document.body.style.cursor = 'nesw-resize';
+                } else if (mode.includes('bottom') && mode.includes('left')) {
+                    document.body.style.cursor = 'nesw-resize';
+                } else if (mode.includes('bottom') && mode.includes('right')) {
+                    document.body.style.cursor = 'nwse-resize';
+                } else if (mode === 'top' || mode === 'bottom') {
+                    document.body.style.cursor = 'ns-resize';
+                } else if (mode === 'left' || mode === 'right') {
+                    document.body.style.cursor = 'ew-resize';
+                }
+                
                 e.preventDefault();
+                e.stopPropagation();
             }
 
             function doResize(e) {
                 if (!isResizing || !resizeMode) return;
-                const deltaX = e.clientX - startX;
-                const deltaY = e.clientY - startY;
+                const deltaX = e.clientX - resizeStartX;
+                const deltaY = e.clientY - resizeStartY;
                 const maxWidth = Math.floor(window.innerWidth * MAX_WIDTH_PCT);
                 const maxHeight = Math.floor(window.innerHeight * MAX_HEIGHT_PCT);
+                
+                let newWidth = resizeStartWidth;
+                let newHeight = resizeStartHeight;
+                let newLeft = resizeStartLeft;
+                let newTop = resizeStartTop;
 
-                if (resizeMode === 'corner') {
-                    const newWidth = Math.max(MIN_WIDTH, Math.min(startWidth + deltaX, maxWidth));
-                    const newHeight = Math.max(MIN_HEIGHT, Math.min(startHeight + deltaY, maxHeight));
-                    chat.style.width = newWidth + 'px';
-                    chat.style.height = newHeight + 'px';
-                } else if (resizeMode === 'right') {
-                    const newWidth = Math.max(MIN_WIDTH, Math.min(startWidth + deltaX, maxWidth));
-                    chat.style.width = newWidth + 'px';
-                } else if (resizeMode === 'bottom') {
-                    const newHeight = Math.max(MIN_HEIGHT, Math.min(startHeight + deltaY, maxHeight));
-                    chat.style.height = newHeight + 'px';
+                // Handle horizontal resizing
+                if (resizeMode.includes('left')) {
+                    newWidth = Math.max(MIN_WIDTH, resizeStartWidth - deltaX);
+                    newLeft = Math.max(0, resizeStartLeft + deltaX);
+                } else if (resizeMode.includes('right')) {
+                    newWidth = Math.max(MIN_WIDTH, Math.min(resizeStartWidth + deltaX, maxWidth));
                 }
+
+                // Handle vertical resizing
+                if (resizeMode.includes('top')) {
+                    newHeight = Math.max(MIN_HEIGHT, resizeStartHeight - deltaY);
+                    newTop = Math.max(0, resizeStartTop + deltaY);
+                } else if (resizeMode.includes('bottom')) {
+                    newHeight = Math.max(MIN_HEIGHT, Math.min(resizeStartHeight + deltaY, maxHeight));
+                }
+
+                // Ensure window stays within bounds
+                newWidth = Math.min(newWidth, window.innerWidth - newLeft);
+                newHeight = Math.min(newHeight, window.innerHeight - newTop);
+
+                chat.style.width = newWidth + 'px';
+                chat.style.height = newHeight + 'px';
+                chat.style.left = newLeft + 'px';
+                chat.style.top = newTop + 'px';
 
                 if (window.resizeVRMRenderer) {
                     try { window.resizeVRMRenderer(); } catch (err) { /* ignore */ }
@@ -6056,6 +6307,7 @@
 
             function endResize() {
                 if (!isResizing) return;
+                console.log('[chat-control] Ending resize');
                 isResizing = false;
                 resizeMode = null;
                 chat.classList.remove('resizing');
@@ -6066,63 +6318,102 @@
                 }
             }
 
-            function updateCursor(e) {
-                if (isResizing) return; // keep current cursor while resizing
-                const rect = chat.getBoundingClientRect();
-                const x = e.clientX;
-                const y = e.clientY;
-                const onRight = x >= rect.right - EDGE_ZONE && x <= rect.right + EDGE_ZONE;
+            function getResizeMode(rect, x, y) {
+                const onTop = y >= rect.top - EDGE_ZONE && y <= rect.top + EDGE_ZONE;
                 const onBottom = y >= rect.bottom - EDGE_ZONE && y <= rect.bottom + EDGE_ZONE;
-                if (onRight && onBottom) {
+                const onLeft = x >= rect.left - EDGE_ZONE && x <= rect.left + EDGE_ZONE;
+                const onRight = x >= rect.right - EDGE_ZONE && x <= rect.right + EDGE_ZONE;
+                
+                // Determine mode based on position
+                if (onTop && onLeft) return 'topleft';
+                if (onTop && onRight) return 'topright';
+                if (onBottom && onLeft) return 'bottomleft';
+                if (onBottom && onRight) return 'bottomright';
+                if (onTop) return 'top';
+                if (onBottom) return 'bottom';
+                if (onLeft) return 'left';
+                if (onRight) return 'right';
+                
+                return null;
+            }
+
+            function updateCursor(e) {
+                if (isDragging || isResizing) return; // keep current cursor while dragging/resizing
+                const rect = chat.getBoundingClientRect();
+                const mode = getResizeMode(rect, e.clientX, e.clientY);
+                
+                if (mode === 'topleft' || mode === 'bottomright') {
                     chat.style.cursor = 'nwse-resize';
-                } else if (onRight) {
-                    chat.style.cursor = 'ew-resize';
-                } else if (onBottom) {
+                } else if (mode === 'topright' || mode === 'bottomleft') {
+                    chat.style.cursor = 'nesw-resize';
+                } else if (mode === 'top' || mode === 'bottom') {
                     chat.style.cursor = 'ns-resize';
+                } else if (mode === 'left' || mode === 'right') {
+                    chat.style.cursor = 'ew-resize';
                 } else {
                     chat.style.cursor = '';
                 }
             }
 
-            // Mouse down decides which mode to start based on pointer location
+            // Title bar drag handler - only drag on title bar, not on edges
+            titleBar.addEventListener('mousedown', function(e) {
+                const chatRect = chat.getBoundingClientRect();
+                const mode = getResizeMode(chatRect, e.clientX, e.clientY);
+                
+                // If clicking near ANY resize edge, don't drag - allow resize
+                if (mode) {
+                    console.log('[chat-control] Click near edge, allowing resize');
+                    beginResize(e, mode);
+                    return;
+                }
+                
+                // Otherwise, start drag
+                console.log('[chat-control] Click on title bar, starting drag');
+                beginDrag(e);
+                e.stopPropagation();
+            });
+
+            // Mouse down on chat decides which mode to start based on pointer location (for resize)
             chat.addEventListener('mousedown', function(e) {
+                // Skip if clicking on title bar (already handled there)
+                if (e.target === titleBar || titleBar.contains(e.target)) {
+                    return;
+                }
+                
                 const rect = chat.getBoundingClientRect();
-                const inRight = e.clientX >= rect.right - EDGE_ZONE && e.clientX <= rect.right + EDGE_ZONE;
-                const inBottom = e.clientY >= rect.bottom - EDGE_ZONE && e.clientY <= rect.bottom + EDGE_ZONE;
-                if (inRight && inBottom) {
-                    beginResize(e, 'corner');
-                    return;
-                }
-                if (inRight) {
-                    beginResize(e, 'right');
-                    return;
-                }
-                if (inBottom) {
-                    beginResize(e, 'bottom');
+                const mode = getResizeMode(rect, e.clientX, e.clientY);
+                
+                if (mode) {
+                    beginResize(e, mode);
                     return;
                 }
             });
 
-            // Track pointer to update cursor zones
+            // Track pointer to update cursor zones on chat hover
             chat.addEventListener('mousemove', updateCursor);
-            chat.addEventListener('mouseleave', function() { if (!isResizing) chat.style.cursor = ''; });
+            chat.addEventListener('mouseleave', function() { if (!isDragging && !isResizing) chat.style.cursor = ''; });
 
+            // Global mouse move/up handlers for drag and resize
             document.addEventListener('mousemove', function(e) {
+                doDrag(e);
                 doResize(e);
-            });
+            }, true); // Use capture phase
+
             document.addEventListener('mouseup', function() {
+                endDrag();
                 endResize();
-            });
+            }, true); // Use capture phase
 
             // Prevent context menu on edge/corner
             chat.addEventListener('contextmenu', function(e) {
                 const rect = chat.getBoundingClientRect();
-                const inRight = e.clientX >= rect.right - EDGE_ZONE && e.clientX <= rect.right + EDGE_ZONE;
-                const inBottom = e.clientY >= rect.bottom - EDGE_ZONE && e.clientY <= rect.bottom + EDGE_ZONE;
-                if (inRight || inBottom) {
+                const mode = getResizeMode(rect, e.clientX, e.clientY);
+                if (mode) {
                     e.preventDefault();
                 }
             });
+            
+            console.log('[chat-control] Chat drag/resize initialized successfully');
         })();
 
     </script>

@@ -579,11 +579,24 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
             # Use the thread_id from the original conversation if available
             payload_thread_id = thread_id if thread_id is not None else 0
 
+            # Extract the original user message text from context if available
+            # This is CRUCIAL: when the corrector retries, the LLM needs to know what the
+            # original user question was, not just that "your JSON was invalid". Without this,
+            # the LLM might respond to the correction instructions themselves instead of
+            # answering the user's original question.
+            # Example: User asks "Rekku ci sei?" -> LLM fails -> Corrector sends correction
+            #          With original_user_message, LLM knows to respond "Sì, ci sono ♡"
+            #          Without it, LLM might respond "Acknowledged, JSON was valid"
+            original_user_message = ""
+            if message:
+                original_user_message = getattr(message, 'text', "")
+            
             correction_payload = {
                 "system_message": {
                     "type": "error",
                     "message": f"CRITICAL ERROR: Your previous response was not valid JSON. You MUST respond with ONLY valid JSON. {last_error_hint}",
                     "your_reply": text,
+                    "original_user_message": original_user_message,
                     "full_json_instructions": full_json,
                 }
             }

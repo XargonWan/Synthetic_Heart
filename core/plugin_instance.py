@@ -297,7 +297,7 @@ async def handle_incoming_message(bot, message, context_memory_or_prompt, interf
         # If the LLM plugin returned a response, pass it through the message chain for validation/correction
         # This ensures ALL LLM responses go through proper JSON validation before being sent to interfaces
         if result:
-            log_debug(f"[plugin_instance] LLM returned response ({len(str(result)) if result else 0} chars), passing to message chain for validation")
+            log_info(f"[plugin_instance] 📥 LLM→INTERFACE: LLM returned response ({len(str(result)) if result else 0} chars), passing to message chain for llm_to_interface validation/correction")
             from core.message_chain import handle_incoming_message as message_chain_handle
             
             # Build context from the original message if available
@@ -311,15 +311,18 @@ async def handle_incoming_message(bot, message, context_memory_or_prompt, interf
             
             # Pass to message chain with source="llm" to mark it as LLM-origin
             # The message chain will validate JSON, auto-correct if needed, and execute actions
+            # This implements the llm_to_interface transport layer standard with corrector middleware
+            log_info(f"[plugin_instance] 📥 LLM→INTERFACE: Entering message_chain with source=llm (will use llm_to_interface transport)")
             chain_result = await message_chain_handle(
                 bot=bot,
                 message=message,
                 text=result,
-                source="llm",  # Mark as LLM-origin so corrector can intervene
+                source="llm",  # Mark as LLM-origin so corrector can intervene (llm_to_interface standard)
                 context=llm_context
             )
             
             log_debug(f"[plugin_instance] Message chain processed LLM response: {chain_result}")
+            log_info(f"[plugin_instance] ✅ LLM→INTERFACE: message_chain completed, result={chain_result}")
             # Don't return ACTIONS_EXECUTED as a message to the webui
             if chain_result == "ACTIONS_EXECUTED":
                 return None

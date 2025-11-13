@@ -109,6 +109,12 @@ async def handle_incoming_message(bot, message: Optional[SimpleNamespace], text:
     from types import SimpleNamespace
     from datetime import datetime
 
+    log_info(f"[message_chain] 🔄 ENTRY: source={source} text_len={len(text) if text else 0} chat_id={kwargs.get('chat_id', getattr(message, 'chat_id', 'unknown')) if message else kwargs.get('chat_id')}")
+    
+    # Trace LLM→INTERFACE flow
+    if source == "llm":
+        log_info(f"[message_chain] 📥 LLM→INTERFACE: Processing LLM response via message_chain (will apply llm_to_interface transport standards)")
+
     if message is None:
         message = SimpleNamespace()
         message.chat_id = kwargs.get('chat_id')
@@ -154,17 +160,21 @@ async def handle_incoming_message(bot, message: Optional[SimpleNamespace], text:
     max_retries = ctx.get('max_retries', CORRECTOR_RETRIES)
 
     while True:
-        log_debug(
-            f"[message_chain] iteration attempt={attempt} source={source} chat={getattr(message,'chat_id',None)}"
+        log_info(
+            f"[message_chain] 🔄 LOOP: attempt={attempt} source={source} chat={getattr(message,'chat_id',None)} text_len={len(text) if text else 0}"
         )
 
         # Quick JSON extraction with metadata to detect corruption
         parsed = None
         metadata = {}
         try:
+            log_info(f"[message_chain] Attempting to extract JSON from text...")
             parsed, metadata = extract_json_from_text(text, return_metadata=True)
+            log_info(f"[message_chain] JSON extraction completed: parsed={parsed is not None} recovered={metadata.get('recovered')}")
         except Exception as e:
-            log_debug(f"[message_chain] extract_json failed: {e}")
+            log_error(f"[message_chain] extract_json EXCEPTION: {e}")
+            import traceback
+            log_error(f"[message_chain] Traceback: {traceback.format_exc()}")
 
         # Check if JSON was recovered from corruption - needs correction
         if parsed is not None and metadata.get('recovered'):
@@ -263,10 +273,14 @@ async def handle_incoming_message(bot, message: Optional[SimpleNamespace], text:
 
         # Request correction from LLM via transport-layer middleware
         try:
+            log_info(f"[message_chain] Calling corrector middleware for attempt={attempt}...")
             corrected = await run_corrector_middleware(text, bot=bot, context=ctx, chat_id=getattr(message, 'chat_id', None))
+            log_info(f"[message_chain] Corrector returned: corrected={corrected is not None} len={len(corrected) if corrected else 0}")
         except Exception as e:
             failure_reason = f"Corrector middleware exception: {str(e)}"
-            log_warning(f"[message_chain] {failure_reason}")
+            log_error(f"[message_chain] {failure_reason}")
+            import traceback
+            log_error(f"[message_chain] Traceback: {traceback.format_exc()}")
             await send_llm_fallback_message(bot, message, failure_reason)
             return LLM_FAILED
 

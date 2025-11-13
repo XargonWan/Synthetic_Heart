@@ -85,6 +85,77 @@ In this ay we thor away the old logs and we don't bother the stable deployment.
 
 ---
 
+## Testing via Ollama API
+
+### Quick Test: Send Message to SyntH via Ollama
+
+The Ollama API (port 11434) can be used to send messages to SyntH for testing without needing Telegram or other interfaces.
+
+**Basic curl command:**
+
+```bash
+curl -X POST http://localhost:11434/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "default",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are Rekku. Respond with ONLY this JSON: {\"actions\": [{\"type\": \"schedule_message\", \"payload\": {\"text\": \"Test message!\", \"send_in\": \"10 seconds\"}}]}"
+      },
+      {
+        "role": "user",
+        "content": "Send a test message!"
+      }
+    ],
+    "stream": false
+  }'
+```
+
+**For testing `schedule_message` action:**
+
+```bash
+curl -X POST http://localhost:11434/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "default",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are Rekku. Respond with ONLY this JSON: {\"actions\": [{\"type\": \"schedule_message\", \"payload\": {\"text\": \"Reminder text here\", \"send_in\": \"15 seconds\"}}]}"
+      },
+      {
+        "role": "user",
+        "content": "Schedule a reminder!"
+      }
+    ],
+    "stream": false
+  }'
+```
+
+**Monitor the logs while testing:**
+
+```bash
+docker exec synth-dev tail -f /app/logs/synth.log | grep -E "execute_action|schedule_message|Retrieved.*rows"
+```
+
+**Expected log sequence:**
+1. `[action_parser] 🎬 run_action called with action: {'type': 'schedule_message', ...}`
+2. `[event_plugin] 🎬 execute_action: type=schedule_message, payload={...}`
+3. `[event_plugin] ⏰ _handle_schedule_message_payload CALLED`
+4. `[event_plugin] 🎯 Schedule message task created`
+5. After delay: `[event_plugin] Event scheduler checking for due events...`
+6. `[event_plugin] Retrieved 1 rows` (or more if multiple events)
+7. Event delivered to LLM via interface_to_llm transport
+
+**Key points:**
+- The system prompt MUST instruct the LLM to respond with ONLY valid JSON
+- Actions must match the `get_supported_actions()` schema from plugins
+- The `schedule_message` action requires: `text` (message content) and `send_in` (delay like "10 seconds", "5 minutes", "1 hour")
+- Monitor logs to verify the action execution pipeline
+
+---
+
 ## Documentation
 Everytime you do a change evaluate if itś needed to updated the documentation in ./docs.
 The documentation must be written in English and in ReadTheDocs format.

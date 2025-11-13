@@ -17,7 +17,7 @@ import aiomysql
 import threading
 from contextlib import asynccontextmanager
 
-from core.db import get_conn
+from core.db import get_conn_ctx
 from core.logging_utils import log_error, log_info, log_debug, log_warning
 
 # Injection priority for diary entries
@@ -240,18 +240,13 @@ def should_include_diary(interface_name: str, current_prompt_length: int = 0, ma
 @asynccontextmanager
 async def get_db():
     """Context manager for MariaDB database connections."""
-    conn = None
-    try:
-        conn = await get_conn()
-        log_debug("[ai_diary] Opened database connection")
-        yield conn
-    except Exception as e:
-        log_error(f"[ai_diary] Database error: {e}")
-        raise
-    finally:
-        if conn:
-            conn.close()
-            log_debug("[ai_diary] Connection closed")
+    async with get_conn_ctx() as conn:
+        try:
+            log_debug("[ai_diary] Opened database connection")
+            yield conn
+        except Exception as e:
+            log_error(f"[ai_diary] Database error: {e}")
+            raise
 
 
 async def init_diary_table():
@@ -1256,7 +1251,10 @@ class DiaryPlugin:
         
         # Log first few entries for debugging
         for i, entry in enumerate(recent_entries[:3]):
-            log_debug(f"[ai_diary] Entry {i+1}: content='{entry.get('content', '')[:50]}...', involved_users={entry.get('involved_users', [])}, interaction_summary='{entry.get('interaction_summary', '')}'")
+            if isinstance(entry, dict):
+                log_debug(f"[ai_diary] Entry {i+1}: content='{entry.get('content', '')[:50]}...', involved_users={entry.get('involved_users', [])}, interaction_summary='{entry.get('interaction_summary', '')}'")
+            else:
+                log_debug(f"[ai_diary] Entry {i+1}: WARNING - not a dict, type={type(entry)}")
         
         return {"latest_diary_entries": recent_entries}
 

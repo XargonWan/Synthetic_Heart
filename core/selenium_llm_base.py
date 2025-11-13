@@ -141,10 +141,21 @@ class SeleniumLLMBase(AIPluginBase):
         """Get the single global shared driver instance."""
         async with cls._global_driver_lock:
             if cls._global_shared_driver is None:
-                log_info("[selenium] 🌍 Creating global shared driver instance")
-                cls._global_shared_driver = await asyncio.to_thread(cls._create_shared_driver)
-                cls._global_ref_count = 1
-                log_info(f"[selenium] 🌍 Global driver created with {len(cls._global_shared_driver.window_handles)} window(s)")
+                log_info("[selenium] 🌍 Creating global shared driver instance with 120s timeout")
+                try:
+                    # Add timeout to prevent infinite blocking on driver creation
+                    cls._global_shared_driver = await asyncio.wait_for(
+                        asyncio.to_thread(cls._create_shared_driver),
+                        timeout=120  # 120 seconds max for driver creation
+                    )
+                    cls._global_ref_count = 1
+                    log_info(f"[selenium] 🌍 Global driver created with {len(cls._global_shared_driver.window_handles)} window(s)")
+                except asyncio.TimeoutError:
+                    log_error("[selenium] 🔴 Driver creation timed out after 120s - browser failed to start")
+                    raise Exception("Selenium driver creation timeout - browser failed to initialize")
+                except Exception as e:
+                    log_error(f"[selenium] 🔴 Failed to create global driver: {e}")
+                    raise
             else:
                 cls._global_ref_count += 1
                 log_debug(f"[selenium] 🌍 Reusing global driver (ref count: {cls._global_ref_count})")
@@ -1918,32 +1929,119 @@ class SeleniumLLMBase(AIPluginBase):
         """Process a message using a pre-built prompt.
         
         This method:
-        1. Converts the prompt to text
-        2. Sends to ChatGPT via generate_response()
-        3. Returns the response to the caller (plugin_instance)
+        1. Sends to ChatGPT via generate_response() with proper role separation
+        2. Returns the response to the caller (plugin_instance)
         
         The response will then be passed to message_chain.handle_incoming_message()
         for validation, correction, and action execution. This ensures all LLM responses
         are properly validated through the central message chain, not sent directly to interfaces.
         """
         try:
-            # Convert prompt to text format for LLM
-            if isinstance(prompt, list):
-                # Convert message list to text
-                prompt_text = ""
-                for msg in prompt:
-                    if isinstance(msg, dict) and "content" in msg:
-                        role = msg.get("role", "user")
-                        content = msg.get("content", "")
-                        prompt_text += f"{role}: {content}\n"
-                    else:
-                        prompt_text += str(msg) + "\n"
+            # Check if prompt contains a system_message (correction scenario)
+            system_message_dict = None
+            prompt_for_llm = prompt
+            
+            # Try to parse prompt if it's a string that looks like JSON
+            if isinstance(prompt, str):
+                try:
+                    parsed = json.loads(prompt)
+                    if isinstance(parsed, dict) and "system_message" in parsed:
+                        system_message_dict = parsed.get("system_message", {})
+                        # Extract the actual JSON instructions or format requirements
+                        prompt_for_llm = parsed
+                        log_debug(f"[selenium] Detected correction scenario with system_message type={system_message_dict.get('type')}")
+                except (json.JSONDecodeError, ValueError):
+                    # Not JSON, proceed normally
+                    pass
+            
+            messages = []
+            
+            # Build system message to enforce JSON-only responses
+            if system_message_dict:
+                # This is a correction/error scenario - we MUST get JSON back
+                error_msg = system_message_dict.get("message", "Invalid JSON")
+                required_format = system_message_dict.get("required_format", {})
+                strict_requirements = system_message_dict.get("strict_requirements", [])
+                original_user_message = system_message_dict.get("original_user_message", "")
+                
+                # Build a comprehensive system prompt that forces JSON response
+                system_prompt = (
+                    "You are a JSON-only assistant. Your task is to respond with ONLY valid JSON.\n"
+                    f"Error: {error_msg}\n"
+                    "\nYou MUST respond with ONLY valid JSON, nothing else.\n"
+                    "NO text outside JSON. NO markdown. NO explanations.\n"
+                    "Strict requirements:\n"
+                )
+                for req in strict_requirements:
+                    system_prompt += f"- {req}\n"
+                
+                system_prompt += (
+                    "\nRespond with this exact structure:\n"
+                    f"{json.dumps(required_format, indent=2)}\n"
+                    "\nDo not deviate. Respond ONLY with valid JSON."
+                )
+                
+                # Build user message with context
+                # Include the ORIGINAL user message so LLM knows what to respond to
+                user_content = (
+                    "Please provide a valid JSON response following the structure shown above.\n\n"
+                )
+                
+                if original_user_message:
+                    user_content += (
+                        f"ORIGINAL USER MESSAGE YOU SHOULD RESPOND TO:\n"
+                        f"\"{original_user_message}\"\n\n"
+                    )
+                
+                user_content += (
+                    f"Your previous response was:\n{system_message_dict.get('your_reply', 'N/A')}\n\n"
+                    "Now provide ONLY a valid JSON response following the structure shown above, "
+                    "as if responding to the original user message. Respond ONLY with valid JSON, nothing else."
+                )
+                
+                messages.append({"role": "system", "content": system_prompt})
+                messages.append({"role": "user", "content": user_content})
+                
+                log_info(f"[selenium] 🔧 Correction scenario: system prompt enforces JSON-only responses")
+                log_debug(f"[selenium] System prompt length: {len(system_prompt)} chars")
+                if original_user_message:
+                    log_info(f"[selenium] 📝 Original user message in correction: \"{original_user_message}\"")
+                else:
+                    log_warning(f"[selenium] ⚠️ No original user message available in correction scenario!")
+                
             else:
-                prompt_text = str(prompt)
+                # Normal scenario - convert prompt to messages
+                if isinstance(prompt_for_llm, dict):
+                    try:
+                        # Simply convert prompt to JSON for user message
+                        prompt_text = json.dumps(prompt_for_llm)
+                        messages.append({"role": "user", "content": prompt_text})
+                        log_debug(f"[selenium] Built user message from prompt ({len(prompt_text)} chars)")
+                    except Exception as e:
+                        log_warning(f"[selenium] Error processing prompt: {e}")
+                        prompt_text = str(prompt_for_llm)
+                        messages.append({"role": "user", "content": prompt_text})
+                    
+                else:
+                    # If prompt is already a list or string, convert to text format
+                    if isinstance(prompt_for_llm, list):
+                        # Convert message list to text
+                        prompt_text = ""
+                        for msg in prompt_for_llm:
+                            if isinstance(msg, dict) and "content" in msg:
+                                role = msg.get("role", "user")
+                                content = msg.get("content", "")
+                                prompt_text += f"{role}: {content}\n"
+                            else:
+                                prompt_text += str(msg) + "\n"
+                    else:
+                        prompt_text = str(prompt_for_llm)
+                    
+                    messages.append({"role": "user", "content": prompt_text})
 
-            # Send to LLM and get response
+
             # The response will be returned to plugin_instance which passes it to message_chain
-            response = await self.generate_response([{"role": "user", "content": prompt_text}])
+            response = await self.generate_response(messages)
             
             # Simply return the response - don't send it directly!
             # plugin_instance will handle passing it to message_chain for proper validation
@@ -1963,27 +2061,40 @@ class SeleniumLLMBase(AIPluginBase):
             if not getattr(self, '_initialized', False):
                 return "❌ LLM engine not properly initialized"
 
-            # Log who's calling this (to debug 30 tabs issue)
-            import traceback
-            caller_info = "".join(traceback.format_stack()[-3:-1])
-            log_warning(f"[selenium] ⚠️ generate_response called! Caller:\n{caller_info}")
-            
             log_debug(f"[selenium] generate_response called with {len(messages) if isinstance(messages, list) else 1} message(s)")
             
-            # Convert messages to text
+            # Log the system prompt if present (for debugging)
+            if isinstance(messages, list) and len(messages) > 0:
+                for msg in messages:
+                    if isinstance(msg, dict) and msg.get("role") == "system":
+                        system_content = msg.get("content", "")
+                        log_info(f"[selenium] 📋 System prompt sent to LLM:\n{system_content[:500]}...")
+                        log_debug(f"[selenium] Full system prompt ({len(system_content)} chars):\n{system_content}")
+            
+            # Convert messages to text for Selenium interaction
+            # Selenium can't use API "system" roles directly, so we need to embed instructions
             if isinstance(messages, list):
                 prompt_text = ""
+                system_instructions = ""
+                
+                # Extract system messages and user messages separately
                 for msg in messages:
-                    if isinstance(msg, dict) and "content" in msg:
+                    if isinstance(msg, dict):
                         role = msg.get("role", "user")
                         content = msg.get("content", "")
-                        prompt_text += f"{role}: {content}\n"
-                    else:
-                        prompt_text += str(msg) + "\n"
+                        
+                        if role == "system":
+                            system_instructions += content + "\n"
+                        else:
+                            prompt_text += f"{role}: {content}\n"
+                
+                # Prepend system instructions to the final prompt
+                if system_instructions:
+                    prompt_text = system_instructions + "\n---\n" + prompt_text
             else:
                 prompt_text = str(messages)
 
-            log_warning(f"[selenium] ⚠️ About to call _execute_complete_workflow with prompt: {prompt_text}")
+            log_debug(f"[selenium] About to call _execute_complete_workflow with prompt ({len(prompt_text)} chars)")
 
             # Lazy driver initialization - create only when first actual request comes in
             if self.driver is None:
@@ -2013,6 +2124,7 @@ class SeleniumLLMBase(AIPluginBase):
                 log_info(f"[selenium] ✅ Fresh driver ready for {self.component_name}")
                 window_count = len(self.driver.window_handles)
                 log_info(f"[selenium] Using fresh shared driver with {window_count} window(s)")
+
 
             try:
                 # Execute interaction in a single thread (driver is now guaranteed to be ready)

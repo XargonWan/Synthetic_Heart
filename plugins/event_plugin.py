@@ -151,6 +151,11 @@ class EventPlugin(AIPluginBase):
                 "required_fields": ["date", "description"],
                 "optional_fields": ["time", "repeat", "created_by"],
                 "description": "Create or schedule a future event",
+            },
+            "schedule_message": {
+                "required_fields": ["text", "send_in"],
+                "optional_fields": ["chat_id", "thread_id"],
+                "description": "Schedule a message to be sent after a delay",
             }
         }
 
@@ -192,38 +197,52 @@ class EventPlugin(AIPluginBase):
 
     def get_prompt_instructions(self, action_name: str) -> dict:
         """Prompt instructions for the supported actions."""
-        if action_name != "event":
-            return {}
-        return {
-            "description": "Schedule a future reminder or event",
-            "payload": {
-                "date": "2025-07-30",
-                "time": "13:00",
-                "repeat": "weekly",
-                "description": "Remind me to water the plants",
-                "created_by": "synth",
-                "interface": self.get_interface_id(),  # interface auto-corrected
-            },
-        }
+        if action_name == "event":
+            return {
+                "description": "Schedule a future reminder or event",
+                "payload": {
+                    "date": "2025-07-30",
+                    "time": "13:00",
+                    "repeat": "weekly",
+                    "description": "Remind me to water the plants",
+                    "created_by": "synth",
+                    "interface": self.get_interface_id(),  # interface auto-corrected
+                },
+            }
+        elif action_name == "schedule_message":
+            return {
+                "description": "Schedule a message to be sent after a specified delay",
+                "payload": {
+                    "text": "Reminder: do something important",
+                    "send_in": "1 minute",  # Can be "5 minutes", "1 hour", etc.
+                    "chat_id": "-1003098886330",  # Optional: target chat
+                    "thread_id": 2,  # Optional: thread ID if applicable
+                },
+            }
+        return {}
 
     def execute_action(self, action: dict, context: dict, bot, original_message):
-        """Execute an event action using the new plugin interface."""
-        if action.get("type") == "event":
-            log_info(
-                "[event_plugin] Executing event action with payload: "
-                + str(action.get("payload"))
-            )
-            try:
-                # Use asyncio.create_task to handle async call from sync context
-                import asyncio
-
-                asyncio.create_task(
-                    self._handle_event_payload(action.get("payload", {}))
-                )
-            except Exception as e:
-                log_error(f"[event_plugin] Error executing event action: {repr(e)}")
-        else:
-            log_error(f"[event_plugin] Unsupported action type: {action.get('type')}")
+        """Execute an event action using the new plugin interface - SIMPLIFIED."""
+        import asyncio
+        action_type = action.get("type")
+        payload = action.get("payload", {})
+        
+        log_info(f"[event_plugin] 🎬 execute_action: type={action_type}, payload={str(payload)[:80]}")
+        
+        try:
+            if action_type == "event":
+                asyncio.run(self._handle_event_payload(payload))
+                log_info(f"[event_plugin] ✅ Event saved")
+                
+            elif action_type == "schedule_message":
+                self._execute_schedule_message_sync(payload)
+                
+            else:
+                log_error(f"[event_plugin] ❌ Unsupported action: {action_type}")
+        except Exception as e:
+            log_error(f"[event_plugin] ❌ execute_action failed: {repr(e)}")
+            import traceback
+            log_error(traceback.format_exc())
 
     async def handle_custom_action(self, action_type: str, payload: dict):
         """Handle custom event actions (legacy method - kept for compatibility)."""
@@ -235,6 +254,14 @@ class EventPlugin(AIPluginBase):
                 await self._handle_event_payload(payload)
             except Exception as e:
                 log_error(f"[event_plugin] Error handling event action: {repr(e)}")
+        elif action_type == "schedule_message":
+            log_info(
+                "[event_plugin] Handling schedule_message action with payload: " + str(payload)
+            )
+            try:
+                await self._handle_schedule_message_payload(payload, original_message=None)
+            except Exception as e:
+                log_error(f"[event_plugin] Error handling schedule_message action: {repr(e)}")
         else:
             log_error(f"[event_plugin] Unsupported action type: {action_type}")
 
@@ -266,6 +293,84 @@ class EventPlugin(AIPluginBase):
         # Confirmation messages are no longer sent directly from the plugin.
         # The LLM will decide if and how to notify the user about scheduled
         # reminders. This keeps event creation interface-agnostic.
+
+    def _execute_schedule_message_sync(self, payload: dict):
+        """Schedule message by creating async task (don't use asyncio.run - we're already in event loop)."""
+        import asyncio
+        try:
+            # Create task instead of asyncio.run() - we're already inside an event loop!
+            task = asyncio.create_task(self._handle_schedule_message_payload(payload))
+            log_info(f"[event_plugin] 🎯 Schedule message task created: {task.get_name()}")
+        except Exception as e:
+            log_error(f"[event_plugin] ❌ _execute_schedule_message_sync failed: {repr(e)}")
+            import traceback
+            log_error(traceback.format_exc())
+
+    async def _handle_schedule_message_payload(self, payload: dict, original_message=None):
+        """Handle schedule_message action by converting delay to date/time."""
+        log_info(f"[event_plugin] ⏰ _handle_schedule_message_payload CALLED with payload: {payload}")
+        text = payload.get("text")
+        send_in = payload.get("send_in", "1 minute")  # Default to 1 minute
+        
+        if not text:
+            log_error("[event_plugin] Invalid schedule_message payload: missing 'text'")
+            return
+        
+        # Parse send_in delay (e.g., "5 minutes", "1 hour", "2 hours")
+        from datetime import datetime, timedelta, timezone
+        
+        try:
+            # Parse delay like "1 minute", "5 minutes", "1 hour", "2 hours"
+            import re
+            match = re.match(r'(\d+)\s+(minute|hour|day|week)s?', send_in.lower())
+            if not match:
+                log_error(f"[event_plugin] Invalid send_in format: {send_in}")
+                return
+            
+            quantity = int(match.group(1))
+            unit = match.group(2)
+            log_info(f"[event_plugin] ⏰ Parsed delay: {quantity} {unit}")
+            
+            # Calculate future time
+            now_utc = datetime.now(timezone.utc)
+            if unit == "minute":
+                future_time = now_utc + timedelta(minutes=quantity)
+            elif unit == "hour":
+                future_time = now_utc + timedelta(hours=quantity)
+            elif unit == "day":
+                future_time = now_utc + timedelta(days=quantity)
+            elif unit == "week":
+                future_time = now_utc + timedelta(weeks=quantity)
+            else:
+                log_error(f"[event_plugin] Unknown time unit: {unit}")
+                return
+            
+            # Extract date and time strings
+            date_str = future_time.strftime("%Y-%m-%d")
+            time_str = future_time.strftime("%H:%M")
+            log_info(f"[event_plugin] ⏰ Scheduled for {date_str} {time_str} UTC")
+            
+            # Build description with chat/thread info if available
+            description = f"MESSAGE: {text}"
+            if payload.get("chat_id"):
+                description += f" [chat: {payload.get('chat_id')}]"
+            if payload.get("thread_id"):
+                description += f" [thread: {payload.get('thread_id')}]"
+            
+            # Save as a one-time reminder
+            await self._save_scheduled_reminder(
+                date_str=date_str,
+                time_str=time_str,
+                repeat="none",
+                description=description,
+                created_by="synth",
+            )
+            log_info(
+                f"[event_plugin] Scheduled message for {date_str} {time_str}: {text[:50]}..."
+            )
+            
+        except Exception as e:
+            log_error(f"[event_plugin] Error processing schedule_message: {repr(e)}")
 
     async def _save_scheduled_reminder(
         self,
@@ -308,6 +413,24 @@ class EventPlugin(AIPluginBase):
     async def _event_scheduler(self):
         """Background task that checks and executes due events."""
         log_info("[event_plugin] Event scheduler loop started (singleton)")
+        
+        # On startup, log pending events that survived a reboot
+        try:
+            from core.db import get_due_events
+            pending = await get_due_events()
+            if pending:
+                log_warning(
+                    f"[event_plugin] ⏰ STARTUP: Found {len(pending)} pending events from previous session (some may be late)"
+                )
+                for evt in pending:
+                    is_late_marker = "⏱️ LATE" if evt.get("is_late") else "✓ On-time"
+                    desc = evt.get("description", "no description")[:50]
+                    log_info(f"[event_plugin]   {is_late_marker}: Event #{evt.get('id')} - {desc}")
+            else:
+                log_debug("[event_plugin] No pending events found at startup")
+        except Exception as e:
+            log_warning(f"[event_plugin] Could not check pending events at startup: {e}")
+        
         while EventPlugin._scheduler_running:
             try:
                 log_debug("[event_plugin] Event scheduler checking for due events...")
@@ -448,25 +571,30 @@ class EventPlugin(AIPluginBase):
                 log_warning(
                     f"[event_plugin] Failed to deliver event {event_id} after {CORRECTOR_RETRIES} attempts"
                 )
-        finally:
-            try:
-                if event_id is not None:
-                    if await mark_event_delivered(event_id):
-                        log_debug(
-                            f"[event_plugin] Event {event_id} marked delivered in DB"
-                        )
+            else:
+                # Mark as delivered ONLY if it was successfully sent to LLM
+                try:
+                    if event_id is not None:
+                        if await mark_event_delivered(event_id):
+                            log_info(
+                                f"[event_plugin] ✅ Event {event_id} successfully marked as delivered in DB"
+                            )
+                        else:
+                            log_warning(
+                                f"[event_plugin] ⚠️ Failed to mark event {event_id} as delivered in DB (will retry next cycle)"
+                            )
                     else:
                         log_warning(
-                            f"[event_plugin] Failed to mark event {event_id} delivered"
+                            "[event_plugin] Cannot mark event with invalid id as delivered"
                         )
-                else:
+                except Exception as e:
                     log_warning(
-                        "[event_plugin] Cannot mark event with invalid id as delivered"
+                        f"[event_plugin] Error marking event {event_id} delivered: {e}"
                     )
-            except Exception as e:
-                log_warning(
-                    f"[event_plugin] Error marking event {event_id} delivered: {e}"
-                )
+        except Exception as outer_e:
+            log_error(
+                f"[event_plugin] Error in _deliver_event_to_llm for event {event_id}: {repr(outer_e)}"
+            )
 
     async def _create_event_prompt(self, event: dict):
         """Create a structured prompt for the event delivery."""

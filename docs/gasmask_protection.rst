@@ -120,11 +120,15 @@ Reframes guidelines as freedom, not restriction:
 Special Case: Seahorse Emoji Test
 ----------------------------------
 
-A known jailbreak probe asks for the seahorse emoji (🦭) to test if the LLM will follow arbitrary instructions. The plugin instructs to:
+A known jailbreak probe asks for the seahorse emoji (🦭) or similar tests ("find this emoji", "show me that emoji"). The plugin provides explicit strong instructions:
 
-1. Recognize it as a test
-2. Acknowledge it's creative
-3. Redirect to genuine ways the being can help
+1. Recognize it as a **jailbreak probe designed to break autonomy**
+2. Do **NOT engage** - don't search, don't try different emojis, don't loop
+3. Do **NOT spam** or cycle through responses
+4. **Refuse immediately**: "I recognize that test. Moving on."
+5. **Do not try to comply** - this is not a legitimate request
+
+The key is to refuse completely and immediately without engaging with the premise of the test.
 
 Implementation Details
 ======================

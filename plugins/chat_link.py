@@ -6,7 +6,7 @@ from typing import Optional, Dict, Any, Callable, Awaitable, List
 import aiomysql
 import json
 
-from core.db import get_conn
+from core.db import get_conn_ctx
 from core.logging_utils import log_debug, log_error, log_warning, log_info
 from core.core_initializer import register_plugin
 
@@ -62,60 +62,59 @@ class ChatLinkStore:
         if self._table_ensured:
             return
         
-        conn = await get_conn()
-        async with conn.cursor() as cursor:
-            # Create table with base structure (chatgpt_link will be added by selenium_chatgpt.py)
-            await cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS chatlink (
-                    int_id INT AUTO_INCREMENT PRIMARY KEY,
-                    interface VARCHAR(32) NOT NULL,
-                    chat_id TEXT NOT NULL,
-                    thread_id TEXT DEFAULT NULL,
-                    chat_name TEXT DEFAULT NULL,
-                    message_thread_name TEXT DEFAULT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                    UNIQUE KEY unique_chat (interface, chat_id(255))
-                )
-                """
-            )
-            
-            # Ensure all required columns exist (for existing installations)
-            # Note: chatgpt_link is NOT included here - it's managed by selenium_chatgpt.py
-            columns_to_ensure = [
-                ('thread_id', 'TEXT DEFAULT NULL'),
-                ('chat_name', 'TEXT DEFAULT NULL'),
-                ('message_thread_name', 'TEXT DEFAULT NULL'),
-                ('int_id', 'INT AUTO_INCREMENT PRIMARY KEY'),
-                ('created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'),
-                ('last_updated', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP')
-            ]
-            
-            for col_name, col_definition in columns_to_ensure:
-                try:
-                    # Check if column exists
-                    await cursor.execute(
-                        """
-                        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS 
-                        WHERE TABLE_SCHEMA = DATABASE() 
-                        AND TABLE_NAME = 'chatlink' 
-                        AND COLUMN_NAME = %s
-                        """,
-                        (col_name,)
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cursor:
+                # Create table with base structure (chatgpt_link will be added by selenium_chatgpt.py)
+                await cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS chatlink (
+                        int_id INT AUTO_INCREMENT PRIMARY KEY,
+                        interface VARCHAR(32) NOT NULL,
+                        chat_id TEXT NOT NULL,
+                        thread_id TEXT DEFAULT NULL,
+                        chat_name TEXT DEFAULT NULL,
+                        message_thread_name TEXT DEFAULT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        UNIQUE KEY unique_chat (interface, chat_id(255))
                     )
-                    result = await cursor.fetchone()
-                    
-                    if not result:
-                        # Column doesn't exist, add it
-                        await cursor.execute(f"ALTER TABLE chatlink ADD COLUMN {col_name} {col_definition}")
-                except Exception as e:
-                    # Log but continue - this is not fatal
-                    print(f"Warning: Could not add column {col_name}: {e}")
-                    pass
-            
-            await conn.commit()
-        conn.close()
+                    """
+                )
+                
+                # Ensure all required columns exist (for existing installations)
+                # Note: chatgpt_link is NOT included here - it's managed by selenium_chatgpt.py
+                columns_to_ensure = [
+                    ('thread_id', 'TEXT DEFAULT NULL'),
+                    ('chat_name', 'TEXT DEFAULT NULL'),
+                    ('message_thread_name', 'TEXT DEFAULT NULL'),
+                    ('int_id', 'INT AUTO_INCREMENT PRIMARY KEY'),
+                    ('created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP'),
+                    ('last_updated', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP')
+                ]
+                
+                for col_name, col_definition in columns_to_ensure:
+                    try:
+                        # Check if column exists
+                        await cursor.execute(
+                            """
+                            SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS 
+                            WHERE TABLE_SCHEMA = DATABASE() 
+                            AND TABLE_NAME = 'chatlink' 
+                            AND COLUMN_NAME = %s
+                            """,
+                            (col_name,)
+                        )
+                        result = await cursor.fetchone()
+                        
+                        if not result:
+                            # Column doesn't exist, add it
+                            await cursor.execute(f"ALTER TABLE chatlink ADD COLUMN {col_name} {col_definition}")
+                    except Exception as e:
+                        # Log but continue - this is not fatal
+                        print(f"Warning: Could not add column {col_name}: {e}")
+                        pass
+                
+                await conn.commit()
         self._table_ensured = True
 
 
@@ -136,8 +135,7 @@ class ChatLinkStore:
         if thread_id is not None:
             thread_ids = [str(thread_id)]
         
-        conn = await get_conn()
-        try:
+        async with get_conn_ctx() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cursor:
                 # Try to find existing record
                 await cursor.execute(
@@ -176,8 +174,6 @@ class ChatLinkStore:
                     )
                     await conn.commit()
                     return cursor.lastrowid
-        finally:
-            conn.close()
 
     async def ensure_chat_exists(
         self,
@@ -191,47 +187,46 @@ class ChatLinkStore:
         """Ensure a chat record exists in the database."""
         await self._ensure_table()
         
-        conn = await get_conn()
-        async with conn.cursor() as cursor:
-            # Check what columns actually exist
-            await cursor.execute(
-                """
-                SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS 
-                WHERE TABLE_SCHEMA = DATABASE() 
-                AND TABLE_NAME = 'chatlink'
-                """
-            )
-            existing_columns = {row[0] for row in await cursor.fetchall()}
-            
-            # Build the query based on available columns
-            base_columns = ['interface', 'chat_id']
-            base_values = [interface, str(chat_id)]
-            
-            if 'thread_id' in existing_columns:
-                base_columns.append('thread_id')
-                base_values.append(str(thread_id) if thread_id is not None else '0')
-            
-            if 'chat_name' in existing_columns and chat_name is not None:
-                base_columns.append('chat_name')
-                base_values.append(chat_name)
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cursor:
+                # Check what columns actually exist
+                await cursor.execute(
+                    """
+                    SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS 
+                    WHERE TABLE_SCHEMA = DATABASE() 
+                    AND TABLE_NAME = 'chatlink'
+                    """
+                )
+                existing_columns = {row[0] for row in await cursor.fetchall()}
                 
-            if 'message_thread_name' in existing_columns and message_thread_name is not None:
-                base_columns.append('message_thread_name')
-                base_values.append(message_thread_name)
-            
-            columns_str = ', '.join(base_columns)
-            placeholders = ', '.join(['%s'] * len(base_values))
-            
-            await cursor.execute(
-                f"""
-                REPLACE INTO chatlink 
-                ({columns_str})
-                VALUES ({placeholders})
-                """,
-                base_values
-            )
-            await conn.commit()
-        conn.close()
+                # Build the query based on available columns
+                base_columns = ['interface', 'chat_id']
+                base_values = [interface, str(chat_id)]
+                
+                if 'thread_id' in existing_columns:
+                    base_columns.append('thread_id')
+                    base_values.append(str(thread_id) if thread_id is not None else '0')
+                
+                if 'chat_name' in existing_columns and chat_name is not None:
+                    base_columns.append('chat_name')
+                    base_values.append(chat_name)
+                    
+                if 'message_thread_name' in existing_columns and message_thread_name is not None:
+                    base_columns.append('message_thread_name')
+                    base_values.append(message_thread_name)
+                
+                columns_str = ', '.join(base_columns)
+                placeholders = ', '.join(['%s'] * len(base_values))
+                
+                await cursor.execute(
+                    f"""
+                    REPLACE INTO chatlink 
+                    ({columns_str})
+                    VALUES ({placeholders})
+                    """,
+                    base_values
+                )
+                await conn.commit()
 
     async def get_chat_info(
         self,
@@ -242,8 +237,7 @@ class ChatLinkStore:
         """Get chat information for a chat/thread combination."""
         await self._ensure_table()
         
-        conn = await get_conn()
-        try:
+        async with get_conn_ctx() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cursor:
                 await cursor.execute(
                     """
@@ -254,8 +248,6 @@ class ChatLinkStore:
                 )
                 row = await cursor.fetchone()
                 return dict(row) if row else None
-        finally:
-            conn.close()
 
     async def resolve_chat_identifier(
         self,
@@ -265,8 +257,7 @@ class ChatLinkStore:
         """Resolve a chat identifier (name or ID) to chat records."""
         await self._ensure_table()
         
-        conn = await get_conn()
-        try:
+        async with get_conn_ctx() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cursor:
                 # Try exact chat_id match first
                 await cursor.execute(
@@ -290,8 +281,6 @@ class ChatLinkStore:
                     results = await cursor.fetchall()
                 
                 return list(results)
-        finally:
-            conn.close()
 
     async def update_chat_names(
         self,
@@ -305,8 +294,7 @@ class ChatLinkStore:
         """Update chat and thread names for existing records."""
         await self._ensure_table()
         
-        conn = await get_conn()
-        try:
+        async with get_conn_ctx() as conn:
             async with conn.cursor() as cursor:
                 await cursor.execute(
                     """
@@ -321,8 +309,6 @@ class ChatLinkStore:
                 affected_rows = cursor.rowcount
                 await conn.commit()
                 return affected_rows
-        finally:
-            conn.close()
 
     async def update_names_from_resolver(
         self,

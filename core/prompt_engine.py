@@ -507,10 +507,18 @@ def reduce_prompt_for_llm_limit(prompt: dict, max_chars: int) -> dict:
                 # Reformat diary with remaining entries
                 try:
                     from plugins.ai_diary import format_diary_for_injection
-                    new_diary_content = format_diary_for_injection(diary_entries)
-                    context["diary"] = new_diary_content
-                except Exception:
+                    # Ensure all remaining entries are dicts (defensive check)
+                    valid_entries = [e for e in diary_entries if isinstance(e, dict)]
+                    if valid_entries:
+                        new_diary_content = format_diary_for_injection(valid_entries)
+                        context["diary"] = new_diary_content
+                    else:
+                        # No valid entries, remove diary
+                        if "diary" in context:
+                            del context["diary"]
+                except Exception as e:
                     # Fallback: remove diary if formatting fails
+                    log_warning(f"[reduce_prompt] Error reformatting diary after removal: {e}")
                     if "diary" in context:
                         del context["diary"]
                 removed_something = True

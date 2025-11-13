@@ -467,6 +467,11 @@ class CoreInitializer:
 
                     instance = plugin_class()
 
+                    # Register the plugin immediately after instantiation so it's available for action discovery
+                    plugin_short_name = module_name.split(".")[-1]
+                    PLUGIN_REGISTRY[plugin_short_name] = instance
+                    log_debug(f"[core_initializer] Plugin {module_name} registered in PLUGIN_REGISTRY as '{plugin_short_name}'")
+
                     if hasattr(instance, "start"):
                         try:
                             if asyncio.iscoroutinefunction(instance.start):
