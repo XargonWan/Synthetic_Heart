@@ -157,7 +157,7 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "execute_action|sche
 ---
 
 ## Documentation
-Everytime you do a change evaluate if itś needed to updated the documentation in ./docs.
+Everytime you do a change evaluate if it's needed to updated the documentation in `./docs`.
 The documentation must be written in English and in ReadTheDocs format.
 
 ---
@@ -168,3 +168,4 @@ The documentation must be written in English and in ReadTheDocs format.
 * Every action must integrate with the core.
 * No direct, hardcoded coupling between the core and any specific plugin/interface/engine.
 * Validation rules are auto-discovered from `get_supported_actions()` methods.
+* Every time you edit a python file use `python3 -m py_compile` against it. If you edited more than one please check them in a single command to save time and user interaction.
