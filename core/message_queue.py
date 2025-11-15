@@ -184,9 +184,13 @@ async def enqueue(bot, message, context_memory=None, priority: bool = False, int
     thread_attrs = [attr for attr in dir(message) if 'thread' in attr.lower()]
     log_debug(f"[QUEUE] Available thread attributes in message: {thread_attrs}")
     
-    # Use only thread_id, message_thread_id is legacy and deprecated
+    # Check for thread_id, but also check message_thread_id (Telegram's native field)
+    # Note: DO NOT set message.thread_id - Message objects are immutable
     thread_id_val = getattr(message, "thread_id", None)
-    log_debug(f"[QUEUE] message.thread_id = {thread_id_val}")
+    if thread_id_val is None:
+        thread_id_val = getattr(message, "message_thread_id", None)
+    
+    log_debug(f"[QUEUE] thread_id extracted: {thread_id_val}")
     
     thread_id = thread_id_val
     interface = interface_id if interface_id else (

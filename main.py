@@ -3,7 +3,7 @@ import signal
 import sys
 import subprocess
 import asyncio
-from core.db import init_db, test_connection, get_conn
+from core.db import init_db, test_connection, get_conn_ctx
 # from core.blocklist import init_blocklist_table  # Now handled by blocklist plugin
 from core.logging_utils import (
     log_debug,
@@ -92,20 +92,16 @@ async def initialize_database():
     # Verifica dei permessi dell'utente del database
     async def check_permissions():
         log_debug("[main] Checking database permissions...")
-        conn = None
         try:
-            conn = await get_conn()
-            async with conn.cursor() as cur:
-                await cur.execute("SHOW GRANTS FOR CURRENT_USER()")
-                grants = await cur.fetchall()
-                log_debug("[main] Database permissions check completed")
-                return grants
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute("SHOW GRANTS FOR CURRENT_USER()")
+                    grants = await cur.fetchall()
+                    log_debug("[main] Database permissions check completed")
+                    return grants
         except Exception as e:
             log_error(f"[main] Error checking database permissions: {repr(e)}")
             raise
-        finally:
-            if conn:
-                conn.close()
 
     try:
         grants = await check_permissions()

@@ -1,4 +1,4 @@
-from core.db import get_conn
+from core.db import get_conn_ctx
 from core.db import ensure_core_tables
 import aiomysql
 import time
@@ -45,38 +45,24 @@ async def track_chat(chat_id: Union[int, str], interface_name: str, metadata=Non
     # Try to persist to DB, but never raise to the caller if DB is unavailable.
     try:
         await ensure_core_tables()
-        try:
-            conn = await get_conn()
-        except Exception as e:
-            log_warning(f"[recent_chats] DB unavailable, skipping persistent tracking: {e}")
-            # Still update in-memory metadata so commands depending on it work
-            if metadata:
-                _metadata[chat_id] = metadata
-            return
-
-        try:
-            async with conn.cursor() as cur:
-                # Convert chat_id to string to handle both int and str uniformly
-                chat_id_str = str(chat_id)
-                await cur.execute(
-                    """
-                    INSERT INTO recent_chats (chat_id, last_active)
-                    VALUES (%s, %s)
-                    ON DUPLICATE KEY UPDATE last_active = VALUES(last_active)
-                    """,
-                    (chat_id_str, now),
-                )
-                await conn.commit()
-        except Exception as e:
-            log_warning(f"[recent_chats] Failed to persist recent chat: {e}")
-        finally:
+        async with get_conn_ctx() as conn:
             try:
-                conn.close()
-            except Exception:
-                pass
+                async with conn.cursor() as cur:
+                    # Convert chat_id to string to handle both int and str uniformly
+                    chat_id_str = str(chat_id)
+                    await cur.execute(
+                        """
+                        INSERT INTO recent_chats (chat_id, last_active)
+                        VALUES (%s, %s)
+                        ON DUPLICATE KEY UPDATE last_active = VALUES(last_active)
+                        """,
+                        (chat_id_str, now),
+                    )
+                    await conn.commit()
+            except Exception as e:
+                log_warning(f"[recent_chats] Failed to persist recent chat: {e}")
     except Exception as e:
-        # Ensure this function never raises due to DB issues
-        log_warning(f"[recent_chats] Unexpected error in track_chat: {e}")
+        log_warning(f"[recent_chats] DB unavailable or error: {e}")
 
     # In-memory fallback/update
     if metadata:
@@ -86,27 +72,14 @@ async def reset_chat(chat_id: Union[int, str], interface_name: str):
     # Attempt to remove from persistent storage; if DB unavailable just remove in-memory
     try:
         await ensure_core_tables()
-        try:
-            conn = await get_conn()
-        except Exception as e:
-            log_warning(f"[recent_chats] DB unavailable, skipping persistent reset: {e}")
-            _metadata.pop(chat_id, None)
-            if chat_path_map.pop(chat_id, None) is not None:
-                _save_chat_paths()
-            return
-
-        try:
-            async with conn.cursor() as cur:
-                chat_id_str = str(chat_id)
-                await cur.execute("DELETE FROM recent_chats WHERE chat_id = %s", (chat_id_str,))
-                await conn.commit()
-        except Exception as e:
-            log_warning(f"[recent_chats] Failed to reset chat in DB: {e}")
-        finally:
+        async with get_conn_ctx() as conn:
             try:
-                conn.close()
-            except Exception:
-                pass
+                async with conn.cursor() as cur:
+                    chat_id_str = str(chat_id)
+                    await cur.execute("DELETE FROM recent_chats WHERE chat_id = %s", (chat_id_str,))
+                    await conn.commit()
+            except Exception as e:
+                log_warning(f"[recent_chats] Failed to reset chat in DB: {e}")
     except Exception as e:
         log_warning(f"[recent_chats] Unexpected error in reset_chat: {e}")
 
@@ -132,7 +105,18 @@ def clear_chat_path(chat_id: Union[int, str]) -> None:
 
 async def get_last_active_chats(n=10):
     try:
-        conn = await get_conn()
+        async with get_conn_ctx() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    """
+                    SELECT chat_id FROM recent_chats
+                    ORDER BY last_active DESC
+                    LIMIT %s
+                    """,
+                    (n,),
+                )
+                rows = await cur.fetchall()
+                return [row["chat_id"] for row in rows]
     except Exception as e:
         log_warning(f"[recent_chats] DB unavailable, falling back to in-memory chats: {e}")
         # Best-effort fallback: return recently cached metadata keys
@@ -141,27 +125,6 @@ async def get_last_active_chats(n=10):
             return keys
         except Exception:
             return []
-
-    try:
-        async with conn.cursor(aiomysql.DictCursor) as cur:
-            await cur.execute(
-                """
-                SELECT chat_id FROM recent_chats
-                ORDER BY last_active DESC
-                LIMIT %s
-                """,
-                (n,),
-            )
-            rows = await cur.fetchall()
-            return [row["chat_id"] for row in rows]
-    except Exception as e:
-        log_warning(f"[recent_chats] Failed to fetch last active chats from DB: {e}")
-        return list(_metadata.keys())[:n]
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
 
 def format_chat_entry_generic(chat_id: Union[int, str], chat_name: Optional[str] = None):
     """Generic format for chat entries."""

@@ -354,9 +354,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Continue processing even if context tracking fails
 
     # === PRIORITY 1: Handle /say step (chat selection) ===
-    log_debug(f"Checking say_step conditions - chat_type: {message.chat.type}, user_id: {user_id}, trainer_id: {get_trainer_id()}, say_choices: {context.user_data.get('say_choices') is not None}")
+    log_debug(f"🟡 [PRIORITY 1 CHECK] Checking say_step conditions - chat_type: {message.chat.type}, user_id: {user_id}, trainer_id: {get_trainer_id()}, say_choices: {context.user_data.get('say_choices') is not None}")
     if message.chat.type == "private" and user_id == get_trainer_id() and context.user_data.get("say_choices"):
-        log_debug(f"Message intercepted by say_step handler")
+        log_debug(f"🟡 [PRIORITY 1 ACTIVE] Message intercepted by say_step handler")
         target_chat = say_proxy.get_target(user_id)
         
         if target_chat == "EXPIRED":
@@ -399,9 +399,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
     
     # === PRIORITY 2: Handle trainer incoming responses (stickers, media with target) ===
+    log_debug(f"🟠 [PRIORITY 2 CHECK] is_trainer({user_id})={is_trainer(user_id)}, chat_type={message.chat.type}")
     if message.chat.type == "private" and is_trainer(user_id):
         media_type = detect_media_type(message)
-        log_debug(f"Trainer message detected: media_type={media_type}")
+        log_debug(f"🟠 [PRIORITY 2 ACTIVE] Trainer message detected: media_type={media_type}")
         
         # Check if there's a target set (from /say or reply)
         target = response_proxy.get_target(get_trainer_id())
@@ -479,6 +480,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         log_debug(f"Could not get bot username: {e}")
     
+    # If human_count is still None for group/supergroup chats, calculate it
+    if human_count is None and message.chat.type in ["group", "supergroup"]:
+        try:
+            member_count = await context.bot.get_chat_member_count(message.chat.id)
+            # Subtract 1 for the bot itself (assuming bot is a member)
+            human_count = max(0, member_count - 1)
+            log_debug(f"[telegram_bot] Calculated human_count={human_count} for group chat {message.chat.id}")
+        except Exception as e:
+            log_debug(f"[telegram_bot] Could not calculate human_count: {e}")
+            # Keep human_count as None; is_message_for_bot will handle it
+    
     directed, reason = await is_message_for_bot(message, context.bot, bot_username=bot_username, human_count=human_count)
     log_debug(f"is_message_for_bot returned directed={directed}, reason='{reason}'")
     
@@ -498,9 +510,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # === PRIORITY 3: Trainer reply to forwarded message ===
     trainer_id = get_trainer_id()
-    log_debug(f"Checking trainer reply conditions - chat_type: {message.chat.type}, user_id: {user_id}, trainer_id: {trainer_id}, has_reply: {bool(message.reply_to_message)}")
+    log_debug(f"🟣 [PRIORITY 3 CHECK] Checking trainer reply conditions - chat_type: {message.chat.type}, user_id: {user_id}, trainer_id: {trainer_id}, has_reply: {bool(message.reply_to_message)}")
     if message.chat.type == "private" and user_id == trainer_id and message.reply_to_message:
-        log_debug(f"Processing trainer reply to forwarded message")
+        log_debug(f"🟣 [PRIORITY 3 ACTIVE] Processing trainer reply to forwarded message")
         reply_msg_id = message.reply_to_message.message_id
         log_debug(f"Reply to trainer_message_id={reply_msg_id}")
         original = plugin_instance.get_target(reply_msg_id)
@@ -521,19 +533,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_debug(f"Not a trainer reply - continuing to queue forwarding")
 
     # === PRIORITY 4: Forward to centralized queue (default behavior) ===
-    log_debug(f"About to forward message to queue: '{text}' from user {user_id}")
-    log_debug(f"Checking message_queue module availability")
+    log_debug(f"🔴 [PRIORITY 4 START] About to forward message to queue: '{text}' from user {user_id}")
+    log_debug(f"🔴 [PRIORITY 4] Checking message_queue module availability")
     
+    # NOTE: Do NOT modify message.thread_id - Message objects are immutable in python-telegram-bot
+    # The message_queue.enqueue() function will extract message_thread_id directly
+    log_debug(f"🔴 [PRIORITY 4] Message has message_thread_id={getattr(message, 'message_thread_id', None)}")
+    
+    log_debug(f"🔴 [PRIORITY 4] About to call message_queue.enqueue()...")
     try:
-        log_debug(f"Calling message_queue.enqueue...")
+        log_debug(f"🔴 [PRIORITY 4] Calling message_queue.enqueue now...")
         
         await message_queue.enqueue(context.bot, message, interface_id="telegram_bot", original_message=message)
         
-        log_debug(f"Message successfully enqueued - processing should continue in queue")
+        log_debug(f"🔴 [PRIORITY 4 SUCCESS] Message successfully enqueued - processing should continue in queue")
         
     except Exception as e:
-        log_error(f"message_queue enqueue failed: {repr(e)}", e)
-        log_error(f"Exception type: {type(e)}", e)
+        log_error(f"🔴 [PRIORITY 4 ERROR] message_queue enqueue failed: {repr(e)}", e)
+        log_error(f"🔴 [PRIORITY 4 ERROR] Exception type: {type(e)}", e)
+        import traceback
+        log_error(f"🔴 [PRIORITY 4 ERROR] Traceback: {traceback.format_exc()}", e)
         await message.reply_text("⚠️ Error processing message.")
         
 
@@ -1173,7 +1192,7 @@ class TelegramInterface:
                     "thread_id": {
                         "type": "integer",
                         "example": 456,
-                        "description": "Thread ID when replying in a topic/thread. OMIT this field for main chat replies (interface will use default). Only include when replying IN a specific thread!",
+                        "description": "Thread ID when replying in a topic/thread. CRITICAL: If input.payload.source.thread_id is non-null, ALWAYS include it here! Only omit if the original message has thread_id=null/0.",
                         "optional": True,
                     },
                     "message_thread_name": {
@@ -1191,6 +1210,7 @@ class TelegramInterface:
                 },
                 "important_notes": [
                     "ALWAYS specify target field - use input.payload.source.chat_id to reply in the same chat",
+                    "CRITICAL for thread conversations: If input.payload.source.thread_id exists and is non-zero, ALWAYS pass it as thread_id in your payload!",
                     "When replying to a message that was in a thread/topic, ALWAYS include thread_id to ensure the reply appears in the correct thread",
                     "If you omit thread_id when it should be included, the message may appear in the main chat instead of the thread",
                     "For group chats with topics enabled, check if the original message has a thread_id and include it in your response"

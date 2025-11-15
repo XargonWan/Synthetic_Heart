@@ -8,7 +8,7 @@ import aiomysql
 import threading
 from contextlib import asynccontextmanager
 
-from core.db import get_conn
+from core.db import get_conn_ctx
 from core.logging_utils import log_error, log_info, log_debug, log_warning
 from core.core_initializer import core_initializer, register_plugin
 
@@ -28,18 +28,15 @@ register_injection_priority()
 @asynccontextmanager
 async def get_db():
     """Context manager for MariaDB database connections."""
-    conn = None
-    try:
-        conn = await get_conn()
+    async with get_conn_ctx() as conn:
         log_debug("[bio_manager] Opened database connection")
-        yield conn
-    except Exception as e:
-        log_error(f"[bio_manager] Database error: {e}")
-        raise
-    finally:
-        if conn:
-            conn.close()
-            log_debug("[bio_manager] Connection closed")
+        try:
+            yield conn
+        except Exception as e:
+            log_error(f"[bio_manager] Database error: {e}")
+            raise
+        finally:
+            log_debug("[bio_manager] Connection released")
 
 
 JSON_LIST_FIELDS = {"known_as", "likes", "not_likes", "past_events", "feelings", "social_accounts"}
@@ -145,22 +142,16 @@ def _run(coro):
 
 
 async def _execute(query: str, params: tuple = ()) -> None:
-    conn = await get_conn()
-    try:
+    async with get_conn_ctx() as conn:
         async with conn.cursor() as cur:
             await cur.execute(query, params)
-    finally:
-        conn.close()
 
 
 async def _fetchone(query: str, params: tuple = ()):
-    conn = await get_conn()
-    try:
+    async with get_conn_ctx() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(query, params)
             return await cur.fetchone()
-    finally:
-        conn.close()
 
 
 def _ensure_table() -> None:

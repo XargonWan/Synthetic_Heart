@@ -263,9 +263,60 @@ async def handle_incoming_message(bot, message, context_memory_or_prompt, interf
                 prompt = json.loads(context_memory_or_prompt)
             except Exception as e:
                 log_warning(f"[plugin_instance] Failed to parse direct prompt: {e}")
-                prompt = await build_json_prompt(message, {}, interface_name, image_data=processed_image_data)
+                # Get model's max chars limit - try plugin, then fallback to DEFAULT
+                max_chars = None
+                try:
+                    if plugin and hasattr(plugin, 'model_limits_map'):
+                        current_model = await plugin.get_current_model() if hasattr(plugin, 'get_current_model') else None
+                        if current_model and current_model in plugin.model_limits_map:
+                            max_chars = plugin.model_limits_map[current_model]
+                except Exception:
+                    pass
+                
+                # Fallback: get from plugin's default model or use engine limits
+                if not max_chars:
+                    try:
+                        if plugin and hasattr(plugin, 'model_limits_map') and 'default' in plugin.model_limits_map:
+                            max_chars = plugin.model_limits_map['default']
+                            log_debug(f"[plugin_instance] Using default max_chars from plugin: {max_chars}")
+                    except Exception as e:
+                        log_warning(f"[plugin_instance] Failed to get default max_chars: {e}")
+                
+                log_debug(f"[plugin_instance] Exception path - max_chars={max_chars}")
+                prompt = await build_json_prompt(message, {}, interface_name, image_data=processed_image_data, max_chars=max_chars)
         else:
-            prompt = await build_json_prompt(message, context_memory_or_prompt, interface_name, image_data=processed_image_data)
+            # Get model's max chars limit - try plugin, then fallback to DEFAULT
+            max_chars = None
+            
+            # Try plugin's model_limits_map
+            try:
+                if plugin and hasattr(plugin, 'model_limits_map'):
+                    current_model = None
+                    if hasattr(plugin, 'get_current_model'):
+                        try:
+                            current_model = await plugin.get_current_model()
+                        except Exception:
+                            pass
+                    
+                    if current_model and current_model in plugin.model_limits_map:
+                        max_chars = plugin.model_limits_map[current_model]
+            except Exception:
+                pass
+            
+            # Fallback: get from plugin's default model
+            if not max_chars:
+                try:
+                    if plugin and hasattr(plugin, 'model_limits_map') and 'default' in plugin.model_limits_map:
+                        max_chars = plugin.model_limits_map['default']
+                        log_debug(f"[plugin_instance] Using default max_chars from plugin: {max_chars}")
+                except Exception as e:
+                    log_warning(f"[plugin_instance] Failed to get default max_chars: {e}")
+            
+            if max_chars is None:
+                log_error(f"[plugin_instance] max_chars is STILL None! plugin={plugin}, has model_limits_map={hasattr(plugin, 'model_limits_map') if plugin else False}")
+            
+            log_debug(f"[plugin_instance] Passing max_chars={max_chars} to build_json_prompt()")
+            prompt = await build_json_prompt(message, context_memory_or_prompt, interface_name, image_data=processed_image_data, max_chars=max_chars)
 
     prompt = sanitize_for_json(prompt)
     log_debug("🌐 JSON PROMPT built for the plugin:")

@@ -345,14 +345,21 @@ class _ConnContext:
     """
 
     async def __aenter__(self):
-        self._conn = await get_conn()
+        try:
+            self._conn = await get_conn()
+        except Exception:
+            # Mark that we failed to acquire a connection so __aexit__ knows not to release
+            self._conn = None
+            raise
         return self._conn
 
     async def __aexit__(self, exc_type, exc, tb):
-        try:
-            await release_conn(self._conn)
-        except Exception:
-            pass
+        # Only try to release if we actually acquired a connection
+        if self._conn is not None:
+            try:
+                await release_conn(self._conn)
+            except Exception:
+                pass
 
 
 def get_conn_ctx():

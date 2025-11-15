@@ -560,13 +560,11 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
                 return None
 
             # Build a correction payload similar to action_parser.corrector
-            full_json = ""
+            # NOTE: We do NOT include full_json_instructions here because:
+            # 1. It's HUGE (all available actions with full descriptions)
+            # 2. Corrector only needs the format template, not all actions
+            # 3. LLM just needs to fix the JSON structure, not learn new actions
             attempted_action_info = None
-            
-            try:
-                full_json = build_full_json_instructions()
-            except Exception:
-                full_json = {}
             
             # Try to identify which action was attempted and include its full description
             try:
@@ -577,6 +575,7 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
                 log_debug(f"[corrector_middleware] Could not extract attempted action info: {e}")
 
             # Use the thread_id from the original conversation if available
+            # The interface (e.g., telegram_bot) should have already normalized message_thread_id to thread_id
             payload_thread_id = thread_id if thread_id is not None else 0
 
             # Extract the original user message text from context if available
@@ -597,7 +596,8 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
                     "message": f"CRITICAL ERROR: Your previous response was not valid JSON. You MUST respond with ONLY valid JSON. {last_error_hint}",
                     "your_reply": text,
                     "original_user_message": original_user_message,
-                    "full_json_instructions": full_json,
+                    "chat_id": chat_id,
+                    "thread_id": payload_thread_id,
                 }
             }
             
@@ -633,7 +633,7 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
             correction_message = SimpleNamespace()
             correction_message.chat_id = chat_id or getattr(bot, 'chat_id', None) or -1
             correction_message.text = correction_prompt
-            correction_message.thread_id = thread_id  # Use thread_id from original conversation
+            correction_message.thread_id = payload_thread_id  # Use thread_id from original conversation
             correction_message.date = None
             correction_message.from_user = None
             correction_message.chat = SimpleNamespace(id=correction_message.chat_id, type='private')

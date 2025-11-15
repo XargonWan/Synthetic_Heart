@@ -10,7 +10,7 @@ import os
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from typing import Dict, Any, Optional, List
 from datetime import datetime
-from core.prompt_engine import build_full_json_instructions
+from core.prompt_engine import build_full_json_instructions, build_minified_json_instructions
 
 CORRECTOR_RETRIES = int(os.getenv("CORRECTOR_RETRIES", "2"))
 
@@ -90,7 +90,8 @@ class AutoResponseSystem:
             mock_message.chat.first_name = "AutoResponse"
             mock_message.chat.type = "private"
             
-            full_json = build_full_json_instructions()
+            # Use minified version to reduce token usage in auto_response scenarios
+            full_json = build_minified_json_instructions()
             if action_outputs is not None:
                 message_block = {"action_outputs": action_outputs}
             else:

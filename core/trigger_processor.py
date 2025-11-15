@@ -1,6 +1,6 @@
 # core/trigger_processor.py
 
-from core.db import get_conn
+from core.db import get_conn_ctx
 from datetime import datetime, timedelta, timezone
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 import aiomysql
@@ -24,14 +24,15 @@ async def process_triggers_for_emotion(emotion: dict) -> int:
         WHERE timestamp >= %s AND scope = %s
         ORDER BY timestamp DESC
     """
-    conn = await get_conn()
-    try:
-        async with conn.cursor() as cur:
-            await cur.execute(query, (since.isoformat(), scope))
-            rows = await cur.fetchall()
-            contents = [row[0] for row in rows]
-    finally:
-        conn.close()
+    async with get_conn_ctx() as conn:
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(query, (since.isoformat(), scope))
+                rows = await cur.fetchall()
+                contents = [row[0] for row in rows]
+        except Exception as e:
+            log_error(f"[trigger_processor] Error fetching memories: {e}")
+            contents = []
 
     # Simple heuristic: look for reinforcing or softening keywords
     reinforce_keywords = {

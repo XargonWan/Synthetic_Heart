@@ -274,7 +274,7 @@ async def handle_incoming_message(bot, message: Optional[SimpleNamespace], text:
         # Request correction from LLM via transport-layer middleware
         try:
             log_info(f"[message_chain] Calling corrector middleware for attempt={attempt}...")
-            corrected = await run_corrector_middleware(text, bot=bot, context=ctx, chat_id=getattr(message, 'chat_id', None))
+            corrected = await run_corrector_middleware(text, bot=bot, context=ctx, chat_id=getattr(message, 'chat_id', None), thread_id=getattr(message, 'thread_id', None))
             log_info(f"[message_chain] Corrector returned: corrected={corrected is not None} len={len(corrected) if corrected else 0}")
         except Exception as e:
             failure_reason = f"Corrector middleware exception: {str(e)}"

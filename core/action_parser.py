@@ -720,7 +720,8 @@ IMPORTANT: Do not include the {successful_count} actions that were already execu
             text=correction_context["instruction"],
             bot=bot,
             context={**context, "selective_correction": True, "correction_context": correction_context},
-            chat_id=getattr(original_message, 'chat_id', None)
+            chat_id=getattr(original_message, 'chat_id', None),
+            thread_id=getattr(original_message, 'thread_id', None)
         )
     except Exception as e:
         log_error(f"[action_parser] Failed to request selective correction: {e}")
@@ -1178,8 +1179,13 @@ async def gather_static_injections(message=None, context_memory=None) -> dict:
     """
 
     injections: dict = {}
+    log_debug(f"[action_parser] 🔍 gather_static_injections() CALLED")
     try:
-        for plugin in _load_action_plugins():
+        plugins_list = _load_action_plugins()
+        log_debug(f"[action_parser] Found {len(list(plugins_list))} plugins to check for static_inject")
+        plugins_list = _load_action_plugins()  # Reload since we consumed it in len()
+        
+        for plugin in plugins_list:
             try:
                 supported = False
                 if hasattr(plugin, "get_supported_action_types"):
@@ -1192,9 +1198,15 @@ async def gather_static_injections(message=None, context_memory=None) -> dict:
                         supported = "static_inject" in acts
                     elif isinstance(acts, (list, set, tuple)):
                         supported = "static_inject" in acts
-                if not supported or not hasattr(plugin, "get_static_injection"):
+                
+                has_method = hasattr(plugin, "get_static_injection")
+                log_debug(f"[action_parser] Plugin {plugin.__class__.__name__}: supported={supported}, has_method={has_method}")
+                
+                if not supported or not has_method:
                     continue
 
+                log_debug(f"[action_parser] 🎯 Calling get_static_injection() on {plugin.__class__.__name__}")
+                
                 # Pass message and context_memory if the plugin expects them
                 try:
                     result = plugin.get_static_injection(message, context_memory)
@@ -1207,6 +1219,9 @@ async def gather_static_injections(message=None, context_memory=None) -> dict:
 
                 if inspect.iscoroutine(result):
                     result = await result
+                    
+                log_debug(f"[action_parser] ✅ Got result from {plugin.__class__.__name__}: {result}")
+                
                 if isinstance(result, dict):
                     injections.update(result)
             except Exception as e:
@@ -1215,6 +1230,8 @@ async def gather_static_injections(message=None, context_memory=None) -> dict:
                 )
     except Exception as e:
         log_error(f"[action_parser] Error collecting static injections: {e}")
+    
+    log_debug(f"[action_parser] 📊 gather_static_injections() returning {len(injections)} keys: {list(injections.keys())}")
     return injections
 
 

@@ -9,17 +9,20 @@ SERVICE_URL = "https://chat.openai.com"
 MODEL_CONFIG_VAR = "CHATGPT_MODEL"
 DEFAULT_MODEL = "gpt-4o"
 
-# ChatGPT-specific model limits (character context limits)
+# ChatGPT-specific model limits - ALL VALUES ARE IN CHARACTERS, NOT TOKENS
+# These are practical character limits for transmission via Selenium UI textarea
+# The numbers represent the maximum number of characters we will send in a single prompt
+# These are CONSERVATIVE limits to work reliably without ChatGPT Plus
 MODEL_LIMITS_MAP = {
-    "gpt-4o": 128000,        # 128k tokens context (~400k characters)
-    "gpt-4o-mini": 128000,   # 128k tokens context (~400k characters)
-    "gpt-4-turbo": 128000,   # 128k tokens context (~400k characters)
-    "gpt-4": 128000,         # 8k tokens context (~24k characters)
-    "gpt-3.5-turbo": 16000,  # 16k tokens context (~48k characters)
-    "o1-preview": 128000,    # 128k tokens context (~400k characters)
-    "o1-mini": 128000,       # 128k tokens context (~400k characters)
-    "unlogged": 21500,       # Limited context for free tier
-    "default": 128000        # Safe default for unknown models
+    "gpt-4o": 60000,         # 60,000 characters max
+    "gpt-4o-mini": 60000,    # 60,000 characters max
+    "gpt-4-turbo": 50000,    # 50,000 characters max
+    "gpt-4": 40000,          # 40,000 characters max
+    "gpt-3.5-turbo": 30000,  # 30,000 characters max
+    "o1-preview": 50000,     # 50,000 characters max
+    "o1-mini": 50000,        # 50,000 characters max
+    "unlogged": 20000,       # 20,000 characters max (free tier limited)
+    "default": 51000         # 51,000 characters max (safe default for unknown models)
 }
 
 class SeleniumChatGPTPlugin(SeleniumLLMBase):
@@ -42,6 +45,11 @@ class SeleniumChatGPTPlugin(SeleniumLLMBase):
         
         # Update interface limits based on current model
         self._update_interface_limits()
+        
+        # Register the ChatGPT limits globally so selenium_llm_base can use them
+        from core.selenium_llm_base import set_active_selenium_limits
+        default_limit = MODEL_LIMITS_MAP.get("default", 51000)
+        set_active_selenium_limits(default_limit, "chatgpt")
         
         # Set up ChatGPT-specific selectors - the base will use these for automation
         self.selectors["prompt_area"] = [
@@ -141,14 +149,24 @@ class SeleniumChatGPTPlugin(SeleniumLLMBase):
         
         If logged in, returns the configured model or default.
         If not logged in, returns 'unlogged' with reduced limits.
+        Also updates the global selenium limits when model changes.
         """
         # Auto-detection: if not logged in, use unlogged model
         if not self.is_user_logged_in():
             log_debug("[selenium_chatgpt] User not logged in, using 'unlogged' model")
-            return "unlogged"
+            model = "unlogged"
+        else:
+            # User is logged in, return configured model
+            model = self._get_current_model_name()
         
-        # User is logged in, return configured model
-        return self._get_current_model_name()
+        # Update global limits for this model
+        if model in self.model_limits_map:
+            limit = self.model_limits_map[model]
+            from core.selenium_llm_base import set_active_selenium_limits
+            set_active_selenium_limits(limit, f"chatgpt_{model}")
+            log_debug(f"[selenium_chatgpt] Updated global limits for model {model}: {limit} chars")
+        
+        return model
 
     def get_interface_limits(self) -> dict:
         """Get the limits and capabilities for Selenium ChatGPT interface."""

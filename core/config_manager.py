@@ -541,31 +541,32 @@ class ConfigRegistry:
     async def _load_from_db(self, key: str) -> Optional[str]:
         try:
             log_debug(f"[config] About to import from core.db for key '{key}'")
-            from core.db import get_conn, ensure_core_tables
+            from core.db import get_conn_ctx, ensure_core_tables
             log_debug(f"[config] Successfully imported from core.db for key '{key}'")
         except ImportError as e:
             # Circular import during initialization - skip DB load
             print(f"[config] Skipping DB load for '{key}' during initialization: {e}", flush=True)
             return None
 
-        log_debug(f"[config] About to ensure_core_tables for key '{key}'")
-        await ensure_core_tables()
-        log_debug(f"[config] ensure_core_tables completed for key '{key}'")
-        log_debug(f"[config] About to get_conn for key '{key}'")
-        conn = await get_conn()
-        log_debug(f"[config] get_conn completed for key '{key}'")
         try:
-            async with conn.cursor() as cur:
-                log_debug(f"[config] About to execute query for key '{key}'")
-                await cur.execute("SELECT value FROM config WHERE config_key = %s", (key,))
-                log_debug(f"[config] Query executed for key '{key}'")
-                row = await cur.fetchone()
-                log_debug(f"[config] fetchone completed for key '{key}': {row}")
-                if row:
-                    return row[0]
-        finally:
-            conn.close()
-        return None
+            log_debug(f"[config] About to ensure_core_tables for key '{key}'")
+            await ensure_core_tables()
+            log_debug(f"[config] ensure_core_tables completed for key '{key}'")
+            log_debug(f"[config] About to get_conn_ctx for key '{key}'")
+            async with get_conn_ctx() as conn:
+                log_debug(f"[config] get_conn_ctx completed for key '{key}'")
+                async with conn.cursor() as cur:
+                    log_debug(f"[config] About to execute query for key '{key}'")
+                    await cur.execute("SELECT value FROM config WHERE config_key = %s", (key,))
+                    log_debug(f"[config] Query executed for key '{key}'")
+                    row = await cur.fetchone()
+                    log_debug(f"[config] fetchone completed for key '{key}': {row}")
+                    if row:
+                        return row[0]
+            return None
+        except Exception as e:
+            log_error(f"[config] Error loading from DB for key '{key}': {e}")
+            return None
 
     def _persist_background(self, key: str, value: str) -> None:
         try:
@@ -586,7 +587,7 @@ class ConfigRegistry:
         """
         try:
             try:
-                from core.db import get_conn, ensure_core_tables
+                from core.db import get_conn_ctx, ensure_core_tables
             except ImportError as e:
                 # Circular import during initialization - skip DB persist
                 print(f"[config] Skipping DB persist for '{key}' during initialization: {e}", flush=True)
@@ -596,58 +597,48 @@ class ConfigRegistry:
             await ensure_core_tables()
 
             log_debug(f"[config] Attempting to acquire DB connection to persist '{key}'")
-            try:
-                conn = await get_conn()
+            async with get_conn_ctx() as conn:
                 log_debug(f"[config] Acquired DB connection for persisting '{key}': conn_id={id(conn)}")
-            except Exception as e:
-                log_warning(f"[config] Unable to acquire DB connection to persist '{key}': {e}")
-                return False
-
-            try:
-                log_debug(f"[config] Checking existence for key='{key}' before persist")
-                recreated = False
-                async with conn.cursor() as cur:
-                    await cur.execute("SELECT 1 FROM config WHERE config_key = %s", (key,))
-                    row = await cur.fetchone()
-                    if not row:
-                        recreated = True
-
-                log_debug(f"[config] Executing REPLACE for key='{key}' (value_len={len(value) if value else 0})")
                 try:
+                    log_debug(f"[config] Checking existence for key='{key}' before persist")
+                    recreated = False
                     async with conn.cursor() as cur:
-                        await cur.execute(
-                            "REPLACE INTO config (config_key, value) VALUES (%s, %s)",
-                            (key, value),
-                        )
-                        await conn.commit()
-                    log_debug(f"[config] REPLACE succeeded for key='{key}'")
-                    if recreated:
-                        log_warning(f"[config] Config key '{key}' was missing from DB and has been recreated with the new value")
-                    return True
-                except Exception:
-                    # Some MySQL variants or permissions could reject REPLACE; try robust fallback
-                    log_debug(f"[config] REPLACE failed for key='{key}', attempting INSERT ... ON DUPLICATE KEY UPDATE fallback")
-                    async with conn.cursor() as cur:
-                        await cur.execute(
-                            "INSERT INTO config (config_key, value) VALUES (%s, %s) ON DUPLICATE KEY UPDATE value = VALUES(value)",
-                            (key, value),
-                        )
-                        await conn.commit()
-                    log_debug(f"[config] Fallback INSERT succeeded for key='{key}'")
-                    if recreated:
-                        log_warning(f"[config] Config key '{key}' was missing from DB and has been recreated with the new value (fallback path)")
-                    return True
-            except Exception as e:
-                # Log full traceback to help diagnose failures (timeouts, connection reset, schema error)
-                import traceback
-                tb = traceback.format_exc()
-                log_error(f"[config] Failed to persist '{key}' to DB: {e} -- traceback:\n{tb}")
-                return False
-            finally:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
+                        await cur.execute("SELECT 1 FROM config WHERE config_key = %s", (key,))
+                        row = await cur.fetchone()
+                        if not row:
+                            recreated = True
+
+                    log_debug(f"[config] Executing REPLACE for key='{key}' (value_len={len(value) if value else 0})")
+                    try:
+                        async with conn.cursor() as cur:
+                            await cur.execute(
+                                "REPLACE INTO config (config_key, value) VALUES (%s, %s)",
+                                (key, value),
+                            )
+                            await conn.commit()
+                        log_debug(f"[config] REPLACE succeeded for key='{key}'")
+                        if recreated:
+                            log_warning(f"[config] Config key '{key}' was missing from DB and has been recreated with the new value")
+                        return True
+                    except Exception:
+                        # Some MySQL variants or permissions could reject REPLACE; try robust fallback
+                        log_debug(f"[config] REPLACE failed for key='{key}', attempting INSERT ... ON DUPLICATE KEY UPDATE fallback")
+                        async with conn.cursor() as cur:
+                            await cur.execute(
+                                "INSERT INTO config (config_key, value) VALUES (%s, %s) ON DUPLICATE KEY UPDATE value = VALUES(value)",
+                                (key, value),
+                            )
+                            await conn.commit()
+                        log_debug(f"[config] Fallback INSERT succeeded for key='{key}'")
+                        if recreated:
+                            log_warning(f"[config] Config key '{key}' was missing from DB and has been recreated with the new value (fallback path)")
+                        return True
+                except Exception as e:
+                    # Log full traceback to help diagnose failures (timeouts, connection reset, schema error)
+                    import traceback
+                    tb = traceback.format_exc()
+                    log_error(f"[config] Failed to persist '{key}' to DB: {e} -- traceback:\n{tb}")
+                    return False
         except Exception as exc:  # pragma: no cover - defensive
             log_error(f"[config] Unexpected error while persisting '{key}': {exc}")
             return False

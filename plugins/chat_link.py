@@ -357,8 +357,7 @@ class ChatLinkStore:
         """List all stored chat links, optionally filtered by interface."""
         await self._ensure_table()
         
-        conn = await get_conn()
-        try:
+        async with get_conn_ctx() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cursor:
                 if interface:
                     await cursor.execute(
@@ -377,8 +376,6 @@ class ChatLinkStore:
                         """
                     )
                 return await cursor.fetchall()
-        finally:
-            conn.close()
 
 
 class ChatLinkPlugin:

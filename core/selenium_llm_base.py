@@ -65,6 +65,7 @@ import core.recent_chats as recent_chats
 from core.ai_plugin_base import AIPluginBase
 from core.action_parser import CORRECTOR_RETRIES
 from core.message_chain import RESPONSE_TIMEOUT
+from core.prompt_engine import reduce_json_text_for_transmission
 
 # Use global timeout
 AWAIT_RESPONSE_TIMEOUT = RESPONSE_TIMEOUT
@@ -87,7 +88,8 @@ _shared_driver_ref_count = 0
 
 # Global prompt character limit from the active Selenium LLM engine
 # Updated when an engine is loaded or model is switched
-_active_selenium_max_prompt_chars = 128000  # Default safe value
+# Default value comes from ChatGPT's MODEL_LIMITS_MAP["default"] = 51,000
+_active_selenium_max_prompt_chars = 51000  # Safe default (ChatGPT default), will be updated when engine loads
 _active_selenium_llm_name = "unknown"  # Track which Selenium engine is active
 
 
@@ -1557,14 +1559,45 @@ class SeleniumLLMBase(AIPluginBase):
                 removed_chars = len(prompt_text) - len(filtered_prompt)
                 log_warning(f"[selenium] Filtered {removed_chars} non-BMP characters from prompt")
             
-            # Check prompt length and truncate if too long
-            max_prompt_length = 100000  # Realistic limit for textarea content
-            if len(filtered_prompt) > max_prompt_length:
-                original_length = len(filtered_prompt)
-                filtered_prompt = filtered_prompt[:max_prompt_length]
-                log_warning(f"[selenium] Prompt truncated from {original_length} to {max_prompt_length} characters")
+            # Try intelligent reduction for JSON prompts (removes only oldest memories)
+            # The goal is to fit within the MODEL's actual character/token limits
+            # 
+            # Get the active model's limit dynamically - this is the SOURCE OF TRUTH
+            # not arbitrary UI limits or fallbacks
+            global _active_selenium_max_prompt_chars
+            model_limit = _active_selenium_max_prompt_chars  # Fallback to global limit
+            try:
+                if hasattr(self, 'llm_registry') and self.llm_registry:
+                    active_llm = getattr(self.llm_registry, 'active_llm', None)
+                    if active_llm and hasattr(active_llm, 'get_model_context_length'):
+                        try:
+                            model_limit = active_llm.get_model_context_length()
+                            log_debug(f"[selenium] Got model limit from registry: {model_limit}")
+                        except Exception:
+                            log_debug(f"[selenium] Could not fetch model limit from active_llm")
+            except Exception as e:
+                log_debug(f"[selenium] Could not fetch model limit: {e}")
             
-            log_debug(f"[selenium] About to clear textarea and send prompt")
+            # Apply intelligent reduction if prompt exceeds model limit
+            if len(filtered_prompt) > model_limit:
+                try:
+                    # Try to reduce as JSON (intelligently removes oldest memories)
+                    reduced_json = reduce_json_text_for_transmission(filtered_prompt, model_limit)
+                    if len(reduced_json) < len(filtered_prompt):
+                        filtered_prompt = reduced_json
+                        log_info(f"[selenium] Applied intelligent JSON reduction: {len(prompt_text)} → {len(filtered_prompt)} chars (model limit: {model_limit})")
+                    else:
+                        # Fallback: dumb truncation to model limit
+                        original_length = len(filtered_prompt)
+                        filtered_prompt = filtered_prompt[:model_limit]
+                        log_warning(f"[selenium] Dumb truncation: {original_length} → {len(filtered_prompt)} chars (model limit: {model_limit})")
+                except Exception as e:
+                    log_debug(f"[selenium] Intelligent reduction failed: {e}, falling back to dumb truncation")
+                    original_length = len(filtered_prompt)
+                    filtered_prompt = filtered_prompt[:model_limit]
+                    log_warning(f"[selenium] Fallback dumb truncation: {original_length} → {len(filtered_prompt)} chars (model limit: {model_limit})")
+            
+            log_debug(f"[selenium] About to clear textarea and send prompt (size: {len(filtered_prompt)}, model limit: {model_limit})")
             
             # Wait for textarea to be ready for input
             WebDriverWait(self.driver, 10).until(

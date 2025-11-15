@@ -1252,10 +1252,9 @@ class SynthWebUIInterface:
 
         try:
             # Get total count first
-            from core.db import get_conn
+            from core.db import get_conn_ctx
             
-            conn = await get_conn()
-            try:
+            async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     if include_archived:
                         await cur.execute("SELECT COUNT(*) FROM ai_diary")
@@ -1267,8 +1266,6 @@ class SynthWebUIInterface:
                         await cur.execute("SELECT COUNT(*) FROM ai_diary")
                         result = await cur.fetchone()
                         total_count = result[0] if result else 0
-            finally:
-                conn.close()
             
             payload["total_count"] = total_count
             payload["total_pages"] = (total_count + per_page - 1) // per_page if per_page != 'unlimited' else 1
@@ -1282,8 +1279,7 @@ class SynthWebUIInterface:
                 limit = per_page
             
             # Fetch paginated entries
-            conn = await get_conn()
-            try:
+            async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     # Build search condition
                     search_condition = ""
@@ -1367,8 +1363,6 @@ class SynthWebUIInterface:
                                 raise
                     
                     rows = await cur.fetchall()
-            finally:
-                conn.close()
             
             # Convert rows to entries format
             entries = []
