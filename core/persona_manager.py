@@ -1019,9 +1019,6 @@ class PersonaManager(PluginBase):
         # Basic identity
         content_parts.append(f"PERSONA IDENTITY:")
         content_parts.append(f"Name: {persona.name}")
-        
-        if persona.aliases:
-            content_parts.append(f"Also known as: {', '.join(persona.aliases)}")
             
         if persona.profile:
             # Add the required prefix text
