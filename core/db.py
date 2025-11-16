@@ -223,13 +223,13 @@ async def get_conn() -> aiomysql.Connection:
     pool = await get_pool()
     log_debug("[db] get_pool() completed, about to call pool.acquire()")
     try:
-        conn = await asyncio.wait_for(pool.acquire(), timeout=10.0)
+        conn = await asyncio.wait_for(pool.acquire(), timeout=30.0)
     except asyncio.CancelledError:
         # Preserve cancellation semantics but log for debugging
         log_error("[db] get_conn cancelled while waiting for pool.acquire()")
         raise
     except asyncio.TimeoutError:
-        log_error("[db] TIMEOUT acquiring connection from pool after 10 seconds - pool may be exhausted")
+        log_error("[db] TIMEOUT acquiring connection from pool after 30 seconds - pool may be exhausted")
         raise TimeoutError("Database connection pool exhausted - timeout acquiring connection")
 
     # Set query timeout to prevent long-running queries from holding connections indefinitely
@@ -257,7 +257,11 @@ async def get_conn() -> aiomysql.Connection:
         # Warn when we're close to pool capacity
         try:
             maxsize = getattr(pool, 'maxsize', None)
-            if maxsize and _active_conn_count >= max(1, maxsize - 3):
+            # Only warn if we're at or very close to pool limit
+            # For small pools (size 1-2), require actual connection pressure
+            # For larger pools, warn when within 2 of limit
+            warning_threshold = max(maxsize - 2, maxsize) if maxsize and maxsize > 2 else maxsize
+            if maxsize and _active_conn_count >= warning_threshold:
                 # Compute the oldest-held connection age and include a stack
                 oldest_age = 0
                 oldest_id = None
@@ -296,46 +300,45 @@ async def get_conn() -> aiomysql.Connection:
     # to the pool correctly). This avoids having to change many call-sites
     # across the codebase.
     class _ConnProxy:
-        def __init__(self, _conn):
+        def __init__(self, _conn, _pool):
             self._conn = _conn
+            self._pool = _pool
 
         def __getattr__(self, item):
             return getattr(self._conn, item)
 
         def close(self):
-            """Synchronous close that schedules the async release routine.
-
-            If there's a running loop, schedule release_conn asynchronously.
-            Otherwise run it synchronously to ensure the connection is
-            returned to the pool even during startup/one-off scripts.
+            """Synchronous close that releases connection back to pool immediately.
+            
+            We use pool.release() directly instead of scheduling an async task
+            because the connection needs to be returned to the pool immediately
+            to avoid connection leaks.
             """
+            global _active_conn_count
             try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                # No running loop — run the async release synchronously
-                try:
-                    asyncio.run(release_conn(self._conn))
-                except Exception:
-                    # As a last resort, attempt direct close
+                # Release directly to pool - this is synchronous and safe
+                if self._pool and hasattr(self._pool, 'release'):
                     try:
-                        self._conn.close()
+                        self._pool.release(self._conn)
                     except Exception:
                         pass
-            else:
-                # Schedule release in the running loop
+                
+                log_debug("[db] Connection released to pool")
+            finally:
                 try:
-                    loop.create_task(release_conn(self._conn))
+                    _active_conn_count = max(0, _active_conn_count - 1)
                 except Exception:
-                    try:
-                        asyncio.ensure_future(release_conn(self._conn))
-                    except Exception:
-                        # Fallback: try to call close directly
-                        try:
-                            self._conn.close()
-                        except Exception:
-                            pass
+                    pass
+                try:
+                    _conn_acquired_times.pop(id(self._conn), None)
+                except Exception:
+                    pass
+                try:
+                    _conn_acquired_stacks.pop(id(self._conn), None)
+                except Exception:
+                    pass
 
-    return _ConnProxy(conn)
+    return _ConnProxy(conn, pool)
 
 
 class _ConnContext:

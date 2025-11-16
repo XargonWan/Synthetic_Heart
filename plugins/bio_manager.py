@@ -1035,7 +1035,7 @@ class BioPlugin:
         update_bio_fields(user_id, updates)
         log_info(f"[bio_manager] Updated user_name for {user_id}: '{new_name}' (moved '{current_name}' to known_as)")
 
-    def resolve_user_info(user_identifier: str) -> tuple[str, str] | None:
+    async def resolve_user_info(user_identifier: str) -> tuple[str, str] | None:
         """Resolve user identifier to (user_id, user_name) tuple.
         
         Args:
@@ -1055,28 +1055,28 @@ class BioPlugin:
         
         # Search through all users for a match in user_name or known_as
         try:
-            conn = get_conn()
-            cursor = conn.cursor()
-            
-            # Search by user_name
-            cursor.execute("SELECT id, user_name FROM bio WHERE user_name = %s", (user_identifier,))
-            result = cursor.fetchone()
-            if result:
-                return (result[0], result[1])
-            
-            # Search by known_as (more complex since it's JSON)
-            cursor.execute("SELECT id, user_name, known_as FROM bio")
-            for row in cursor.fetchall():
-                user_id, user_name, known_as_json = row
-                try:
-                    known_as = json.loads(known_as_json) if known_as_json else []
-                    if user_identifier in known_as:
-                        return (user_id, user_name or user_id)
-                except:
-                    continue
-                
-            conn.close()
-            return None
+            async with get_conn_ctx() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    # Search by user_name
+                    await cursor.execute("SELECT id, user_name FROM bio WHERE user_name = %s", (user_identifier,))
+                    result = await cursor.fetchone()
+                    if result:
+                        return (str(result.get("id")), result.get("user_name", user_identifier))
+                    
+                    # Search by known_as (more complex since it's JSON)
+                    await cursor.execute("SELECT id, user_name, known_as FROM bio")
+                    for row in await cursor.fetchall():
+                        user_id = str(row.get("id"))
+                        user_name = row.get("user_name") or user_id
+                        known_as_json = row.get("known_as")
+                        try:
+                            known_as = json.loads(known_as_json) if known_as_json else []
+                            if user_identifier in known_as:
+                                return (user_id, user_name)
+                        except:
+                            continue
+                    
+                    return None
             
         except Exception as e:
             log_warning(f"[bio_manager] Error resolving user {user_identifier}: {e}")

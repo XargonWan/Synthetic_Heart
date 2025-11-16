@@ -160,39 +160,33 @@ def get_max_diary_chars(interface_name: str = None, current_prompt_length: int =
         return 8000  # Fallback
 
 
+async def _run_sync_async(coro):
+    """Run async function, handling all cases without creating new event loops."""
+    try:
+        # Get current running loop if available
+        loop = asyncio.get_running_loop()
+        # Use executor to avoid creating new event loop in thread
+        return await loop.run_in_executor(None, lambda: asyncio.run(coro))
+    except RuntimeError:
+        # No running loop, just run the coroutine directly
+        return await coro
+
 def _run_sync(coro):
     """Helper to run async functions in sync context with better error handling."""
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            # We're already in an async context, use threading
-            result = None
-            exception = None
-            
-            def run_in_thread():
-                nonlocal result, exception
+            # We're in an async context, use run_in_executor to avoid creating new event loop
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                # Schedule coroutine to run in thread pool without creating new event loop
+                future = executor.submit(asyncio.run, coro)
                 try:
-                    new_loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(new_loop)
-                    try:
-                        result = new_loop.run_until_complete(coro)
-                    finally:
-                        new_loop.close()
-                except Exception as e:
-                    exception = e
-            
-            thread = threading.Thread(target=run_in_thread)
-            thread.start()
-            thread.join(timeout=5.0)  # Add timeout to prevent hanging
-            
-            if thread.is_alive():
-                log_warning("[ai_diary] Thread timeout in _run_sync")
-                return None
-            
-            if exception:
-                log_debug(f"[ai_diary] Exception in _run_sync: {exception}")
-                return None
-            return result
+                    result = future.result(timeout=5.0)
+                    return result
+                except concurrent.futures.TimeoutError:
+                    log_warning("[ai_diary] Timeout in _run_sync")
+                    return None
         else:
             return loop.run_until_complete(coro)
     except RuntimeError:

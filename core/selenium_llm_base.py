@@ -1550,14 +1550,29 @@ class SeleniumLLMBase(AIPluginBase):
                 self._dismiss_modal_with_selectors(self.driver, modal_selectors)
             
             # Filter out non-BMP characters that ChromeDriver can't handle
+            # NOTE: Modern ChromeDriver supports full Unicode, so this should rarely happen
+            # Only filter if the prompt becomes suspiciously small after filtering
             def filter_bmp_chars(text):
                 """Filter out characters outside the Basic Multilingual Plane (BMP)."""
                 return ''.join(char for char in text if ord(char) <= 0xFFFF)
             
-            filtered_prompt = filter_bmp_chars(prompt_text)
+            # First, try to use the full prompt as-is
+            filtered_prompt = prompt_text
+            
+            # Only apply BMP filtering if the prompt seems to have problematic characters
+            # (This is a safety measure for older ChromeDriver versions)
+            try:
+                # Try to encode as UTF-8 to check for issues
+                prompt_text.encode('utf-8')
+                # If encoding works, use the original prompt
+                log_debug(f"[selenium] Prompt encoded successfully as UTF-8, no filtering needed")
+            except Exception as e:
+                log_warning(f"[selenium] Prompt encoding issue: {e}, applying BMP filter")
+                filtered_prompt = filter_bmp_chars(prompt_text)
+            
             if len(filtered_prompt) != len(prompt_text):
                 removed_chars = len(prompt_text) - len(filtered_prompt)
-                log_warning(f"[selenium] Filtered {removed_chars} non-BMP characters from prompt")
+                log_warning(f"[selenium] Filtered {removed_chars} characters from prompt")
             
             # Try intelligent reduction for JSON prompts (removes only oldest memories)
             # The goal is to fit within the MODEL's actual character/token limits

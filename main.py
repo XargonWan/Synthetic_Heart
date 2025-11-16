@@ -149,30 +149,6 @@ if __name__ == "__main__":
     setup_logging()
     log_info("[main] Starting synth application...")
     
-    # Test DB connectivity and initialize tables with retry mechanism
-    import time
-    max_retries = 30
-    retry_delay = 2
-    
-    for attempt in range(max_retries):
-        try:
-            log_info(f"[main] Attempting database connection (attempt {attempt + 1}/{max_retries})...")
-            
-            # Initialize database async
-            if asyncio.run(initialize_database()):
-                break
-            else:
-                raise Exception("Database initialization failed")
-            
-        except Exception as e:
-            if attempt < max_retries - 1:
-                log_warning(f"[main] Database connection attempt {attempt + 1} failed: {e}")
-                log_info(f"[main] Retrying in {retry_delay} seconds...")
-                time.sleep(retry_delay)
-            else:
-                log_error(f"[main] Critical error during database initialization after {max_retries} attempts: {e}")
-                sys.exit(1)
-
     # 🌐 Show where the Webtop/VNC interface is available
     host = os.environ.get("WEBVIEW_HOST", "localhost")
     port = os.environ.get("WEBVIEW_PORT", "3000")
@@ -184,6 +160,37 @@ if __name__ == "__main__":
     async def start_application():
         """Start the application and handle restart requests."""
         global _restart_requested, _restart_event
+        
+        # Test DB connectivity and initialize tables with retry mechanism
+        # This must be done in the main event loop to avoid creating separate pools
+        
+        # Register main loop with notifier so it doesn't create new event loops
+        from core.notifier import _set_main_loop
+        loop = asyncio.get_running_loop()
+        _set_main_loop(loop)
+        
+        import time
+        max_retries = 30
+        retry_delay = 2
+        
+        for attempt in range(max_retries):
+            try:
+                log_info(f"[main] Attempting database connection (attempt {attempt + 1}/{max_retries})...")
+                
+                # Initialize database async
+                if await initialize_database():
+                    break
+                else:
+                    raise Exception("Database initialization failed")
+                
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    log_warning(f"[main] Database connection attempt {attempt + 1} failed: {e}")
+                    log_info(f"[main] Retrying in {retry_delay} seconds...")
+                    await asyncio.sleep(retry_delay)
+                else:
+                    log_error(f"[main] Critical error during database initialization after {max_retries} attempts: {e}")
+                    sys.exit(1)
         
         while True:
             _restart_requested = False

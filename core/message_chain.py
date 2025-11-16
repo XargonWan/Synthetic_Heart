@@ -58,11 +58,19 @@ RESPONSE_TIMEOUT = config_registry.get_var(
 
 def get_failed_message_text() -> str:
     """Get the fallback message when LLM fails."""
-    return FAILED_MESSAGE_TEXT
+    fallback = FAILED_MESSAGE_TEXT
+    # Ensure we return a string (ConfigVar might be returned)
+    if hasattr(fallback, 'get_value'):
+        fallback = fallback.get_value()
+    return str(fallback)
 
 async def send_llm_fallback_message(bot, message: SimpleNamespace, failure_reason: str) -> str:
     """Send fallback message when LLM fails and log the failure reason."""
     fallback_text = get_failed_message_text()
+    # Ensure fallback_text is a string (ConfigVar might be returned)
+    if hasattr(fallback_text, 'get_value'):
+        fallback_text = fallback_text.get_value()
+    fallback_text = str(fallback_text)
     chat_id = getattr(message, 'chat_id', None)
     
     # Log detailed error

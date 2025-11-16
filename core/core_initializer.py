@@ -1368,5 +1368,25 @@ def _schedule_rebuild_actions(core_init_instance):
     global _action_rebuild_timer
     if _action_rebuild_timer:
         _action_rebuild_timer.cancel()
-    _action_rebuild_timer = threading.Timer(_ACTION_REBUILD_DEBOUNCE_SEC, lambda: asyncio.run(core_init_instance._build_actions_block()))
+    
+    def rebuild_with_main_loop():
+        """Run rebuild on main event loop to avoid creating new event loops."""
+        try:
+            # Try to get the main event loop
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # Schedule as a task on the running loop
+                asyncio.create_task(core_init_instance._build_actions_block())
+            else:
+                # If loop exists but not running, run until complete
+                loop.run_until_complete(core_init_instance._build_actions_block())
+        except RuntimeError:
+            # No event loop at all - this is a fallback but shouldn't happen
+            try:
+                asyncio.run(core_init_instance._build_actions_block())
+            except Exception as e:
+                from core.logging_utils import log_debug
+                log_debug(f"[core_initializer] Error rebuilding actions: {e}")
+    
+    _action_rebuild_timer = threading.Timer(_ACTION_REBUILD_DEBOUNCE_SEC, rebuild_with_main_loop)
     _action_rebuild_timer.start()
