@@ -104,7 +104,7 @@ Creating a new plugin is straightforward. All plugins should extend ``AIPluginBa
 Action Plugin
 ~~~~~~~~~~~~~
 
-Action plugins provide executable actions that can be called via JSON:
+Action plugins provide executable actions that can be called via JSON. Actions are defined using a structured schema format that optimizes prompt size while maintaining full functionality.
 
 .. code-block:: python
 
@@ -123,26 +123,43 @@ Action plugins provide executable actions that can be called via JSON:
            return ["my_action"]
 
        def get_supported_actions(self) -> dict:
-           """Return schema for all supported actions."""
+           """Return schema for all supported actions using the new optimized format."""
            return {
                "my_action": {
-                   "description": "Perform a custom action",
-                   "required_fields": ["value"],
-                   "optional_fields": ["option"],
-               }
-           }
-
-       def get_prompt_instructions(self, action_name: str) -> dict:
-           """Provide LLM instructions for using this action."""
-           if action_name == "my_action":
-               return {
-                   "description": "Execute my custom action with a value.",
-                   "payload": {
-                       "value": {"type": "string", "description": "The value to process"},
-                       "option": {"type": "boolean", "description": "Optional flag"}
+                   "schema": {
+                       "type": "object",
+                       "properties": {
+                           "value": {
+                               "type": "string",
+                               "description": "The value to process"
+                           },
+                           "option": {
+                               "type": "boolean",
+                               "description": "Optional flag"
+                           }
+                       },
+                       "required": ["value"]
+                   },
+                   "brief": "Execute my custom action with a value",
+                   "examples": {
+                       "description": "Execute my custom action with a value. The option flag controls additional behavior.",
+                       "instructions": {
+                           "when_to_use": "Use this action when you need to process a value with optional configuration",
+                           "common_pitfalls": ["Ensure value is not empty", "Boolean option defaults to false"]
+                       },
+                       "examples": [
+                           {
+                               "scenario": "Basic value processing",
+                               "payload": {"value": "hello world"}
+                           },
+                           {
+                               "scenario": "Processing with option enabled",
+                               "payload": {"value": "hello world", "option": true}
+                           }
+                       ]
                    }
                }
-           return {}
+           }
 
        def validate_payload(self, action_type: str, payload: dict) -> list[str]:
            """Validate action payload before execution."""
@@ -160,6 +177,80 @@ Action plugins provide executable actions that can be called via JSON:
 
    # Required: Export the plugin class
    PLUGIN_CLASS = MyActionPlugin
+
+Action Schema Format
+~~~~~~~~~~~~~~~~~~~~
+
+.. versionadded:: 1.0
+   New optimized action schema format for reduced prompt sizes.
+
+Actions are defined using a structured three-tier format that optimizes LLM prompt size while maintaining full functionality:
+
+**Schema Tier** (JSON Schema)
+    Defines the structure, field types, and required fields. Used for validation and LLM prompt generation.
+
+**Brief Tier** (One-line description)
+    Concise description of what the action does. Included in LLM prompts for context.
+
+**Examples Tier** (Detailed documentation)
+    Comprehensive descriptions, usage instructions, and examples. Used only by the corrector when LLM makes mistakes.
+
+.. code-block:: python
+
+   {
+       "my_action": {
+           "schema": {
+               "type": "object",
+               "properties": {
+                   "field_name": {
+                       "type": "string",  # or "number", "boolean", "array", "object"
+                       "description": "What this field does",
+                       "enum": ["option1", "option2"]  # optional: restrict to specific values
+                   }
+               },
+               "required": ["field_name"]  # array of required field names
+           },
+           "brief": "One-line description of what the action does",
+           "examples": {
+               "description": "Detailed description with usage context and edge cases",
+               "instructions": {
+                   "when_to_use": "When to use this action",
+                   "common_pitfalls": ["Common mistakes to avoid"],
+                   "notes": ["Additional important information"]
+               },
+               "examples": [
+                   {
+                       "scenario": "Description of use case",
+                       "payload": {"field_name": "example_value"}
+                   }
+               ]
+           }
+       }
+   }
+
+**Field Types Supported:**
+
+- ``"string"`` - Text values
+- ``"number"`` - Numeric values (integers/floats)
+- ``"boolean"`` - True/false values
+- ``"array"`` - Lists of values
+- ``"object"`` - Nested objects
+
+**Schema Validation:**
+
+The schema follows JSON Schema standards and is automatically validated. Use ``enum`` to restrict values to specific options:
+
+.. code-block:: python
+
+   "priority": {
+       "type": "string",
+       "enum": ["low", "medium", "high"],
+       "description": "Message priority level"
+   }
+
+**Backward Compatibility:**
+
+The old format (``description``, ``required_fields``, ``optional_fields``) is automatically converted to the new format. Existing plugins continue to work without changes.
 
 Plugin Flow
 -----------
@@ -193,6 +284,18 @@ The plugin system integrates seamlessly with the message chain:
 Best Practices
 --------------
 
+**Action Schema Design**
+    Use the new three-tier action format for optimal prompt efficiency. Keep ``brief`` descriptions under 100 characters.
+
+**Schema Validation**
+    Define comprehensive JSON schemas with proper types and constraints. Use ``enum`` for restricted values.
+
+**Brief Descriptions**
+    Write concise, actionable descriptions for the ``brief`` field. Focus on what the action does, not how.
+
+**Examples Documentation**
+    Provide comprehensive examples in the ``examples`` tier. Include common use cases, edge cases, and error scenarios.
+
 **Security First**
     Always validate inputs and restrict access to authorized users only.
 
@@ -200,7 +303,7 @@ Best Practices
     Provide meaningful error messages and handle edge cases gracefully.
 
 **Documentation**
-    Include clear descriptions and examples in ``get_prompt_instructions()``.
+    Include clear descriptions and examples in the ``examples`` tier for corrector assistance.
 
 **Testing**
     Test plugins independently before integration with the full system.
@@ -208,4 +311,4 @@ Best Practices
 **Performance**
     Consider async operations for I/O-bound tasks to maintain responsiveness.
 
-For examples, examine existing plugins like ``plugins/terminal.py`` or ``plugins/event.py`` in the repository.
+For examples, examine existing plugins like ``plugins/ai_diary.py`` (new format) or ``plugins/terminal.py`` (legacy format) in the repository.

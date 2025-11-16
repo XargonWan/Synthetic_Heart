@@ -34,6 +34,7 @@ getting started.
    persona_configuration
    llm_engines
    plugins
+   action_schema_format
    validation_system
    ai_diary_personal_memory
    vrm_animations

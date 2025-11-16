@@ -41,46 +41,39 @@ DIARY_HISTORY_DAYS = config_registry.get_var(
 def minify_actions_block(available_actions: dict) -> dict:
     """Convert full action schemas to minimal versions for prompt.
     
-    Instead of sending complete schemas with examples, field_types, and nested instructions,
-    this creates a lean version with just essential information:
-    - action name
-    - brief description
-    - required_fields
-    - optional_fields
-    - source
-    - instructions (ONLY if action description contains "REQUIRED" or "MUST" - critical for LLM behavior)
+    For LLM prompts, sends ONLY schema and brief description to minimize token usage.
+    This dramatically reduces prompt size while preserving all critical information needed.
     
-    This reduces token usage dramatically while preserving all critical information.
-    Full instructions are still available in each action definition if needed by plugins.
+    Uses new normalized action format:
+    - schema: JSON schema with structure, types, and required fields
+    - brief: One-line description of action purpose
+    - source: Which plugin/interface provides this action
+    
+    Full examples and detailed instructions are NOT included here - they're used by 
+    the corrector when the LLM makes mistakes.
     
     Parameters
     ----------
     available_actions : dict
-        Full actions block with complete schemas and instructions
+        Full actions block with schemas in new normalized format
         
     Returns
     -------
     dict
-        Minified actions block suitable for LLM prompts
+        Minified actions block suitable for LLM prompts (schema + brief only)
     """
+    from core.action_schema_converter import extract_for_llm_prompt, normalize_action_schema
+    
     minified = {}
     for action_name, action_def in available_actions.items():
-        # Keep only essential fields
-        minified_action = {
-            "description": action_def.get("description", ""),
-            "required_fields": action_def.get("required_fields", []),
-            "optional_fields": action_def.get("optional_fields", []),
-            "source": action_def.get("source", ""),
-        }
+        # Normalize to new format (handles both old and new formats)
+        normalized = normalize_action_schema(action_name, action_def)
         
-        # Include instructions if action description contains "REQUIRED" or "MUST" - these are critical for LLM behavior
-        description = action_def.get("description", "").upper()
-        if "REQUIRED" in description or "MUST" in description:
-            instructions = action_def.get("instructions", {})
-            if instructions:
-                minified_action["instructions"] = instructions
+        # Extract only what's needed for LLM (schema + brief)
+        minified_action = extract_for_llm_prompt(action_name, normalized)
         
         minified[action_name] = minified_action
+    
     return minified
 
 

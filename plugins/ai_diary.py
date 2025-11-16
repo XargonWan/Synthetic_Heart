@@ -1115,16 +1115,52 @@ class DiaryPlugin:
     def get_supported_actions(self):
         return {
             "static_inject": {
-                "description": "Inject recent diary entries into the prompt context",
-                "required_fields": [],
-                "optional_fields": [],
+                "schema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                },
+                "brief": "Inject recent diary entries into the prompt context",
+                "examples": {
+                    "description": "This action injects synth's recent diary entries to maintain memory and continuity",
+                    "instructions": {},
+                    "examples": []
+                }
             },
             "create_personal_diary_entry": {
-                "description": "Create a personal diary entry for synth's memory - REQUIRED in every response",
-                "required_fields": ["interaction_summary"],
-                "optional_fields": ["content", "personal_thought", "emotions", "context_tags", "involved_users"],
-                "instructions": {
-                    "description": "Create a diary entry recording what happened in this interaction. This action MUST be included in EVERY response.",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "interaction_summary": {
+                            "type": "string",
+                            "description": "Summary of what happened in this interaction"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "The response content (optional, auto-captured)"
+                        },
+                        "personal_thought": {
+                            "type": "string",
+                            "description": "Personal reflection on the interaction (optional)"
+                        },
+                        "emotions": {
+                            "type": "array",
+                            "description": "Array of emotions felt (optional)"
+                        },
+                        "context_tags": {
+                            "type": "array",
+                            "description": "Tags for topics discussed (optional)"
+                        },
+                        "involved_users": {
+                            "type": "array",
+                            "description": "Users involved in the interaction (optional)"
+                        }
+                    },
+                    "required": ["interaction_summary"]
+                },
+                "brief": "Add a new diary entry to synth's memory - REQUIRED in every response",
+                "examples": {
+                    "description": "Create a diary entry recording what happened in this interaction. This action MUST be included in EVERY response to maintain synth's persistent memory.",
                     "when_to_use": "Use this action in every single response to record the interaction in synth's personal memory",
                     "examples": [
                         {

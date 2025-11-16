@@ -814,8 +814,15 @@ class CoreInitializer:
         log_debug("[core_initializer] Initialized available_actions dict")
 
         def _register(action_type: str, owner: str, schema: dict, instr_fn):
-            required = schema.get("required_fields", [])
-            optional = schema.get("optional_fields", [])
+            from core.action_schema_converter import normalize_action_schema
+            
+            # Normalize schema to new format (handles both old and new formats)
+            normalized = normalize_action_schema(action_type, schema)
+            
+            # Extract required/optional fields from normalized schema
+            required = list(normalized.get("schema", {}).get("required", []))
+            optional = list(set(normalized.get("schema", {}).get("properties", {}).keys()) - set(required))
+            
             if not isinstance(required, list) or not isinstance(optional, list):
                 raise ValueError(f"Invalid schema for {action_type} in {owner}")
 
@@ -827,35 +834,41 @@ class CoreInitializer:
                 log_debug(f"[core_initializer] Updating existing declaration for {action_type}")
                 # Merge required_fields and optional_fields
                 existing = available_actions[action_type]
-                existing_required = set(existing.get("required_fields", []))
-                existing_optional = set(existing.get("optional_fields", []))
+                
+                # Get existing schema info (for backward compat)
+                existing_required = set(existing.get("schema", {}).get("required", []))
+                existing_optional = set(existing.get("schema", {}).get("properties", {}).keys()) - existing_required
+                
                 new_required = set(required)
                 new_optional = set(optional)
                 
                 # Merge fields, giving priority to required over optional
                 merged_required = list(existing_required.union(new_required))
-                merged_optional = list((existing_optional.union(new_optional)) - set(merged_required))                # Keep track of original source, append new sources
+                merged_optional = list((existing_optional.union(new_optional)) - set(merged_required))
+                
+                # Keep track of original source, append new sources
                 existing_source = existing.get("source", "")
                 new_source = f"{existing_source}, {owner}" if existing_source else owner
                 
-                available_actions[action_type] = {
-                    "description": schema.get("description", ""),
-                    "required_fields": merged_required,
-                    "optional_fields": merged_optional,
-                    "source": new_source,
-                }
+                # Update schema with merged properties
+                merged_properties = {}
+                for field in merged_required + merged_optional:
+                    merged_properties[field] = {"type": "string", "description": f"Field: {field}"}
+                
+                normalized["schema"]["properties"] = merged_properties
+                normalized["schema"]["required"] = merged_required
+                normalized["source"] = new_source
+                
+                available_actions[action_type] = normalized
                 log_info(
                     f"[core_initializer] Merged {action_type} fields: required={merged_required}, optional={merged_optional}, source={new_source}"
                 )
             else:
-                available_actions[action_type] = {
-                    "description": schema.get("description", ""),
-                    "required_fields": required,
-                    "optional_fields": optional,
-                    "source": owner,
-                }
+                # Add source to normalized schema
+                normalized["source"] = owner
+                available_actions[action_type] = normalized
 
-            # Get and add instructions
+            # Get and add instructions (from plugin's get_prompt_instructions method)
             instr = instr_fn(action_type) if instr_fn else None
             if instr is None:
                 log_debug(f"Missing prompt instructions for {action_type}")
@@ -864,8 +877,12 @@ class CoreInitializer:
                 log_warning(f"Prompt instructions for {action_type} must be a dict, got {type(instr)}")
                 instr = {}
             
-            # Add instructions directly to the action
-            available_actions[action_type]["instructions"] = instr
+            # Add instructions to examples section if not already present
+            if "examples" not in available_actions[action_type]:
+                available_actions[action_type]["examples"] = {}
+            
+            if instr:
+                available_actions[action_type]["examples"]["instructions"] = instr
 
         # --- Load action plugins from registry ---
         log_debug(f"[core_initializer] Loading actions from {len(PLUGIN_REGISTRY)} plugins: {list(PLUGIN_REGISTRY.keys())}")

@@ -187,12 +187,55 @@ Creating a new interface requires implementing the interface contract:
 
        @staticmethod
        def get_supported_actions() -> dict:
-           """Return action schemas."""
+           """Return action schemas using the optimized format."""
            return {
                "message_myinterface": {
-                   "description": "Send a message via MyInterface",
-                   "required_fields": ["text", "target"],
-                   "optional_fields": ["media"],
+                   "schema": {
+                       "type": "object",
+                       "properties": {
+                           "text": {
+                               "type": "string",
+                               "description": "Message content to send"
+                           },
+                           "target": {
+                               "type": "string",
+                               "description": "Target recipient or channel"
+                           },
+                           "media": {
+                               "type": "string",
+                               "description": "Optional media attachment URL"
+                           }
+                       },
+                       "required": ["text", "target"]
+                   },
+                   "brief": "Send a message via MyInterface",
+                   "examples": {
+                       "description": "Send a message through MyInterface with optional media attachment.",
+                       "instructions": {
+                           "when_to_use": "Use to communicate through MyInterface channels or direct messages.",
+                           "common_pitfalls": [
+                               "Ensure target exists and is accessible",
+                               "Media URLs must be publicly accessible"
+                           ]
+                       },
+                       "examples": [
+                           {
+                               "scenario": "Send text message",
+                               "payload": {
+                                   "text": "Hello world!",
+                                   "target": "#general"
+                               }
+                           },
+                           {
+                               "scenario": "Send message with media",
+                               "payload": {
+                                   "text": "Check this out",
+                                   "target": "@user",
+                                   "media": "https://example.com/image.jpg"
+                               }
+                           }
+                       ]
+                   }
                }
            }
 
@@ -300,6 +343,9 @@ All inputs are validated before processing:
 Best Practices
 --------------
 
+**Action Schema Design**
+    Use the new three-tier action format for optimal prompt efficiency. See :doc:`action_schema_format` for details.
+
 **Error Handling**
     Implement comprehensive error handling with user feedback.
 
@@ -313,6 +359,6 @@ Best Practices
     Respect platform rate limits and content policies.
 
 **Documentation**
-    Provide clear action schemas and examples.
+    Provide clear action schemas and examples in the ``examples`` tier.
 
 For complete implementations, examine ``interface/telegram_bot.py`` or ``interface/discord_interface.py`` in the repository.
