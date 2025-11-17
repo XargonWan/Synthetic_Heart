@@ -14,10 +14,12 @@ The connection pool is configured through environment variables in `.env-dev`:
 .. code-block:: bash
 
     DB_POOL_MINSIZE=1          # Minimum connections kept alive
-    DB_POOL_MAXSIZE=8          # Maximum concurrent connections
+    DB_POOL_MAXSIZE=5          # Maximum concurrent connections (reduced from 8 to prevent bio_manager timeouts)
     DB_CONNECTION_TIMEOUT=10   # Timeout for acquiring a connection (seconds)
 
 **Database Limit**: MariaDB/MySQL has a system-wide connection limit (default 151 on standard deployments). The pool is sized to stay well below this limit.
+
+**Bio Manager Timeout Fix**: The pool size was reduced from 8 to 5 connections to prevent ``TimeoutError`` in the bio_manager plugin. The bio_manager performs synchronous database operations from async contexts, and a smaller pool size ensures connections are always available without blocking.
 
 Single Event Loop Architecture
 -------------------------------
@@ -33,7 +35,7 @@ Each event loop maintained its own connection pool, leading to:
 - Pool 2: 8 connections
 - Total: 16 connections (exceeding limits)
 
-**Solution**: Moved database initialization into the main async function, eliminating the second event loop. Now there is **only one pool with 8 maximum connections**.
+**Solution**: Moved database initialization into the main async function, eliminating the second event loop. Now there is **only one pool with 5 maximum connections**.
 
 Connection Acquisition Pattern
 -------------------------------
@@ -237,4 +239,30 @@ References
 
 - **aiomysql Documentation**: https://aiomysql.readthedocs.io/
 - **AsyncIO Context Managers**: https://docs.python.org/3/library/contextlib.html#async-context-managers
+
+Recent Fixes
+------------
+
+**Bio Manager Timeout Fix (November 2025)**:
+
+The bio_manager plugin was experiencing ``TimeoutError`` when retrieving user profiles during prompt injection. Root causes and solutions:
+
+**Issues Fixed**:
+- **Database Pool Contention**: Pool size reduced from 8 to 5 connections to prevent exhaustion
+- **Table Initialization Deadlock**: Added caching to prevent repeated ``_ensure_table()`` calls
+- **Async/Sync Mixing**: Converted ``get_static_injection()`` to async to prevent ``run_coroutine_threadsafe()`` timeouts
+
+**Technical Details**:
+- **Before**: Sync ``get_static_injection()`` → sync ``get_bio_light()`` → ``_run()`` → ``run_coroutine_threadsafe()`` → 30s timeout
+- **After**: Async ``get_static_injection()`` → ``await _get_bio_light_async()`` → direct async DB operations
+
+**Configuration Changes**:
+.. code-block:: bash
+
+    # .env-dev
+    DB_POOL_MAXSIZE=5  # Reduced from 8
+
+**Code Changes**:
+- ``plugins/bio_manager.py``: Added ``_get_bio_light_async()``, ``_update_last_accessed_async()``
+- ``plugins/bio_manager.py``: Converted ``get_static_injection()`` to ``async def``
 - **MariaDB Connection Pooling**: https://mariadb.com/kb/en/

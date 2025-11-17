@@ -27,6 +27,49 @@ Available Action Plugins
 
 * ``ai_diary`` – Personal memory system for synth. Records conversations, thoughts, and emotions. See :doc:`ai_diary_personal_memory` for details.
 * ``bio_manager`` – Manage persistent user biographies. Uses database settings ``DB_HOST``, ``DB_USER``, ``DB_PASS`` and ``DB_NAME``.
+
+Bio Manager Plugin
+------------------
+
+The ``bio_manager`` plugin provides persistent storage and retrieval of user biographical information. It automatically injects participant context into LLM prompts, including:
+
+- **User profiles**: Nicknames, short bio, current feelings
+- **Chat history**: Recent messages from each participant
+- **Last accessed**: Automatic timestamp updates
+
+**Database Schema**:
+
+.. code-block:: sql
+
+    CREATE TABLE bio (
+        id VARCHAR(255) PRIMARY KEY,
+        known_as TEXT DEFAULT '[]',
+        likes TEXT DEFAULT '[]',
+        not_likes TEXT DEFAULT '[]',
+        information TEXT DEFAULT '',
+        past_events TEXT DEFAULT '[]',
+        feelings TEXT DEFAULT '[]',
+        contacts TEXT DEFAULT '{}',
+        social_accounts TEXT DEFAULT '[]',
+        privacy VARCHAR(50) DEFAULT 'default',
+        created_at TEXT DEFAULT '',
+        last_accessed TEXT DEFAULT '',
+        last_update TEXT DEFAULT '',
+        update_count INT DEFAULT 0
+    );
+
+**Performance Optimizations**:
+
+- **Table Initialization Cache**: Prevents repeated ``_ensure_table()`` calls that caused timeouts
+- **Async Operations**: ``get_static_injection()`` is fully async to prevent deadlock with the event loop
+- **Connection Pool Tuning**: Reduced pool size to 5 connections to ensure availability
+
+**API Methods**:
+
+- ``get_bio_light(user_id)``: Retrieve lightweight bio for prompt injection
+- ``get_bio_full(user_id)``: Retrieve complete user profile
+- ``update_bio_fields_auto(user_id, updates)``: Update fields without rate limiting
+- ``get_static_injection(message, context_memory)``: Async method for prompt context injection
 * ``blocklist`` – User blocking/unblocking functionality (no configuration).
 * ``chat_link`` – Cross-platform chat linking and message forwarding.
 * ``message_map`` – Message threading and conversation tracking.
