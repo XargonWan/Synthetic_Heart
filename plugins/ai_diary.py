@@ -165,8 +165,8 @@ async def _run_sync_async(coro):
     try:
         # Get current running loop if available
         loop = asyncio.get_running_loop()
-        # Use executor to avoid creating new event loop in thread
-        return await loop.run_in_executor(None, lambda: asyncio.run(coro))
+        # Just run the coroutine directly - we have a running loop
+        return await coro
     except RuntimeError:
         # No running loop, just run the coroutine directly
         return await coro
@@ -176,17 +176,10 @@ def _run_sync(coro):
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            # We're in an async context, use run_in_executor to avoid creating new event loop
+            # We're in an async context, schedule coroutine on the running loop from this thread
+            # This avoids creating a new event loop
             import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                # Schedule coroutine to run in thread pool without creating new event loop
-                future = executor.submit(asyncio.run, coro)
-                try:
-                    result = future.result(timeout=5.0)
-                    return result
-                except concurrent.futures.TimeoutError:
-                    log_warning("[ai_diary] Timeout in _run_sync")
-                    return None
+            return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=5.0)
         else:
             return loop.run_until_complete(coro)
     except RuntimeError:
@@ -370,24 +363,22 @@ async def recreate_diary_table():
 def _run(coro):
     """Run a coroutine safely even if an event loop is already running."""
     try:
-        return asyncio.run(coro)
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # We're in async context, use executor to avoid creating new loop
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(asyncio.run, coro)
+                return future.result(timeout=10.0)
+        else:
+            # Event loop exists but not running, use run_until_complete
+            return loop.run_until_complete(coro)
     except RuntimeError:
-        result: Any = None
-        exc: Exception | None = None
-
-        def runner() -> None:
-            nonlocal result, exc
-            try:
-                result = asyncio.run(coro)
-            except Exception as e:
-                exc = e
-
-        thread = threading.Thread(target=runner)
-        thread.start()
-        thread.join()
-        if exc:
-            raise exc
-        return result
+        # No event loop at all - this is the only safe place to use asyncio.run()
+        return asyncio.run(coro)
+    except Exception as e:
+        log_debug(f"[ai_diary] Error in _run: {e}")
+        return None
 
 
 async def _execute(query: str, params: tuple = ()) -> None:

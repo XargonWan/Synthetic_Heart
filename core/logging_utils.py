@@ -161,9 +161,23 @@ def _log(level: str, message: str, exc: Optional[Exception] = None) -> None:
                         if loop and loop.is_running():
                             loop.create_task(send_to_logchat())
                         else:
-                            asyncio.run(send_to_logchat())
+                            try:
+                                loop = asyncio.get_event_loop()
+                                if not loop.is_closed():
+                                    loop.run_until_complete(send_to_logchat())
+                                else:
+                                    asyncio.run(send_to_logchat())
+                            except RuntimeError:
+                                asyncio.run(send_to_logchat())
                     except RuntimeError:
-                        asyncio.run(send_to_logchat())
+                        try:
+                            loop = asyncio.get_event_loop()
+                            if not loop.is_closed():
+                                loop.run_until_complete(send_to_logchat())
+                            else:
+                                asyncio.run(send_to_logchat())
+                        except RuntimeError:
+                            asyncio.run(send_to_logchat())
                     return
             
             # Fallback to trainer - use any available interface
@@ -182,9 +196,23 @@ def _log(level: str, message: str, exc: Optional[Exception] = None) -> None:
                         if loop and loop.is_running():
                             loop.create_task(send_to_trainer())
                         else:
-                            asyncio.run(send_to_trainer())
+                            try:
+                                loop = asyncio.get_event_loop()
+                                if not loop.is_closed():
+                                    loop.run_until_complete(send_to_trainer())
+                                else:
+                                    asyncio.run(send_to_trainer())
+                            except RuntimeError:
+                                asyncio.run(send_to_trainer())
                     except RuntimeError:
-                        asyncio.run(send_to_trainer())
+                        try:
+                            loop = asyncio.get_event_loop()
+                            if not loop.is_closed():
+                                loop.run_until_complete(send_to_trainer())
+                            else:
+                                asyncio.run(send_to_trainer())
+                        except RuntimeError:
+                            asyncio.run(send_to_trainer())
                     return
                         
         except Exception:

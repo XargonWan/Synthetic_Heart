@@ -104,7 +104,8 @@ async def get_active_llm():
     """Get the currently active LLM engine from config registry."""
     try:
         current_value = str(ACTIVE_LLM)
-        if current_value and current_value != "":
+        # Check for None, empty string, or literal "None" string
+        if current_value and current_value != "" and current_value != "None":
             log_debug(f"[config] 🧠 Active LLM: {current_value}")
             return current_value
     except Exception as e:

@@ -231,7 +231,16 @@ class EventPlugin(AIPluginBase):
         
         try:
             if action_type == "event":
-                asyncio.run(self._handle_event_payload(payload))
+                # Schedule on main loop instead of creating new one
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.create_task(self._handle_event_payload(payload))
+                    else:
+                        loop.run_until_complete(self._handle_event_payload(payload))
+                except RuntimeError as e:
+                    # No event loop available - log and return
+                    log_error(f"[event_plugin] Could not get event loop for event payload: {e}")
                 log_info(f"[event_plugin] ✅ Event saved")
                 
             elif action_type == "schedule_message":

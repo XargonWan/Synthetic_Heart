@@ -185,6 +185,51 @@ def get_supported_action_types() -> set[str]:
     return supported_types
 
 
+def _normalize_payload(action_type: str, payload: dict) -> None:
+    """Normalize payload by converting string numbers to int for numeric fields.
+    
+    This makes the system more flexible by accepting both "2" and 2 for numeric IDs.
+    Modifies the payload dict in-place.
+    
+    Fields that should be integers:
+    - thread_id: Telegram thread/topic ID
+    - chat_id: Chat identifier
+    - user_id: User identifier
+    - Any field ending with _id
+    """
+    # Fields that should always be integers
+    int_fields = {"thread_id", "chat_id", "user_id", "message_id", "animation_state"}
+    
+    # Also handle fields ending with _id
+    for key in payload.keys():
+        if key.endswith("_id") and key not in int_fields:
+            int_fields.add(key)
+    
+    # Normalize top-level fields
+    for field in int_fields:
+        if field in payload:
+            value = payload[field]
+            if isinstance(value, str) and value.isdigit():
+                try:
+                    payload[field] = int(value)
+                    log_debug(f"[action_parser] Normalized {action_type}.payload.{field}: '{value}' -> {int(value)}")
+                except (ValueError, TypeError):
+                    pass
+    
+    # Normalize nested dict fields (like target: {chat_id: ..., thread_id: ...})
+    for key, value in payload.items():
+        if isinstance(value, dict):
+            for nested_field in int_fields:
+                if nested_field in value:
+                    nested_value = value[nested_field]
+                    if isinstance(nested_value, str) and nested_value.isdigit():
+                        try:
+                            value[nested_field] = int(nested_value)
+                            log_debug(f"[action_parser] Normalized {action_type}.payload.{key}.{nested_field}: '{nested_value}' -> {int(nested_value)}")
+                        except (ValueError, TypeError):
+                            pass
+
+
 def _validate_payload(action_type: str, payload: dict, errors: List[str]) -> None:
     """Validate payload using centralized validation registry and legacy plugin/interface validation.
     
@@ -328,6 +373,8 @@ def validate_action(action: dict, context: dict = None, original_message=None) -
 
     # Dynamic validation - delegate to plugins or interfaces that support this action type
     if (isinstance(payload, dict) or action_type in actions_with_flexible_payload) and action_type in supported_types:
+        # Normalize payload before validation (convert string numbers to int)
+        _normalize_payload(action_type, payload or {})
         _validate_payload(action_type, payload or {}, errors)
 
         if _is_restricted_action(action_type):

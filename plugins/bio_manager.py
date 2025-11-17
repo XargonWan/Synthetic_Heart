@@ -121,24 +121,19 @@ async def init_bio_table():
 def _run(coro):
     """Run a coroutine safely even if an event loop is already running."""
     try:
-        return asyncio.run(coro)
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # We're in async context, use run_coroutine_threadsafe to avoid creating new loop
+            return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=10.0)
+        else:
+            # Event loop exists but not running, use run_until_complete
+            return loop.run_until_complete(coro)
     except RuntimeError:
-        result: Any = None
-        exc: Exception | None = None
-
-        def runner() -> None:
-            nonlocal result, exc
-            try:
-                result = asyncio.run(coro)
-            except Exception as e:  # pragma: no cover - defensive
-                exc = e
-
-        thread = threading.Thread(target=runner)
-        thread.start()
-        thread.join()
-        if exc:
-            raise exc
-        return result
+        # No event loop at all - this is the only safe place to use asyncio.run()
+        return asyncio.run(coro)
+    except Exception as e:
+        log_error(f"[bio_manager] Error in _run: {e}")
+        return None
 
 
 async def _execute(query: str, params: tuple = ()) -> None:
