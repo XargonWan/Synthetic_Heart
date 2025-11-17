@@ -1190,7 +1190,12 @@ class DiaryPlugin:
         }
 
     def get_static_injection(self, message=None, context_memory=None) -> dict:
-        """Get recent diary entries for static injection. Returns empty dict if plugin disabled."""
+        """Get recent diary entries for static injection. Returns empty dict if plugin disabled.
+        
+        NOTE: This method now returns the RAW diary entries. The decision of whether to include
+        them in the prompt is made by prompt_engine.py based on available space. This method
+        just provides the data.
+        """
         global PLUGIN_ENABLED
         
         log_debug(f"[ai_diary] get_static_injection called, PLUGIN_ENABLED: {PLUGIN_ENABLED}")
@@ -1198,104 +1203,42 @@ class DiaryPlugin:
         if not PLUGIN_ENABLED:
             log_debug("[ai_diary] Plugin is disabled, returning empty entries")
             return {"latest_diary_entries": []}
-            
-        # Get interface name from message if available
-        interface_name = "manual"  # Default fallback
-        if message and hasattr(message, 'interface'):
-            interface_name = message.interface
-        elif message and isinstance(message, dict):
-            interface_name = message.get('interface', 'manual')
         
-        log_debug(f"[ai_diary] Interface name: {interface_name}")
-        
-        # Get current prompt length estimate (if available)
-        current_prompt_length = 0
-        max_prompt_chars = 128000  # Safe default, will be overridden if we can get a better value
-        
-        # Try to get prompt length from context_memory or message
-        if context_memory:
-            # Estimate based on context memory size
-            current_prompt_length = len(str(context_memory)) * 2  # Rough estimate
-        
-        # Get max prompt chars from active LLM
         try:
-            active_llm = _run_sync(get_active_llm())
-            # Check that active_llm is not None before proceeding
-            if not active_llm:
-                log_debug(f"[ai_diary] Active LLM is None in get_static_injection, using fallback")
-                try:
-                    from core.prompt_engine import DEFAULT_MAX_PROMPT_CHARS
-                    if DEFAULT_MAX_PROMPT_CHARS is not None:
-                        max_prompt_chars = DEFAULT_MAX_PROMPT_CHARS
-                except Exception:
-                    pass  # Keep the default 128000
-            else:
-                registry = get_llm_registry()
-                engine = registry.get_engine(active_llm)
-                
-                if not engine:
-                    engine = registry.load_engine(active_llm)
-                
-                if engine and hasattr(engine, 'get_interface_limits'):
-                    limits = engine.get_interface_limits()
-                    # Prefer an engine-provided limit, fall back to core default
-                    try:
-                        from core.prompt_engine import DEFAULT_MAX_PROMPT_CHARS
-                        fallback_limit = DEFAULT_MAX_PROMPT_CHARS if DEFAULT_MAX_PROMPT_CHARS is not None else 128000
-                    except Exception:
-                        fallback_limit = 128000
-                    retrieved_limit = limits.get("max_prompt_chars", fallback_limit)
-                    max_prompt_chars = retrieved_limit if retrieved_limit is not None else 128000
-                    log_debug(f"[ai_diary] Active LLM {active_llm} max_prompt_chars: {max_prompt_chars}")
-                else:
-                    try:
-                        from core.prompt_engine import DEFAULT_MAX_PROMPT_CHARS
-                        if DEFAULT_MAX_PROMPT_CHARS is not None:
-                            max_prompt_chars = DEFAULT_MAX_PROMPT_CHARS
-                    except Exception:
-                        pass  # Keep the default 128000
-        except Exception as e:
-            log_debug(f"[ai_diary] Could not get active LLM limits: {e}")
+            # Get diary history days from config_registry
             try:
-                from core.prompt_engine import DEFAULT_MAX_PROMPT_CHARS
-                if DEFAULT_MAX_PROMPT_CHARS is not None:
-                    max_prompt_chars = DEFAULT_MAX_PROMPT_CHARS
-            except Exception:
-                pass  # Keep the default 128000
-        
-        log_debug(f"[ai_diary] Prompt stats - current: {current_prompt_length}, max: {max_prompt_chars}")
-        
-        # Check if we should include diary based on available space
-        should_include = should_include_diary(interface_name, current_prompt_length, max_prompt_chars)
-        max_chars = get_max_diary_chars(interface_name, current_prompt_length)
-        
-        log_debug(f"[ai_diary] Should include diary: {should_include}, max_chars: {max_chars}")
-        
-        if not should_include:
-            log_debug("[ai_diary] Diary not included due to space constraints")
-            return {"latest_diary_entries": []}
-        
-        # Get recent entries with character limit
-        log_debug(f"[ai_diary] Getting recent entries for {DIARY_CONFIG['default_days']} days with max {max_chars} chars")
-        recent_entries = get_recent_entries(days=DIARY_CONFIG["default_days"], max_chars=max_chars)
-        
-        log_debug(f"[ai_diary] Retrieved {len(recent_entries)} diary entries")
-        
-        if not recent_entries:
-            log_debug("[ai_diary] No recent entries found, returning empty")
-            return {"latest_diary_entries": []}
-        
-        # Return raw entries as JSON instead of formatted text
-        log_info(f"[ai_diary] Returning {len(recent_entries)} diary entries for injection")
-        
-        # Log first few entries for debugging
-        for i, entry in enumerate(recent_entries[:3]):
-            if isinstance(entry, dict):
-                log_debug(f"[ai_diary] Entry {i+1}: content='{entry.get('content', '')[:50]}...', involved_users={entry.get('involved_users', [])}, interaction_summary='{entry.get('interaction_summary', '')}'")
+                from core.config_manager import config_registry
+                diary_days = int(config_registry.get_value('DIARY_HISTORY_DAYS', 2, value_type=int))
+            except Exception as e:
+                log_debug(f"[ai_diary] Could not get DIARY_HISTORY_DAYS from config: {e}, using default 2")
+                diary_days = 2
+            
+            # Get recent entries with generous limit - prompt_engine will trim if needed
+            log_debug(f"[ai_diary] Getting recent entries for {diary_days} days")
+            
+            # Don't limit characters here - let prompt_engine.py decide based on actual prompt size
+            recent_entries = get_recent_entries(days=diary_days, max_chars=None)
+            
+            log_debug(f"[ai_diary] Retrieved {len(recent_entries)} diary entries for injection")
+            
+            if recent_entries:
+                # Log first few entries for debugging
+                for i, entry in enumerate(recent_entries[:3]):
+                    if isinstance(entry, dict):
+                        log_debug(f"[ai_diary] Entry {i+1}: content='{entry.get('content', '')[:50]}...', involved_users={entry.get('involved_users', [])}, interaction_summary='{entry.get('interaction_summary', '')}'")
+                    else:
+                        log_debug(f"[ai_diary] Entry {i+1}: WARNING - not a dict, type={type(entry)}")
+                log_info(f"[ai_diary] Returning {len(recent_entries)} diary entries for injection")
             else:
-                log_debug(f"[ai_diary] Entry {i+1}: WARNING - not a dict, type={type(entry)}")
+                log_debug("[ai_diary] No recent entries found")
+            
+            # ALWAYS return latest_diary_entries key, even if empty
+            return {"latest_diary_entries": recent_entries}
         
-        return {"latest_diary_entries": recent_entries}
+        except Exception as e:
+            log_error(f"[ai_diary] Error in get_static_injection: {e}")
+            # Return empty list, not empty dict - so the key is present
+            return {"latest_diary_entries": []}
 
     def execute_action(self, action: dict, context: dict, bot, original_message):
         """Execute diary-related actions."""
@@ -1542,5 +1485,11 @@ def get_all_diary_entries(include_archived: bool = False) -> List[Dict[str, Any]
         return []
 
 
-# Instantiate the plugin to register it
+# Instantiate the plugin to register it with the core
+try:
+    _diary_plugin_instance = DiaryPlugin()
+    log_info("[ai_diary] Plugin instance created and registered with core")
+except Exception as e:
+    log_error(f"[ai_diary] Failed to instantiate DiaryPlugin: {e}")
+
 PLUGIN_CLASS = DiaryPlugin

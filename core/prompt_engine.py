@@ -99,6 +99,17 @@ async def build_json_prompt(message, context_memory, interface_name: str | None 
 
     # === 1. Context messages (chat_history) ===
     # Use CHAT_HISTORY from config_registry
+    # First, load persisted history from database if not in memory
+    if chat_id and chat_id not in context_memory:
+        try:
+            from core.chat_history_cache import load_chat_history as cache_load
+            cached_history = await cache_load(chat_id)
+            if cached_history:
+                context_memory[chat_id] = cached_history
+                log_debug(f"[json_prompt] Loaded {len(cached_history)} cached messages for chat {chat_id}")
+        except Exception as e:
+            log_warning(f"[json_prompt] Failed to load cached chat history for {chat_id}: {e}")
+    
     chat_history = list(context_memory.get(chat_id, []))[-CHAT_HISTORY_LIMIT:]
 
     # === 2. Tags and memory lookup ===
@@ -119,12 +130,12 @@ async def build_json_prompt(message, context_memory, interface_name: str | None 
     try:
         from core.action_parser import gather_static_injections
 
-        log_debug(f"[json_prompt] 🔄 About to call gather_static_injections()")
+        log_info(f"[json_prompt] 🔄 About to call gather_static_injections()")
         injections = await gather_static_injections(message, context_memory)
-        log_debug(f"[json_prompt] 📥 gather_static_injections() returned: {list(injections.keys()) if injections else 'empty'}")
+        log_info(f"[json_prompt] 📥 gather_static_injections() returned: {list(injections.keys()) if injections else 'empty'}")
         if isinstance(injections, dict):
             context_section.update(injections)
-            log_debug(f"[json_prompt] ✅ Updated context_section with injections. Keys now: {list(context_section.keys())}")
+            log_info(f"[json_prompt] ✅ Updated context_section with injections. Keys now: {list(context_section.keys())}")
     except Exception as e:
         log_warning(f"[json_prompt] Failed to gather static injections: {e}")
 

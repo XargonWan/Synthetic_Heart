@@ -1226,10 +1226,10 @@ async def gather_static_injections(message=None, context_memory=None) -> dict:
     """
 
     injections: dict = {}
-    log_debug(f"[action_parser] 🔍 gather_static_injections() CALLED")
+    log_info(f"[action_parser] 🔍 gather_static_injections() CALLED")
     try:
         plugins_list = _load_action_plugins()
-        log_debug(f"[action_parser] Found {len(list(plugins_list))} plugins to check for static_inject")
+        log_info(f"[action_parser] Found {len(list(plugins_list))} plugins to check for static_inject")
         plugins_list = _load_action_plugins()  # Reload since we consumed it in len()
         
         for plugin in plugins_list:
@@ -1252,7 +1252,7 @@ async def gather_static_injections(message=None, context_memory=None) -> dict:
                 if not supported or not has_method:
                     continue
 
-                log_debug(f"[action_parser] 🎯 Calling get_static_injection() on {plugin.__class__.__name__}")
+                log_info(f"[action_parser] 🎯 Calling get_static_injection() on {plugin.__class__.__name__}")
                 
                 # Pass message and context_memory if the plugin expects them
                 try:
@@ -1267,7 +1267,7 @@ async def gather_static_injections(message=None, context_memory=None) -> dict:
                 if inspect.iscoroutine(result):
                     result = await result
                     
-                log_debug(f"[action_parser] ✅ Got result from {plugin.__class__.__name__}: {result}")
+                log_info(f"[action_parser] ✅ Got result from {plugin.__class__.__name__}: {list(result.keys()) if isinstance(result, dict) else type(result)}")
                 
                 if isinstance(result, dict):
                     injections.update(result)
@@ -1278,7 +1278,7 @@ async def gather_static_injections(message=None, context_memory=None) -> dict:
     except Exception as e:
         log_error(f"[action_parser] Error collecting static injections: {e}")
     
-    log_debug(f"[action_parser] 📊 gather_static_injections() returning {len(injections)} keys: {list(injections.keys())}")
+    log_info(f"[action_parser] 📊 gather_static_injections() returning {len(injections)} keys: {list(injections.keys())}")
     return injections
 
 

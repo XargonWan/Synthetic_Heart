@@ -165,19 +165,11 @@ def _log(level: str, message: str, exc: Optional[Exception] = None) -> None:
                                 loop = asyncio.get_event_loop()
                                 if not loop.is_closed():
                                     loop.run_until_complete(send_to_logchat())
-                                else:
-                                    asyncio.run(send_to_logchat())
+                                # If no running loop, just skip async send in logging context
                             except RuntimeError:
-                                asyncio.run(send_to_logchat())
+                                pass  # No event loop available in this context
                     except RuntimeError:
-                        try:
-                            loop = asyncio.get_event_loop()
-                            if not loop.is_closed():
-                                loop.run_until_complete(send_to_logchat())
-                            else:
-                                asyncio.run(send_to_logchat())
-                        except RuntimeError:
-                            asyncio.run(send_to_logchat())
+                        pass  # No event loop available in this context
                     return
             
             # Fallback to trainer - use any available interface
@@ -200,19 +192,11 @@ def _log(level: str, message: str, exc: Optional[Exception] = None) -> None:
                                 loop = asyncio.get_event_loop()
                                 if not loop.is_closed():
                                     loop.run_until_complete(send_to_trainer())
-                                else:
-                                    asyncio.run(send_to_trainer())
+                                # If no running loop, just skip async send in logging context
                             except RuntimeError:
-                                asyncio.run(send_to_trainer())
+                                pass  # No event loop available in this context
                     except RuntimeError:
-                        try:
-                            loop = asyncio.get_event_loop()
-                            if not loop.is_closed():
-                                loop.run_until_complete(send_to_trainer())
-                            else:
-                                asyncio.run(send_to_trainer())
-                        except RuntimeError:
-                            asyncio.run(send_to_trainer())
+                        pass  # No event loop available in this context
                     return
                         
         except Exception:
