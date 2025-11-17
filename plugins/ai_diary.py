@@ -199,6 +199,11 @@ def should_include_diary(interface_name: str, current_prompt_length: int = 0, ma
     if max_prompt_chars <= 0:
         try:
             active_llm = _run_sync(get_active_llm())
+            # Check that active_llm is not None before proceeding
+            if not active_llm:
+                log_debug(f"[ai_diary] Active LLM is None, skipping LLM limits lookup")
+                return True  # Conservative: include diary if we can't determine LLM
+            
             registry = get_llm_registry()
             engine = registry.get_engine(active_llm)
             
@@ -1205,7 +1210,7 @@ class DiaryPlugin:
         
         # Get current prompt length estimate (if available)
         current_prompt_length = 0
-        max_prompt_chars = 0
+        max_prompt_chars = 128000  # Safe default, will be overridden if we can get a better value
         
         # Try to get prompt length from context_memory or message
         if context_memory:
@@ -1215,35 +1220,48 @@ class DiaryPlugin:
         # Get max prompt chars from active LLM
         try:
             active_llm = _run_sync(get_active_llm())
-            registry = get_llm_registry()
-            engine = registry.get_engine(active_llm)
-            
-            if not engine:
-                engine = registry.load_engine(active_llm)
-            
-            if engine and hasattr(engine, 'get_interface_limits'):
-                limits = engine.get_interface_limits()
-                # Prefer an engine-provided limit, fall back to core default
+            # Check that active_llm is not None before proceeding
+            if not active_llm:
+                log_debug(f"[ai_diary] Active LLM is None in get_static_injection, using fallback")
                 try:
                     from core.prompt_engine import DEFAULT_MAX_PROMPT_CHARS
-                    fallback_limit = DEFAULT_MAX_PROMPT_CHARS
+                    if DEFAULT_MAX_PROMPT_CHARS is not None:
+                        max_prompt_chars = DEFAULT_MAX_PROMPT_CHARS
                 except Exception:
-                    fallback_limit = 128000
-                max_prompt_chars = limits.get("max_prompt_chars", fallback_limit)
-                log_debug(f"[ai_diary] Active LLM {active_llm} max_prompt_chars: {max_prompt_chars}")
+                    pass  # Keep the default 128000
             else:
-                try:
-                    from core.prompt_engine import DEFAULT_MAX_PROMPT_CHARS
-                    max_prompt_chars = DEFAULT_MAX_PROMPT_CHARS
-                except Exception:
-                    max_prompt_chars = 128000
+                registry = get_llm_registry()
+                engine = registry.get_engine(active_llm)
+                
+                if not engine:
+                    engine = registry.load_engine(active_llm)
+                
+                if engine and hasattr(engine, 'get_interface_limits'):
+                    limits = engine.get_interface_limits()
+                    # Prefer an engine-provided limit, fall back to core default
+                    try:
+                        from core.prompt_engine import DEFAULT_MAX_PROMPT_CHARS
+                        fallback_limit = DEFAULT_MAX_PROMPT_CHARS if DEFAULT_MAX_PROMPT_CHARS is not None else 128000
+                    except Exception:
+                        fallback_limit = 128000
+                    retrieved_limit = limits.get("max_prompt_chars", fallback_limit)
+                    max_prompt_chars = retrieved_limit if retrieved_limit is not None else 128000
+                    log_debug(f"[ai_diary] Active LLM {active_llm} max_prompt_chars: {max_prompt_chars}")
+                else:
+                    try:
+                        from core.prompt_engine import DEFAULT_MAX_PROMPT_CHARS
+                        if DEFAULT_MAX_PROMPT_CHARS is not None:
+                            max_prompt_chars = DEFAULT_MAX_PROMPT_CHARS
+                    except Exception:
+                        pass  # Keep the default 128000
         except Exception as e:
             log_debug(f"[ai_diary] Could not get active LLM limits: {e}")
             try:
                 from core.prompt_engine import DEFAULT_MAX_PROMPT_CHARS
-                max_prompt_chars = DEFAULT_MAX_PROMPT_CHARS
+                if DEFAULT_MAX_PROMPT_CHARS is not None:
+                    max_prompt_chars = DEFAULT_MAX_PROMPT_CHARS
             except Exception:
-                max_prompt_chars = 128000
+                pass  # Keep the default 128000
         
         log_debug(f"[ai_diary] Prompt stats - current: {current_prompt_length}, max: {max_prompt_chars}")
         

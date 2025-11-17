@@ -219,6 +219,22 @@ class DiscordInterface:
 
         try:
             await universal_send(self._discord_send, channel_id, text=text)
+            
+            # Save Rekku's response to chat history cache
+            try:
+                from core.chat_history_cache import save_chat_message
+                await save_chat_message(
+                    chat_id=str(channel_id),
+                    message_text=text,
+                    sender_name="Rekku",
+                    sender_id="rekku",
+                    interface="discord_interface",
+                    thread_id=None
+                )
+                log_debug(f"[discord_interface] Saved Rekku response to chat history cache for channel {channel_id}")
+            except Exception as e:
+                log_debug(f"[discord_interface] Failed to save Rekku response to cache: {e}")
+            
             log_debug(f"[discord_interface] Message sent to {channel_id}: {text}")
         except Exception as e:
             log_error(

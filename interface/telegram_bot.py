@@ -1518,6 +1518,22 @@ class TelegramInterface:
                 fallback_thread_id=fallback_thread_id,
                 fallback_reply_to_message_id=fallback_reply_to,
             )
+            
+            # Save Rekku's response to chat history cache
+            try:
+                from core.chat_history_cache import save_chat_message
+                await save_chat_message(
+                    chat_id=str(chat_id),
+                    message_text=text,
+                    sender_name="Rekku",
+                    sender_id="rekku",
+                    interface="telegram_bot",
+                    thread_id=thread_id
+                )
+                log_debug(f"[telegram_interface] Saved Rekku response to chat history cache for chat {chat_id}")
+            except Exception as e:
+                log_debug(f"[telegram_interface] Failed to save Rekku response to cache: {e}")
+                
         except BadRequest as e:
             if "chat not found" in str(e).lower():
                 # Use orchestrator instead of legacy corrector

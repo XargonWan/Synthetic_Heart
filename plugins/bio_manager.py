@@ -16,6 +16,10 @@ from core.core_initializer import core_initializer, register_plugin
 # Injection priority for participant bios
 INJECTION_PRIORITY = 5  # Medium priority - keep essential participant info
 
+# Global flag to track if table has been initialized
+_table_initialized = False
+_table_lock = threading.Lock()
+
 def register_injection_priority():
     """Register this component's injection priority."""
     log_info(f"[bio_manager] Registered injection priority: {INJECTION_PRIORITY}")
@@ -121,10 +125,17 @@ async def init_bio_table():
 def _run(coro):
     """Run a coroutine safely even if an event loop is already running."""
     try:
+        # Log the coroutine name for debugging timeouts
+        coro_name = coro.__name__ if hasattr(coro, '__name__') else str(coro)
+        log_debug(f"[bio_manager] _run called with: {coro_name}")
+        
         loop = asyncio.get_event_loop()
         if loop.is_running():
             # We're in async context, use run_coroutine_threadsafe to avoid creating new loop
-            return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=10.0)
+            log_debug(f"[bio_manager] Using run_coroutine_threadsafe for: {coro_name}")
+            result = asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=30.0)
+            log_debug(f"[bio_manager] _run completed successfully for: {coro_name}")
+            return result
         else:
             # Event loop exists but not running, use run_until_complete
             return loop.run_until_complete(coro)
@@ -132,7 +143,9 @@ def _run(coro):
         # No event loop at all - this is the only safe place to use asyncio.run()
         return asyncio.run(coro)
     except Exception as e:
+        import traceback
         log_error(f"[bio_manager] Error in _run: {e}")
+        log_debug(f"[bio_manager] Traceback: {traceback.format_exc()}")
         return None
 
 
@@ -151,7 +164,21 @@ async def _fetchone(query: str, params: tuple = ()):
 
 def _ensure_table() -> None:
     """Create the bio table if it doesn't exist."""
-    _run(init_bio_table())
+    global _table_initialized
+    
+    # Fast path: if already initialized, skip DB call
+    if _table_initialized:
+        return
+    
+    # Slow path: check and initialize with lock
+    with _table_lock:
+        # Double-check after acquiring lock
+        if _table_initialized:
+            return
+        
+        _run(init_bio_table())
+        _table_initialized = True
+        log_debug("[bio_manager] Table initialization completed and cached")
 
 
 def _ensure_user_exists(user_id: str) -> None:
@@ -303,8 +330,44 @@ def _update_json_field(user_id: str, key: str, update_fn: Callable[[Any], Any]) 
         return
 
 
+async def _get_bio_light_async(user_id: str) -> dict:
+    """Async version of get_bio_light - returns a lightweight bio for the user."""
+    try:
+        row = await _fetchone(
+            "SELECT known_as, likes, not_likes, feelings, information FROM bio WHERE id=%s",
+            (user_id,),
+        )
+        if not row:
+            return {}
+        
+        result = {
+            "known_as": _load_json_field(row.get("known_as"), "known_as", DEFAULTS["known_as"]),
+            "likes": _load_json_field(row.get("likes"), "likes", DEFAULTS["likes"]),
+            "not_likes": _load_json_field(row.get("not_likes"), "not_likes", DEFAULTS["not_likes"]),
+            "feelings": _load_json_field(row.get("feelings"), "feelings", DEFAULTS["feelings"]),
+            "information": row.get("information") or "",
+        }
+        
+        # Ensure all expected fields exist and are of correct types
+        if not isinstance(result.get("known_as"), list):
+            result["known_as"] = DEFAULTS["known_as"]
+        if not isinstance(result.get("likes"), list):
+            result["likes"] = DEFAULTS["likes"]
+        if not isinstance(result.get("not_likes"), list):
+            result["not_likes"] = DEFAULTS["not_likes"]
+        if not isinstance(result.get("feelings"), list):
+            result["feelings"] = DEFAULTS["feelings"]
+        if not isinstance(result.get("information"), str):
+            result["information"] = ""
+            
+        return result
+    except Exception as e:
+        log_error(f"[bio_manager] Error in _get_bio_light_async for user {user_id}: {e}")
+        return {}
+
+
 def get_bio_light(user_id: str) -> dict:
-    """Return a lightweight bio for the user."""
+    """Return a lightweight bio for the user (sync wrapper)."""
     try:
         _ensure_table()
         row = _run(
@@ -551,6 +614,17 @@ def update_bio_fields(user_id: str, updates: dict) -> None:
                 ),
             )
         )
+
+
+async def _update_last_accessed_async(user_id: str, timestamp: str) -> None:
+    """Async version to update last_accessed field without blocking."""
+    try:
+        await _execute(
+            "UPDATE bio SET last_accessed = %s WHERE id = %s",
+            (timestamp, user_id)
+        )
+    except Exception as e:
+        log_warning(f"[bio_manager] Failed to update last_accessed for user {user_id}: {e}")
 
 
 def update_bio_fields_auto(user_id: str, updates: dict) -> None:
@@ -843,8 +917,8 @@ class BioPlugin:
             }
         return {}
 
-    def get_static_injection(self, message=None, context_memory=None) -> dict:
-        """Gather participants and inject short bios and feelings."""
+    async def get_static_injection(self, message=None, context_memory=None) -> dict:
+        """Gather participants and inject short bios and feelings (async version)."""
         if not message or context_memory is None:
             self._participants = []
             return {}
@@ -884,22 +958,35 @@ class BioPlugin:
         data = []
         now = datetime.utcnow().isoformat()
         for p in participants:
-            bio = get_bio_light(p["id"])
+            bio = await _get_bio_light_async(p["id"])  # Use async version
             # Ensure bio is always a dict to prevent 'str' object has no attribute 'get' error
             if not isinstance(bio, dict):
-                log_warning(f"[bio_manager] get_bio_light returned non-dict for user {p['id']}: {type(bio)} - {bio}")
+                log_warning(f"[bio_manager] _get_bio_light_async returned non-dict for user {p['id']}: {type(bio)} - {bio}")
                 bio = {}
             short_info = bio.get("information", "")[:200]
+            
+            # Build chat_history for this participant from context_memory
+            user_chat_history = []
+            if chat_msgs:
+                for msg in chat_msgs:
+                    if str(msg.get("user_id")) == p["id"]:
+                        user_chat_history.append({
+                            "text": msg.get("text", ""),
+                            "timestamp": msg.get("timestamp", ""),
+                            "username": msg.get("username", "")
+                        })
+            
             entry = {
                 "id": p["id"],
                 "usertag": p.get("usertag"),
+                "chat_history": user_chat_history,
                 "nicknames": bio.get("known_as", []),
                 "short_bio": short_info,
                 "feelings": bio.get("feelings", []),
             }
             data.append(entry)
             try:
-                update_bio_fields_auto(p["id"], {"last_accessed": now})
+                await _update_last_accessed_async(p["id"], now)
             except Exception as e:
                 log_warning(f"[bio_manager] Failed to update last_accessed for user {p['id']}: {e}")
                 # Continue without failing the entire injection

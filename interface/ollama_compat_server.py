@@ -668,6 +668,21 @@ class OllamaCompatServer:
                 conversation_id=conversation_id,
                 text=text,
             )
+            
+            # Save Rekku's response to chat history cache
+            try:
+                from core.chat_history_cache import save_chat_message
+                await save_chat_message(
+                    chat_id=chat_id,
+                    message_text=text,
+                    sender_name="Rekku",
+                    sender_id="rekku",
+                    interface="ollama_serve",
+                    thread_id=None
+                )
+                log_debug(f"[ollama_serve] Saved Rekku response to chat history cache for chat {chat_id}")
+            except Exception as e:
+                log_debug(f"[ollama_serve] Failed to save Rekku response to cache: {e}")
 
         if finalize_flag:
             await self._finalize_stream(

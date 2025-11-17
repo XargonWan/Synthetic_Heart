@@ -40,6 +40,12 @@ class LLMRegistry:
         If the engine is not yet registered, attempts to load it directly
         from the llm_engines module to support dynamic loading.
         """
+        # Validate that name is not None or empty
+        if not name or not isinstance(name, str):
+            error_msg = f"Invalid engine name: {repr(name)}. Engine name must be a non-empty string."
+            log_error(f"[llm_registry] ❌ {error_msg}")
+            raise ValueError(error_msg)
+        
         module_path = None
         
         # Check if registered

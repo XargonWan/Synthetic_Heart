@@ -22,6 +22,7 @@ NORMAL_PRIORITY = 1
 _queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
 _lock = asyncio.Lock()
 _consumer_task: asyncio.Task | None = None
+_counter = 0  # Monotonic counter to prevent dict comparison when priorities are equal
 
 
 class MessageQueue:
@@ -38,9 +39,11 @@ class MessageQueue:
 
 
 async def _delayed_put(item: dict, delay: float) -> None:
+    global _counter
     await asyncio.sleep(delay)
     priority = HIGH_PRIORITY if item.get("priority") else NORMAL_PRIORITY
-    await _queue.put((priority, item))
+    _counter += 1
+    await _queue.put((priority, _counter, item))
 
 
 async def enqueue(bot, message, context_memory=None, priority: bool = False, interface_id: str = None, skip_mention_check: bool = False, original_message=None) -> None:
@@ -232,8 +235,10 @@ async def enqueue(bot, message, context_memory=None, priority: bool = False, int
         "priority": priority,
     }
 
+    global _counter
     priority_val = HIGH_PRIORITY if priority else NORMAL_PRIORITY
-    await _queue.put((priority_val, item))
+    _counter += 1
+    await _queue.put((priority_val, _counter, item))
     log_debug(f"[QUEUE] Message successfully put in queue with priority {priority_val}")
     
     if priority:
@@ -282,9 +287,9 @@ async def _consumer_loop() -> None:
     log_info("[QUEUE] Consumer loop started")
     while True:
         try:
-            priority, item = await _queue.get()
+            priority, counter, item = await _queue.get()
             log_debug(
-                f"[QUEUE] Dequeued message from chat {item.get('chat_id')} (priority={priority})"
+                f"[QUEUE] Dequeued message from chat {item.get('chat_id')} (priority={priority}, counter={counter})"
             )
 
             async with _lock:
@@ -455,12 +460,14 @@ async def enqueue_event(bot, prompt_data, event_id: int = None) -> None:
     }
 
     # Check to avoid duplicates in the queue
-    for prio, queued_item in list(_queue._queue):
+    for prio, cnt, queued_item in list(_queue._queue):
         if queued_item.get("event_prompt") == prompt_data:
             log_warning("[QUEUE] Duplicate event detected, not added to the queue")
             return
 
-    await _queue.put((HIGH_PRIORITY, item))
+    global _counter
+    _counter += 1
+    await _queue.put((HIGH_PRIORITY, _counter, item))
     log_debug(f"[QUEUE] Event added to the queue with priority: {prompt_data}")
     log_debug(f"[QUEUE] Current queue state: {list(_queue._queue)}")
 

@@ -11,6 +11,9 @@ while [ ! -e /tmp/.X11-unix/X1 ]; do
     echo "[S6 synth] Still waiting for /tmp/.X11-unix/X1..."
 done
 
+# Set DISPLAY environment variable for X11 applications (including Chromium/Selenium)
+export DISPLAY=:1
+
 echo "[S6 synth] Avvio Synthetic Heart..."
 cd /app
 exec /app/synth.sh run
