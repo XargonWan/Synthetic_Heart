@@ -145,11 +145,9 @@ removed without affecting the core system.
        tags JSON,
        involved JSON,
        emotions JSON,
-       interface VARCHAR(50),
-       chat_id VARCHAR(255),
-       thread_id VARCHAR(255),
+       interface_path VARCHAR(512),
        INDEX idx_timestamp (timestamp),
-       INDEX idx_interface_chat (interface, chat_id)
+       INDEX idx_interface_path (interface_path)
    );
 
 **Usage Example:**
@@ -165,7 +163,7 @@ After helping Takeshi with a coding task, synth automatically creates a diary en
    #tags: bio, security, helpful
    #involved: Takeshi
    #emotions: helpful(8), focused(7)
-   #context: telegram/123456/2
+   #context: telegram_bot/123456/2
 
    === End Diary ===
 

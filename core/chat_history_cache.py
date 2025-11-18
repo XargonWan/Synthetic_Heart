@@ -30,16 +30,14 @@ async def init_chat_history_table() -> None:
                 await cur.execute("""
                     CREATE TABLE IF NOT EXISTS chat_history_cache (
                         id INT AUTO_INCREMENT PRIMARY KEY,
-                        chat_id VARCHAR(255) NOT NULL,
-                        interface VARCHAR(100),
-                        thread_id VARCHAR(255),
+                        interface_path VARCHAR(512) NOT NULL,
                         sender_name VARCHAR(255),
                         sender_id VARCHAR(255),
                         message_text LONGTEXT NOT NULL,
                         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        INDEX idx_chat_id (chat_id),
+                        INDEX idx_interface_path (interface_path),
                         INDEX idx_timestamp (timestamp),
-                        UNIQUE KEY uniq_message (chat_id, thread_id, timestamp)
+                        UNIQUE KEY uniq_message (interface_path, timestamp)
                     )
                 """)
                 log_debug("[chat_history_cache] chat_history_cache table initialized")
@@ -48,24 +46,20 @@ async def init_chat_history_table() -> None:
 
 
 async def save_chat_message(
-    chat_id: str,
+    interface_path: str,
     message_text: str,
     sender_name: str = None,
-    sender_id: str = None,
-    interface: str = None,
-    thread_id: str = None
+    sender_id: str = None
 ) -> None:
     """Save a message to the chat history cache.
     
     Args:
-        chat_id: The chat ID
+        interface_path: The interface path (e.g., telegram_bot/123456/2)
         message_text: The message text
         sender_name: Optional sender name
         sender_id: Optional sender ID
-        interface: Optional interface name
-        thread_id: Optional thread ID
     """
-    if not chat_id or not message_text:
+    if not interface_path or not message_text:
         return
     
     try:
@@ -74,40 +68,40 @@ async def save_chat_message(
                 # Insert message
                 await cur.execute("""
                     INSERT INTO chat_history_cache 
-                    (chat_id, interface, thread_id, sender_name, sender_id, message_text)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    (interface_path, sender_name, sender_id, message_text)
+                    VALUES (%s, %s, %s, %s)
                     ON DUPLICATE KEY UPDATE timestamp=CURRENT_TIMESTAMP
-                """, (chat_id, interface, thread_id, sender_name, sender_id, message_text))
+                """, (interface_path, sender_name, sender_id, message_text))
                 
                 # Clean up old messages beyond CHAT_HISTORY_LIMIT
                 await cur.execute("""
                     DELETE FROM chat_history_cache
-                    WHERE chat_id = %s
+                    WHERE interface_path = %s
                     AND id NOT IN (
                         SELECT id FROM (
                             SELECT id FROM chat_history_cache
-                            WHERE chat_id = %s
+                            WHERE interface_path = %s
                             ORDER BY timestamp DESC
                             LIMIT %s
                         ) AS temp
                     )
-                """, (chat_id, chat_id, CHAT_HISTORY_LIMIT))
+                """, (interface_path, interface_path, CHAT_HISTORY_LIMIT))
                 
-                log_debug(f"[chat_history_cache] Saved message for chat {chat_id}")
+                log_debug(f"[chat_history_cache] Saved message for interface_path {interface_path}")
     except Exception as e:
         log_debug(f"[chat_history_cache] Failed to save message: {e}")
 
 
-async def load_chat_history(chat_id: str) -> deque:
-    """Load chat history from cache for a specific chat.
+async def load_chat_history(interface_path: str) -> deque:
+    """Load chat history from cache for a specific interface path.
     
     Args:
-        chat_id: The chat ID
+        interface_path: The interface path (e.g., telegram_bot/123456/2)
         
     Returns:
         deque of message objects in chronological order
     """
-    if not chat_id:
+    if not interface_path:
         return deque()
     
     try:
@@ -115,12 +109,12 @@ async def load_chat_history(chat_id: str) -> deque:
             async with conn.cursor() as cur:
                 # Load messages in chronological order
                 await cur.execute("""
-                    SELECT sender_name, sender_id, message_text, timestamp, interface, thread_id
+                    SELECT sender_name, sender_id, message_text, timestamp, interface_path
                     FROM chat_history_cache
-                    WHERE chat_id = %s
+                    WHERE interface_path = %s
                     ORDER BY timestamp ASC
                     LIMIT %s
-                """, (chat_id, CHAT_HISTORY_LIMIT))
+                """, (interface_path, CHAT_HISTORY_LIMIT))
                 
                 rows = await cur.fetchall()
                 
@@ -128,44 +122,43 @@ async def load_chat_history(chat_id: str) -> deque:
                 messages = deque()
                 for row in rows:
                     try:
-                        sender_name, sender_id, message_text, timestamp, interface, thread_id = row
+                        sender_name, sender_id, message_text, timestamp, ipath = row
                         # Store as dict for flexibility
                         msg = {
                             "sender_name": sender_name,
                             "sender_id": sender_id,
                             "text": message_text,
                             "timestamp": timestamp.isoformat() if isinstance(timestamp, datetime) else str(timestamp),
-                            "interface": interface,
-                            "thread_id": thread_id,
+                            "interface_path": ipath,
                         }
                         messages.append(msg)
                     except Exception as e:
                         log_debug(f"[chat_history_cache] Error parsing message row: {e}")
                 
-                log_debug(f"[chat_history_cache] Loaded {len(messages)} messages for chat {chat_id}")
+                log_debug(f"[chat_history_cache] Loaded {len(messages)} messages for interface_path {interface_path}")
                 return messages
                 
     except Exception as e:
-        log_error(f"[chat_history_cache] Failed to load chat history for {chat_id}: {e}")
+        log_error(f"[chat_history_cache] Failed to load chat history for {interface_path}: {e}")
         return deque()
 
 
-async def clear_chat_history(chat_id: str) -> None:
-    """Clear all messages for a specific chat.
+async def clear_chat_history(interface_path: str) -> None:
+    """Clear all messages for a specific interface path.
     
     Args:
-        chat_id: The chat ID to clear
+        interface_path: The interface path to clear (e.g., telegram_bot/123456/2)
     """
-    if not chat_id:
+    if not interface_path:
         return
     
     try:
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
-                await cur.execute("DELETE FROM chat_history_cache WHERE chat_id = %s", (chat_id,))
-                log_info(f"[chat_history_cache] Cleared chat history for {chat_id}")
+                await cur.execute("DELETE FROM chat_history_cache WHERE interface_path = %s", (interface_path,))
+                log_info(f"[chat_history_cache] Cleared chat history for {interface_path}")
     except Exception as e:
-        log_error(f"[chat_history_cache] Failed to clear chat history for {chat_id}: {e}")
+        log_error(f"[chat_history_cache] Failed to clear chat history for {interface_path}: {e}")
 
 
 async def get_cache_stats() -> dict:
@@ -181,9 +174,9 @@ async def get_cache_stats() -> dict:
                 await cur.execute("SELECT COUNT(*) FROM chat_history_cache")
                 total_messages = (await cur.fetchone())[0]
                 
-                # Number of unique chats
-                await cur.execute("SELECT COUNT(DISTINCT chat_id) FROM chat_history_cache")
-                unique_chats = (await cur.fetchone())[0]
+                # Number of unique interface paths
+                await cur.execute("SELECT COUNT(DISTINCT interface_path) FROM chat_history_cache")
+                unique_paths = (await cur.fetchone())[0]
                 
                 # Oldest and newest messages
                 await cur.execute("""
@@ -194,7 +187,7 @@ async def get_cache_stats() -> dict:
                 
                 return {
                     "total_messages": total_messages,
-                    "unique_chats": unique_chats,
+                    "unique_interface_paths": unique_paths,
                     "oldest_message": oldest.isoformat() if oldest else None,
                     "newest_message": newest.isoformat() if newest else None,
                     "history_limit": CHAT_HISTORY_LIMIT,

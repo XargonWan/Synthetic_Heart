@@ -368,12 +368,31 @@ class MatrixInterface:
         else:
             date = datetime.now(tz=timezone.utc)
 
-        history = context_memory.setdefault(room_identifier, deque(maxlen=50))
-        history.append(text)
-
+        # Build interface_path for Matrix
+        from core.interface_path_utils import build_interface_path
         source = getattr(event, "source", {}) or {}
         content = source.get("content", {})
         relates_to = content.get("m.relates_to", {}) if isinstance(content, dict) else {}
+        thread_event_id = relates_to.get("event_id") if isinstance(relates_to, dict) else None
+        
+        # Matrix: matrix/room_id/event_id (if threaded)
+        interface_path = build_interface_path('matrix', room_identifier, thread_event_id if thread_event_id else None)
+        log_debug(f"[matrix_interface] Generated interface_path: {interface_path}")
+
+        # Track context using centralized manager
+        from core.chat_context_manager import add_message_to_context
+        try:
+            await add_message_to_context(
+                interface_path=interface_path,
+                message_text=text,
+                sender_name=_extract_username(getattr(event, "sender", "")),
+                sender_id=getattr(event, "sender", "unknown"),
+                message_id=getattr(event, "event_id", None),
+                timestamp=date.isoformat() if date else None
+            )
+        except Exception as e:
+            log_warning(f"[matrix_interface] Failed to add message to context: {e}")
+
         reply_payload = relates_to.get("m.in_reply_to", {}) if isinstance(relates_to, dict) else {}
         reply_event_id = reply_payload.get("event_id")
 
@@ -392,10 +411,11 @@ class MatrixInterface:
         wrapped = SimpleNamespace(
             message_id=getattr(event, "event_id", None),
             chat_id=room_identifier,
+            interface_path=interface_path,  # Add interface_path to message
             text=text,
             caption=None,
             date=date,
-            thread_id=relates_to.get("event_id") if isinstance(relates_to, dict) else None,
+            thread_id=thread_event_id,
             from_user=SimpleNamespace(
                 id=getattr(event, "sender", None),
                 username=_extract_username(getattr(event, "sender", "")),
@@ -485,13 +505,13 @@ class MatrixInterface:
         # Save Rekku's response to chat history cache
         try:
             from core.chat_history_cache import save_chat_message
+            from core.interface_path_utils import build_interface_path
+            interface_path = build_interface_path('matrix', str(room_id), str(thread_event_id) if thread_event_id else None)
             await save_chat_message(
-                chat_id=str(room_id),
+                interface_path=interface_path,
                 message_text=text,
                 sender_name="Rekku",
-                sender_id="rekku",
-                interface="matrix_interface",
-                thread_id=thread_event_id
+                sender_id="rekku"
             )
             log_debug(f"[matrix_interface] Saved Rekku response to chat history cache for room {room_id}")
         except Exception as e:

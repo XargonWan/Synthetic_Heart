@@ -47,16 +47,16 @@ def get_context_memory() -> Dict[str, deque]:
     return _context_memory
 
 
-def get_or_create_chat_context(chat_id: str) -> deque:
-    """Get or create a context deque for a chat.
+def get_or_create_chat_context(interface_path: str) -> deque:
+    """Get or create a context deque for an interface path.
     
     Args:
-        chat_id: The chat identifier
+        interface_path: The interface path (e.g., telegram_bot/123456/2)
         
     Returns:
         A deque with maxlen=CHAT_HISTORY_LIMIT
     """
-    if chat_id not in _context_memory:
+    if interface_path not in _context_memory:
         limit = config_registry.get_var(
             "CHAT_HISTORY_LIMIT",
             10,
@@ -70,19 +70,17 @@ def get_or_create_chat_context(chat_id: str) -> deque:
         except (ValueError, TypeError):
             limit = 10
         
-        _context_memory[chat_id] = deque(maxlen=limit)
-        log_debug(f"[context_manager] Created context for chat {chat_id} with limit {limit}")
+        _context_memory[interface_path] = deque(maxlen=limit)
+        log_debug(f"[context_manager] Created context for interface_path {interface_path} with limit {limit}")
     
-    return _context_memory[chat_id]
+    return _context_memory[interface_path]
 
 
 async def add_message_to_context(
-    chat_id: str,
+    interface_path: str,
     message_text: str,
     sender_name: str,
     sender_id: str,
-    interface: str,
-    thread_id: Optional[str] = None,
     message_id: Optional[int] = None,
     timestamp: Optional[str] = None,
     **extra_fields
@@ -95,18 +93,16 @@ async def add_message_to_context(
     3. Auto-cleans old messages beyond CHAT_HISTORY_LIMIT
     
     Args:
-        chat_id: Chat identifier
+        interface_path: Interface path (e.g., 'telegram_bot/123456/2')
         message_text: The message text
         sender_name: Sender display name
         sender_id: Sender unique ID
-        interface: Interface name (e.g., 'telegram_bot', 'discord_interface')
-        thread_id: Optional thread/topic ID
         message_id: Optional message ID from interface
         timestamp: Optional ISO format timestamp
         **extra_fields: Additional fields to store in context
     """
     # Add to in-memory context
-    context = get_or_create_chat_context(chat_id)
+    context = get_or_create_chat_context(interface_path)
     
     message_obj = {
         "message_id": message_id,
@@ -114,79 +110,76 @@ async def add_message_to_context(
         "username": sender_name,
         "text": message_text,
         "timestamp": timestamp,
-        "interface": interface,
-        "thread_id": thread_id,
+        "interface_path": interface_path,
     }
     message_obj.update(extra_fields)
     
     context.append(message_obj)
-    log_debug(f"[context_manager] Added message to context for chat {chat_id}")
+    log_debug(f"[context_manager] Added message to context for interface_path {interface_path}")
     
     # Persist to database (non-blocking, don't let DB failures affect message processing)
     try:
         from core.chat_history_cache import save_chat_message
         await save_chat_message(
-            chat_id=chat_id,
+            interface_path=interface_path,
             message_text=message_text,
             sender_name=sender_name,
-            sender_id=sender_id,
-            interface=interface,
-            thread_id=thread_id
+            sender_id=sender_id
         )
     except Exception as e:
         log_warning(f"[context_manager] Failed to persist message to cache: {e}")
 
 
-async def load_chat_history(chat_id: str) -> None:
+async def load_chat_history(interface_path: str) -> None:
     """Load persisted chat history into context memory.
     
     This is called during initialization to restore chat history
     from previous sessions.
     
     Args:
-        chat_id: Chat identifier to load history for
+        interface_path: Interface path to load history for (e.g., telegram_bot/123456/2)
     """
     try:
         from core.chat_history_cache import load_chat_history as cache_load
         
-        history = await cache_load(chat_id)
+        history = await cache_load(interface_path)
         if history:
-            context = get_or_create_chat_context(chat_id)
+            context = get_or_create_chat_context(interface_path)
             # Load all messages from cache
             for msg in history:
                 context.append(msg)
-            log_info(f"[context_manager] Loaded {len(history)} messages for chat {chat_id}")
+            log_info(f"[context_manager] Loaded {len(history)} messages for interface_path {interface_path}")
         else:
-            log_debug(f"[context_manager] No persisted history for chat {chat_id}")
+            log_debug(f"[context_manager] No persisted history for interface_path {interface_path}")
     except Exception as e:
-        log_warning(f"[context_manager] Failed to load chat history for {chat_id}: {e}")
+        log_warning(f"[context_manager] Failed to load chat history for {interface_path}: {e}")
 
 
-def clear_chat_context(chat_id: str) -> None:
-    """Clear context for a specific chat.
+def clear_chat_context(interface_path: str) -> None:
+    """Clear context for a specific interface path.
     
     Args:
-        chat_id: Chat identifier
+        interface_path: Interface path (e.g., telegram_bot/123456/2)
     """
-    if chat_id in _context_memory:
-        _context_memory[chat_id].clear()
-        log_debug(f"[context_manager] Cleared context for chat {chat_id}")
+    if interface_path in _context_memory:
+        _context_memory[interface_path].clear()
+        log_debug(f"[context_manager] Cleared context for interface_path {interface_path}")
 
 
 def get_context_stats() -> dict:
     """Get statistics about the context memory.
     
     Returns:
-        Dict with keys: 'total_chats', 'total_messages', 'chats'
+        Dict with keys: 'total_paths', 'total_messages', 'paths'
     """
     stats = {
-        'total_chats': len(_context_memory),
+        'total_paths': len(_context_memory),
         'total_messages': sum(len(deq) for deq in _context_memory.values()),
-        'chats': {}
+        'paths': {}
     }
     
-    for chat_id, deq in _context_memory.items():
-        stats['chats'][chat_id] = {
+    for interface_path, deq in _context_memory.items():
+        stats['paths'][interface_path] = {
             'messages': len(deq),
             'maxlen': deq.maxlen
         }

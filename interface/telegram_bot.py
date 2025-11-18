@@ -335,17 +335,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     log_info(f"[telegram_bot] Processing message from {username} ({user_id}){content_description}")
 
+    # Build interface_path for this message
+    from core.interface_path_utils import build_interface_path
+    thread_id = getattr(message, 'message_thread_id', None) or getattr(message, 'thread_id', None)
+    interface_path = build_interface_path('telegram_bot', str(message.chat_id), str(thread_id) if thread_id else None)
+    log_debug(f"[telegram_bot] Generated interface_path: {interface_path}")
+
     # Track context - using centralized context manager
-    log_debug(f"[telegram_bot] Tracking message for chat {message.chat_id}")
+    log_debug(f"[telegram_bot] Tracking message for interface_path {interface_path}")
     from core.chat_context_manager import add_message_to_context
     try:
         await add_message_to_context(
-            chat_id=str(message.chat_id),
+            interface_path=interface_path,
             message_text=text,
             sender_name=username,
             sender_id=str(user_id),
-            interface="telegram_bot",
-            thread_id=None,
             message_id=message.message_id,
             timestamp=message.date.isoformat() if hasattr(message, 'date') else None
         )
@@ -1095,6 +1099,10 @@ class TelegramInterface:
             return {"chat_name": chat_name, "message_thread_name": thread_name}
 
         ChatLinkStore.set_name_resolver("telegram", _resolver)
+        
+        # Register validation rules with the validation registry
+        self._register_custom_validation()
+        
         log_debug("[telegram_interface] TelegramInterface instance initialized")
 
     async def start(self):
@@ -1148,22 +1156,16 @@ class TelegramInterface:
         """Return schema information for supported actions."""
         return {
             "message_telegram_bot": {
-                "required_fields": ["text"],
+                "required_fields": ["text", "interface_path"],
                 "optional_fields": [
-                    "target",
                     "chat_name",
-                    "thread_id",
-                    "message_thread_name",
                 ],
                 "description": "Send a text message via Telegram",
             },
             "audio_telegram_bot": {
-                "required_fields": ["audio"],
+                "required_fields": ["audio", "interface_path"],
                 "optional_fields": [
-                    "target",
                     "chat_name",
-                    "thread_id",
-                    "message_thread_name",
                 ],
                 "description": "Send a voice message via Telegram",
             },
@@ -1177,28 +1179,15 @@ class TelegramInterface:
                 "description": "Send a message via Telegram bot",
                 "payload": {
                     "text": {"type": "string", "example": "Hello!", "description": "The message text to send"},
-                    "target": {
+                    "interface_path": {
                         "type": "string",
-                        "example": "-123456789",
-                        "description": "Numeric chat_id or chat_name of the recipient. Use input.payload.source.chat_id to reply in the same chat.",
-                        "optional": True,
+                        "example": "telegram_bot/123456789/456",
+                        "description": "REQUIRED. Interface path in format 'telegram_bot/chat_id' or 'telegram_bot/chat_id/thread_id'. Use input.payload.source.interface_path to reply in same context.",
                     },
                     "chat_name": {
                         "type": "string",
                         "example": "Il covo di Rekku",
-                        "description": "Alternative to target for specifying the chat by name",
-                        "optional": True,
-                    },
-                    "thread_id": {
-                        "type": "integer",
-                        "example": 456,
-                        "description": "Thread ID when replying in a topic/thread. CRITICAL: If input.payload.source.thread_id is non-null, ALWAYS include it here! Only omit if the original message has thread_id=null/0.",
-                        "optional": True,
-                    },
-                    "message_thread_name": {
-                        "type": "string",
-                        "example": "Generale",
-                        "description": "Alternative to thread_id to specify the thread by name",
+                        "description": "Alternative to interface_path for specifying the chat by name (will be resolved to interface_path)",
                         "optional": True,
                     },
                     "reply_to_message_id": {
@@ -1209,11 +1198,10 @@ class TelegramInterface:
                     },
                 },
                 "important_notes": [
-                    "ALWAYS specify target field - use input.payload.source.chat_id to reply in the same chat",
-                    "CRITICAL for thread conversations: If input.payload.source.thread_id exists and is non-zero, ALWAYS pass it as thread_id in your payload!",
-                    "When replying to a message that was in a thread/topic, ALWAYS include thread_id to ensure the reply appears in the correct thread",
-                    "If you omit thread_id when it should be included, the message may appear in the main chat instead of the thread",
-                    "For group chats with topics enabled, check if the original message has a thread_id and include it in your response"
+                    "CRITICAL: ALWAYS use interface_path from input.payload.source.interface_path to reply in same conversation!",
+                    "Format: 'telegram_bot/chat_id' for regular chats or 'telegram_bot/chat_id/thread_id' for topics/threads",
+                    "Example: if input shows 'telegram_bot/-1003098886330/789', use EXACTLY that as interface_path in your payload",
+                    "Never use just chat_id or target - always use the complete interface_path format"
                 ]
             }
         if action_name == "audio_telegram_bot":
@@ -1221,22 +1209,15 @@ class TelegramInterface:
                 "description": "Send a voice message via Telegram bot",
                 "payload": {
                     "audio": {"type": "string", "example": "/path/to/file.ogg", "description": "Path to the voice file"},
-                    "target": {
+                    "interface_path": {
                         "type": "string",
-                        "example": "-123456789",
-                        "description": "Numeric chat_id or chat_name of the recipient",
-                        "optional": True,
+                        "example": "telegram_bot/123456789/456",
+                        "description": "REQUIRED. Complete interface path. Use input.payload.source.interface_path to reply in same context.",
                     },
                     "chat_name": {
                         "type": "string",
                         "example": "Il covo di Rekku",
-                        "description": "Alternative to target for specifying the chat by name",
-                        "optional": True,
-                    },
-                    "thread_id": {
-                        "type": "integer",
-                        "example": 456,
-                        "description": "Optional thread ID for group chats",
+                        "description": "Alternative to interface_path for specifying the chat by name",
                         "optional": True,
                     },
                 },
@@ -1260,31 +1241,104 @@ class TelegramInterface:
         else:
             return []
 
-        target = payload.get("target")
+        interface_path = payload.get("interface_path")
         chat_name = payload.get("chat_name")
-        if target is None and chat_name is None:
-            errors.append("payload.target or payload.chat_name is required")
+        
+        if interface_path is None and chat_name is None:
+            errors.append("payload.interface_path or payload.chat_name is required")
         else:
-            if target is not None:
-                if isinstance(target, dict):
-                    chat_id = target.get("chat_id")
-                    thread_id = target.get("thread_id")
-                    if chat_id is not None and not isinstance(chat_id, (int, str)):
-                        errors.append("payload.target.chat_id must be an int or string")
-                    if thread_id is not None and not isinstance(thread_id, int):
-                        errors.append("payload.target.thread_id must be an int")
-                elif not isinstance(target, (int, str)):
-                    errors.append("payload.target must be an int, string or dict")
-
-        thread_id = payload.get("thread_id")
-        if thread_id is not None and not isinstance(thread_id, int):
-            errors.append("payload.thread_id must be an int")
-
-        thread_name = payload.get("message_thread_name")
-        if thread_name is not None and not isinstance(thread_name, str):
-            errors.append("payload.message_thread_name must be a string")
+            if interface_path is not None and not isinstance(interface_path, str):
+                errors.append("payload.interface_path must be a string")
+            if chat_name is not None and not isinstance(chat_name, str):
+                errors.append("payload.chat_name must be a string")
 
         return errors
+
+    def _register_custom_validation(self):
+        """Register custom validation rules with the validation registry."""
+        try:
+            from core.validation_registry import ValidationRule, get_validation_registry
+            
+            def validate_telegram_message(payload):
+                """Enhanced validation for Telegram message actions."""
+                errors = []
+                
+                # Validate text content
+                text = payload.get("text")
+                if text is None or (isinstance(text, str) and not text.strip()):
+                    errors.append("Message text cannot be empty")
+                elif not isinstance(text, str):
+                    errors.append("Message text must be a string")
+                
+                # Validate interface_path or chat_name
+                interface_path = payload.get("interface_path")
+                chat_name = payload.get("chat_name")
+                
+                if interface_path is None and chat_name is None:
+                    errors.append("Either interface_path or chat_name must be provided")
+                
+                if interface_path is not None and not isinstance(interface_path, str):
+                    errors.append("interface_path must be a string")
+                elif interface_path is not None and not interface_path.strip():
+                    errors.append("interface_path cannot be empty")
+                
+                if chat_name is not None and not isinstance(chat_name, str):
+                    errors.append("chat_name must be a string")
+                
+                return errors
+            
+            def validate_telegram_audio(payload):
+                """Enhanced validation for Telegram audio actions."""
+                errors = []
+                
+                # Validate audio path
+                audio = payload.get("audio")
+                if audio is None or (isinstance(audio, str) and not audio.strip()):
+                    errors.append("Audio path cannot be empty")
+                elif not isinstance(audio, str):
+                    errors.append("Audio path must be a string")
+                
+                # Validate interface_path or chat_name
+                interface_path = payload.get("interface_path")
+                chat_name = payload.get("chat_name")
+                
+                if interface_path is None and chat_name is None:
+                    errors.append("Either interface_path or chat_name must be provided")
+                
+                if interface_path is not None and not isinstance(interface_path, str):
+                    errors.append("interface_path must be a string")
+                elif interface_path is not None and not interface_path.strip():
+                    errors.append("interface_path cannot be empty")
+                
+                if chat_name is not None and not isinstance(chat_name, str):
+                    errors.append("chat_name must be a string")
+                
+                return errors
+            
+            # Create validation rules for message_telegram_bot
+            message_rule = ValidationRule(
+                action_type="message_telegram_bot",
+                required_fields=["text"],
+                custom_validator=validate_telegram_message,
+                component_name="telegram_bot"
+            )
+            
+            # Create validation rules for audio_telegram_bot
+            audio_rule = ValidationRule(
+                action_type="audio_telegram_bot",
+                required_fields=["audio"],
+                custom_validator=validate_telegram_audio,
+                component_name="telegram_bot"
+            )
+            
+            # Register with validation registry
+            registry = get_validation_registry()
+            registry.register_component_rules("telegram_bot", [message_rule, audio_rule])
+            
+            log_debug("[telegram_bot] Registered custom validation rules with validation registry")
+            
+        except Exception as e:
+            log_warning(f"[telegram_bot] Failed to register custom validation: {e}")
 
     async def _emit_system_error(
         self,
@@ -1345,47 +1399,36 @@ class TelegramInterface:
             return
 
         text = payload.get("text", "")
-        target = payload.get("target")
+        interface_path = payload.get("interface_path")
         chat_name = payload.get("chat_name")
-        thread_id = payload.get("thread_id")
-        thread_name = payload.get("message_thread_name")
-
-        # LLM must explicitly specify target - no auto-injection
-        # Auto-inject thread_id if missing and available (thread_id auto-inject is still useful)
-        if original_message is not None and thread_id is None and hasattr(original_message, "thread_id"):
-            thread_id = original_message.thread_id
-            log_debug(f"[telegram_interface] Auto-injected thread_id from original message: {thread_id}")
+        
+        # Extract chat_id and thread_id from interface_path if provided
+        thread_id = None
+        target = None
+        if interface_path:
+            from core.interface_path_utils import extract_legacy_ids
+            legacy_ids = extract_legacy_ids(interface_path)
+            target = legacy_ids.get('chat_id')
+            thread_id = legacy_ids.get('thread_id')
+            log_debug(f"[telegram_interface] Extracted from interface_path: chat_id={target}, thread_id={thread_id}")
 
         log_debug(
-            f"[telegram_interface] Sending to target={target} chat_name={chat_name} thread_id={thread_id} thread_name={thread_name}"
+            f"[telegram_interface] Sending to interface_path={interface_path} chat_name={chat_name} extracted: chat_id={target} thread_id={thread_id}"
         )
 
         if not text or (target is None and chat_name is None):
             log_warning("[telegram_interface] Missing text or destination, aborting")
             return
 
-        chat_id = None
+        chat_id = target
 
-        if isinstance(target, dict):
-            chat_id = target.get("chat_id")
-            thread_id = target.get("thread_id", thread_id)
-            thread_name = target.get("message_thread_name", thread_name)
-        elif target is not None:
-            if isinstance(target, str) and not target.lstrip("-").isdigit():
-                chat_name = target
-            else:
-                try:
-                    chat_id = int(target)
-                except Exception:
-                    chat_name = target
-
-        if chat_id is None or (thread_id is None and thread_name is not None):
+        if chat_id is None:
             try:
                 row = await chat_link_store.resolve(
                     chat_id=chat_id,
                     thread_id=thread_id,
                     chat_name=chat_name,
-                    message_thread_name=thread_name,
+                    message_thread_name=None,
                 )
             except ChatLinkMultipleMatches:
                 # Use orchestrator instead of legacy corrector

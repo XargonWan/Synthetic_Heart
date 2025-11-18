@@ -355,8 +355,8 @@ async def handle_incoming_message(bot, message, context_memory_or_prompt, interf
             llm_context = {}
             if hasattr(message, 'chat_id'):
                 llm_context['chat_id'] = message.chat_id
-            if hasattr(message, 'thread_id'):
-                llm_context['thread_id'] = message.thread_id
+            if hasattr(message, 'interface_path'):
+                llm_context['interface_path'] = message.interface_path
             if isinstance(context_memory_or_prompt, dict):
                 llm_context.update(context_memory_or_prompt)
             

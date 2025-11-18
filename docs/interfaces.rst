@@ -197,9 +197,9 @@ Creating a new interface requires implementing the interface contract:
                                "type": "string",
                                "description": "Message content to send"
                            },
-                           "target": {
+                           "interface_path": {
                                "type": "string",
-                               "description": "Target recipient or channel"
+                               "description": "Hierarchical interface path (e.g., 'telegram_bot/chat_id/thread_id')"
                            },
                            "media": {
                                "type": "string",
@@ -223,14 +223,14 @@ Creating a new interface requires implementing the interface contract:
                                "scenario": "Send text message",
                                "payload": {
                                    "text": "Hello world!",
-                                   "target": "#general"
+                                   "interface_path": "myinterface/channel1"
                                }
                            },
                            {
                                "scenario": "Send message with media",
                                "payload": {
                                    "text": "Check this out",
-                                   "target": "@user",
+                                   "interface_path": "myinterface/user123",
                                    "media": "https://example.com/image.jpg"
                                }
                            }
@@ -246,7 +246,7 @@ Creating a new interface requires implementing the interface contract:
                    "description": "Send a message through MyInterface.",
                    "payload": {
                        "text": {"type": "string", "description": "Message content"},
-                       "target": {"type": "string", "description": "Recipient identifier"},
+                       "interface_path": {"type": "string", "description": "Hierarchical interface path (e.g., 'myinterface/channel1')"},
                        "media": {"type": "string", "description": "Optional media URL"}
                    }
                }
@@ -258,8 +258,8 @@ Creating a new interface requires implementing the interface contract:
            if action_type == "message_myinterface":
                if "text" not in payload:
                    errors.append("payload.text is required")
-               if "target" not in payload:
-                   errors.append("payload.target is required")
+               if "interface_path" not in payload:
+                   errors.append("payload.interface_path is required")
            return errors
 
        async def start(self):
@@ -297,7 +297,7 @@ Interfaces can provide actions that LLMs can invoke:
      "type": "message_telegram_bot",
      "payload": {
        "text": "Hello from synth!",
-       "chat_id": "123456789"
+       "interface_path": "telegram_bot/123456789/2"
      }
    }
 
@@ -309,7 +309,7 @@ Interfaces can provide actions that LLMs can invoke:
      "type": "send_media_discord",
      "payload": {
        "file_url": "https://example.com/image.png",
-       "channel_id": "987654321"
+       "interface_path": "discord_interface/987654321/123"
      }
    }
 

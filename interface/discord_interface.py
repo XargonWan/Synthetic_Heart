@@ -145,7 +145,7 @@ class DiscordInterface:
         return {
             "message_discord_bot": {
                 "description": "Send a text message to a Discord channel.",
-                "required_fields": ["text", "target"],
+                "required_fields": ["text", "interface_path"],
                 "optional_fields": [],
             }
         }
@@ -157,9 +157,17 @@ class DiscordInterface:
                 "description": "Send a message to a Discord channel.",
                 "payload": {
                     "text": {"type": "string", "example": "Hello Discord!", "description": "The message text to send."},
-                    "target": {"type": "string", "example": "1234567890", "description": "The channel_id of the recipient."},
+                    "interface_path": {
+                        "type": "string", 
+                        "example": "discord_bot/1234567890/9876543210",
+                        "description": "REQUIRED. Interface path from input.payload.source.interface_path. Format: 'discord_bot/guild_id/channel_id' or 'discord_bot/guild_id/channel_id/thread_id' or 'discord_bot/user_id' for DM."
+                    },
                     "reply_to_message_id": {"type": "integer", "example": 987654321, "description": "Optional ID of the message to reply to", "optional": True},
                 },
+                "important_notes": [
+                    "CRITICAL: ALWAYS use interface_path from input.payload.source.interface_path to reply in same conversation!",
+                    "Never construct interface_path manually - use the exact value from input.payload.source.interface_path"
+                ]
             }
         return {}
 
@@ -193,16 +201,33 @@ class DiscordInterface:
         Supports multiple calling conventions:
         - send_message(channel_id, text)
         - send_message(chat_id=..., text=...)
-        - send_message({"target": ..., "text": ...})
+        - send_message({"interface_path": ..., "text": ...})
         """
         if isinstance(channel_id, dict):
             payload = channel_id
             text = payload.get("text", text)
-            channel_id = (
-                payload.get("target")
-                or payload.get("channel_id")
-                or payload.get("chat_id")
-            )
+            interface_path = payload.get("interface_path")
+            
+            # Extract channel_id from interface_path if provided
+            if interface_path:
+                from core.interface_path_utils import parse_interface_path
+                # For Discord: interface_path = discord_bot/guild_id/channel_id/thread_id
+                # We want the channel_id (level 2) or thread_id (level 3) if in thread
+                levels = parse_interface_path(interface_path)
+                if len(levels) >= 4:  # Has thread
+                    channel_id = levels[3]  # thread_id
+                elif len(levels) >= 3:  # No thread
+                    channel_id = levels[2]  # channel_id
+                elif len(levels) >= 2:  # DM
+                    channel_id = levels[1]  # user_id
+                log_debug(f"[discord_interface] Extracted channel_id={channel_id} from interface_path")
+            else:
+                # Fallback for backward compatibility
+                channel_id = (
+                    payload.get("target")
+                    or payload.get("channel_id")
+                    or payload.get("chat_id")
+                )
         else:
             if channel_id is None:
                 channel_id = (
@@ -223,13 +248,13 @@ class DiscordInterface:
             # Save Rekku's response to chat history cache
             try:
                 from core.chat_history_cache import save_chat_message
+                from core.interface_path_utils import build_interface_path
+                interface_path = build_interface_path('discord_bot', str(channel_id))
                 await save_chat_message(
-                    chat_id=str(channel_id),
+                    interface_path=interface_path,
                     message_text=text,
                     sender_name="Rekku",
-                    sender_id="rekku",
-                    interface="discord_interface",
-                    thread_id=None
+                    sender_id="rekku"
                 )
                 log_debug(f"[discord_interface] Saved Rekku response to chat history cache for channel {channel_id}")
             except Exception as e:
@@ -320,11 +345,9 @@ class DiscordInterface:
                     log_error(f"[discord_interface] Command {command} failed: {e}")
                 return
 
-            # Track context memory
+            # Context tracking now handled via centralized chat_context_manager
+            # (see interface_path generation below)
             channel_id = getattr(message.channel, "id", None)
-            if channel_id is not None:
-                history = context_memory.setdefault(channel_id, deque(maxlen=20))
-                history.append(content)
 
             # Handle Discord replies
             reply_to = None
@@ -356,6 +379,7 @@ class DiscordInterface:
             # Discord thread detection and handling
             thread_id = None
             parent_channel_id = None
+            guild_id = str(message.guild.id) if message.guild else None
             
             if hasattr(message, 'channel') and message.channel:
                 # In Discord.py, threads have type GUILD_PUBLIC_THREAD, GUILD_PRIVATE_THREAD, etc.
@@ -366,10 +390,35 @@ class DiscordInterface:
                     parent_channel_id = getattr(message.channel, 'parent_id', None)
                     log_debug(f"[discord_interface] Message in thread: {thread_id}, parent: {parent_channel_id}")
 
+            # Build interface_path for Discord
+            from core.interface_path_utils import build_interface_path
+            if guild_id:
+                # Guild message: discord_bot/guild_id/channel_id/thread_id (if in thread)
+                interface_path = build_interface_path('discord_bot', guild_id, str(channel_id), str(thread_id) if thread_id else None)
+            else:
+                # DM: discord_bot/user_id
+                interface_path = build_interface_path('discord_bot', str(message.author.id))
+            log_debug(f"[discord_interface] Generated interface_path: {interface_path}")
+
+            # Track context using centralized manager
+            from core.chat_context_manager import add_message_to_context
+            try:
+                await add_message_to_context(
+                    interface_path=interface_path,
+                    message_text=content,
+                    sender_name=message.author.display_name or message.author.name,
+                    sender_id=str(message.author.id),
+                    message_id=message.id,
+                    timestamp=message.created_at.isoformat() if hasattr(message.created_at, 'isoformat') else None
+                )
+            except Exception as e:
+                log_warning(f"[discord_interface] Failed to add message to context: {e}")
+
             # Prepare simplified message for core queue  
             wrapped = SimpleNamespace(
                 message_id=getattr(message, "id", None),
                 chat_id=channel_id,  # In Discord, this is thread ID if in thread, channel ID otherwise
+                interface_path=interface_path,  # Add interface_path to message
                 text=content,
                 caption=None,
                 date=getattr(message, "created_at", None),

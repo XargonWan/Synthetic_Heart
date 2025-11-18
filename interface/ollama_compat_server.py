@@ -238,8 +238,29 @@ class OllamaCompatServer:
         completion_event: asyncio.Event,
     ) -> None:
         try:
+            # Build interface_path for Ollama
+            from core.interface_path_utils import build_interface_path
+            interface_path = build_interface_path('ollama_serve', chat_id)
+            log_debug(f"[ollama_serve] Generated interface_path: {interface_path}")
+
+            # Track context using centralized manager
+            from core.chat_context_manager import add_message_to_context
+            try:
+                await add_message_to_context(
+                    interface_path=interface_path,
+                    message_text=last_message.get("content", ""),
+                    sender_name="user",
+                    sender_id=f"ollama-user-{chat_id}",
+                    timestamp=None
+                )
+            except Exception as e:
+                log_warning(f"[ollama_serve] Failed to add message to context: {e}")
+
             self._populate_history(chat_id, history_messages)
             message_obj = self._build_message(chat_id, last_message)
+            
+            # Add interface_path to message object
+            message_obj.interface_path = interface_path
 
             # Update context memory with the latest user message so the prompt
             # reflects the current conversation state.

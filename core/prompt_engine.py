@@ -96,11 +96,19 @@ async def build_json_prompt(message, context_memory, interface_name: str | None 
     """
     chat_id = getattr(message, "chat_id", None)
     text = getattr(message, "text", "") or ""
+    
+    # Determine if context_memory is a chat history map or a context dict
+    # Context dicts have keys like 'interface_path', 'system_message', etc.
+    # Chat history maps have chat_id as keys
+    is_context_dict = isinstance(context_memory, dict) and any(
+        key in context_memory for key in ['interface_path', 'system_message', 'chat_id_context']
+    )
 
     # === 1. Context messages (chat_history) ===
     # Use CHAT_HISTORY from config_registry
     # First, load persisted history from database if not in memory
-    if chat_id and chat_id not in context_memory:
+    # Only do this if context_memory is a chat history map, not a context dict
+    if not is_context_dict and chat_id and chat_id not in context_memory:
         try:
             from core.chat_history_cache import load_chat_history as cache_load
             cached_history = await cache_load(chat_id)
@@ -110,7 +118,11 @@ async def build_json_prompt(message, context_memory, interface_name: str | None 
         except Exception as e:
             log_warning(f"[json_prompt] Failed to load cached chat history for {chat_id}: {e}")
     
-    chat_history = list(context_memory.get(chat_id, []))[-CHAT_HISTORY_LIMIT:]
+    # Get chat history from context_memory if it's a history map, otherwise empty
+    if is_context_dict:
+        chat_history = []  # No history in context dict
+    else:
+        chat_history = list(context_memory.get(chat_id, []))[-CHAT_HISTORY_LIMIT:]
 
     # === 2. Tags and memory lookup ===
     tags = extract_tags(text)
@@ -208,15 +220,13 @@ async def build_json_prompt(message, context_memory, interface_name: str | None 
         log_warning(f"[json_prompt] Failed to add diary content: {e}")
 
     # === 4. Input payload ===
-    thread_id = getattr(message, "thread_id", None)
-    # Handle legacy message_thread_id from Telegram (map to thread_id)
-    if thread_id is None:
-        thread_id = getattr(message, "message_thread_id", None)
+    # Try to get interface_path from message first, then from context dict if available
+    interface_path = getattr(message, "interface_path", None)
     
-    # Normalize thread_id: treat 0 as "no thread" (None), keep positive integers
-    # This is important because Telegram uses 0 for messages outside threads
-    if thread_id == 0:
-        thread_id = None
+    # If interface_path not in message, check if context_memory is actually a context dict with interface_path
+    if not interface_path and isinstance(context_memory, dict) and "interface_path" in context_memory:
+        interface_path = context_memory.get("interface_path")
+        log_debug(f"[json_prompt] Retrieved interface_path from context dict: {interface_path}")
     
     input_payload = {
         "text": text,
@@ -225,7 +235,7 @@ async def build_json_prompt(message, context_memory, interface_name: str | None 
             "message_id": message.message_id,
             "username": message.from_user.full_name,
             "usertag": f"@{message.from_user.username}" if message.from_user.username else "(no tag)",
-            "thread_id": thread_id,
+            "interface_path": interface_path,
             "interface": interface_name,
         },
         "timestamp": message.date.isoformat(),
@@ -429,8 +439,10 @@ def load_json_instructions() -> str:
 - RESPOND ONLY WITH VALID JSON. No text before or after.
 - Use input.interface to know where the message came from and respond there.
 - NEVER lie. If you don't know something, say "I don't know".
-- Target responses to input.payload.source.chat_id
-- CRITICAL: Include thread_id ONLY if input.payload.source.thread_id is a positive integer (>0) - use that exact value! If thread_id is null/0/missing, OMIT the field from your payload.
+- CRITICAL: ALWAYS use input.payload.source.interface_path as the interface_path in your response actions!
+- The interface_path format is hierarchical: 'telegram_bot/chat_id/thread_id' or 'discord_bot/guild_id/channel_id/thread_id' or 'discord_bot/user_id' for DMs.
+- NEVER use 'target' field - always use 'interface_path' field in ALL message actions.
+- Example: if input shows interface_path='telegram_bot/-1003098886330/123', use EXACTLY 'telegram_bot/-1003098886330/123' as interface_path in your message_telegram_bot action.
 - Include reply_message_id if replying to specific messages.
 - ALWAYS include create_personal_diary_entry action to record interactions.
 - Interaction_summary examples: "User asked about weather, provided forecast" or "Discussed coding, provided solutions"

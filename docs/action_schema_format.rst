@@ -50,9 +50,9 @@ The schema tier defines the action's structure using JSON Schema standards. This
                "enum": ["low", "normal", "high"],
                "description": "Message priority level"
            },
-           "recipient": {
+           "interface_path": {
                "type": "string",
-               "description": "Target recipient identifier"
+               "description": "Hierarchical interface path (e.g., 'telegram_bot/chat_id/thread_id')"
            }
        },
        "required": ["message"]
@@ -148,7 +148,7 @@ The examples tier contains comprehensive documentation used only when the LLM ma
                "payload": {
                    "message": "Urgent: System maintenance in 5 minutes",
                    "priority": "high",
-                   "recipient": "@admin"
+                   "interface_path": "discord_interface/guild123/channel456"
                }
            },
            {
@@ -210,7 +210,7 @@ Here's a complete action definition combining all three tiers:
                            "payload": {
                                "message": "Meeting in 10 minutes",
                                "priority": "high",
-                               "recipient": "@john"
+                               "interface_path": "discord_interface/guild123/user456"
                            }
                        }
                    ]

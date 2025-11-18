@@ -32,6 +32,7 @@ System Components
     - **Core Initializer** (``core_initializer.py``): Auto-discovers and loads all components from ``plugins/``, ``llm_engines/``, and ``interface/`` directories.
     - **Registries**: Centralized management for LLM engines, interfaces, plugins, and validation rules.
     - **Transport Layer**: Handles communication between components and interfaces.
+    - **Interface Path System**: Unified hierarchical addressing system using ``interface_path`` format (e.g., "telegram_bot/chat_id/thread_id") for consistent conversation identification across all platforms. See :doc:`interface_path` for detailed documentation.
 
 ``interface``
     Chat platform integrations (Telegram, Discord, Reddit, etc.). Each interface:

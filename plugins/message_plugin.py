@@ -64,8 +64,22 @@ class MessagePlugin:
 
         payload = action.get("payload", {})
         text = payload.get("text", "")
-        target = payload.get("target")
-        thread_id = payload.get("thread_id")
+        interface_path = payload.get("interface_path")
+        target = payload.get("target")  # Fallback for legacy code
+        thread_id = payload.get("thread_id")  # Fallback for legacy code
+        
+        # Decompose interface_path into components
+        # Format: "interface_name/chat_id/thread_id" or "interface_name/chat_id"
+        if interface_path:
+            parts = interface_path.split("/")
+            if len(parts) >= 2:
+                interface_name_from_path = parts[0]
+                target = parts[1]  # chat_id or user_id
+                if len(parts) >= 3:
+                    thread_id = parts[2]  # thread_id or channel_id
+            else:
+                log_warning(f"[message_plugin] Invalid interface_path format: {interface_path}")
+                return
         
         # Map action types to interface names
         action_type = action.get("type", "")
@@ -120,9 +134,19 @@ class MessagePlugin:
             reply_to = original_message.message_id
             log_debug(f"[message_plugin] Adding reply_to_message_id: {reply_to}")
 
+        # Rebuild interface_path for the send_payload
+        rebuilt_interface_path = None
+        if interface_name and target:
+            if thread_id:
+                rebuilt_interface_path = f"{interface_name}/{target}/{thread_id}"
+            else:
+                rebuilt_interface_path = f"{interface_name}/{target}"
+
         send_payload = {"text": text, "target": target}
         if thread_id is not None:
             send_payload["thread_id"] = thread_id
+        if rebuilt_interface_path:
+            send_payload["interface_path"] = rebuilt_interface_path
 
         try:
             await handler.send_message(send_payload, original_message)

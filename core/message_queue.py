@@ -397,8 +397,25 @@ async def _consumer_loop() -> None:
                         final["bot"], mock_message, final["event_prompt"], final.get("interface")
                     )
                 else:
+                    # Build interface_path and add to context for prompt_engine to use
+                    chat_id = final.get("chat_id")
+                    thread_id = final.get("thread_id")
+                    interface_id = final.get("interface", "unknown")
+                    
+                    # Create interface_path and add to context
+                    from core.interface_path_utils import build_interface_path
+                    interface_path = build_interface_path(interface_id, str(chat_id), str(thread_id) if thread_id else None)
+                    
+                    # Add interface_path to context dict so prompt_engine can access it
+                    context = final.get("context", {})
+                    if isinstance(context, dict):
+                        context["interface_path"] = interface_path
+                        log_debug(f"[QUEUE] Added interface_path to context: {interface_path}")
+                    else:
+                        log_warning(f"[QUEUE] Context is not a dict, cannot add interface_path")
+                    
                     await plugin_instance.handle_incoming_message(
-                        final["bot"], final["message"], final["context"], final.get("interface")
+                        final["bot"], final["message"], context, final.get("interface")
                     )
             except Exception as e:  # pragma: no cover - plugin may misbehave
                 log_error(

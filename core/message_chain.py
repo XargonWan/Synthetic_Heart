@@ -86,7 +86,7 @@ async def send_llm_fallback_message(bot, message: SimpleNamespace, failure_reaso
                 bot.send_message,
                 chat_id,
                 text=fallback_text,
-                thread_id=getattr(message, 'thread_id', None),
+                interface_path=getattr(message, 'interface_path', None),
                 is_llm_response=True  # Mark as LLM response so interface handles normally
             )
         else:
@@ -127,7 +127,7 @@ async def handle_incoming_message(bot, message: Optional[SimpleNamespace], text:
         message = SimpleNamespace()
         message.chat_id = kwargs.get('chat_id')
         message.text = ""
-        message.thread_id = kwargs.get('thread_id')
+        message.interface_path = kwargs.get('interface_path')
         message.date = datetime.utcnow()
 
     # Default context
@@ -146,11 +146,11 @@ async def handle_incoming_message(bot, message: Optional[SimpleNamespace], text:
     except (AttributeError, TypeError):
         pass  # Message object is immutable (Telegram Message); use ctx instead
     
-    # Preserve chat_id and thread_id in context to avoid losing them during processing
+    # Preserve chat_id and interface_path in context to avoid losing them during processing
     if hasattr(message, 'chat_id'):
         ctx['chat_id'] = message.chat_id
-    if hasattr(message, 'thread_id'):
-        ctx['thread_id'] = message.thread_id
+    if hasattr(message, 'interface_path'):
+        ctx['interface_path'] = message.interface_path
 
     # Process LLM messages for emotional state updates
     if ctx.get('from_llm', False) or source == 'llm':
@@ -282,7 +282,7 @@ async def handle_incoming_message(bot, message: Optional[SimpleNamespace], text:
         # Request correction from LLM via transport-layer middleware
         try:
             log_info(f"[message_chain] Calling corrector middleware for attempt={attempt}...")
-            corrected = await run_corrector_middleware(text, bot=bot, context=ctx, chat_id=getattr(message, 'chat_id', None), thread_id=getattr(message, 'thread_id', None))
+            corrected = await run_corrector_middleware(text, bot=bot, context=ctx, chat_id=getattr(message, 'chat_id', None), interface_path=getattr(message, 'interface_path', None))
             log_info(f"[message_chain] Corrector returned: corrected={corrected is not None} len={len(corrected) if corrected else 0}")
         except Exception as e:
             failure_reason = f"Corrector middleware exception: {str(e)}"

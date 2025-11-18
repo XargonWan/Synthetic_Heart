@@ -55,22 +55,18 @@ ERROR_RETRY_POLICY = {
 
 
 def _get_retry_key(message):
-    """Generate a unique key for tracking retries based on chat/thread.
+    """Generate a unique key for tracking retries based on interface_path.
 
-    Preserve chat_id and thread_id as strings (no numeric coercion),
-    since external interfaces may represent identifiers as strings. This
-    ensures consistent retry keys without changing original identifier types.
+    Uses interface_path to uniquely identify conversation context.
     """
-    chat_id = getattr(message, "chat_id", None)
-    thread_id = getattr(message, "thread_id", None)
+    interface_path = getattr(message, "interface_path", None)
 
     def _norm(value):
         if value is None:
             return "none"
-        # Keep original representation as string (don't coerce to int)
         return str(value)
 
-    return f"{_norm(chat_id)}_{_norm(thread_id)}"
+    return _norm(interface_path)
 
 
 def _should_retry(message, max_retries: int = CORRECTOR_RETRIES) -> bool:
@@ -192,13 +188,12 @@ def _normalize_payload(action_type: str, payload: dict) -> None:
     Modifies the payload dict in-place.
     
     Fields that should be integers:
-    - thread_id: Telegram thread/topic ID
     - chat_id: Chat identifier
     - user_id: User identifier
     - Any field ending with _id
     """
     # Fields that should always be integers
-    int_fields = {"thread_id", "chat_id", "user_id", "message_id", "animation_state"}
+    int_fields = {"chat_id", "user_id", "message_id", "animation_state"}
     
     # Also handle fields ending with _id
     for key in payload.keys():
@@ -216,7 +211,7 @@ def _normalize_payload(action_type: str, payload: dict) -> None:
                 except (ValueError, TypeError):
                     pass
     
-    # Normalize nested dict fields (like target: {chat_id: ..., thread_id: ...})
+    # Normalize nested dict fields (like target: {chat_id: ...})
     for key, value in payload.items():
         if isinstance(value, dict):
             for nested_field in int_fields:
@@ -768,7 +763,7 @@ IMPORTANT: Do not include the {successful_count} actions that were already execu
             bot=bot,
             context={**context, "selective_correction": True, "correction_context": correction_context},
             chat_id=getattr(original_message, 'chat_id', None),
-            thread_id=getattr(original_message, 'thread_id', None)
+            interface_path=getattr(original_message, 'interface_path', None)
         )
     except Exception as e:
         log_error(f"[action_parser] Failed to request selective correction: {e}")
@@ -879,7 +874,7 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
             "chat_id": getattr(original_message, "chat_id", None),
             "message_id": getattr(original_message, "message_id", None),
             "interface_name": interface_name,
-            "thread_id": getattr(original_message, "thread_id", None),
+            "interface_path": getattr(original_message, "interface_path", None),
         }
 
         try:
@@ -937,7 +932,7 @@ async def _create_diary_entry_for_actions(processed_actions, context, original_m
         # Extract relevant information
         interface_name = context.get("interface", "unknown")
         chat_id = getattr(original_message, "chat_id", None)
-        thread_id = getattr(original_message, "thread_id", None)
+        interface_path = getattr(original_message, "interface_path", None)
         
         # Get user message from context or original_message
         user_message = ""
@@ -1020,8 +1015,7 @@ async def _create_diary_entry_for_actions(processed_actions, context, original_m
             context_tags=context_tags,
             involved_users=involved_list,
             interface=interface_name,
-            chat_id=str(chat_id) if chat_id else None,
-            thread_id=str(thread_id) if thread_id else None
+            chat_id=str(chat_id) if chat_id else None
         )
         
         log_debug(f"[action_parser] Created personal diary entry: {synth_response}")
@@ -1443,9 +1437,9 @@ async def corrector_orchestrator(text: str, context: dict, bot, message, max_ret
             # Add message to context for error handling
             context = dict(context) if context else {}
             context['message'] = message
-            # Pass thread_id from original message to maintain conversation continuity
-            thread_id = getattr(message, 'thread_id', None)
-            corrected = await transport.run_corrector_middleware(text, bot=bot, context=context, chat_id=getattr(message, 'chat_id', None), thread_id=thread_id)
+            # Pass interface_path from original message to maintain conversation continuity
+            interface_path = getattr(message, 'interface_path', None)
+            corrected = await transport.run_corrector_middleware(text, bot=bot, context=context, chat_id=getattr(message, 'chat_id', None), interface_path=interface_path)
         except Exception as e:
             log_warning(f"[corrector_orchestrator] Corrector invocation failed: {e}")
             return False

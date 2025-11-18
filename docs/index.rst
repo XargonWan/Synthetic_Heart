@@ -40,6 +40,7 @@ getting started.
    vrm_animations
    animation_system
    interfaces
+   interface_path
    matrix_interface
    config_management
    dev_components
