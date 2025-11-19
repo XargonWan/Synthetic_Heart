@@ -349,7 +349,9 @@ async def handle_incoming_message(bot, message, context_memory_or_prompt, interf
         # This ensures ALL LLM responses go through proper JSON validation before being sent to interfaces
         if result:
             log_info(f"[plugin_instance] 📥 LLM→INTERFACE: LLM returned response ({len(str(result)) if result else 0} chars), passing to message chain for llm_to_interface validation/correction")
+            log_info(f"[plugin_instance] 🔄 BEFORE IMPORT: about to import message_chain_handle")
             from core.message_chain import handle_incoming_message as message_chain_handle
+            log_info(f"[plugin_instance] ✓ AFTER IMPORT: message_chain_handle imported successfully")
             
             # Build context from the original message if available
             llm_context = {}
@@ -364,13 +366,22 @@ async def handle_incoming_message(bot, message, context_memory_or_prompt, interf
             # The message chain will validate JSON, auto-correct if needed, and execute actions
             # This implements the llm_to_interface transport layer standard with corrector middleware
             log_info(f"[plugin_instance] 📥 LLM→INTERFACE: Entering message_chain with source=llm (will use llm_to_interface transport)")
-            chain_result = await message_chain_handle(
-                bot=bot,
-                message=message,
-                text=result,
-                source="llm",  # Mark as LLM-origin so corrector can intervene (llm_to_interface standard)
-                context=llm_context
-            )
+            log_info(f"[plugin_instance] ⏳ About to await message_chain_handle (this may freeze)")
+            try:
+                chain_result = await message_chain_handle(
+                    bot=bot,
+                    message=message,
+                    text=result,
+                    source="llm",  # Mark as LLM-origin so corrector can intervene (llm_to_interface standard)
+                    context=llm_context
+                )
+                log_info(f"[plugin_instance] ✅ message_chain_handle completed")
+            except asyncio.TimeoutError:
+                log_error(f"[plugin_instance] ❌ message_chain_handle TIMEOUT (deadlock suspected)")
+                raise
+            except Exception as e:
+                log_error(f"[plugin_instance] ❌ message_chain_handle raised exception: {e}")
+                raise
             
             log_debug(f"[plugin_instance] Message chain processed LLM response: {chain_result}")
             log_info(f"[plugin_instance] ✅ LLM→INTERFACE: message_chain completed, result={chain_result}")

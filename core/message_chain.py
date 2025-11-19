@@ -154,14 +154,21 @@ async def handle_incoming_message(bot, message: Optional[SimpleNamespace], text:
 
     # Process LLM messages for emotional state updates
     if ctx.get('from_llm', False) or source == 'llm':
+        log_info(f"[message_chain] 🎭 Starting emotion processing for LLM message...")
         try:
             from core.persona_manager import get_persona_manager
             persona_manager = get_persona_manager()
             if persona_manager:
                 persona_manager.process_llm_message_for_emotions(text)
+                log_info(f"[message_chain] ✅ Emotion processing completed successfully")
+            else:
+                log_warning(f"[message_chain] ⚠️ Persona manager not available")
         except Exception as e:
-            log_debug(f"[message_chain] Error processing LLM emotions: {e}")
+            log_error(f"[message_chain] ❌ Error processing LLM emotions: {e}")
+            import traceback
+            log_error(f"[message_chain] Traceback: {traceback.format_exc()}")
 
+    log_info(f"[message_chain] 📋 Starting action extraction loop...")
     # Retry/tried set to avoid loops
     tried_texts = set()
     attempt = 0
@@ -282,7 +289,7 @@ async def handle_incoming_message(bot, message: Optional[SimpleNamespace], text:
         # Request correction from LLM via transport-layer middleware
         try:
             log_info(f"[message_chain] Calling corrector middleware for attempt={attempt}...")
-            corrected = await run_corrector_middleware(text, bot=bot, context=ctx, chat_id=getattr(message, 'chat_id', None), interface_path=getattr(message, 'interface_path', None))
+            corrected = await run_corrector_middleware(text, bot=bot, context=ctx, chat_id=getattr(message, 'chat_id', None), thread_id=getattr(message, 'thread_id', None))
             log_info(f"[message_chain] Corrector returned: corrected={corrected is not None} len={len(corrected) if corrected else 0}")
         except Exception as e:
             failure_reason = f"Corrector middleware exception: {str(e)}"

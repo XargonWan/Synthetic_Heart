@@ -420,8 +420,8 @@ def _load_action_plugins() -> List[Any]:
 def _plugins_for(action_type: str) -> List[Any]:
     plugins = []
     loaded_plugins = _load_action_plugins()
-    log_debug(
-        f"[action_parser] _plugins_for({action_type}): Checking {len(loaded_plugins)} loaded plugins"
+    log_info(
+        f"[action_parser] _plugins_for({action_type}): Searching in {len(loaded_plugins)} loaded plugins"
     )
 
     for plugin in loaded_plugins:
@@ -510,8 +510,8 @@ def _plugins_for(action_type: str) -> List[Any]:
         except Exception as e:
             log_error(f"[action_parser] Error querying interface {name}: {repr(e)}")
 
-    log_debug(
-        f"[action_parser] _plugins_for({action_type}): Found {len(plugins)} supporting plugins"
+    log_info(
+        f"[action_parser] _plugins_for({action_type}): Found {len(plugins)} supporting plugins: {[p.__class__.__name__ for p in plugins]}"
     )
     return plugins
 
@@ -674,13 +674,15 @@ async def run_action(action: Any, context: Dict[str, Any], bot, original_message
         log_info(f"[action_parser] 📋 Processing action list with {len(action)} items")
         return await run_actions(action, context, bot, original_message)
 
+    action_type = action.get("type")
+    log_info(f"[action_parser] 🔍 Action type detected: {action_type}")
+    
     valid, errors = validate_action(action, context, original_message)
     if not valid:
         error_msg = f"Invalid action: {errors}"
         log_error(f"[action_parser] ❌ {error_msg}")
         return {"error": error_msg}
 
-    action_type = action.get("type")
     action_interface = action.get("interface")
     log_info(f"[action_parser] 🚀 Executing action: type={action_type}, interface={action_interface}")
 
@@ -692,6 +694,8 @@ async def run_action(action: Any, context: Dict[str, Any], bot, original_message
 async def _request_selective_correction(failed_actions, successful_actions, bot, context, original_message):
     """Request LLM to fix only the failed actions, while preserving successful ones."""
     from core.transport_layer import run_corrector_middleware
+    from core.action_parser import _load_action_plugins
+    from core.core_initializer import INTERFACE_REGISTRY
     
     # Build clear correction prompt
     successful_count = len(successful_actions)
@@ -700,16 +704,58 @@ async def _request_selective_correction(failed_actions, successful_actions, bot,
     # Extract successful action types for context
     successful_types = [action.get("type", "unknown") for action in successful_actions]
     
-    # Build detailed error descriptions
+    # Load plugin and interface schemas for detailed descriptions
+    action_schemas = {}
+    
+    # Get schemas from plugins
+    try:
+        for plugin in _load_action_plugins():
+            if hasattr(plugin, 'get_supported_actions'):
+                actions = plugin.get_supported_actions()
+                for action_type, action_info in actions.items():
+                    action_schemas[action_type] = action_info
+            if hasattr(plugin, 'get_prompt_instructions'):
+                # Store verbose descriptions
+                for action_type in (plugin.get_supported_actions() or {}).keys():
+                    if hasattr(plugin, 'get_prompt_instructions'):
+                        instructions = plugin.get_prompt_instructions(action_type)
+                        if instructions and action_type in action_schemas:
+                            action_schemas[action_type]['_verbose_instructions'] = instructions
+    except Exception as e:
+        log_warning(f"[action_parser] Error loading plugin schemas: {e}")
+    
+    # Get schemas from interfaces
+    try:
+        for iface_name, interface in INTERFACE_REGISTRY.items():
+            if hasattr(interface, 'get_supported_actions'):
+                actions = interface.get_supported_actions()
+                for action_type, action_info in actions.items():
+                    action_schemas[action_type] = action_info
+    except Exception as e:
+        log_warning(f"[action_parser] Error loading interface schemas: {e}")
+    
+    # Build detailed error descriptions with schemas
     error_details = []
     for failed in failed_actions:
         action = failed["action"]
         errors = failed["errors"]
-        error_details.append({
-            "action_type": action.get("type", "unknown"),
+        action_type = action.get("type", "unknown")
+        schema = action_schemas.get(action_type, {})
+        
+        detail = {
+            "action_type": action_type,
             "errors": errors,
-            "original_action": action
-        })
+            "original_action": action,
+            "description": schema.get("description", "Unknown action"),
+            "required_fields": schema.get("required_fields", []),
+            "optional_fields": schema.get("optional_fields", []),
+        }
+        
+        # Add verbose instructions if available
+        if '_verbose_instructions' in schema:
+            detail['verbose_instructions'] = schema['_verbose_instructions']
+        
+        error_details.append(detail)
     
     # Create a specialized correction prompt that only asks for failed actions
     correction_context = {
@@ -725,14 +771,28 @@ Your previous response was partially successful:
 
 Please provide ONLY the corrected versions of the failed actions. Do not repeat the {successful_count} successful actions.
 
-Failed actions with errors:
+FAILED ACTIONS REQUIRING CORRECTION:
 """
     }
     
     for i, detail in enumerate(error_details, 1):
-        correction_context["instruction"] += f"\n{i}. Action '{detail['action_type']}' failed:\n"
+        correction_context["instruction"] += f"\n{i}. ACTION: '{detail['action_type']}'\n"
+        correction_context["instruction"] += f"   DESCRIPTION: {detail['description']}\n"
+        
+        # Add schema information
+        if detail['required_fields']:
+            correction_context["instruction"] += f"   REQUIRED FIELDS: {', '.join(detail['required_fields'])}\n"
+        if detail['optional_fields']:
+            correction_context["instruction"] += f"   OPTIONAL FIELDS: {', '.join(detail['optional_fields'])}\n"
+        
+        # Add verbose instructions if available
+        if 'verbose_instructions' in detail:
+            correction_context["instruction"] += f"   EXAMPLE: {detail['verbose_instructions'].get('payload', {})}\n"
+        
+        # Add specific errors
+        correction_context["instruction"] += f"   ERRORS FOUND:\n"
         for error in detail['errors']:
-            correction_context["instruction"] += f"   - {error}\n"
+            correction_context["instruction"] += f"      ❌ {error}\n"
     
     correction_context["instruction"] += f"""
 Respond with JSON containing only the corrected actions (not the successful ones):
@@ -763,7 +823,7 @@ IMPORTANT: Do not include the {successful_count} actions that were already execu
             bot=bot,
             context={**context, "selective_correction": True, "correction_context": correction_context},
             chat_id=getattr(original_message, 'chat_id', None),
-            interface_path=getattr(original_message, 'interface_path', None)
+            thread_id=getattr(original_message, 'thread_id', None)
         )
     except Exception as e:
         log_error(f"[action_parser] Failed to request selective correction: {e}")
@@ -892,7 +952,10 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
 
     if collected_errors and failed_actions:
         # New selective corrector: only ask LLM to fix failed actions, not successful ones
-        if hasattr(original_message, 'from_llm') and original_message.from_llm:
+        # Check both message object AND context for from_llm flag
+        is_from_llm = (hasattr(original_message, 'from_llm') and original_message.from_llm) or context.get('from_llm', False)
+        
+        if is_from_llm:
             try:
                 await _request_selective_correction(
                     failed_actions=failed_actions,

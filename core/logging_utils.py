@@ -218,3 +218,9 @@ def log_warning(msg: str) -> None:
 
 def log_error(msg: str, exc: Optional[Exception] = None) -> None:
     _log("ERROR", msg, exc)
+
+
+# Initialize logging immediately when this module is imported
+# This ensures the log file is created even if setup_logging() is called late
+_register_logging_config()
+setup_logging()
