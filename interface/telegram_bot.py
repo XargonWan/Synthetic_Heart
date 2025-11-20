@@ -342,6 +342,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_debug(f"[telegram_bot] Generated interface_path: {interface_path}")
 
     # Track context - using centralized context manager
+    # NOTE: chat activity tracking is now centralized in chat_context_manager.add_message_to_context
     log_debug(f"[telegram_bot] Tracking message for interface_path {interface_path}")
     from core.chat_context_manager import add_message_to_context
     try:

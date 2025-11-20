@@ -380,6 +380,7 @@ class MatrixInterface:
         log_debug(f"[matrix_interface] Generated interface_path: {interface_path}")
 
         # Track context using centralized manager
+        # NOTE: chat activity tracking is now centralized in chat_context_manager.add_message_to_context
         from core.chat_context_manager import add_message_to_context
         try:
             await add_message_to_context(

@@ -123,15 +123,12 @@ class RecentChatsPlugin:
         log_info("[recent_chats] RecentChatsPlugin initialized and registered")
 
     def get_supported_action_types(self):
-        return ["update_chat_activity", "get_recent_chats", "cleanup_old_chats"]
+        return ["get_recent_chats", "cleanup_old_chats"]
 
     def get_supported_actions(self):
         return {
-            "update_chat_activity": {
-                "description": "Update the last activity time for a chat",
-                "required_fields": ["chat_id"],
-                "optional_fields": ["metadata"],
-            },
+            # NOTE: update_chat_activity is NOT exposed to LLM - it's called automatically by interfaces
+            # when messages are received. This is a mechanical action that doesn't need LLM reasoning.
             "get_recent_chats": {
                 "description": "Get the most recently active chats",
                 "required_fields": [],
@@ -148,14 +145,9 @@ class RecentChatsPlugin:
         action_type = action.get("type")
         payload = action.get("payload", {}) or {}
         
-        if action_type == "update_chat_activity":
-            chat_id = payload.get("chat_id")
-            metadata = payload.get("metadata")
-            if chat_id:
-                import asyncio
-                asyncio.create_task(update_chat_activity(chat_id, metadata))
-                
-        elif action_type == "get_recent_chats":
+        # NOTE: update_chat_activity is handled automatically by interfaces, not via LLM actions
+        
+        if action_type == "get_recent_chats":
             limit = payload.get("limit", 10)
             import asyncio
             asyncio.create_task(self._send_recent_chats(bot, original_message, limit))

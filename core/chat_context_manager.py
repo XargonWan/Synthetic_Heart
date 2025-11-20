@@ -117,6 +117,25 @@ async def add_message_to_context(
     context.append(message_obj)
     log_debug(f"[context_manager] Added message to context for interface_path {interface_path}")
     
+    # Automatically update chat activity (mechanical action, centralized here)
+    # This tracks the last activity time for each chat without requiring LLM reasoning
+    try:
+        from plugins.recent_chats import update_chat_activity
+        import asyncio
+        # Extract chat_id from interface_path (format: interface/chat_id/thread_id)
+        parts = interface_path.split('/')
+        chat_id = parts[1] if len(parts) > 1 else interface_path
+        asyncio.create_task(update_chat_activity(
+            chat_id=chat_id,
+            metadata={
+                'username': sender_name,
+                'user_id': sender_id,
+                'interface_path': interface_path
+            }
+        ))
+    except Exception as e:
+        log_debug(f"[context_manager] Failed to update chat activity: {e}")
+    
     # Persist to database (non-blocking, don't let DB failures affect message processing)
     try:
         from core.chat_history_cache import save_chat_message
