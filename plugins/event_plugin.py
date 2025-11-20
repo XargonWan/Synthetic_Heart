@@ -407,12 +407,23 @@ class EventPlugin(AIPluginBase):
 
         # Extract interface_path from original_message if available
         interface_path = None
+        log_debug(f"[event_plugin] _handle_event_payload: original_message={original_message}")
+        log_debug(f"[event_plugin] _handle_event_payload: original_message attrs={dir(original_message) if original_message else 'None'}")
+        
         if original_message and hasattr(original_message, 'interface_path'):
             interface_path = original_message.interface_path
+            log_debug(f"[event_plugin] ✅ Extracted interface_path from original_message: {interface_path}")
+        else:
+            log_warning(f"[event_plugin] ⚠️ No interface_path found in original_message")
+            # Try to get from context if available
+            if original_message:
+                log_warning(f"[event_plugin] Original message type: {type(original_message)}")
+                log_warning(f"[event_plugin] Original message: {original_message}")
         
         # Add interface_path to description for later retrieval
         if interface_path:
             description += f" [interface_path: {interface_path}]"
+            log_info(f"[event_plugin] ✅ Appended interface_path to description")
 
         await self._save_scheduled_reminder(
             date_str,

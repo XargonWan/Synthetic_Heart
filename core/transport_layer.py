@@ -246,6 +246,8 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
     # Save LLM response to chat history (before JSON parsing)
     # Extract interface_path for saving to chat history
     interface_path = kwargs.get('interface_path')
+    log_debug(f"[transport] Checking for chat history save: interface_path={interface_path}, text_len={len(text) if text else 0}")
+    
     if interface_path and text:
         try:
             from core.chat_context_manager import add_message_to_context
@@ -254,9 +256,13 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
             # Only save non-JSON text (actual messages to users)
             # JSON-only responses are internal and shouldn't be in chat history
             json_data = extract_json_from_text(text)
+            log_debug(f"[transport] JSON data extracted: {json_data is not None}")
+            
             text_content = text.replace(json_data, "").strip() if json_data else text
+            log_debug(f"[transport] Text content for history: {len(text_content)} chars (was {len(text)})")
             
             if text_content:  # Only save if there's actual message content
+                log_info(f"[transport] 📝 Saving LLM response to chat history: {interface_path}")
                 await add_message_to_context(
                     interface_path=interface_path,
                     message_text=text_content,
@@ -264,9 +270,13 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
                     sender_id="synth",
                     timestamp=datetime.now().isoformat()
                 )
-                log_debug(f"[transport] 📝 LLM response saved to chat history for {interface_path}")
+                log_info(f"[transport] ✅ LLM response saved to chat history for {interface_path}")
+            else:
+                log_debug(f"[transport] No text content to save (only JSON)")
         except Exception as e:
-            log_warning(f"[transport] Failed to save LLM response to chat history: {e}")
+            log_error(f"[transport] ❌ Failed to save LLM response to chat history: {e}")
+            import traceback
+            log_debug(f"[transport] Traceback: {traceback.format_exc()}")
 
     # Filter out internal parameters that should not be passed to interface send functions
     excluded_params = {'event_id', 'interface', 'is_llm_response', 'context', 'error_retry_policy', 'interface_path'}
