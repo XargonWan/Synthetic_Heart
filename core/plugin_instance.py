@@ -143,7 +143,9 @@ async def load_plugin(name: str, notify_fn=None):
         except Exception as e:
             log_warning(f"[plugin] Error during model setup: {e}")
 
-    await set_active_llm(name)
+    # NOTE: Do NOT call set_active_llm() here - it overwrites the DB value during startup
+    # The active LLM is already persisted when changed via WebUI/commands, and should be
+    # loaded from DB during initialization, not overwritten with the current plugin name
 
 async def handle_incoming_message(bot, message, context_memory_or_prompt, interface: str = None):
     """Process incoming messages or pre-built prompts."""

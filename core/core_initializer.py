@@ -89,6 +89,29 @@ class CoreInitializer:
             # 0. Initialize registries
             await self._initialize_registries()
 
+            # 0.5. Pre-load ACTIVE_LLM from database before loading the LLM engine
+            # This ensures we load the correct LLM that was saved by the user
+            log_debug("[core_initializer] Pre-loading ACTIVE_LLM from database...")
+            try:
+                from core.config_manager import config_registry
+                # Force load ACTIVE_LLM from DB if it exists
+                definition = config_registry._definitions.get("ACTIVE_LLM")
+                if definition:
+                    from core.db import ensure_core_tables
+                    await ensure_core_tables()
+                    raw_value = await config_registry._load_from_db("ACTIVE_LLM")
+                    if raw_value:
+                        definition.raw_value = raw_value
+                        definition.value = config_registry._convert_value(definition, raw_value)
+                        definition.loaded = True
+                        log_info(f"[core_initializer] ✅ Pre-loaded ACTIVE_LLM from DB: {raw_value}")
+                    else:
+                        log_debug("[core_initializer] ACTIVE_LLM not found in DB, using default")
+                else:
+                    log_debug("[core_initializer] ACTIVE_LLM definition not found in registry")
+            except Exception as preload_exc:
+                log_warning(f"[core_initializer] Failed to pre-load ACTIVE_LLM: {preload_exc}")
+
             # 1. Load LLM engine
             await self._load_llm_engine(notify_fn)
 

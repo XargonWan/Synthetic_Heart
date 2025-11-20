@@ -20,6 +20,78 @@ from core.core_initializer import core_initializer, register_plugin
 CORRECTOR_RETRIES = int(os.getenv("CORRECTOR_RETRIES", "2"))
 
 
+def _build_event_reminder_instructions(event_id: int, description: str, is_late: bool, scheduled_time: str, lateness_context: str, original_context: str = None) -> str:
+    """Build event reminder instructions with extracted metadata and original conversation context."""
+    import re
+    
+    # Extract metadata from description: [chat: ID] [thread: ID]
+    chat_match = re.search(r'\[chat:\s*(-?\d+)\]', description)
+    thread_match = re.search(r'\[thread:\s*(\d+)\]', description)
+    
+    chat_id = chat_match.group(1) if chat_match else None
+    thread_id = thread_match.group(1) if thread_match else None
+    
+    # Remove metadata from display text
+    clean_description = re.sub(r'\s*\[chat:\s*-?\d+\]\s*', '', description)
+    clean_description = re.sub(r'\s*\[thread:\s*\d+\]\s*', '', clean_description)
+    
+    # Build instruction text with metadata clearly shown
+    metadata_info = ""
+    if chat_id and thread_id:
+        metadata_info = f"\n\n⚙️ DELIVERY INFO: This message is for Telegram chat {chat_id}, thread {thread_id}"
+    elif chat_id:
+        metadata_info = f"\n\n⚙️ DELIVERY INFO: This message is for Telegram chat {chat_id}"
+    
+    # Include original context if available
+    context_section = ""
+    if original_context:
+        context_section = f"\n\n📋 ORIGINAL CONTEXT:\n{original_context}\n"
+    
+    instructions = f"""SCHEDULED REMINDER #{event_id} {"(LATE)" if is_late else "(ON TIME)"}
+
+Reminder: {clean_description}
+Scheduled for: {scheduled_time}
+Status: {lateness_context}{metadata_info}{context_section}
+
+This is a reminder you set for yourself. Freely decide whether and how to act:
+
+1. If it's a reminder that requires action (e.g. "remember Jay"), decide what to do
+2. If it's an internal thought, you might decide to do nothing or something else
+3. If it's late, deliver it but communicate that it's late
+4. You are NOT obliged to send messages - assess if it's really needed
+
+You can respond with any action (message, etc.) or combination of actions.
+If you decide to do nothing, the JSON should not contain any action.
+
+AVAILABLE ACTIONS:
+
+**schedule_message** - Schedule a message to be sent after a delay OR at a specific time
+  With delay: {{"text": "message", "send_in": "10 seconds|5 minutes|1 hour"}}
+  With specific time: {{"text": "message", "send_at": "HH:MM|YYYY-MM-DD HH:MM|2025-11-20T09:00:00|1735142400"}}
+  Examples:
+  - Delay: {{"type": "schedule_message", "payload": {{"text": "Hello!", "send_in": "1 minute"}}}}
+  - Specific time today: {{"type": "schedule_message", "payload": {{"text": "Buongiorno!", "send_at": "09:30"}}}}
+  - Specific date: {{"type": "schedule_message", "payload": {{"text": "Ricordati!", "send_at": "2025-11-21 10:00"}}}}
+
+**message_telegram_bot** - Send a message immediately via Telegram
+  payload: {{"text": "message", "interface_path": "telegram_bot/CHAT_ID"}}
+  IMPORTANT: If you have chat_id info above, use it! Example with actual chat ID:
+  {{"type": "message_telegram_bot", "payload": {{"text": "Hello!", "interface_path": "telegram_bot/-1003098886330"}}}}
+
+**event** - Create a future reminder/event
+  payload: {{"date": "YYYY-MM-DD", "time": "HH:MM", "description": "...", "repeat": "none|daily|weekly|monthly"}}
+  Example: {{"type": "event", "payload": {{"date": "2025-07-22", "time": "15:30", "description": "Remember to check if Jay replied", "repeat": "none"}}}}
+
+For recurring events, use repeat values:
+- "none": single reminder (default)
+- "daily": repeat every day
+- "weekly": repeat every week
+- "monthly": repeat every month
+- "always": keep active indefinitely"""
+    
+    return instructions.strip()
+
+
 class EventPlugin(AIPluginBase):
     """Plugin that stores future events without using an LLM."""
 
@@ -153,45 +225,87 @@ class EventPlugin(AIPluginBase):
                 "description": "Create or schedule a future event",
             },
             "schedule_message": {
-                "required_fields": ["text", "send_in"],
-                "optional_fields": ["chat_id", "thread_id"],
-                "description": "Schedule a message to be sent after a delay",
+                "required_fields": ["text"],
+                "optional_fields": ["send_in", "send_at"],
+                "description": "Schedule a message to be sent after a delay (send_in) or at a specific time (send_at)",
             }
         }
 
     def validate_payload(self, action_type: str, payload: dict) -> list:
         """Validate payload for event actions."""
-        if action_type != "event":
-            return []
-        
         errors = []
         
-        # Required fields validation
-        date_str = payload.get("date")
-        if not date_str:
-            errors.append("payload.date is required for event action")
-        else:
-            try:
-                from datetime import datetime
-                datetime.strptime(date_str, "%Y-%m-%d")
-            except Exception:
-                errors.append("payload.date must be in format YYYY-MM-DD")
+        if action_type == "event":
+            # Required fields validation
+            date_str = payload.get("date")
+            if not date_str:
+                errors.append("payload.date is required for event action")
+            else:
+                try:
+                    from datetime import datetime
+                    datetime.strptime(date_str, "%Y-%m-%d")
+                except Exception:
+                    errors.append("payload.date must be in format YYYY-MM-DD")
 
-        if not payload.get("description"):
-            errors.append("payload.description is required for event action")
+            if not payload.get("description"):
+                errors.append("payload.description is required for event action")
 
-        # Optional fields validation
-        time_str = payload.get("time")
-        if time_str:
-            try:
-                from datetime import datetime
-                datetime.strptime(time_str, "%H:%M")
-            except Exception:
-                errors.append("payload.time must be in format HH:MM")
+            # Optional fields validation
+            time_str = payload.get("time")
+            if time_str:
+                try:
+                    from datetime import datetime
+                    datetime.strptime(time_str, "%H:%M")
+                except Exception:
+                    errors.append("payload.time must be in format HH:MM")
 
-        repeat = payload.get("repeat")
-        if repeat and repeat not in ["none", "daily", "weekly", "monthly", "always"]:
-            errors.append("payload.repeat must be one of: none, daily, weekly, monthly, always")
+            repeat = payload.get("repeat")
+            if repeat and repeat not in ["none", "daily", "weekly", "monthly", "always"]:
+                errors.append("payload.repeat must be one of: none, daily, weekly, monthly, always")
+        
+        elif action_type == "schedule_message":
+            # Required fields validation
+            if not payload.get("text"):
+                errors.append("payload.text is required for schedule_message action")
+            
+            # Either send_in OR send_at must be provided (at least one)
+            send_in = payload.get("send_in")
+            send_at = payload.get("send_at")
+            if not send_in and not send_at:
+                errors.append("Either payload.send_in (delay) or payload.send_at (specific time) is required for schedule_message action")
+            
+            # Validate send_at format if provided
+            if send_at:
+                try:
+                    from datetime import datetime
+                    # Try Unix timestamp
+                    try:
+                        ts = int(send_at)
+                        if ts > 0:
+                            datetime.fromtimestamp(ts)
+                        else:
+                            raise ValueError("Invalid timestamp")
+                    except ValueError:
+                        # Try ISO format: 2025-11-20T09:00:00
+                        try:
+                            datetime.fromisoformat(send_at.replace('Z', '+00:00'))
+                        except ValueError:
+                            # Try YYYY-MM-DD HH:MM format
+                            try:
+                                datetime.strptime(send_at, "%Y-%m-%d %H:%M")
+                            except ValueError:
+                                # Try HH:MM format (today)
+                                datetime.strptime(send_at, "%H:%M")
+                except Exception:
+                    errors.append(f"payload.send_at has invalid format. Accepted: HH:MM (today), YYYY-MM-DD HH:MM, ISO 8601 (2025-11-20T09:00:00), or Unix timestamp (1735142400)")
+            
+            # IMPORTANT: Reject invalid fields that should not be in schedule_message
+            # chat_id and thread_id are now auto-extracted from event metadata, not from payload
+            if "chat_id" in payload:
+                errors.append("payload.chat_id is not a valid field for schedule_message - it's auto-extracted from event metadata")
+            
+            if "thread_id" in payload:
+                errors.append("payload.thread_id is not a valid field for schedule_message - it's auto-extracted from event metadata")
         
         return errors
 
@@ -211,12 +325,11 @@ class EventPlugin(AIPluginBase):
             }
         elif action_name == "schedule_message":
             return {
-                "description": "Schedule a message to be sent after a specified delay",
+                "description": "Schedule a message to be sent after a delay (send_in) or at a specific time (send_at)",
                 "payload": {
                     "text": "Reminder: do something important",
-                    "send_in": "1 minute",  # Can be "5 minutes", "1 hour", etc.
-                    "chat_id": "-1003098886330",  # Optional: target chat
-                    "thread_id": 2,  # Optional: thread ID if applicable
+                    "send_in": "1 minute",  # Can be "5 minutes", "1 hour", "2 days", etc. OR use send_at instead
+                    "send_at": "09:30",  # Alternatively: specific time as HH:MM, YYYY-MM-DD HH:MM, ISO 8601, or Unix timestamp
                 },
             }
         return {}
@@ -235,16 +348,16 @@ class EventPlugin(AIPluginBase):
                 try:
                     loop = asyncio.get_event_loop()
                     if loop.is_running():
-                        asyncio.create_task(self._handle_event_payload(payload))
+                        asyncio.create_task(self._handle_event_payload(payload, original_message=original_message))
                     else:
-                        loop.run_until_complete(self._handle_event_payload(payload))
+                        loop.run_until_complete(self._handle_event_payload(payload, original_message=original_message))
                 except RuntimeError as e:
                     # No event loop available - log and return
                     log_error(f"[event_plugin] Could not get event loop for event payload: {e}")
                 log_info(f"[event_plugin] ✅ Event saved")
                 
             elif action_type == "schedule_message":
-                self._execute_schedule_message_sync(payload)
+                self._execute_schedule_message_sync(payload, original_message=original_message)
                 
             else:
                 log_error(f"[event_plugin] ❌ Unsupported action: {action_type}")
@@ -274,7 +387,7 @@ class EventPlugin(AIPluginBase):
         else:
             log_error(f"[event_plugin] Unsupported action type: {action_type}")
 
-    async def _handle_event_payload(self, payload: dict):
+    async def _handle_event_payload(self, payload: dict, original_message=None):
         """Shared logic for processing an event payload."""
         date_str = payload.get("date")
         description = payload.get("description")
@@ -282,11 +395,24 @@ class EventPlugin(AIPluginBase):
         repeat = payload.get("repeat", "none")
         created_by = payload.get("created_by", "synth")
 
+        # Clean time_str to remove timezone suffixes like "UTC"
+        import re
+        time_str = re.sub(r'\s+UTC$', '', time_str).strip()
+        
         if not date_str or not description:
             log_error(
                 "[event_plugin] Invalid event payload: missing 'date' or 'description'"
             )
             return
+
+        # Extract interface_path from original_message if available
+        interface_path = None
+        if original_message and hasattr(original_message, 'interface_path'):
+            interface_path = original_message.interface_path
+        
+        # Add interface_path to description for later retrieval
+        if interface_path:
+            description += f" [interface_path: {interface_path}]"
 
         await self._save_scheduled_reminder(
             date_str,
@@ -303,76 +429,220 @@ class EventPlugin(AIPluginBase):
         # The LLM will decide if and how to notify the user about scheduled
         # reminders. This keeps event creation interface-agnostic.
 
-    def _execute_schedule_message_sync(self, payload: dict):
+    def _execute_schedule_message_sync(self, payload: dict, original_message=None):
         """Schedule message by creating async task (don't use asyncio.run - we're already in event loop)."""
         import asyncio
         try:
             # Create task instead of asyncio.run() - we're already inside an event loop!
-            task = asyncio.create_task(self._handle_schedule_message_payload(payload))
+            task = asyncio.create_task(self._handle_schedule_message_payload(payload, original_message=original_message))
             log_info(f"[event_plugin] 🎯 Schedule message task created: {task.get_name()}")
         except Exception as e:
             log_error(f"[event_plugin] ❌ _execute_schedule_message_sync failed: {repr(e)}")
             import traceback
             log_error(traceback.format_exc())
 
+    def _extract_original_context(self, original_message) -> str:
+        """Extract conversation context from original_message object."""
+        if not original_message:
+            return None
+        
+        try:
+            # Try to build a summary of what triggered this action
+            parts = []
+            
+            # Add user message if available
+            if hasattr(original_message, 'text') and original_message.text:
+                user_text = original_message.text[:200]  # Limit length
+                parts.append(f"User: {user_text}")
+            
+            # Add message ID/thread info if available (for context linking)
+            if hasattr(original_message, 'message_id'):
+                parts.append(f"[Message ID: {original_message.message_id}]")
+            
+            if hasattr(original_message, 'chat_id'):
+                parts.append(f"[Chat: {original_message.chat_id}]")
+            
+            context_str = " / ".join(parts)
+            return context_str if context_str else None
+        except Exception as e:
+            log_debug(f"[event_plugin] Could not extract context from original_message: {e}")
+            return None
+
     async def _handle_schedule_message_payload(self, payload: dict, original_message=None):
-        """Handle schedule_message action by converting delay to date/time."""
+        """Handle schedule_message action by converting delay (send_in) or absolute time (send_at) to date/time."""
         log_info(f"[event_plugin] ⏰ _handle_schedule_message_payload CALLED with payload: {payload}")
         text = payload.get("text")
-        send_in = payload.get("send_in", "1 minute")  # Default to 1 minute
+        send_in = payload.get("send_in")
+        send_at = payload.get("send_at")
         
         if not text:
             log_error("[event_plugin] Invalid schedule_message payload: missing 'text'")
             return
         
-        # Parse send_in delay (e.g., "5 minutes", "1 hour", "2 hours")
         from datetime import datetime, timedelta, timezone
+        import re
         
         try:
-            # Parse delay like "1 minute", "5 minutes", "1 hour", "2 hours"
-            import re
-            match = re.match(r'(\d+)\s+(minute|hour|day|week)s?', send_in.lower())
-            if not match:
-                log_error(f"[event_plugin] Invalid send_in format: {send_in}")
-                return
+            future_time = None
             
-            quantity = int(match.group(1))
-            unit = match.group(2)
-            log_info(f"[event_plugin] ⏰ Parsed delay: {quantity} {unit}")
+            # Priority: send_at (absolute time) over send_in (delay)
+            if send_at:
+                log_info(f"[event_plugin] Processing send_at: {send_at}")
+                from core.time_zone_utils import get_local_tz
+                
+                # Try Unix timestamp first
+                try:
+                    ts = int(send_at)
+                    future_time = datetime.fromtimestamp(ts, tz=timezone.utc)
+                    log_info(f"[event_plugin] Parsed as Unix timestamp: {future_time}")
+                except (ValueError, TypeError):
+                    # Try ISO format: 2025-11-20T09:00:00 or 2025-11-20T09:00:00Z
+                    try:
+                        future_time = datetime.fromisoformat(send_at.replace('Z', '+00:00'))
+                        if future_time.tzinfo is None:
+                            future_time = future_time.replace(tzinfo=timezone.utc)
+                        log_info(f"[event_plugin] Parsed as ISO format: {future_time}")
+                    except ValueError:
+                        # Try YYYY-MM-DD HH:MM format
+                        try:
+                            dt_local = datetime.strptime(send_at, "%Y-%m-%d %H:%M")
+                            local_tz = get_local_tz()
+                            dt_local = dt_local.replace(tzinfo=local_tz)
+                            future_time = dt_local.astimezone(timezone.utc)
+                            log_info(f"[event_plugin] Parsed as YYYY-MM-DD HH:MM (local): {send_at} → UTC {future_time}")
+                        except ValueError:
+                            # Try HH:MM format (today in local timezone)
+                            try:
+                                now_local = datetime.now(tz=get_local_tz())
+                                time_part = datetime.strptime(send_at, "%H:%M").time()
+                                dt_local = datetime.combine(now_local.date(), time_part, tzinfo=get_local_tz())
+                                future_time = dt_local.astimezone(timezone.utc)
+                                log_info(f"[event_plugin] Parsed as HH:MM (today, local): {send_at} → UTC {future_time}")
+                            except ValueError:
+                                error_msg = (
+                                    f"❌ Formato send_at non riconosciuto: `{send_at}`\n\n"
+                                    f"**Formati accettati:**\n"
+                                    f"  • **HH:MM**: `09:30` (oggi a quell'ora)\n"
+                                    f"  • **YYYY-MM-DD HH:MM**: `2025-11-20 09:30`\n"
+                                    f"  • **ISO 8601**: `2025-11-20T09:30:00` o `2025-11-20T09:30:00Z`\n"
+                                    f"  • **Unix timestamp**: `1735142400`\n\n"
+                                    f"**Esempi:**\n"
+                                    f"  ✅ `schedule_message` con `send_at='09:30'` (oggi)\n"
+                                    f"  ✅ `schedule_message` con `send_at='2025-11-20 09:30'`\n"
+                                    f"  ✅ `schedule_message` con `send_at='2025-11-20T09:30:00Z'`"
+                                )
+                                await self._send_corrective_message(error_msg, original_message)
+                                return
             
-            # Calculate future time
-            now_utc = datetime.now(timezone.utc)
-            if unit == "minute":
-                future_time = now_utc + timedelta(minutes=quantity)
-            elif unit == "hour":
-                future_time = now_utc + timedelta(hours=quantity)
-            elif unit == "day":
-                future_time = now_utc + timedelta(days=quantity)
-            elif unit == "week":
-                future_time = now_utc + timedelta(weeks=quantity)
+            elif send_in:
+                log_info(f"[event_plugin] Processing send_in (delay): {send_in}")
+                # Parse delay in multiple formats:
+                # - Full format: "5 minutes", "2 hours", "1 day"
+                # - Abbreviated: "6m", "2h", "1d", "1w" (with or without space)
+                # - Time format: "1:23" (1 minute 23 seconds), "5:30" (5 minutes 30 seconds)
+                
+                quantity = None
+                unit = None
+                
+                # Try MM:SS format first (e.g., "1:23" means 1m 23s)
+                match = re.match(r'^(\d+):(\d+)$', send_in.strip())
+                if match:
+                    minutes = int(match.group(1))
+                    seconds = int(match.group(2))
+                    # Convert to total seconds
+                    total_seconds = minutes * 60 + seconds
+                    quantity = total_seconds
+                    unit = 'second'
+                else:
+                    # Try full format (e.g., "5 minutes", "2 hours")
+                    match = re.match(r'(\d+)\s+(second|minute|hour|day|week)s?', send_in.lower())
+                    if match:
+                        quantity = int(match.group(1))
+                        unit = match.group(2)
+                        # Normalize unit to singular form
+                        if unit.endswith('s'):
+                            unit = unit[:-1]
+                    else:
+                        # Try abbreviation format (e.g., "6m", "2h", "1d", "1w")
+                        match = re.match(r'^(\d+)\s*([smhdw])$', send_in.lower())
+                        if match:
+                            quantity = int(match.group(1))
+                            abbrev = match.group(2)
+                            # Convert abbreviation to full name
+                            abbrev_map = {'s': 'second', 'm': 'minute', 'h': 'hour', 'd': 'day', 'w': 'week'}
+                            unit = abbrev_map.get(abbrev)
+                
+                if not quantity or not unit:
+                    log_error(f"[event_plugin] Invalid send_in format: {send_in}")
+                    # Send corrective feedback
+                    error_msg = (
+                        f"❌ Formato send_in non riconosciuto: `{send_in}`\n\n"
+                        f"**Formati accettati:**\n"
+                        f"  • **Abbreviati**: `6m`, `2h`, `1d`, `1w`, `30s`\n"
+                        f"  • **Completi**: `5 minutes`, `2 hours`, `1 day`\n"
+                        f"  • **MM:SS**: `1:30` (1 minuto 30 secondi), `5:45`\n\n"
+                        f"**Esempi corretti:**\n"
+                        f"  ✅ `schedule_message` con `send_in='5 minutes'`\n"
+                        f"  ✅ `schedule_message` con `send_in='6m'`\n"
+                        f"  ✅ `schedule_message` con `send_in='1:30'`"
+                    )
+                    await self._send_corrective_message(error_msg, original_message)
+                    return
+                
+                log_info(f"[event_plugin] ⏰ Parsed delay: {quantity} {unit}(s)")
+                
+                # Calculate future time
+                now_utc = datetime.now(timezone.utc)
+                if unit == "second":
+                    future_time = now_utc + timedelta(seconds=quantity)
+                elif unit == "minute":
+                    future_time = now_utc + timedelta(minutes=quantity)
+                elif unit == "hour":
+                    future_time = now_utc + timedelta(hours=quantity)
+                elif unit == "day":
+                    future_time = now_utc + timedelta(days=quantity)
+                elif unit == "week":
+                    future_time = now_utc + timedelta(weeks=quantity)
+                else:
+                    log_error(f"[event_plugin] Unknown time unit: {unit}")
+                    return
+            
             else:
-                log_error(f"[event_plugin] Unknown time unit: {unit}")
+                # Neither send_in nor send_at provided (should have been caught by validation)
+                log_error("[event_plugin] Neither send_in nor send_at provided")
                 return
             
-            # Extract date and time strings
-            date_str = future_time.strftime("%Y-%m-%d")
-            time_str = future_time.strftime("%H:%M")
-            log_info(f"[event_plugin] ⏰ Scheduled for {date_str} {time_str} UTC")
+            # Convert UTC future time to local timezone for display/storage
+            from core.time_zone_utils import utc_to_local
+            future_time_local = utc_to_local(future_time)
             
-            # Build description with chat/thread info if available
+            # Extract date and time strings in LOCAL timezone
+            date_str = future_time_local.strftime("%Y-%m-%d")
+            time_str = future_time_local.strftime("%H:%M")
+            log_info(f"[event_plugin] ⏰ Scheduled for {date_str} {time_str} local time (UTC: {future_time.strftime('%Y-%m-%d %H:%M')})")
+            
+            # Extract interface_path from original_message for proper delivery
+            interface_path = None
+            if original_message and hasattr(original_message, 'interface_path'):
+                interface_path = original_message.interface_path
+            
+            # Build description with interface context for proper delivery
+            # Format: MESSAGE: {text} [interface_path: {interface_path}]
             description = f"MESSAGE: {text}"
-            if payload.get("chat_id"):
-                description += f" [chat: {payload.get('chat_id')}]"
-            if payload.get("thread_id"):
-                description += f" [thread: {payload.get('thread_id')}]"
+            if interface_path:
+                description += f" [interface_path: {interface_path}]"
             
-            # Save as a one-time reminder
+            # Extract original context from the conversation
+            original_context = self._extract_original_context(original_message)
+            
+            # Save as a one-time reminder (will be converted to UTC by _save_scheduled_reminder)
             await self._save_scheduled_reminder(
                 date_str=date_str,
                 time_str=time_str,
                 repeat="none",
                 description=description,
                 created_by="synth",
+                original_context=original_context,
             )
             log_info(
                 f"[event_plugin] Scheduled message for {date_str} {time_str}: {text[:50]}..."
@@ -388,8 +658,22 @@ class EventPlugin(AIPluginBase):
         repeat: str,
         description: str,
         created_by: str = "synth",
+        original_context: str = None,
+        conversation_user_message: str = None,
+        conversation_llm_response: str = None,
     ) -> None:
-        """Save a scheduled reminder to the database."""
+        """Save a scheduled reminder to the database.
+        
+        Args:
+            date_str: Event date (YYYY-MM-DD)
+            time_str: Event time (HH:MM)
+            repeat: Recurrence pattern (none, daily, weekly, monthly, always)
+            description: Event description
+            created_by: Who created this event (default: "synth")
+            original_context: Original context from conversation (for user-initiated events)
+            conversation_user_message: Original user message that triggered event creation
+            conversation_llm_response: Original LLM response that created the event
+        """
         try:
             valid_recurrence_types = {"none", "daily", "weekly", "monthly", "always"}
             if repeat not in valid_recurrence_types:
@@ -406,6 +690,9 @@ class EventPlugin(AIPluginBase):
                 repeat,
                 reminder_description,
                 created_by,
+                original_context=original_context,
+                conversation_user_message=conversation_user_message,
+                conversation_llm_response=conversation_llm_response,
             )
             from core.time_zone_utils import parse_local_to_utc, format_dual_time
             try:
@@ -548,16 +835,29 @@ class EventPlugin(AIPluginBase):
                     )
                 else:
                     from types import SimpleNamespace
+                    import re
 
-                    SCHEDULED_EVENTS_CHAT_ID = -999999999
+                    # Extract interface_path from description (format: "MESSAGE: ... [interface_path: {interface_path}]")
+                    description = event.get('description', '')
+                    interface_path = None
+                    match = re.search(r'\[interface_path:\s*([^\]]+)\]', description)
+                    if match:
+                        interface_path = match.group(1).strip()
+                    
+                    if not interface_path:
+                        log_warning(
+                            f"[event_plugin] Could not extract interface_path from event {event_id} description"
+                        )
+                        # Skip this event - we need interface_path to deliver properly
+                        continue
+
                     synthetic_message = SimpleNamespace(
                         message_id=f"scheduled_event_{event_id}",
-                        chat_id=SCHEDULED_EVENTS_CHAT_ID,
-                        text=f"[SCHEDULED_EVENT_{event_id}] {event.get('description', '')[:50]}",
+                        interface_path=interface_path,
+                        text=f"[SCHEDULED_EVENT_{event_id}] {description[:50]}",
                         from_user=SimpleNamespace(
                             id=0, username="scheduler", full_name="Scheduler"
                         ),
-                        chat=SimpleNamespace(id=SCHEDULED_EVENTS_CHAT_ID, type="private"),
                     )
 
                     delivered = await request_llm_delivery(
@@ -607,6 +907,19 @@ class EventPlugin(AIPluginBase):
 
     async def _create_event_prompt(self, event: dict):
         """Create a structured prompt for the event delivery."""
+
+        def make_json_serializable(obj):
+            """Recursively convert datetime objects to strings for JSON serialization."""
+            from datetime import datetime, date, timedelta
+            if isinstance(obj, (datetime, date)):
+                return obj.isoformat() if hasattr(obj, 'isoformat') else str(obj)
+            elif isinstance(obj, timedelta):
+                return str(obj)
+            elif isinstance(obj, dict):
+                return {k: make_json_serializable(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [make_json_serializable(item) for item in obj]
+            return obj
 
         # Extract event details
         event_id = event.get("id", "unknown")
@@ -660,9 +973,29 @@ class EventPlugin(AIPluginBase):
         try:
             from core.action_parser import gather_static_injections
 
+            # FOR EVENT REMINDERS: Only get minimal injections to avoid bloating context with full persona/diary
+            # Event reminders don't need complete memory context - just essential system state
+            log_info(f"[event_plugin] 📦 EVENT_REMINDER context reduction: gathering minimal injections only")
             injections = await gather_static_injections()
             if isinstance(injections, dict):
-                context.update(injections)
+                # Keep only essential keys for event reminders, skip heavy diary/persona data
+                allowed_keys = {"persona", "weather", "current_time", "instructions"}
+                reduced_injections = {k: v for k, v in injections.items() if k in allowed_keys}
+                
+                # For persona, if it exists, limit diary entries to last 5 only
+                if "persona" in reduced_injections and isinstance(reduced_injections["persona"], dict):
+                    persona = reduced_injections["persona"]
+                    if "latest_diary_entries" in persona and isinstance(persona["latest_diary_entries"], list):
+                        # Keep only 5 most recent diary entries
+                        persona["latest_diary_entries"] = persona["latest_diary_entries"][:5]
+                        log_debug(f"[event_plugin] Persona diary reduced to 5 entries for event reminder")
+                    if "memories" in persona and isinstance(persona["memories"], list):
+                        # Keep only 3 most recent memories
+                        persona["memories"] = persona["memories"][:3]
+                        log_debug(f"[event_plugin] Persona memories reduced to 3 entries for event reminder")
+                
+                context.update(reduced_injections)
+                log_info(f"[event_plugin] 📦 Context size after reduction: {len(str(context))} chars (was potentially 200KB+)")
         except Exception as e:
             log_warning(f"[event_plugin] Failed to gather static injections: {e}")
 
@@ -670,62 +1003,60 @@ class EventPlugin(AIPluginBase):
             f"[event_plugin] Formatting event {event_id} as event_reminder for LLM"
         )
 
-        return {
+        # Convert date/time to serializable strings
+        date_str = str(date) if date else ""
+        time_str = str(time) if time else ""
+        
+        # Extract metadata from description for LLM
+        import re
+        chat_match = re.search(r'\[chat:\s*(-?\d+)\]', description)
+        thread_match = re.search(r'\[thread:\s*(\d+)\]', description)
+        chat_id = chat_match.group(1) if chat_match else None
+        thread_id = thread_match.group(1) if thread_match else None
+
+        result = {
             "context": context,
             "input": {
                 "type": "event_reminder",
                 "payload": {
-                    "date": date,
-                    "time": time,
+                    "date": date_str,
+                    "time": time_str,
                     "repeat": event.get("recurrence_type", "none"),
                     "description": description,
                     "created_by": event.get("created_by", "synth"),
+                    "chat_id": chat_id,
+                    "thread_id": thread_id,
                 },
                 "source": {
                     "event_id": event_id,
                     "origin": "scheduler",
                 },
-                "timestamp": event.get("next_run")
-                or datetime.utcnow().isoformat() + "+00:00",
+                "timestamp": (
+                    event.get("next_run").isoformat() if isinstance(event.get("next_run"), datetime) 
+                    else str(event.get("next_run")) if event.get("next_run") 
+                    else datetime.utcnow().isoformat() + "+00:00"
+                ),
             },
-            "instructions": f"""
-SCHEDULED REMINDER #{event_id} {"(LATE)" if is_late else "(ON TIME)"}
-
-Reminder: """
-            + str(description)
-            + f"""
-Scheduled for: {scheduled_time}
-Status: {lateness_context}
-
-This is a reminder you set for yourself. Freely decide whether and how to act:
-
-1. If it's a reminder that requires action (e.g. "remember Jay"), decide what to do
-2. If it's an internal thought, you might decide to do nothing or something else
-3. If it's late, deliver it but communicate that it's late
-4. You are NOT obliged to send messages - assess if it's really needed
-
-You can respond with any action (message, etc.) or combination of actions.
-If you decide to do nothing, the JSON should not contain any action.
-
-Example of a valid JSON structure for an event:
-{{
-  "type": "event",
-  "payload": {{
-    "date": "2025-07-22",
-    "time": "15:30",
-    "description": "Remember to check if Jay replied to the message",
-    "repeat": "none"
-  }}
-}}
-
-For recurring events, you can use:
-- "none": single reminder (default)
-- "daily": repeat every day
-- "weekly": repeat every week
-- "monthly": repeat every month
-- "always": keep active indefinitely
-            """.strip(),
+            "instructions": _build_event_reminder_instructions(
+                event_id, description, is_late, scheduled_time, lateness_context, 
+                original_context=event.get("original_context")
+            ),
         }
+        
+        # Make all datetime objects JSON-serializable before returning
+        log_debug(f"[event_plugin] Applying make_json_serializable to event {event_id} payload")
+        serializable_result = make_json_serializable(result)
+        log_debug(f"[event_plugin] Serialization complete for event {event_id}")
+        
+        # Test JSON serialization immediately
+        try:
+            import json
+            _ = json.dumps(serializable_result, ensure_ascii=False)
+            log_debug(f"[event_plugin] ✅ Event {event_id} payload is JSON-serializable")
+        except Exception as e:
+            log_error(f"[event_plugin] ❌ Event {event_id} payload still NOT JSON-serializable: {e}")
+        
+        return serializable_result
 
     def _create_scheduler_message(self, event: dict):
         """Create a scheduler message object for the event."""
@@ -799,21 +1130,22 @@ For recurring events, you can use:
 
     async def _send_via_transport_layer(
         self,
-        chat_id: int,
+        interface_path_or_chat_id,
         text: str,
         thread_id: int = None,
         event_id: int = None,
     ):
-        """Send message directly via transport layer, bypassing interfaces."""
+        """Send message via transport layer using interface_path (preferred) or legacy chat_id."""
         try:
-            # Determine the appropriate transport based on chat_id patterns
-            if chat_id < 0:
-                # Negative IDs are typically Telegram groups/channels
-                await self._send_via_telegram_transport(
-                    chat_id, text, thread_id, event_id
-                )
+            # Check if this is an interface_path (string starting with interface name)
+            # or a chat_id (integer or numeric string)
+            if isinstance(interface_path_or_chat_id, str) and not interface_path_or_chat_id.replace('-', '').replace('+', '').isdigit():
+                # This is an interface_path
+                interface_path = interface_path_or_chat_id
+                await self._send_via_interface_path(interface_path, text, event_id)
             else:
-                # Positive IDs could be Telegram private chats or other platforms
+                # This is a chat_id (legacy path)
+                chat_id = int(interface_path_or_chat_id) if isinstance(interface_path_or_chat_id, str) else interface_path_or_chat_id
                 await self._send_via_telegram_transport(
                     chat_id, text, thread_id, event_id
                 )
@@ -822,6 +1154,53 @@ For recurring events, you can use:
             log_error(
                 f"[event_plugin] Error in transport layer for event {event_id}: {repr(e)}"
             )
+
+    async def _send_via_interface_path(self, interface_path: str, text: str, event_id: int = None):
+        """Send message using interface_path through the message plugin."""
+        try:
+            from core.action_parser import run_action
+            from types import SimpleNamespace
+            
+            # Create a message-like object for the action
+            payload = {
+                "text": text,
+                "interface_path": interface_path,
+            }
+            
+            message = SimpleNamespace(
+                interface_path=interface_path,
+                from_llm=False,  # This is from the system, not the LLM
+            )
+            
+            action = {
+                "type": "message_telegram_bot",
+                "payload": payload,
+            }
+            
+            await run_action(action, message)
+            log_info(f"[event_plugin] ✅ Message sent via interface_path {interface_path} (event {event_id})")
+            
+        except Exception as e:
+            log_error(f"[event_plugin] Error sending via interface_path: {repr(e)}")
+
+    async def _send_corrective_message(self, error_msg: str, original_message=None):
+        """Send corrective feedback to user about invalid format."""
+        try:
+            if not original_message:
+                log_warning("[event_plugin] No original_message to send corrective feedback")
+                return
+            
+            interface_path = getattr(original_message, "interface_path", None)
+            
+            if not interface_path:
+                log_warning("[event_plugin] Cannot determine interface_path for corrective message")
+                return
+            
+            log_info(f"[event_plugin] 💬 Sending corrective message via {interface_path}")
+            await self._send_via_transport_layer(interface_path, error_msg)
+            
+        except Exception as e:
+            log_error(f"[event_plugin] Error sending corrective message: {repr(e)}")
 
     async def _send_via_telegram_transport(
         self,

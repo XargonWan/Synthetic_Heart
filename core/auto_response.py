@@ -44,6 +44,8 @@ class AutoResponseSystem:
             from core.message_queue import enqueue
             
             # Build context for LLM
+            # Support both new interface_path and legacy chat_id
+            interface_path = original_context.get('interface_path')
             chat_id = original_context.get('chat_id')
             message_id = original_context.get('message_id')
             interface_name = original_context.get('interface_name')
@@ -57,6 +59,7 @@ class AutoResponseSystem:
             mock_message = SimpleNamespace()
             # Basic identifiers
             mock_message.chat_id = chat_id
+            mock_message.interface_path = interface_path
             mock_message.message_id = message_id or 0
             if action_outputs is not None:
                 mock_message.text = json.dumps(
@@ -78,9 +81,6 @@ class AutoResponseSystem:
             # Message metadata expected by downstream handlers
             mock_message.date = datetime.utcnow()
             mock_message.reply_to_message = None
-            mock_message.interface_path = original_context.get(
-                "interface_path"
-            )
 
             # Provide chat structure expected by message_queue.enqueue
             mock_message.chat = SimpleNamespace()

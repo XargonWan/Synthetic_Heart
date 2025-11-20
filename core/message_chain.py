@@ -161,6 +161,32 @@ async def handle_incoming_message(bot, message: Optional[SimpleNamespace], text:
             if persona_manager:
                 persona_manager.process_llm_message_for_emotions(text)
                 log_info(f"[message_chain] ✅ Emotion processing completed successfully")
+                
+                # Check if there were invalid emotions - trigger corrector if so
+                corrector_msg = persona_manager.get_emotion_validation_corrector()
+                if corrector_msg:
+                    log_warning(f"[message_chain] 🚨 Invalid emotions detected - triggering corrector")
+                    # Trigger corrector with emotion validation message
+                    from core.corrector_utils import get_action_description_for_corrector
+                    from core.action_parser import run_action
+                    
+                    try:
+                        # Build corrector action
+                        corrector_action = {
+                            "type": "send_corrector_message",
+                            "payload": {
+                                "correction_type": "invalid_emotions",
+                                "message": corrector_msg,
+                                "interface_path": ctx.get('interface_path'),
+                                "chat_id": ctx.get('chat_id')
+                            }
+                        }
+                        
+                        # Try to send corrector message
+                        asyncio.create_task(run_action(corrector_action, message))
+                        log_info(f"[message_chain] ✓ Corrector action scheduled for invalid emotions")
+                    except Exception as ce:
+                        log_warning(f"[message_chain] Could not send corrector: {ce}")
             else:
                 log_warning(f"[message_chain] ⚠️ Persona manager not available")
         except Exception as e:

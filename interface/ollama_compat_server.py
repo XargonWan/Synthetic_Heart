@@ -68,7 +68,7 @@ class OllamaCompatServer:
         register_interface(self.interface_id, self)
         log_info("[ollama_serve] Interface registered")
 
-        self.stream_timeout = float(os.getenv("OLLAMA_STREAM_TIMEOUT", "10.0"))
+        self.stream_timeout = float(os.getenv("OLLAMA_STREAM_TIMEOUT", "60.0"))
         self.completion_timeout = float(os.getenv("OLLAMA_COMPLETION_TIMEOUT", "0.0"))
 
         self._schedule_server_startup()

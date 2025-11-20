@@ -49,7 +49,8 @@ async def save_chat_message(
     interface_path: str,
     message_text: str,
     sender_name: str = None,
-    sender_id: str = None
+    sender_id: str = None,
+    timestamp: datetime = None
 ) -> None:
     """Save a message to the chat history cache.
     
@@ -58,20 +59,36 @@ async def save_chat_message(
         message_text: The message text
         sender_name: Optional sender name
         sender_id: Optional sender ID
+        timestamp: Optional message timestamp (datetime object or ISO string)
     """
     if not interface_path or not message_text:
         return
     
     try:
+        # Parse timestamp if it's a string
+        if timestamp and isinstance(timestamp, str):
+            try:
+                timestamp = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+            except Exception:
+                timestamp = None
+        
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
-                # Insert message
-                await cur.execute("""
-                    INSERT INTO chat_history_cache 
-                    (interface_path, sender_name, sender_id, message_text)
-                    VALUES (%s, %s, %s, %s)
-                    ON DUPLICATE KEY UPDATE timestamp=CURRENT_TIMESTAMP
-                """, (interface_path, sender_name, sender_id, message_text))
+                # Insert message with timestamp
+                if timestamp:
+                    await cur.execute("""
+                        INSERT INTO chat_history_cache 
+                        (interface_path, sender_name, sender_id, message_text, timestamp)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON DUPLICATE KEY UPDATE timestamp=VALUES(timestamp)
+                    """, (interface_path, sender_name, sender_id, message_text, timestamp))
+                else:
+                    await cur.execute("""
+                        INSERT INTO chat_history_cache 
+                        (interface_path, sender_name, sender_id, message_text)
+                        VALUES (%s, %s, %s, %s)
+                        ON DUPLICATE KEY UPDATE timestamp=CURRENT_TIMESTAMP
+                    """, (interface_path, sender_name, sender_id, message_text))
                 
                 # Clean up old messages beyond CHAT_HISTORY_LIMIT
                 await cur.execute("""
@@ -87,7 +104,7 @@ async def save_chat_message(
                     )
                 """, (interface_path, interface_path, CHAT_HISTORY_LIMIT))
                 
-                log_debug(f"[chat_history_cache] Saved message for interface_path {interface_path}")
+                log_debug(f"[chat_history_cache] Saved message for interface_path {interface_path}, sender={sender_name}, timestamp={timestamp}")
     except Exception as e:
         log_debug(f"[chat_history_cache] Failed to save message: {e}")
 
@@ -136,6 +153,8 @@ async def load_chat_history(interface_path: str) -> deque:
                         log_debug(f"[chat_history_cache] Error parsing message row: {e}")
                 
                 log_debug(f"[chat_history_cache] Loaded {len(messages)} messages for interface_path {interface_path}")
+                for msg in messages:
+                    log_debug(f"[chat_history_cache]   - {msg.get('timestamp')}: {msg.get('sender_name')} [{msg.get('sender_id')}]: {msg.get('text')[:50]}...")
                 return messages
                 
     except Exception as e:

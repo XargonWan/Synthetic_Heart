@@ -124,7 +124,8 @@ async def add_message_to_context(
             interface_path=interface_path,
             message_text=message_text,
             sender_name=sender_name,
-            sender_id=sender_id
+            sender_id=sender_id,
+            timestamp=timestamp
         )
     except Exception as e:
         log_warning(f"[context_manager] Failed to persist message to cache: {e}")

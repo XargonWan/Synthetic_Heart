@@ -487,7 +487,7 @@ async def insert_memory(
     timestamp: str | None = None,
 ) -> None:
     if not timestamp:
-        timestamp = datetime.now(timezone.utc).isoformat()
+        timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
 
     await ensure_core_tables()
 
@@ -635,8 +635,22 @@ async def insert_scheduled_event(
     recurrence_type: str,
     description: str,
     created_by: str = "synth",
+    original_context: str = None,
+    conversation_user_message: str = None,
+    conversation_llm_response: str = None,
 ) -> None:
-    """Insert a new scheduled event using local time and store next_run in UTC."""
+    """Insert a new scheduled event using local time and store next_run in UTC.
+    
+    Args:
+        date: Event date (YYYY-MM-DD)
+        time: Event time (HH:MM)
+        recurrence_type: Recurrence pattern (none, daily, weekly, monthly, always)
+        description: Event description
+        created_by: Who created this event (default: "synth")
+        original_context: Original context from conversation (optional, for user-initiated events)
+        conversation_user_message: Original user message that triggered event creation (optional)
+        conversation_llm_response: Original LLM response that created the event (optional)
+    """
 
     if not time:
         time = "00:00"
@@ -657,16 +671,22 @@ async def insert_scheduled_event(
                 await safe_db_execute(
                     cur,
                     """
-                    INSERT INTO scheduled_events (`date`, `time`, next_run, recurrence_type, description, created_by)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    INSERT INTO scheduled_events (
+                        `date`, `time`, next_run, recurrence_type, description, created_by,
+                        original_context, conversation_user_message, conversation_llm_response
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         date,
                         time,
-                        next_run_utc.isoformat(),
+                        next_run_utc.strftime('%Y-%m-%d %H:%M:%S'),
                         recurrence_type or "none",
                         description,
                         created_by,
+                        original_context,
+                        conversation_user_message,
+                        conversation_llm_response,
                     ),
                     ensure_fn=ensure_core_tables,
                 )
@@ -675,21 +695,28 @@ async def insert_scheduled_event(
 
 
 async def get_due_events(now: datetime | None = None) -> list[dict]:
-    """Return scheduled events that are ready for dispatch."""
+    """Return scheduled events that are ready for dispatch.
+    
+    All timestamps are stored in UTC in the database.
+    Comparison is always done in UTC for consistency.
+    """
 
     if now is None:
         now = datetime.now(timezone.utc)
 
     log_debug(f"[get_due_events] Checking events at UTC {now.isoformat()}")
 
+    # Query: find events that are due (not delivered and next_run is in the past)
+    # All timestamps stored in DB are already in UTC (converted during insert)
+    now_str = now.strftime('%Y-%m-%d %H:%M:%S')
     query = "SELECT * FROM scheduled_events WHERE delivered = 0 AND next_run <= %s ORDER BY id"
-    log_debug(f"[get_due_events] Executing query: {query}")
+    log_debug(f"[get_due_events] Executing query with UTC time: {now_str}")
 
     rows = []
     try:
         async with get_conn_ctx() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
-                await safe_db_execute(cur, query, (now.isoformat(),), ensure_fn=ensure_core_tables)
+                await safe_db_execute(cur, query, (now_str,), ensure_fn=ensure_core_tables)
                 rows = await cur.fetchall()
                 log_debug(f"[get_due_events] Retrieved {len(rows)} rows")
                 for row in rows:
@@ -814,7 +841,7 @@ async def mark_event_delivered(event_id: int) -> bool:
                         log_warning(f"[db] Unknown recurrence type '{repeat_type}' for event {event_id}")
                         return False
 
-                    new_iso = new_dt.astimezone(timezone.utc).isoformat()
+                    new_iso = new_dt.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
                     await safe_db_execute(
                         cur,
                         "UPDATE scheduled_events SET next_run = %s WHERE id = %s",

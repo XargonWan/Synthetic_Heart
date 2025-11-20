@@ -1607,10 +1607,27 @@ class SeleniumLLMBase(AIPluginBase):
                         filtered_prompt = filtered_prompt[:model_limit]
                         log_warning(f"[selenium] Dumb truncation: {original_length} → {len(filtered_prompt)} chars (model limit: {model_limit})")
                 except Exception as e:
-                    log_debug(f"[selenium] Intelligent reduction failed: {e}, falling back to dumb truncation")
+                    log_debug(f"[selenium] Intelligent reduction failed: {e}, falling back to emergency truncation")
                     original_length = len(filtered_prompt)
-                    filtered_prompt = filtered_prompt[:model_limit]
-                    log_warning(f"[selenium] Fallback dumb truncation: {original_length} → {len(filtered_prompt)} chars (model limit: {model_limit})")
+                    
+                    # Emergency truncation: try to preserve minimum valid JSON structure
+                    truncated = filtered_prompt[:model_limit]
+                    
+                    # If it looks like a JSON object was being cut off, try to close it gracefully
+                    if truncated.count('{') > truncated.count('}'):
+                        # Find the last complete object/array and close it
+                        last_bracket = max(truncated.rfind('}'), truncated.rfind(']'))
+                        if last_bracket > 0:
+                            truncated = truncated[:last_bracket+1]
+                            log_debug(f"[selenium] Closed unclosed JSON at position {last_bracket}")
+                    
+                    # If truncation resulted in invalid JSON structure, use safe minimal version
+                    if '{"' not in truncated[:50]:  # Likely not valid JSON
+                        truncated = '{"status": "event_reminder_truncated", "message": "Context too large, using fallback"}'
+                        log_warning(f"[selenium] Extreme emergency: JSON was too corrupted, using minimal fallback structure")
+                    
+                    filtered_prompt = truncated
+                    log_warning(f"[selenium] Emergency fallback truncation: {original_length} → {len(filtered_prompt)} chars (model limit: {model_limit})")
             
             log_debug(f"[selenium] About to clear textarea and send prompt (size: {len(filtered_prompt)}, model limit: {model_limit})")
             
@@ -2143,6 +2160,7 @@ class SeleniumLLMBase(AIPluginBase):
                 prompt_text = str(messages)
 
             log_debug(f"[selenium] About to call _execute_complete_workflow with prompt ({len(prompt_text)} chars)")
+            log_debug(f"[selenium] 📤 FULL PROMPT SENT TO LLM ({len(prompt_text)} chars):\n{prompt_text}")
 
             # Lazy driver initialization - create only when first actual request comes in
             if self.driver is None:
@@ -2222,6 +2240,12 @@ class SeleniumLLMBase(AIPluginBase):
 
             # Wait for response to stabilize (text stops growing for N seconds)
             response = self.wait_until_response_stabilizes(self.driver)
+
+            # Log the full response for debugging
+            if response:
+                log_debug(f"[selenium] 📨 FULL LLM RESPONSE ({len(response)} chars):\n{response}")
+            else:
+                log_warning("[selenium] Received empty response from LLM")
 
             return response
 

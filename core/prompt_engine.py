@@ -84,8 +84,8 @@ async def build_json_prompt(message, context_memory, interface_name: str | None 
     ----------
     message : AbstractMessage or compatible interface message
         Incoming message object from an interface.
-    context_memory : dict[int, deque]
-        Dictionary storing last messages per chat.
+    context_memory : dict[str, deque]
+        Dictionary storing last messages per interface_path.
     interface_name : str | None
         Identifier of the interface that delivered the message.
     image_data : dict | None
@@ -94,12 +94,12 @@ async def build_json_prompt(message, context_memory, interface_name: str | None 
         Maximum characters for the JSON prompt. If provided, the prompt will be
         intelligently reduced by removing oldest memories. If None, no reduction is done.
     """
-    chat_id = getattr(message, "chat_id", None)
+    interface_path = getattr(message, "interface_path", None)
     text = getattr(message, "text", "") or ""
     
     # Determine if context_memory is a chat history map or a context dict
     # Context dicts have keys like 'interface_path', 'system_message', etc.
-    # Chat history maps have chat_id as keys
+    # Chat history maps have interface_path as keys
     is_context_dict = isinstance(context_memory, dict) and any(
         key in context_memory for key in ['interface_path', 'system_message', 'chat_id_context']
     )
@@ -108,21 +108,31 @@ async def build_json_prompt(message, context_memory, interface_name: str | None 
     # Use CHAT_HISTORY from config_registry
     # First, load persisted history from database if not in memory
     # Only do this if context_memory is a chat history map, not a context dict
-    if not is_context_dict and chat_id and chat_id not in context_memory:
+    if not is_context_dict and interface_path and interface_path not in context_memory:
         try:
             from core.chat_history_cache import load_chat_history as cache_load
-            cached_history = await cache_load(chat_id)
+            cached_history = await cache_load(interface_path)
             if cached_history:
-                context_memory[chat_id] = cached_history
-                log_debug(f"[json_prompt] Loaded {len(cached_history)} cached messages for chat {chat_id}")
+                context_memory[interface_path] = cached_history
+                log_debug(f"[json_prompt] Loaded {len(cached_history)} cached messages for interface_path {interface_path}")
         except Exception as e:
-            log_warning(f"[json_prompt] Failed to load cached chat history for {chat_id}: {e}")
+            log_warning(f"[json_prompt] Failed to load cached chat history for {interface_path}: {e}")
     
     # Get chat history from context_memory if it's a history map, otherwise empty
     if is_context_dict:
         chat_history = []  # No history in context dict
     else:
-        chat_history = list(context_memory.get(chat_id, []))[-CHAT_HISTORY_LIMIT:]
+        chat_history = list(context_memory.get(interface_path, []))[-CHAT_HISTORY_LIMIT:]
+    
+    # Log chat history details for LLM context
+    if chat_history:
+        log_info(f"[json_prompt] 📝 Chat history for {interface_path} ({len(chat_history)} messages):")
+        for msg in chat_history:
+            sender = msg.get("sender_name", msg.get("username", "Unknown"))
+            sender_id = msg.get("sender_id", msg.get("user_id", "?"))
+            timestamp = msg.get("timestamp", "N/A")
+            text_preview = msg.get("text", "")[:60]
+            log_info(f"[json_prompt]   [{timestamp}] {sender} ({sender_id}): {text_preview}...")
 
     # === 2. Tags and memory lookup ===
     tags = extract_tags(text)
@@ -220,10 +230,8 @@ async def build_json_prompt(message, context_memory, interface_name: str | None 
         log_warning(f"[json_prompt] Failed to add diary content: {e}")
 
     # === 4. Input payload ===
-    # Try to get interface_path from message first, then from context dict if available
-    interface_path = getattr(message, "interface_path", None)
-    
-    # If interface_path not in message, check if context_memory is actually a context dict with interface_path
+    # interface_path was already extracted at the beginning
+    # If still not found, check if context_memory is actually a context dict with interface_path
     if not interface_path and isinstance(context_memory, dict) and "interface_path" in context_memory:
         interface_path = context_memory.get("interface_path")
         log_debug(f"[json_prompt] Retrieved interface_path from context dict: {interface_path}")
@@ -231,11 +239,10 @@ async def build_json_prompt(message, context_memory, interface_name: str | None 
     input_payload = {
         "text": text,
         "source": {
-            "chat_id": chat_id,
+            "interface_path": interface_path,
             "message_id": message.message_id,
             "username": message.from_user.full_name,
             "usertag": f"@{message.from_user.username}" if message.from_user.username else "(no tag)",
-            "interface_path": interface_path,
             "interface": interface_name,
         },
         "timestamp": message.date.isoformat(),

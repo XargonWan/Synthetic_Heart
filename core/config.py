@@ -89,6 +89,7 @@ LLM_MODE = config_registry.get_var(
 # === Persistent LLM mode ===
 
 # Exposed configuration for active LLM (hidden from UI - set via Components tab)
+# NOTE: Do NOT use "bootstrap" tag - this config MUST be loaded from DB
 ACTIVE_LLM = config_registry.get_var(
     "ACTIVE_LLM",
     "selenium_chatgpt",
@@ -96,14 +97,20 @@ ACTIVE_LLM = config_registry.get_var(
     description="The currently active LLM engine. Set via the Components tab in the Web UI.",
     group="core",
     component="core",
-    tags=["bootstrap"],
     hidden=True,  # Hidden from UI config - only set via Components tab
 )
 
 async def get_active_llm():
-    """Get the currently active LLM engine from config registry."""
+    """Get the currently active LLM engine from config registry.
+    
+    This function ensures the value is loaded from the database if available,
+    not just the default value that was set during module import.
+    """
     try:
-        current_value = str(ACTIVE_LLM)
+        # Force retrieval from config registry to get the most up-to-date value
+        # This ensures we load from DB even if called before load_all_from_db()
+        current_value = config_registry.get_value("ACTIVE_LLM", "selenium_chatgpt")
+        
         # Check for None, empty string, or literal "None" string
         if current_value and current_value != "" and current_value != "None":
             log_debug(f"[config] 🧠 Active LLM: {current_value}")
