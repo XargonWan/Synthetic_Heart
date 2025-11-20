@@ -244,7 +244,7 @@ class SynthWebUIInterface:
     def get_supported_actions() -> dict:
         return {
             "message_synth_webui": {
-                "required_fields": ["text", "target"],
+                "required_fields": ["text", "interface_path"],
                 "optional_fields": [],
                 "description": f"Send a text message to a {BRAND_NAME} session.",
             }
@@ -644,6 +644,7 @@ class SynthWebUIInterface:
 
         message = SimpleNamespace(
             chat_id=session_id,
+            interface_path=f"{INTERFACE_NAME}/{session_id}",  # Add interface_path for proper routing
             message_id=int(datetime.utcnow().timestamp() * 1000) % 1_000_000,
             text=text,
             date=datetime.utcnow(),
@@ -789,7 +790,7 @@ class SynthWebUIInterface:
         if isinstance(payload_or_chat_id, dict):
             payload = payload_or_chat_id
             text = payload.get("text", text)
-            chat_id = payload.get("target") or payload.get("chat_id")
+            chat_id = payload.get("interface_path") or payload.get("target") or payload.get("chat_id")
         else:
             chat_id = payload_or_chat_id or kwargs.get("chat_id")
             if text is None:
@@ -798,6 +799,14 @@ class SynthWebUIInterface:
         if not text or not chat_id:
             log_warning(f"{LOG_PREFIX} send_message missing text or chat_id")
             return
+
+        # Handle interface_path format: extract session_id from "synth_webui/session_id"
+        if "/" in str(chat_id):
+            parts = str(chat_id).split("/")
+            if len(parts) >= 2 and parts[0] == INTERFACE_NAME:
+                session_id = parts[1]
+                log_debug(f"{LOG_PREFIX} Extracted session {session_id} from interface_path {chat_id}")
+                chat_id = session_id
 
         websocket = self.connections.get(str(chat_id))
         if not websocket:
@@ -814,9 +823,15 @@ class SynthWebUIInterface:
     async def execute_action(self, action: dict, context: dict, bot, original_message):
         if action.get("type") == "message_synth_webui":
             payload = action.get("payload", {})
-            # Always use context chat_id (the actual session_id) for WebUI messages
-            # The target field might contain @usertag, but we need the session UUID
+            # Try to get session_id from context (chat_id or interface_path)
             session_id = context.get("chat_id")
+            if not session_id and "interface_path" in context:
+                # Extract session_id from interface_path format: "synth_webui/session_id"
+                interface_path = context.get("interface_path")
+                if interface_path and "/" in interface_path:
+                    parts = interface_path.split("/")
+                    if len(parts) >= 2:
+                        session_id = parts[1]
             
             # Set animation to 'write' before sending message
             if self.persona_manager and session_id:
@@ -826,8 +841,9 @@ class SynthWebUIInterface:
                 except Exception as anim_exc:
                     log_debug(f"{LOG_PREFIX} Failed to set 'write' animation: {anim_exc}")
             
-            # Ensure the payload has the correct session_id for sending
-            payload["target"] = session_id
+            # Ensure the payload has the correct interface_path for sending
+            if session_id:
+                payload["interface_path"] = f"{INTERFACE_NAME}/{session_id}"
             await self.send_message(payload, original_message=original_message)
 
     # ------------------------------------------------------------------
