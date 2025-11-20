@@ -43,12 +43,12 @@ async def get_db():
             log_debug("[bio_manager] Connection released")
 
 
-JSON_LIST_FIELDS = {"known_as", "likes", "not_likes", "past_events", "feelings", "social_accounts"}
+JSON_LIST_FIELDS = {"known_as", "likes", "not_likes", "past_events", "social_accounts"}
 JSON_DICT_FIELDS = {"contacts"}
 
 VALID_BIO_FIELDS = {
     "known_as", "likes", "not_likes", "information", "past_events", 
-    "feelings", "contacts", "social_accounts", "privacy", "created_at", "last_accessed", "user_name"
+    "contacts", "social_accounts", "privacy", "created_at", "last_accessed", "user_name"
 }
 
 DEFAULTS = {
@@ -57,7 +57,6 @@ DEFAULTS = {
     "not_likes": [],
     "information": "",
     "past_events": [],
-    "feelings": [],
     "contacts": {},
     "social_accounts": [],  # Changed from {} to []
     "privacy": "default",

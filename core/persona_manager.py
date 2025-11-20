@@ -1052,13 +1052,40 @@ class PersonaManager(PluginBase):
         This should be called whenever the LLM sends a message to capture
         emotional tags and update the persona's state accordingly.
         
+        Delegates to emotion_manager plugin if available for centralized management.
+        Falls back to local extraction for backward compatibility.
+        
         Args:
             message_text: The complete LLM message text
         """
         if not message_text:
             return
+        
+        # Try to delegate to emotion_manager plugin first
+        try:
+            from plugins.emotion_manager import EmotionManager
+            emotion_mgr = EmotionManager()
             
-        # Extract emotion tags from the message
+            # Run async delegated update
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # Schedule as task if loop is running
+                    asyncio.create_task(emotion_mgr.update_emotion_from_tags(message_text))
+                else:
+                    # Run directly
+                    asyncio.run(emotion_mgr.update_emotion_from_tags(message_text))
+            except RuntimeError:
+                # No event loop, run directly
+                asyncio.run(emotion_mgr.update_emotion_from_tags(message_text))
+            
+            log_info(f"[persona_manager] Delegated emotion update to emotion_manager plugin")
+            return
+            
+        except Exception as e:
+            log_debug(f"[persona_manager] Could not delegate to emotion_manager plugin: {e}")
+        
+        # Fallback: extract emotion tags from the message and update local state
         emotion_tags = self.extract_emotion_tags_from_text(message_text)
         
         if emotion_tags:

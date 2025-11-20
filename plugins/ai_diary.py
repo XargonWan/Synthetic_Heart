@@ -1141,7 +1141,14 @@ class DiaryPlugin:
                         },
                         "emotions": {
                             "type": "array",
-                            "description": "Array of emotions felt (optional)"
+                            "description": "Array of emotions with type and intensity (1-10). Format: [{\"type\": \"emotion_name\", \"intensity\": 7}]",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "type": {"type": "string", "example": "joy"},
+                                    "intensity": {"type": "number", "example": 7, "minimum": 1, "maximum": 10}
+                                }
+                            }
                         },
                         "context_tags": {
                             "type": "array",

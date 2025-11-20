@@ -171,6 +171,7 @@ class SynthWebUIInterface:
         self.app.get("/")(self.index)
         self.app.get("/health")(self.health)
         self.app.get("/api/action-state")(self.get_action_state_endpoint)
+        self.app.get("/api/emotion-state")(self.get_emotion_state_endpoint)
         self.app.get("/stats")(self.stats)
         self.app.get("/logs")(self.logs_page)
         self.app.get("/diary")(self.diary_page)
@@ -344,6 +345,51 @@ class SynthWebUIInterface:
                 "phase": "IDLE",
                 "component": None,
                 "started_at": None
+            })
+
+    async def get_emotion_state_endpoint(self):
+        """Get the current emotional state for animation/face expressions.
+        
+        Returns JSON with emotion state for dynamic facial expression updates.
+        This endpoint is used by the WebUI to fetch emotion data periodically
+        for updating the 3D model's facial expressions and animations.
+        
+        Example response:
+        {
+            "emotions": {
+                "happy": 7.5,
+                "calm": 5.2,
+                "curious": 4.0
+            },
+            "dominant_emotion": "happy"
+        }
+        """
+        try:
+            from plugins.emotion_manager import EmotionManager
+            emotion_mgr = EmotionManager()
+            
+            # Get current emotion state with decay applied
+            emotions = await emotion_mgr.get_emotion_state()
+            
+            # Find dominant emotion (highest intensity)
+            dominant = None
+            if emotions:
+                dominant = max(emotions.items(), key=lambda x: x[1])[0]
+            
+            return JSONResponse({
+                "emotions": emotions,
+                "dominant_emotion": dominant,
+                "timestamp": datetime.utcnow().isoformat(),
+            })
+            
+        except Exception as e:
+            log_warning(f"{LOG_PREFIX} Failed to get emotion state: {e}")
+            # Return neutral state if emotion manager unavailable
+            return JSONResponse({
+                "emotions": {},
+                "dominant_emotion": None,
+                "timestamp": datetime.utcnow().isoformat(),
+                "error": str(e),
             })
 
     async def stats(self):

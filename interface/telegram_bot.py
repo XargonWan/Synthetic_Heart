@@ -1159,6 +1159,7 @@ class TelegramInterface:
                 "required_fields": ["text", "interface_path"],
                 "optional_fields": [
                     "chat_name",
+                    "reply_to_message_id",
                 ],
                 "description": "Send a text message via Telegram",
             },

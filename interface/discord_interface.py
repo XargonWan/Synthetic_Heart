@@ -146,7 +146,7 @@ class DiscordInterface:
             "message_discord_bot": {
                 "description": "Send a text message to a Discord channel.",
                 "required_fields": ["text", "interface_path"],
-                "optional_fields": [],
+                "optional_fields": ["reply_to_message_id"],
             }
         }
 
