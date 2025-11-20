@@ -24,8 +24,8 @@ Why Three Tiers?
 
 .. code-block:: none
 
-   LLM Prompt → Schema + Brief (minimal, efficient)
-   LLM Error → Corrector uses Schema + Brief + Examples (comprehensive)
+   LLM Prompt -> Schema + Brief (minimal, efficient)
+   LLM Error -> Corrector uses Schema + Brief + Examples (comprehensive)
 
 Schema Tier
 -----------

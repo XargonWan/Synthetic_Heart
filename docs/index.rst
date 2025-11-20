@@ -30,6 +30,9 @@ getting started.
    event_id_flow
    auto_response
    chat_links
+   chat_context
+   chat_history
+   emotion_engine
    persona_manager
    persona_configuration
    llm_engines

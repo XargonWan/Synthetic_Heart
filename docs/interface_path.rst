@@ -196,6 +196,40 @@ Best Practices
 - Include interface paths in debug logs for traceability
 - Use paths instead of legacy identifiers in error messages
 
+Error Message Routing
+~~~~~~~~~~~~~~~~~~~~~
+
+.. versionchanged:: 1.0
+   LLM error messages now correctly follow the interface_path from the original message.
+
+When LLM processing fails (JSON parsing errors, timeouts, validation failures), the system sends fallback error messages. These messages are automatically routed to the same interface and conversation using the preserved interface_path.
+
+**Implementation:**
+
+The error routing is handled in ``core/message_chain.py`` → ``send_llm_fallback_message()``:
+
+.. code-block:: python
+
+   # Extract interface_path from message or context
+   interface_path = getattr(message, 'interface_path', None)
+   if not interface_path and context:
+       interface_path = context.get('interface_path')
+
+   # Route through transport layer with preserved path
+   await universal_send(
+       bot.send_message,
+       chat_id,
+       text=fallback_text,
+       interface_path=interface_path,  # Ensures correct routing
+       is_llm_response=True
+   )
+
+**Benefits:**
+
+- **Consistent Error Delivery**: Errors appear in the same chat where the problem occurred
+- **Context Preservation**: Users see errors in the correct conversation thread
+- **Interface Agnostic**: Works across Telegram, Discord, Matrix, etc.
+
 **Migration:**
 
 - Use ``build_interface_path_from_legacy()`` for gradual migration

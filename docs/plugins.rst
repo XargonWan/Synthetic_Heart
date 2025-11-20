@@ -70,6 +70,125 @@ The ``bio_manager`` plugin provides persistent storage and retrieval of user bio
 - ``get_bio_full(user_id)``: Retrieve complete user profile
 - ``update_bio_fields_auto(user_id, updates)``: Update fields without rate limiting
 - ``get_static_injection(message, context_memory)``: Async method for prompt context injection
+
+Emotion Manager Plugin
+----------------------
+
+.. versionadded:: 1.0
+   Centralized emotional state management with decay, balancing, and persistence.
+
+The ``emotion_manager`` plugin manages SyntH's emotional state with sophisticated psychological modeling. It provides persistent emotional state storage, exponential decay over time, and Plutchik's wheel-based emotion balancing for realistic emotional behavior.
+
+**Key Features:**
+
+- **Persistent Storage**: Emotions stored in database with timestamps
+- **Exponential Decay**: Emotions naturally fade over time
+- **Emotion Balancing**: Plutchik's wheel opposites reduce conflicting emotions
+- **LLM Integration**: Automatic emotion extraction from message tags
+- **Global State**: Readable emotional state for WebUI, animations, and plugins
+
+**Architecture:**
+
+The emotion engine consists of three main components:
+
+1. **EmotionState Class**: Represents individual emotions with intensity and decay
+2. **EmotionManager Plugin**: Core plugin handling all emotion operations
+3. **Database Layer**: Persistent storage with automatic cleanup
+
+**Emotion State Model:**
+
+.. code-block:: python
+
+   @dataclass
+   class EmotionState:
+       emotion_name: str      # Emotion identifier
+       intensity: float       # 0.0-10.0 scale
+       timestamp: datetime    # Creation/update time
+
+**Decay Calculation:**
+
+Emotions decay exponentially over time using the formula:
+
+.. math::
+
+   I(t) = I_0 \cdot e^{-\frac{t}{\tau}}
+
+Where:
+- :math:`I(t)` = Current intensity
+- :math:`I_0` = Initial intensity
+- :math:`t` = Time elapsed (seconds)
+- :math:`\tau` = Decay half-life (configurable, default 3600s = 1 hour)
+
+**Configuration:**
+
+- ``EMOTION_DECAY_TAU``: Decay half-life in seconds (default: 3600)
+- ``EMOTION_DECAY_THRESHOLD``: Minimum intensity before removal (default: 0.1)
+
+**Plutchik's Wheel Balancing:**
+
+The engine implements Plutchik's circumplex model of emotion, where opposite emotions on the wheel naturally suppress each other:
+
+.. code-block:: python
+
+   PLUTCHIK_OPPOSITES = {
+       'joy': 'sadness',
+       'trust': 'disgust',
+       'fear': 'anger',
+       'anticipation': 'surprise',
+       'happiness': 'sadness',
+       'excitement': 'calm',
+       # ... extended opposites
+   }
+
+**Supported Emotions:**
+
+The engine supports a comprehensive whitelist including Ekman's basic emotions (anger, disgust, fear, happiness, sadness, surprise), Plutchik's complex emotions (joy, trust, anticipation, etc.), and common states (anxiety, calm, confusion, etc.).
+
+**Database Schema:**
+
+.. code-block:: sql
+
+   CREATE TABLE emotion_state (
+       id INT AUTO_INCREMENT PRIMARY KEY,
+       emotion_name VARCHAR(100) NOT NULL,
+       intensity FLOAT NOT NULL DEFAULT 5.0,
+       timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+       INDEX idx_emotion_name (emotion_name),
+       INDEX idx_timestamp (timestamp)
+   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+**API Actions:**
+
+- ``static_inject``: Inject current emotional state into LLM context
+- ``get_emotion_state``: Get current emotional state with decay applied
+- ``update_emotion_from_tags``: Extract and apply emotions from LLM message tags like ``{emotion intensity}``
+- ``set_emotion``: Set a single emotion intensity directly
+- ``decay_emotions``: Apply decay to all emotions and remove low-intensity ones
+- ``sync_emotions_from_all_sources``: Synchronize emotions from ai_diary, message tags, and emotion_state DB
+
+**LLM Integration:**
+
+Emotions can be specified in LLM responses using the format ``{emotion intensity}``:
+
+.. code-block:: none
+
+   I'm so excited about this project! {excitement 8.5} {curiosity 7.2}
+
+The engine automatically scans LLM messages for emotion tags and applies them to the emotional state with balancing.
+
+**WebUI Integration:**
+
+The emotional state is exposed to the WebUI for real-time visualization and can trigger animations and visual feedback.
+
+**Troubleshooting:**
+
+- Check ``EMOTION_DECAY_TAU`` configuration for decay issues
+- Verify emotion names against ``VALID_EMOTIONS`` whitelist
+- Ensure DB credentials are configured correctly
+- Check that ``decay_emotions`` is called periodically
+
+* ``emotion_manager`` – Centralized emotional state management with decay and balancing.
 * ``blocklist`` – User blocking/unblocking functionality (no configuration).
 * ``chat_link`` – Cross-platform chat linking and message forwarding.
 * ``message_map`` – Message threading and conversation tracking.
@@ -77,6 +196,59 @@ The ``bio_manager`` plugin provides persistent storage and retrieval of user bio
 * ``recent_chats`` – Access to recent conversation history.
 * ``time_plugin`` – Inject current time and location (no configuration).
 * ``weather_plugin`` – Provide weather info as static context. Optional ``WEATHER_FETCH_TIME`` sets refresh interval.
+
+Recent Chats Plugin
+-------------------
+
+.. versionchanged:: 1.0
+   ``update_chat_activity`` is now automatic and no longer exposed to LLM actions.
+
+The ``recent_chats`` plugin manages conversation activity tracking and provides access to recently active chats. Unlike other plugins, this plugin focuses on mechanical operations that don't require LLM reasoning.
+
+**Key Changes in v1.0:**
+
+- **Automatic Activity Tracking**: Chat activity is now tracked automatically when messages are received, eliminating the need for LLM-requested ``update_chat_activity`` actions
+- **Centralized Implementation**: Activity tracking is handled in ``core/chat_context_manager.py`` instead of being duplicated across interfaces
+- **Reduced Prompt Size**: One less action for the LLM to consider
+
+**Available Actions:**
+
+- ``get_recent_chats``: Retrieve the most recently active chats
+- ``cleanup_old_chats``: Remove chat records older than specified days
+
+**Database Schema:**
+
+.. code-block:: sql
+
+   CREATE TABLE recent_chats (
+       chat_id VARCHAR(255) PRIMARY KEY,
+       last_active DOUBLE NOT NULL,
+       metadata TEXT,
+       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+       INDEX idx_last_active (last_active)
+   );
+
+**Automatic Activity Tracking:**
+
+Chat activity is now tracked automatically whenever ``add_message_to_context()`` is called:
+
+.. code-block:: python
+
+   # Automatic - no LLM intervention required
+   asyncio.create_task(update_chat_activity(
+       chat_id=extracted_chat_id,
+       metadata={
+           'username': sender_name,
+           'user_id': sender_id,
+           'interface_path': interface_path
+       }
+   ))
+
+**Benefits:**
+
+- **Performance**: Eliminates unnecessary LLM decision-making for basic tracking
+- **Consistency**: All interfaces track activity the same way
+- **Maintenance**: Single implementation point for activity tracking logic
 
 **Development Plugins** (in ``plugins_dev/`` directory):
 
