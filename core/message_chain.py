@@ -64,8 +64,15 @@ def get_failed_message_text() -> str:
         fallback = fallback.get_value()
     return str(fallback)
 
-async def send_llm_fallback_message(bot, message: SimpleNamespace, failure_reason: str) -> str:
-    """Send fallback message when LLM fails and log the failure reason."""
+async def send_llm_fallback_message(bot, message: SimpleNamespace, failure_reason: str, context: dict = None) -> str:
+    """Send fallback message when LLM fails and log the failure reason.
+    
+    Args:
+        bot: The bot instance
+        message: The message object (may have interface_path attribute)
+        failure_reason: Description of why the LLM failed
+        context: Optional context dict that may contain interface_path
+    """
     fallback_text = get_failed_message_text()
     # Ensure fallback_text is a string (ConfigVar might be returned)
     if hasattr(fallback_text, 'get_value'):
@@ -73,8 +80,13 @@ async def send_llm_fallback_message(bot, message: SimpleNamespace, failure_reaso
     fallback_text = str(fallback_text)
     chat_id = getattr(message, 'chat_id', None)
     
+    # Extract interface_path from message or context - CRITICAL for routing to correct interface
+    interface_path = getattr(message, 'interface_path', None)
+    if not interface_path and context:
+        interface_path = context.get('interface_path')
+    
     # Log detailed error
-    log_error(f"[message_chain] LLM FAILURE - Chat: {chat_id}, Reason: {failure_reason}")
+    log_error(f"[message_chain] LLM FAILURE - Chat: {chat_id}, Interface: {interface_path}, Reason: {failure_reason}")
     log_error(f"[message_chain] Sending fallback message: '{fallback_text}'")
     
     # Send fallback message through transport layer
@@ -86,12 +98,12 @@ async def send_llm_fallback_message(bot, message: SimpleNamespace, failure_reaso
                 bot.send_message,
                 chat_id,
                 text=fallback_text,
-                interface_path=getattr(message, 'interface_path', None),
+                interface_path=interface_path,
                 is_llm_response=True  # Mark as LLM response so interface handles normally
             )
         else:
             log_warning(f"[message_chain] Bot does not have send_message method, cannot send fallback")
-        log_debug(f"[message_chain] Fallback message sent to chat {chat_id}")
+        log_debug(f"[message_chain] Fallback message sent to chat {chat_id} via interface_path {interface_path}")
         return fallback_text
     except Exception as e:
         log_error(f"[message_chain] Failed to send fallback message: {e}")
@@ -301,13 +313,13 @@ async def handle_incoming_message(bot, message: Optional[SimpleNamespace], text:
         if attempt > max_retries:
             failure_reason = f"Exhausted {max_retries} correction attempts for invalid JSON"
             log_warning(f"[message_chain] {failure_reason}; sending fallback message")
-            await send_llm_fallback_message(bot, message, failure_reason)
+            await send_llm_fallback_message(bot, message, failure_reason, context=ctx)
             return LLM_FAILED
 
         if text in tried_texts:
             failure_reason = "Correction loop detected - same text repeated"
             log_warning(f'[message_chain] {failure_reason}; sending fallback message')
-            await send_llm_fallback_message(bot, message, failure_reason)
+            await send_llm_fallback_message(bot, message, failure_reason, context=ctx)
             return LLM_FAILED
 
         tried_texts.add(text)
@@ -322,7 +334,7 @@ async def handle_incoming_message(bot, message: Optional[SimpleNamespace], text:
             log_error(f"[message_chain] {failure_reason}")
             import traceback
             log_error(f"[message_chain] Traceback: {traceback.format_exc()}")
-            await send_llm_fallback_message(bot, message, failure_reason)
+            await send_llm_fallback_message(bot, message, failure_reason, context=ctx)
             return LLM_FAILED
 
         if not corrected:
@@ -331,7 +343,7 @@ async def handle_incoming_message(bot, message: Optional[SimpleNamespace], text:
             if attempt >= max_retries - 1:
                 failure_reason = f"Corrector returned no correction after {attempt} attempts"
                 log_warning(f"[message_chain] {failure_reason}; sending fallback message")
-                await send_llm_fallback_message(bot, message, failure_reason)
+                await send_llm_fallback_message(bot, message, failure_reason, context=ctx)
                 return LLM_FAILED
             # On no-correction, loop and let retry counter enforce blocking
             await asyncio.sleep(0.5)

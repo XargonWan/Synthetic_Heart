@@ -245,7 +245,7 @@ class DiscordInterface:
         try:
             await universal_send(self._discord_send, channel_id, text=text)
             
-            # Save Rekku's response to chat history cache
+            # Save SyntH's response to chat history cache
             try:
                 from core.chat_history_cache import save_chat_message
                 from core.interface_path_utils import build_interface_path
@@ -253,12 +253,12 @@ class DiscordInterface:
                 await save_chat_message(
                     interface_path=interface_path,
                     message_text=text,
-                    sender_name="Rekku",
-                    sender_id="rekku"
+                    sender_name="self",
+                    sender_id="self"
                 )
-                log_debug(f"[discord_interface] Saved Rekku response to chat history cache for channel {channel_id}")
+                log_debug(f"[discord_interface] Saved SyntH response to chat history cache for channel {channel_id}")
             except Exception as e:
-                log_debug(f"[discord_interface] Failed to save Rekku response to cache: {e}")
+                log_debug(f"[discord_interface] Failed to save SyntH response to cache: {e}")
             
             log_debug(f"[discord_interface] Message sent to {channel_id}: {text}")
         except Exception as e:

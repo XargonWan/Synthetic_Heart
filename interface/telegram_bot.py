@@ -1563,20 +1563,21 @@ class TelegramInterface:
                 fallback_reply_to_message_id=fallback_reply_to,
             )
             
-            # Save Rekku's response to chat history cache
+            # Save SyntH's response to chat history cache
             try:
                 from core.chat_history_cache import save_chat_message
+                from core.interface_path_utils import build_interface_path
+                # Build correct interface_path for this message
+                msg_interface_path = build_interface_path('telegram_bot', str(chat_id), str(thread_id) if thread_id else None)
                 await save_chat_message(
-                    chat_id=str(chat_id),
+                    interface_path=msg_interface_path,
                     message_text=text,
-                    sender_name="Rekku",
-                    sender_id="rekku",
-                    interface="telegram_bot",
-                    thread_id=thread_id
+                    sender_name="self",
+                    sender_id="self"
                 )
-                log_debug(f"[telegram_interface] Saved Rekku response to chat history cache for chat {chat_id}")
+                log_debug(f"[telegram_interface] Saved SyntH response to chat history cache for interface_path {msg_interface_path}")
             except Exception as e:
-                log_debug(f"[telegram_interface] Failed to save Rekku response to cache: {e}")
+                log_debug(f"[telegram_interface] Failed to save SyntH response to cache: {e}")
                 
         except BadRequest as e:
             if "chat not found" in str(e).lower():

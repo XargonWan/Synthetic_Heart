@@ -502,7 +502,7 @@ class MatrixInterface:
             thread_event_id=thread_event_id,
         )
         
-        # Save Rekku's response to chat history cache
+        # Save SyntH's response to chat history cache
         try:
             from core.chat_history_cache import save_chat_message
             from core.interface_path_utils import build_interface_path
@@ -510,12 +510,12 @@ class MatrixInterface:
             await save_chat_message(
                 interface_path=interface_path,
                 message_text=text,
-                sender_name="Rekku",
-                sender_id="rekku"
+                sender_name="self",
+                sender_id="self"
             )
-            log_debug(f"[matrix_interface] Saved Rekku response to chat history cache for room {room_id}")
+            log_debug(f"[matrix_interface] Saved SyntH response to chat history cache for room {room_id}")
         except Exception as e:
-            log_debug(f"[matrix_interface] Failed to save Rekku response to cache: {e}")
+            log_debug(f"[matrix_interface] Failed to save SyntH response to cache: {e}")
 
     async def _send_matrix_message(
         self,

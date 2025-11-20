@@ -690,20 +690,21 @@ class OllamaCompatServer:
                 text=text,
             )
             
-            # Save Rekku's response to chat history cache
+            # Save SyntH's response to chat history cache
             try:
                 from core.chat_history_cache import save_chat_message
+                from core.interface_path_utils import build_interface_path
+                # Build correct interface_path for this message
+                msg_interface_path = build_interface_path('ollama_serve', str(chat_id))
                 await save_chat_message(
-                    chat_id=chat_id,
+                    interface_path=msg_interface_path,
                     message_text=text,
-                    sender_name="Rekku",
-                    sender_id="rekku",
-                    interface="ollama_serve",
-                    thread_id=None
+                    sender_name="self",
+                    sender_id="self"
                 )
-                log_debug(f"[ollama_serve] Saved Rekku response to chat history cache for chat {chat_id}")
+                log_debug(f"[ollama_serve] Saved SyntH response to chat history cache for interface_path {msg_interface_path}")
             except Exception as e:
-                log_debug(f"[ollama_serve] Failed to save Rekku response to cache: {e}")
+                log_debug(f"[ollama_serve] Failed to save SyntH response to cache: {e}")
 
         if finalize_flag:
             await self._finalize_stream(

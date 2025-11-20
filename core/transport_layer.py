@@ -664,6 +664,7 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
             correction_prompt = json.dumps(correction_payload, ensure_ascii=False)
 
             # Construct a lightweight message object expected by plugins
+            # CRITICAL: Preserve interface_path from original message/context so error messages route correctly
             correction_message = SimpleNamespace()
             correction_message.chat_id = chat_id or getattr(bot, 'chat_id', None) or -1
             correction_message.text = correction_prompt
@@ -671,6 +672,12 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
             correction_message.date = None
             correction_message.from_user = None
             correction_message.chat = SimpleNamespace(id=correction_message.chat_id, type='private')
+            # Extract interface_path from original message or context
+            correction_message.interface_path = None
+            if message and hasattr(message, 'interface_path'):
+                correction_message.interface_path = message.interface_path
+            elif context and 'interface_path' in context:
+                correction_message.interface_path = context['interface_path']
 
             log_debug(f"[corrector_middleware] Requesting correction from LLM (attempt {attempt}/{max_retries}) - chat_id={correction_message.chat_id}, thread_id={correction_message.thread_id}")
 
