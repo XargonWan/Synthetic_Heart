@@ -139,9 +139,9 @@ async def get_pool():
                 except Exception:
                     DB_POOL_MINSIZE = 1
                 try:
-                    DB_POOL_MAXSIZE = int(os.getenv('DB_POOL_MAXSIZE', config_registry.get_value('DB_POOL_MAXSIZE', 100, label='DB Pool Max Size', group='database', component='core', advanced=True)))
+                    DB_POOL_MAXSIZE = int(os.getenv('DB_POOL_MAXSIZE', config_registry.get_value('DB_POOL_MAXSIZE', 151, label='DB Pool Max Size', group='database', component='core', advanced=True)))
                 except Exception:
-                    DB_POOL_MAXSIZE = 100
+                    DB_POOL_MAXSIZE = 151
 
                 try:
                     host, port, user, passwd, dbname = _read_db_config()
@@ -694,29 +694,37 @@ async def insert_scheduled_event(
         log_error(f"[insert_scheduled_event] Error: {e}")
 
 
-async def get_due_events(now: datetime | None = None) -> list[dict]:
+async def get_due_events(now: datetime | None = None, advance_minutes: int = 3) -> list[dict]:
     """Return scheduled events that are ready for dispatch.
     
     All timestamps are stored in UTC in the database.
     Comparison is always done in UTC for consistency.
+    
+    Args:
+        now: Current time (UTC). Defaults to current UTC time.
+        advance_minutes: Number of minutes to check ahead for events (default: 3).
+                        This accounts for LLM processing delays.
     """
 
     if now is None:
         now = datetime.now(timezone.utc)
+    
+    # Add advance window to account for LLM processing time
+    check_time = now + timedelta(minutes=advance_minutes)
 
-    log_debug(f"[get_due_events] Checking events at UTC {now.isoformat()}")
+    log_debug(f"[get_due_events] Checking events at UTC {now.isoformat()} (with {advance_minutes}min advance: {check_time.isoformat()})")
 
-    # Query: find events that are due (not delivered and next_run is in the past)
+    # Query: find events that are due (not delivered and next_run is within advance window)
     # All timestamps stored in DB are already in UTC (converted during insert)
-    now_str = now.strftime('%Y-%m-%d %H:%M:%S')
+    check_str = check_time.strftime('%Y-%m-%d %H:%M:%S')
     query = "SELECT * FROM scheduled_events WHERE delivered = 0 AND next_run <= %s ORDER BY id"
-    log_debug(f"[get_due_events] Executing query with UTC time: {now_str}")
+    log_debug(f"[get_due_events] Executing query with UTC time (+ {advance_minutes}min): {check_str}")
 
     rows = []
     try:
         async with get_conn_ctx() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
-                await safe_db_execute(cur, query, (now_str,), ensure_fn=ensure_core_tables)
+                await safe_db_execute(cur, query, (check_str,), ensure_fn=ensure_core_tables)
                 rows = await cur.fetchall()
                 log_debug(f"[get_due_events] Retrieved {len(rows)} rows")
                 for row in rows:
