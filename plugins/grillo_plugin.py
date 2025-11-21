@@ -352,12 +352,12 @@ class GrilloPlugin(AIPluginBase):
             async with conn.cursor() as cur:
                 cutoff = datetime.now() - timedelta(days=days)
                 
-                # Query ai_diary for recent tags
+                # Query ai_diary for recent tags (column is context_tags, stored as JSON)
                 await cur.execute(
                     """
-                    SELECT tags 
+                    SELECT context_tags 
                     FROM ai_diary 
-                    WHERE timestamp >= %s AND tags IS NOT NULL AND tags != ''
+                    WHERE timestamp >= %s AND context_tags IS NOT NULL AND context_tags != '[]'
                     ORDER BY timestamp DESC
                     LIMIT 100
                     """,
@@ -366,13 +366,20 @@ class GrilloPlugin(AIPluginBase):
                 
                 rows = await cur.fetchall()
                 
-                # Count tag frequencies (tags are comma-separated)
+                # Count tag frequencies (context_tags is JSON array)
                 tag_counts: Dict[str, int] = {}
                 for row in rows:
                     if row and row[0]:
-                        tags = [t.strip() for t in row[0].split(',') if t.strip()]
-                        for tag in tags:
-                            tag_counts[tag] = tag_counts.get(tag, 0) + 1
+                        try:
+                            # Parse JSON array
+                            tags = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+                            if isinstance(tags, list):
+                                for tag in tags:
+                                    if tag and isinstance(tag, str):
+                                        tag_counts[tag] = tag_counts.get(tag, 0) + 1
+                        except (json.JSONDecodeError, TypeError):
+                            # Skip malformed entries
+                            continue
                 
                 # Sort by frequency and return top N
                 sorted_tags = sorted(tag_counts.items(), key=lambda x: x[1], reverse=True)
