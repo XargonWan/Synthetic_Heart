@@ -54,7 +54,7 @@ services:
       MYSQL_USER: ${DB_USER:-synth}
       MYSQL_PASSWORD: ${DB_PASS:-synth}
       MARIADB_AUTO_UPGRADE: 1
-    command: --max-connections=156
+    command: --max-connections=200
     volumes:
       - synth_db_data:/var/lib/mysql
       - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql

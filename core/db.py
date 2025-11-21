@@ -139,9 +139,9 @@ async def get_pool():
                 except Exception:
                     DB_POOL_MINSIZE = 1
                 try:
-                    DB_POOL_MAXSIZE = int(os.getenv('DB_POOL_MAXSIZE', config_registry.get_value('DB_POOL_MAXSIZE', 151, label='DB Pool Max Size', group='database', component='core', advanced=True)))
+                    DB_POOL_MAXSIZE = int(os.getenv('DB_POOL_MAXSIZE', config_registry.get_value('DB_POOL_MAXSIZE', 150, label='DB Pool Max Size', group='database', component='core', advanced=True)))
                 except Exception:
-                    DB_POOL_MAXSIZE = 151
+                    DB_POOL_MAXSIZE = 150
 
                 try:
                     host, port, user, passwd, dbname = _read_db_config()
@@ -746,18 +746,17 @@ async def get_due_events(now: datetime | None = None, advance_minutes: int = 3) 
                 event_dt = scheduled_val
             else:
                 event_dt = datetime.fromisoformat(str(scheduled_val).replace('Z', '+00:00'))
+            # If no timezone info, assume it's UTC (as stored in the database)
             if event_dt.tzinfo is None:
-                from core.time_zone_utils import get_local_timezone
-                event_dt = (
-                    event_dt.replace(tzinfo=get_local_timezone())
-                    .astimezone(timezone.utc)
-                )
+                event_dt = event_dt.replace(tzinfo=timezone.utc)
             else:
                 event_dt = event_dt.astimezone(timezone.utc)
         except Exception as e:
             log_warning(f"[get_due_events] Invalid datetime in next_run: {scheduled_val} - {e}")
             continue
 
+        # Calculate lateness: an event is late only if now (without advance) is past its scheduled time
+        # This ensures events retrieved within the advance window are not marked as late
         is_late = now > event_dt
         minutes_late = int((now - event_dt).total_seconds() / 60) if is_late else 0
 

@@ -1,3 +1,7 @@
+-- Set max_connections for proper connection pool management
+-- This ensures 150 connections for Python pool + 50 for buffer/overhead
+SET GLOBAL max_connections=200;
+
 -- Emotion State Table for Centralized Emotion Management
 -- Stores emotional state with timestamps for decay calculation
 CREATE TABLE IF NOT EXISTS emotion_state (
