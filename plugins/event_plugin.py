@@ -24,23 +24,17 @@ def _build_event_reminder_instructions(event_id: int, description: str, is_late:
     """Build event reminder instructions with extracted metadata and original conversation context."""
     import re
     
-    # Extract metadata from description: [chat: ID] [thread: ID]
-    chat_match = re.search(r'\[chat:\s*(-?\d+)\]', description)
-    thread_match = re.search(r'\[thread:\s*(\d+)\]', description)
-    
-    chat_id = chat_match.group(1) if chat_match else None
-    thread_id = thread_match.group(1) if thread_match else None
+    # Extract interface_path from description: [interface_path: telegram_bot/chat_id/thread_id]
+    interface_match = re.search(r'\[interface_path:\s*([^\]]+)\]', description)
+    interface_path = interface_match.group(1).strip() if interface_match else None
     
     # Remove metadata from display text
-    clean_description = re.sub(r'\s*\[chat:\s*-?\d+\]\s*', '', description)
-    clean_description = re.sub(r'\s*\[thread:\s*\d+\]\s*', '', clean_description)
+    clean_description = re.sub(r'\s*\[interface_path:\s*[^\]]+\]\s*', '', description)
     
     # Build instruction text with metadata clearly shown
     metadata_info = ""
-    if chat_id and thread_id:
-        metadata_info = f"\n\n⚙️ DELIVERY INFO: This message is for Telegram chat {chat_id}, thread {thread_id}"
-    elif chat_id:
-        metadata_info = f"\n\n⚙️ DELIVERY INFO: This message is for Telegram chat {chat_id}"
+    if interface_path:
+        metadata_info = f"\n\n⚙️ DELIVERY INFO: Use interface_path '{interface_path}' for message delivery"
     
     # Include original context if available
     context_section = ""
@@ -75,7 +69,7 @@ AVAILABLE ACTIONS:
 
 **message_telegram_bot** - Send a message immediately via Telegram
   payload: {{"text": "message", "interface_path": "telegram_bot/CHAT_ID"}}
-  IMPORTANT: If you have chat_id info above, use it! Example with actual chat ID:
+  IMPORTANT: If you have interface_path info above, use it! Example with actual interface_path:
   {{"type": "message_telegram_bot", "payload": {{"text": "Hello!", "interface_path": "telegram_bot/-1003098886330"}}}}
 
 **event** - Create a future reminder/event
@@ -300,12 +294,15 @@ class EventPlugin(AIPluginBase):
                     errors.append(f"payload.send_at has invalid format. Accepted: HH:MM (today), YYYY-MM-DD HH:MM, ISO 8601 (2025-11-20T09:00:00), or Unix timestamp (1735142400)")
             
             # IMPORTANT: Reject invalid fields that should not be in schedule_message
-            # chat_id and thread_id are now auto-extracted from event metadata, not from payload
+            # interface_path is auto-extracted from original_message, not from payload
             if "chat_id" in payload:
-                errors.append("payload.chat_id is not a valid field for schedule_message - it's auto-extracted from event metadata")
+                errors.append("payload.chat_id is not a valid field for schedule_message - use interface_path instead (auto-extracted from context)")
             
             if "thread_id" in payload:
-                errors.append("payload.thread_id is not a valid field for schedule_message - it's auto-extracted from event metadata")
+                errors.append("payload.thread_id is not a valid field for schedule_message - use interface_path instead (auto-extracted from context)")
+            
+            if "interface_path" in payload:
+                errors.append("payload.interface_path is not a valid field for schedule_message - it's auto-extracted from original_message context")
         
         return errors
 
@@ -410,20 +407,32 @@ class EventPlugin(AIPluginBase):
         log_debug(f"[event_plugin] _handle_event_payload: original_message={original_message}")
         log_debug(f"[event_plugin] _handle_event_payload: original_message attrs={dir(original_message) if original_message else 'None'}")
         
-        if original_message and hasattr(original_message, 'interface_path'):
-            interface_path = original_message.interface_path
-            log_debug(f"[event_plugin] ✅ Extracted interface_path from original_message: {interface_path}")
-        else:
-            log_warning(f"[event_plugin] ⚠️ No interface_path found in original_message")
-            # Try to get from context if available
-            if original_message:
-                log_warning(f"[event_plugin] Original message type: {type(original_message)}")
-                log_warning(f"[event_plugin] Original message: {original_message}")
+        if original_message:
+            if hasattr(original_message, 'interface_path'):
+                interface_path = original_message.interface_path
+                log_debug(f"[event_plugin] ✅ Extracted interface_path from original_message: {interface_path}")
+            elif hasattr(original_message, 'chat_id') or hasattr(original_message, 'chat'):
+                # Construct interface_path from Telegram message attributes
+                chat_id = getattr(original_message, 'chat_id', None) or (original_message.chat.id if hasattr(original_message, 'chat') else None)
+                thread_id = getattr(original_message, 'message_thread_id', None)
+                
+                if chat_id:
+                    interface_path = f"telegram_bot/{chat_id}"
+                    if thread_id:
+                        interface_path += f"/{thread_id}"
+                    log_info(f"[event_plugin] ✅ Constructed interface_path from Telegram message: {interface_path}")
+                else:
+                    log_warning(f"[event_plugin] ⚠️ Could not extract chat_id from original_message")
+            else:
+                log_warning(f"[event_plugin] ⚠️ No interface_path or chat info found in original_message")
         
         # Add interface_path to description for later retrieval
         if interface_path:
             description += f" [interface_path: {interface_path}]"
             log_info(f"[event_plugin] ✅ Appended interface_path to description")
+        
+        # Extract original context from the conversation
+        original_context = self._extract_original_context(original_message)
 
         await self._save_scheduled_reminder(
             date_str,
@@ -431,6 +440,7 @@ class EventPlugin(AIPluginBase):
             repeat,
             description,
             created_by,
+            original_context=original_context,
         )
         log_info(
             f"[event_plugin] Reminder scheduled for {date_str} {time_str} ({repeat}): {description}"
@@ -466,12 +476,12 @@ class EventPlugin(AIPluginBase):
                 user_text = original_message.text[:200]  # Limit length
                 parts.append(f"User: {user_text}")
             
-            # Add message ID/thread info if available (for context linking)
+            # Add message ID and interface_path info if available (for context linking)
             if hasattr(original_message, 'message_id'):
                 parts.append(f"[Message ID: {original_message.message_id}]")
             
-            if hasattr(original_message, 'chat_id'):
-                parts.append(f"[Chat: {original_message.chat_id}]")
+            if hasattr(original_message, 'interface_path'):
+                parts.append(f"[Interface: {original_message.interface_path}]")
             
             context_str = " / ".join(parts)
             return context_str if context_str else None
@@ -855,19 +865,47 @@ class EventPlugin(AIPluginBase):
                     if match:
                         interface_path = match.group(1).strip()
                     
+                    # Fallback: extract from original_context if not in description
+                    if not interface_path:
+                        original_context = event.get('original_context', '')
+                        if original_context:
+                            # Extract from format: [Interface: telegram_bot/chat_id/thread_id]
+                            interface_match = re.search(r'\[Interface:\s*([^\]]+)\]', original_context)
+                            if interface_match:
+                                interface_path = interface_match.group(1).strip()
+                                log_info(
+                                    f"[event_plugin] ✅ Extracted interface_path from original_context: {interface_path}"
+                                )
+                    
                     if not interface_path:
                         log_warning(
-                            f"[event_plugin] Could not extract interface_path from event {event_id} description"
+                            f"[event_plugin] ⚠️ Could not extract interface_path from event {event_id} description or original_context"
                         )
                         # Skip this event - we need interface_path to deliver properly
                         continue
 
+                    # Extract chat_id from interface_path for compatibility
+                    # Format: telegram_bot/chat_id or telegram_bot/chat_id/thread_id
+                    chat_id = None
+                    thread_id = None
+                    if interface_path:
+                        parts = interface_path.split('/')
+                        if len(parts) >= 2:
+                            chat_id = parts[1]  # Extract chat_id
+                        if len(parts) >= 3:
+                            thread_id = parts[2]  # Extract thread_id if present
+
                     synthetic_message = SimpleNamespace(
                         message_id=f"scheduled_event_{event_id}",
                         interface_path=interface_path,
+                        chat_id=int(chat_id) if chat_id and chat_id.lstrip('-').isdigit() else -1,
                         text=f"[SCHEDULED_EVENT_{event_id}] {description[:50]}",
                         from_user=SimpleNamespace(
                             id=0, username="scheduler", full_name="Scheduler"
+                        ),
+                        chat=SimpleNamespace(
+                            id=int(chat_id) if chat_id and chat_id.lstrip('-').isdigit() else -1,
+                            type="supergroup"
                         ),
                     )
 
@@ -1020,10 +1058,8 @@ class EventPlugin(AIPluginBase):
         
         # Extract metadata from description for LLM
         import re
-        chat_match = re.search(r'\[chat:\s*(-?\d+)\]', description)
-        thread_match = re.search(r'\[thread:\s*(\d+)\]', description)
-        chat_id = chat_match.group(1) if chat_match else None
-        thread_id = thread_match.group(1) if thread_match else None
+        interface_match = re.search(r'\[interface_path:\s*([^\]]+)\]', description)
+        interface_path = interface_match.group(1).strip() if interface_match else None
 
         result = {
             "context": context,
@@ -1035,8 +1071,7 @@ class EventPlugin(AIPluginBase):
                     "repeat": event.get("recurrence_type", "none"),
                     "description": description,
                     "created_by": event.get("created_by", "synth"),
-                    "chat_id": chat_id,
-                    "thread_id": thread_id,
+                    "interface_path": interface_path,
                 },
                 "source": {
                     "event_id": event_id,
@@ -1075,7 +1110,8 @@ class EventPlugin(AIPluginBase):
 
         return SimpleNamespace(
             message_id=f"event_{event['id']}",
-            chat_id="SYSTEM_SCHEDULER",
+            interface_path="system/scheduler",
+            chat_id=-1,
             text="Reminder: " + str(event.get("description", "")),
             from_user=SimpleNamespace(
                 id=-1,  # System user ID

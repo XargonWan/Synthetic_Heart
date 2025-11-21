@@ -544,19 +544,18 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
 
     # Extract message from context if available
     message = context.get('message') if context else None
-
+    
+    # Check if we have selective correction context (some actions succeeded, some failed)
+    correction_context = getattr(message, 'correction_context', None) if message else None
+    
     # If already valid JSON WITHOUT errors, nothing to do
     try:
         json_obj, metadata = extract_json_from_text(text, return_metadata=True)
-        if json_obj and not metadata.get('had_errors', False):
-            log_debug = globals().get('log_debug')
-            if log_debug:
-                log_debug("[corrector_middleware] Input contains clean JSON; skipping correction")
+        if json_obj and not metadata.get('had_errors', False) and not correction_context:
+            log_debug("[corrector_middleware] Input contains clean JSON; skipping correction")
             return text
         elif json_obj and metadata.get('had_errors', False):
-            log_debug = globals().get('log_debug')
-            if log_debug:
-                log_debug(f"[corrector_middleware] JSON recovered with {metadata.get('error_count', 0)} errors; proceeding with correction")
+            log_debug(f"[corrector_middleware] JSON recovered with {metadata.get('error_count', 0)} errors; proceeding with correction")
     except Exception:
         pass
 
@@ -630,10 +629,52 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
             if message:
                 original_user_message = getattr(message, 'text', "")
             
+            # Build correction message based on whether we have selective correction context
+            if correction_context:
+                # Selective correction: tell LLM what succeeded and what needs fixing
+                successful = correction_context.get('successful_actions', [])
+                failed = correction_context.get('failed_actions', [])
+                errors = correction_context.get('errors', [])
+                
+                correction_message_text = (
+                    f"PARTIAL SUCCESS - Some actions completed, others failed.\n\n"
+                    f"✅ Successfully executed {len(successful)} action(s):\n"
+                )
+                for action in successful:
+                    action_type = action.get('type', 'unknown')
+                    correction_message_text += f"  - {action_type}\n"
+                
+                correction_message_text += (
+                    f"\n❌ Failed {len(failed)} action(s) that need correction:\n"
+                )
+                for failed_item in failed:
+                    action = failed_item.get('action', {})
+                    action_errors = failed_item.get('errors', [])
+                    action_type = action.get('type', 'unknown')
+                    correction_message_text += f"  - {action_type}: {', '.join(action_errors)}\n"
+                
+                correction_message_text += (
+                    f"\nRequirements:\n"
+                    f"1. Respond with ONLY valid JSON\n"
+                    f"2. Include ONLY the missing/failed actions - do NOT repeat successful ones\n"
+                    f"3. Fix validation errors in the failed actions\n"
+                    f"4. Ensure you've created ALL actions from the user's original request\n"
+                )
+            else:
+                # Full correction: complete JSON failure
+                correction_message_text = (
+                    f"CRITICAL ERROR: Your previous response was not valid JSON or incomplete. "
+                    f"Requirements:\n"
+                    f"1. Respond with ONLY valid JSON (no explanations)\n"
+                    f"2. Complete ALL actions requested by the user in their original message\n"
+                    f"3. Fix any JSON syntax errors\n"
+                    f"Error details: {last_error_hint}"
+                )
+            
             correction_payload = {
                 "system_message": {
                     "type": "error",
-                    "message": f"CRITICAL ERROR: Your previous response was not valid JSON. You MUST respond with ONLY valid JSON. {last_error_hint}",
+                    "message": correction_message_text,
                     "your_reply": text,
                     "original_user_message": original_user_message,
                     "chat_id": chat_id,

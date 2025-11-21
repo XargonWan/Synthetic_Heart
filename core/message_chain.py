@@ -229,13 +229,13 @@ async def handle_incoming_message(bot, message: Optional[SimpleNamespace], text:
             import traceback
             log_error(f"[message_chain] Traceback: {traceback.format_exc()}")
 
-        # Check if JSON was recovered from corruption - needs correction
+        # Check if JSON was recovered from corruption - may still have valid actions
         if parsed is not None and metadata.get('recovered'):
             log_warning(
                 f"[message_chain] JSON recovered from corruption (errors: {metadata.get('error_count', 0)}, "
-                f"unparsed: {len(metadata.get('unparsed_content', ''))} chars) - triggering corrector"
+                f"unparsed: {len(metadata.get('unparsed_content', ''))} chars) - will execute valid actions and correct failures"
             )
-            parsed = None  # Force correction path
+            # Don't set parsed = None here - try to execute valid actions first
 
         if parsed is not None:
             # System messages are produced by the core/system and should NEVER be processed
@@ -286,9 +286,46 @@ async def handle_incoming_message(bot, message: Optional[SimpleNamespace], text:
                 # Execute actions regardless of whether response is included
                 if parsed is not None:
                     try:
-                        await run_actions(actions, ctx, bot, message)
-                        log_info('[message_chain] Actions executed successfully - loop interrupted')
-                        return ACTIONS_EXECUTED
+                        result = await run_actions(actions, ctx, bot, message)
+                        processed = result.get('processed', [])
+                        failed = result.get('failed_actions', [])
+                        errors = result.get('errors', [])
+                        
+                        log_info(f'[message_chain] Actions result: {len(processed)} successful, {len(failed)} failed')
+                        
+                        # If we had corruption recovery or validation failures, check if correction is needed
+                        needs_correction = len(failed) > 0 or metadata.get('recovered', False)
+                        
+                        if needs_correction and (source == "llm" or getattr(message, "from_llm", False)):
+                            # Some actions failed or JSON was corrupted - request selective correction
+                            log_warning(f'[message_chain] {len(failed)} actions failed, requesting correction for missing/invalid actions')
+                            
+                            # Build correction context with info about what succeeded and what failed
+                            correction_context = {
+                                'successful_actions': processed,
+                                'failed_actions': failed,
+                                'errors': errors,
+                                'had_json_errors': metadata.get('recovered', False),
+                                'original_text': text
+                            }
+                            
+                            # Store this in the message for the corrector to use
+                            if hasattr(message, '__dict__'):
+                                message.correction_context = correction_context
+                            
+                            # Set parsed = None to trigger correction path
+                            # But keep the successful actions already executed
+                            if len(failed) > 0:
+                                parsed = None  # This will trigger the correction loop below
+                            else:
+                                # All actions succeeded despite recovery - we're done
+                                log_info('[message_chain] All actions executed successfully despite JSON recovery')
+                                return ACTIONS_EXECUTED
+                        else:
+                            # All actions succeeded
+                            log_info('[message_chain] Actions executed successfully - loop interrupted')
+                            return ACTIONS_EXECUTED
+                            
                     except Exception as e:
                         log_warning(f"[message_chain] Failed to run actions: {e}")
                         # If action execution fails, don't continue with correction loop
