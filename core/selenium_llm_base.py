@@ -1769,6 +1769,53 @@ class SeleniumLLMBase(AIPluginBase):
                 log_debug(f"[selenium] Wait for confirmation timed out or failed: {wait_error}")
                 # Continue anyway - the message might have been sent
             
+            # CRITICAL: Verify ChatGPT has started processing the request
+            # Wait for signs that ChatGPT is actually responding (streaming indicator, response area changes, etc.)
+            log_debug("[selenium] Verifying ChatGPT has started processing...")
+            processing_started = False
+            start_time = time.time()
+            max_wait = 30  # Wait maximum 30 seconds for ChatGPT to start responding
+            
+            while time.time() - start_time < max_wait:
+                try:
+                    # Check for response area containing text or streaming indicators
+                    response_selectors = self.selectors.get("response_container", [])
+                    for selector in response_selectors:
+                        try:
+                            elements = self.driver.find_elements(selector[0], selector[1])
+                            for elem in elements:
+                                # Check if element has any text content (ChatGPT started writing)
+                                if elem.text and len(elem.text.strip()) > 0:
+                                    processing_started = True
+                                    log_debug(f"[selenium] ChatGPT has started processing - found response text ({len(elem.text)} chars)")
+                                    break
+                        except:
+                            pass
+                    
+                    if processing_started:
+                        break
+                    
+                    # Also check for "stop generating" button which appears when ChatGPT is writing
+                    try:
+                        stop_buttons = self.driver.find_elements(By.CSS_SELECTOR, "[aria-label*='Stop'], button:has-text('Stop')")
+                        if len(stop_buttons) > 0:
+                            processing_started = True
+                            log_debug("[selenium] ChatGPT has started processing - found stop button")
+                            break
+                    except:
+                        pass
+                    
+                    time.sleep(0.5)
+                except Exception as e:
+                    log_debug(f"[selenium] Error while checking for processing: {e}")
+                    break
+            
+            if not processing_started:
+                log_warning(f"[selenium] ChatGPT did not start processing within {max_wait}s - prompt may not have been sent successfully")
+                # Don't fail here - let wait_until_response_stabilizes handle the timeout
+            else:
+                log_debug(f"[selenium] ChatGPT processing confirmed after {time.time() - start_time:.1f}s")
+            
             return True  # Prompt was sent successfully
         
         except Exception as e:

@@ -545,13 +545,18 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
     # Extract message from context if available
     message = context.get('message') if context else None
 
-    # If already valid JSON, nothing to do
+    # If already valid JSON WITHOUT errors, nothing to do
     try:
-        if extract_json_from_text(text):
+        json_obj, metadata = extract_json_from_text(text, return_metadata=True)
+        if json_obj and not metadata.get('had_errors', False):
             log_debug = globals().get('log_debug')
             if log_debug:
-                log_debug("[corrector_middleware] Input already contains JSON; skipping correction")
+                log_debug("[corrector_middleware] Input contains clean JSON; skipping correction")
             return text
+        elif json_obj and metadata.get('had_errors', False):
+            log_debug = globals().get('log_debug')
+            if log_debug:
+                log_debug(f"[corrector_middleware] JSON recovered with {metadata.get('error_count', 0)} errors; proceeding with correction")
     except Exception:
         pass
 
