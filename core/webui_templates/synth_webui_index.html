@@ -4593,13 +4593,12 @@
                     }
 
                     const clips = [];
-                    let selectedFile = null;
+                    const fileMap = []; // Track which file corresponds to which clip
                     for (const file of files) {
                         const clip = await this.loadAnimation(actionName, file);
                         if (clip) {
                             clips.push(clip);
-                            // Save the selected file for descriptor lookup
-                            if (!selectedFile) selectedFile = file;
+                            fileMap.push(file);
                         }
                     }
 
@@ -4608,6 +4607,7 @@
                     // Create action from random clip if multiple
                     const clipIndex = Math.floor(Math.random() * clips.length);
                     const clip = clips[clipIndex];
+                    const selectedFile = fileMap[clipIndex]; // Get the correct file for the selected clip
                     
                     // Try to load descriptor for the selected file to check for intro/outro structure
                     let descriptor = null;
@@ -4627,6 +4627,9 @@
                             const fps = 30; // assumption for subclip frame math
                             const totalFrames = Math.max(2, Math.round(clip.duration * fps));
                             
+                            // Check if descriptor has a loop section defined
+                            const hasLoopSection = descriptor && descriptor.loop;
+                            
                             // Extract frames from descriptor or use defaults
                             let introStart, introEnd, loopStart, loopEnd, outroStart, outroEnd;
                             
@@ -4634,12 +4637,22 @@
                                 // Use descriptor-defined frames with fallback to defaults
                                 introStart = descriptor.intro?.start_frame ?? 0;
                                 introEnd = descriptor.intro?.end_frame ?? Math.round(totalFrames * 0.20);
-                                loopStart = descriptor.loop?.start_frame ?? introEnd;
-                                loopEnd = descriptor.loop?.end_frame ?? Math.round(totalFrames * 0.80);
-                                outroStart = descriptor.outro?.start_frame ?? loopEnd;
+                                
+                                if (hasLoopSection) {
+                                    // Animation has intro/loop/outro structure
+                                    loopStart = descriptor.loop.start_frame ?? introEnd;
+                                    loopEnd = descriptor.loop.end_frame ?? Math.round(totalFrames * 0.80);
+                                    outroStart = descriptor.outro?.start_frame ?? loopEnd;
+                                } else {
+                                    // Animation has only intro/outro structure (play_once animation)
+                                    // No loop section - outro starts right after intro
+                                    loopStart = null;
+                                    loopEnd = null;
+                                    outroStart = descriptor.outro?.start_frame ?? introEnd;
+                                }
                                 outroEnd = descriptor.outro?.end_frame ?? totalFrames;
                             } else {
-                                // Default split for 'think' state
+                                // Default split for 'think' state (always has loop)
                                 introStart = 0;
                                 introEnd = Math.max(1, Math.round(totalFrames * 0.20));
                                 loopStart = introEnd;
@@ -4649,28 +4662,41 @@
                             }
 
                             const introClip = THREE.AnimationUtils.subclip(clip, `${actionName}_intro`, introStart, introEnd - 1, fps);
-                            const loopClip = THREE.AnimationUtils.subclip(clip, `${actionName}_loop`, loopStart, loopEnd - 1, fps);
                             const outroClip = THREE.AnimationUtils.subclip(clip, `${actionName}_outro`, outroStart, outroEnd - 1, fps);
-
+                            
                             const introAction = this.mixer.clipAction(introClip);
-                            const loopAction = this.mixer.clipAction(loopClip);
                             const outroAction = this.mixer.clipAction(outroClip);
 
                             introAction.setLoop(THREE.LoopOnce, 0);
                             introAction.clampWhenFinished = true;
-                            loopAction.setLoop(THREE.LoopRepeat);
-                            loopAction.clampWhenFinished = false;
                             outroAction.setLoop(THREE.LoopOnce, 0);
                             outroAction.clampWhenFinished = true;
 
-                            // Store structured actions so start/stop can coordinate them
-                            this.actions[actionName] = {
+                            // Create structured action object
+                            const structuredAction = {
                                 intro: introAction,
-                                loop: loopAction,
                                 outro: outroAction,
                                 _meta: { source: clip.name || selectedFile || 'structured_clip', descriptor: descriptor }
                             };
-                            return this.actions[actionName];
+
+                            // Only create loop section if it exists in the descriptor or is default 'think'
+                            if (loopStart !== null && loopEnd !== null) {
+                                const loopClip = THREE.AnimationUtils.subclip(clip, `${actionName}_loop`, loopStart, loopEnd - 1, fps);
+                                const loopAction = this.mixer.clipAction(loopClip);
+                                loopAction.setLoop(THREE.LoopRepeat);
+                                loopAction.clampWhenFinished = false;
+                                structuredAction.loop = loopAction;
+                            } else {
+                                // Mark this as a play_once only animation (no loop section)
+                                structuredAction.loop = null;
+                                structuredAction._playOnceOnly = true;
+                            }
+
+                            // Store with file-specific key if we know the file
+                            const storageKey = selectedFile ? `${actionName}:${selectedFile}` : actionName;
+                            this.actions[storageKey] = structuredAction;
+                            console.log(`[AnimationHandler] Stored structured action with key: ${storageKey}, playOnceOnly: ${structuredAction._playOnceOnly}`);
+                            return this.actions[storageKey];
                         } catch (err) {
                             console.warn(`[AnimationHandler] Failed to create structured subclips, falling back to full clip: ${err}`);
                             // Fall through to create single action below
@@ -4681,7 +4707,9 @@
                     const action = this.mixer.clipAction(clip);
                     action.setLoop(THREE.LoopRepeat);
                     action.clampWhenFinished = false;
-                    this.actions[actionName] = action;
+                    const storageKey = selectedFile ? `${actionName}:${selectedFile}` : actionName;
+                    this.actions[storageKey] = action;
+                    console.log(`[AnimationHandler] Stored simple action with key: ${storageKey}`);
                     return action;
                 }
 
@@ -4747,17 +4775,97 @@
                             // Load the specific animation file
                             const clip = await this.loadAnimation(actionName, animationFile);
                             if (clip) {
-                                action = this.mixer.clipAction(clip);
-                                // Set loop type based on playOnce flag
-                                if (playOnce) {
-                                    action.setLoop(THREE.LoopOnce, 0);
-                                    action.clampWhenFinished = true;
-                                } else {
-                                    action.setLoop(THREE.LoopRepeat);
-                                    action.clampWhenFinished = false;
+                                // Load descriptor to check for structured animation (intro/loop/outro)
+                                let descriptor = null;
+                                try {
+                                    descriptor = await this.loadDescriptor(actionName, animationFile);
+                                    console.log(`[AnimationHandler] Loaded descriptor for ${animationFile}:`, descriptor);
+                                } catch (err) {
+                                    console.debug(`[AnimationHandler] Could not load descriptor for ${animationFile}`);
                                 }
-                                this.actions[specificKey] = action;
-                                console.log(`[AnimationHandler] Specific animation ${animationFile} loaded and cached`);
+
+                                // Check if this should be a structured animation
+                                const hasStructuredDescriptor = descriptor && descriptor.intro && descriptor.outro;
+                                if (hasStructuredDescriptor && clip && clip.duration && THREE.AnimationUtils && typeof THREE.AnimationUtils.subclip === 'function') {
+                                    // Create structured animation (intro/loop/outro)
+                                    try {
+                                        const fps = 30;
+                                        const totalFrames = Math.max(2, Math.round(clip.duration * fps));
+                                        const hasLoopSection = descriptor && descriptor.loop;
+
+                                        let introStart = descriptor.intro?.start_frame ?? 0;
+                                        let introEnd = descriptor.intro?.end_frame ?? Math.round(totalFrames * 0.20);
+                                        let loopStart, loopEnd, outroStart, outroEnd;
+
+                                        if (hasLoopSection) {
+                                            loopStart = descriptor.loop.start_frame ?? introEnd;
+                                            loopEnd = descriptor.loop.end_frame ?? Math.round(totalFrames * 0.80);
+                                            outroStart = descriptor.outro?.start_frame ?? loopEnd;
+                                        } else {
+                                            // No loop section - intro goes directly to outro
+                                            loopStart = null;
+                                            loopEnd = null;
+                                            outroStart = descriptor.outro?.start_frame ?? introEnd;
+                                        }
+                                        outroEnd = descriptor.outro?.end_frame ?? totalFrames;
+
+                                        const introClip = THREE.AnimationUtils.subclip(clip, `${specificKey}_intro`, introStart, introEnd - 1, fps);
+                                        const outroClip = THREE.AnimationUtils.subclip(clip, `${specificKey}_outro`, outroStart, outroEnd - 1, fps);
+                                        
+                                        const introAction = this.mixer.clipAction(introClip);
+                                        const outroAction = this.mixer.clipAction(outroClip);
+
+                                        introAction.setLoop(THREE.LoopOnce, 0);
+                                        introAction.clampWhenFinished = true;
+                                        outroAction.setLoop(THREE.LoopOnce, 0);
+                                        outroAction.clampWhenFinished = true;
+
+                                        const structuredAction = {
+                                            intro: introAction,
+                                            outro: outroAction,
+                                            _meta: { source: clip.name || animationFile, descriptor: descriptor }
+                                        };
+
+                                        if (loopStart !== null && loopEnd !== null) {
+                                            const loopClip = THREE.AnimationUtils.subclip(clip, `${specificKey}_loop`, loopStart, loopEnd - 1, fps);
+                                            const loopAction = this.mixer.clipAction(loopClip);
+                                            loopAction.setLoop(THREE.LoopRepeat);
+                                            loopAction.clampWhenFinished = false;
+                                            structuredAction.loop = loopAction;
+                                        } else {
+                                            structuredAction.loop = null;
+                                            structuredAction._playOnceOnly = true;
+                                        }
+
+                                        this.actions[specificKey] = structuredAction;
+                                        action = structuredAction;
+                                        console.log(`[AnimationHandler] Created structured animation for ${animationFile}, playOnceOnly: ${structuredAction._playOnceOnly}`);
+                                    } catch (err) {
+                                        console.warn(`[AnimationHandler] Failed to create structured animation for ${animationFile}, using simple action:`, err);
+                                        // Fall back to simple action
+                                        action = this.mixer.clipAction(clip);
+                                        if (playOnce || (descriptor && descriptor.play_once)) {
+                                            action.setLoop(THREE.LoopOnce, 0);
+                                            action.clampWhenFinished = true;
+                                        } else {
+                                            action.setLoop(THREE.LoopRepeat);
+                                            action.clampWhenFinished = false;
+                                        }
+                                        this.actions[specificKey] = action;
+                                    }
+                                } else {
+                                    // Simple animation without structure
+                                    action = this.mixer.clipAction(clip);
+                                    if (playOnce || (descriptor && descriptor.play_once)) {
+                                        action.setLoop(THREE.LoopOnce, 0);
+                                        action.clampWhenFinished = true;
+                                    } else {
+                                        action.setLoop(THREE.LoopRepeat);
+                                        action.clampWhenFinished = false;
+                                    }
+                                    this.actions[specificKey] = action;
+                                    console.log(`[AnimationHandler] Created simple animation for ${animationFile}, playOnce: ${playOnce || (descriptor && descriptor.play_once)}`);
+                                }
                             } else {
                                 console.log(`[AnimationHandler] Failed to load specific animation ${animationFile}, falling back to random from ${actionName}`);
                                 // Fall back to random animation from the action group
@@ -4769,6 +4877,12 @@
                         console.log(`[AnimationHandler] Loading action ${actionName}...`);
                         action = await this.loadAction(actionName);
                         console.log(`[AnimationHandler] Action loaded:`, !!action);
+                    } else if (!animationFile && actionName === 'idle') {
+                        // For idle without a specific file, always load a new random animation
+                        // instead of reusing the cached 'idle' action
+                        console.log(`[AnimationHandler] Loading new random idle animation...`);
+                        action = await this.loadAction(actionName);
+                        console.log(`[AnimationHandler] New random idle animation loaded:`, !!action);
                     } else {
                         console.log(`[AnimationHandler] Using existing action for ${actionName}`);
                     }
@@ -4778,12 +4892,11 @@
                         return;
                     }
 
-                    // If action is structured (intro/loop/outro), handle it differently
-                    // defensive - not likely
-
-                    // If the action is the structured think object
-                    if (action && action.intro && action.loop && action.outro) {
+                    // If action is structured (intro/outro with optional loop), handle it differently
+                    // Check for intro and outro (loop is optional for play_once animations)
+                    if (action && action.intro && action.outro) {
                         const structured = action;
+                        const isPlayOnceOnly = structured._playOnceOnly || !structured.loop;
 
                         // Check if we need to interrupt a currently playing structured action
                         // and transition to its outro before starting the new one
@@ -4837,6 +4950,10 @@
                             this.currentStructuredAction = structured;
                             return;
                         } else if (playSection === 'loop') {
+                            if (!structured.loop) {
+                                console.warn(`[AnimationHandler] Loop section requested but not available for ${actionName}, ignoring`);
+                                return;
+                            }
                             console.log(`[AnimationHandler] Playing only loop section for ${actionName}`);
                             if (this.currentAction && this.currentAction !== structured.loop) {
                                 this.currentAction.fadeOut(0.25);
@@ -4892,18 +5009,29 @@
                                     // Iterate structured actions to find matching intro/loop/outro
                                     for (const key in this.actions) {
                                         const candidate = this.actions[key];
-                                        if (!candidate || !candidate.intro || !candidate.loop || !candidate.outro) continue;
+                                        if (!candidate || !candidate.intro || !candidate.outro) continue;
                                         const introName = `${key}_intro`;
                                         const loopName = `${key}_loop`;
                                         const outroName = `${key}_outro`;
+                                        
                                         if (finishedClipName === introName) {
-                                            console.log(`[AnimationHandler] intro finished for ${key} -> starting loop`);
-                                            candidate.loop.reset().fadeIn(0.1).play();
-                                            this.currentAction = candidate.loop;
-                                            this.currentActionPhase = 'loop';
+                                            // Intro finished
+                                            if (candidate._playOnceOnly) {
+                                                // No loop section - go directly to outro
+                                                console.log(`[AnimationHandler] intro finished for play_once animation ${key} -> starting outro`);
+                                                candidate.outro.reset().fadeIn(0.1).play();
+                                                this.currentAction = candidate.outro;
+                                                this.currentActionPhase = 'outro';
+                                            } else if (candidate.loop) {
+                                                // Has loop section - transition to loop
+                                                console.log(`[AnimationHandler] intro finished for ${key} -> starting loop`);
+                                                candidate.loop.reset().fadeIn(0.1).play();
+                                                this.currentAction = candidate.loop;
+                                                this.currentActionPhase = 'loop';
+                                            }
                                             break;
                                         }
-                                        if (finishedClipName === loopName) {
+                                        if (finishedClipName === loopName && candidate.loop) {
                                             // Loop finished - check if it was marked as playOnce
                                             if (candidate.loop._playOnce) {
                                                 console.log(`[AnimationHandler] loop finished (playOnce=true) for ${key} -> starting outro`);
@@ -4914,11 +5042,23 @@
                                             break;
                                         }
                                         if (finishedClipName === outroName) {
-                                            console.log(`[AnimationHandler] outro finished for ${key} -> clearing currentAction`);
+                                            console.log(`[AnimationHandler] outro finished for ${key} -> advancing to next animation`);
                                             if (this.currentAction === candidate.outro) this.currentAction = null;
                                             this.currentActionPhase = null;
                                             this.currentActionName = null;
                                             this.currentStructuredAction = null;
+                                            
+                                            // If this was an idle animation, advance to next random idle
+                                            if (key.startsWith('idle:') || key === 'idle') {
+                                                console.log(`[AnimationHandler] Outro finished for idle animation -> starting next idle`);
+                                                setTimeout(() => {
+                                                    try {
+                                                        this.startAction('idle');
+                                                    } catch (e) {
+                                                        console.warn('[AnimationHandler] Failed to start next idle after outro:', e);
+                                                    }
+                                                }, 100);
+                                            }
                                             break;
                                         }
                                     }
@@ -4928,29 +5068,45 @@
                             });
                         }
 
-                        // Start with intro, then the mixer event will switch to loopAction
-                        console.log(`[AnimationHandler] Starting structured think action (intro -> loop)`);
+                        // Start with intro, then the mixer event will switch to loop (if exists) or outro
+                        if (isPlayOnceOnly) {
+                            console.log(`[AnimationHandler] Starting play_once structured action (intro -> outro)`);
+                        } else {
+                            console.log(`[AnimationHandler] Starting structured action (intro -> loop -> outro)`);
+                        }
                         structured.intro.reset().fadeIn(0.15).play();
                         this.currentAction = structured.intro;
                         this.currentActionName = actionName;
                         this.currentActionPhase = 'intro';
                         this.currentStructuredAction = structured;
-                        console.log(`[AnimationHandler] Structured think action started`);
-                        // If playOnce requested for structured action, schedule a
-                        // safety fallback after the total duration (intro+loop+outro)
+                        console.log(`[AnimationHandler] Structured action started`);
+                        
+                        // If playOnce requested for structured action (or if it's a play_once only animation),
+                        // schedule a safety fallback after the total duration
                         try {
-                            if (playOnce) {
+                            if (playOnce || isPlayOnceOnly) {
                                 const introDur = structured.intro.getClip ? (structured.intro.getClip().duration || 0) : 0;
-                                const loopDur = structured.loop.getClip ? (structured.loop.getClip().duration || 0) : 0;
+                                const loopDur = structured.loop && structured.loop.getClip ? (structured.loop.getClip().duration || 0) : 0;
                                 const outroDur = structured.outro.getClip ? (structured.outro.getClip().duration || 0) : 0;
                                 const totalMs = Math.round((introDur + loopDur + outroDur) * 1000) + 300;
                                 const key = `${actionName}:structured`;
                                 if (this._playOnceTimers[key]) { clearTimeout(this._playOnceTimers[key]); delete this._playOnceTimers[key]; }
                                 this._playOnceTimers[key] = setTimeout(() => {
                                     try {
-                                        console.log(`[AnimationHandler] playOnce structured fallback for ${key} -> transitioning to idle`);
-                                        try { structured.loop.fadeOut(0.2); } catch (e) { /* ignore */ }
-                                        setTimeout(() => { try { this.startAction('idle'); } catch (e) { /* ignore */ } }, 200);
+                                        console.log(`[AnimationHandler] playOnce structured fallback for ${key} -> advancing to next animation`);
+                                        // Fade out whatever is playing
+                                        if (structured.loop) {
+                                            try { structured.loop.fadeOut(0.2); } catch (e) { /* ignore */ }
+                                        }
+                                        try { structured.outro.fadeOut(0.2); } catch (e) { /* ignore */ }
+                                        
+                                        // If this was an idle animation, start next random idle
+                                        if (actionName.startsWith('idle') || actionName === 'idle') {
+                                            setTimeout(() => { try { this.startAction('idle'); } catch (e) { /* ignore */ } }, 200);
+                                        } else {
+                                            // Otherwise transition to idle
+                                            setTimeout(() => { try { this.startAction('idle'); } catch (e) { /* ignore */ } }, 200);
+                                        }
                                     } catch (err) { console.warn('[AnimationHandler] structured fallback error:', err); }
                                 }, totalMs);
                             }
@@ -5088,7 +5244,7 @@
                     console.log(`[AnimationHandler] Action started successfully`);
 
                     // Safety fallback: if playOnce requested, schedule a timer to
-                    // restart the same animation after the clip duration + buffer
+                    // advance to next animation after the clip duration + buffer
                     try {
                         // clear previous timer for this actionName if present
                         const key = animationFile ? `${actionName}:${animationFile}` : actionName;
@@ -5101,11 +5257,11 @@
                             const dur = clip && clip.duration ? (clip.duration * 1000) : 3000; // default 3s
                             this._playOnceTimers[key] = setTimeout(() => {
                                 try {
-                                    console.log(`[AnimationHandler] playOnce fallback timer fired for ${key} -> restarting same animation`);
-                                    // For playOnce idle animations, restart the same animation
+                                    console.log(`[AnimationHandler] playOnce fallback timer fired for ${key} -> advancing to next animation`);
+                                    // For playOnce idle animations, advance to next random idle animation
                                     if (actionName === 'idle' && animationFile) {
                                         try { action.fadeOut(0.2); } catch (err) { /* ignore */ }
-                                        setTimeout(() => { try { this.startAction('idle', animationFile, true); } catch (e) { /* ignore */ } }, 200);
+                                        setTimeout(() => { try { this.startAction('idle'); } catch (e) { /* ignore */ } }, 200);
                                     } else {
                                         // For non-idle playOnce or fallback, transition to idle
                                         try { action.fadeOut(0.2); } catch (err) { /* ignore */ }
