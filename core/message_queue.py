@@ -18,6 +18,7 @@ from plugins.chat_link import ChatLinkStore
 # Use a priority queue so events can be processed before regular messages
 HIGH_PRIORITY = 0
 NORMAL_PRIORITY = 1
+LOW_PRIORITY = 2  # For autonomous beats (G.R.I.L.L.O.) - processed only when queue is idle
 
 _queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
 _lock = asyncio.Lock()
