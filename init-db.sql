@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS grillo_activity_log (
     id INT AUTO_INCREMENT PRIMARY KEY,
     beat_type VARCHAR(50) NOT NULL,
     prompt_text TEXT NOT NULL,
+    response_text LONGTEXT,
     diary_entry_id INT,
     executed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     metadata JSON,

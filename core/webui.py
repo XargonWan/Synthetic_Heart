@@ -1726,6 +1726,7 @@ class SynthWebUIInterface:
                     # Simplified query without JOIN
                     query = f"""
                         SELECT id, beat_type, LEFT(prompt_text, 300) as prompt_text, 
+                               LEFT(response_text, 500) as response_text,
                                diary_entry_id, executed_at
                         FROM grillo_activity_log
                         WHERE {where_clause}
@@ -1742,7 +1743,7 @@ class SynthWebUIInterface:
                     
                     for row in rows:
                         # Convert UTC timestamp to local timezone
-                        executed_at_utc = row[4]
+                        executed_at_utc = row[5]
                         if executed_at_utc:
                             # Ensure it has UTC timezone info
                             if executed_at_utc.tzinfo is None:
@@ -1756,9 +1757,10 @@ class SynthWebUIInterface:
                             "id": row[0],
                             "beat_type": row[1],
                             "prompt_text": row[2],  # Truncated for speed
-                            "diary_entry_id": row[3],
+                            "response_text": row[3],  # Truncated LLM response
+                            "diary_entry_id": row[4],
                             "executed_at": executed_at_str,
-                            "has_diary": row[3] is not None  # Flag instead of content
+                            "has_diary": row[4] is not None  # Flag instead of content
                         })
             
             # Estimate total
@@ -1837,7 +1839,7 @@ class SynthWebUIInterface:
                         rows = rows[:per_page]
                     
                     for row in rows:
-                        # Convert timestamp to local timezone
+                        # Convert timestamp from UTC to local timezone
                         timestamp = row[3]
                         if timestamp:
                             if timestamp.tzinfo is None:

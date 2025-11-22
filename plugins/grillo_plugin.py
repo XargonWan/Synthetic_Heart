@@ -485,13 +485,14 @@ class GrilloPlugin(AIPluginBase):
         finally:
             conn.close()
     
-    async def _log_beat_activity(self, beat_type: str, prompt: str, metadata: Optional[Dict] = None) -> Optional[int]:
+    async def _log_beat_activity(self, beat_type: str, prompt: str, response: Optional[str] = None, metadata: Optional[Dict] = None) -> Optional[int]:
         """
         Log a beat execution to the grillo_activity_log table.
         
         Args:
             beat_type: Type of beat being executed
             prompt: The prompt text sent to the LLM
+            response: Optional response text from the LLM
             metadata: Optional metadata dict to store as JSON
             
         Returns:
@@ -504,10 +505,10 @@ class GrilloPlugin(AIPluginBase):
                 
                 await cur.execute(
                     """
-                    INSERT INTO grillo_activity_log (beat_type, prompt_text, metadata, executed_at)
-                    VALUES (%s, %s, %s, UTC_TIMESTAMP())
+                    INSERT INTO grillo_activity_log (beat_type, prompt_text, response_text, metadata, executed_at)
+                    VALUES (%s, %s, %s, %s, UTC_TIMESTAMP())
                     """,
-                    (beat_type, prompt, metadata_json)
+                    (beat_type, prompt, response, metadata_json)
                 )
                 
                 activity_log_id = cur.lastrowid
@@ -517,6 +518,37 @@ class GrilloPlugin(AIPluginBase):
         except Exception as e:
             log_error(f"[grillo] Failed to log beat activity: {e}")
             return None
+        finally:
+            conn.close()
+    
+    async def _update_beat_response(self, activity_log_id: int, response_text: str) -> bool:
+        """
+        Update the response text for a beat activity log entry.
+        
+        Args:
+            activity_log_id: The ID of the activity log entry
+            response_text: The response text from the LLM
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            conn = await get_conn()
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    UPDATE grillo_activity_log
+                    SET response_text = %s
+                    WHERE id = %s
+                    """,
+                    (response_text, activity_log_id)
+                )
+                log_debug(f"[grillo] Updated beat response for activity ID {activity_log_id}")
+                return True
+                
+        except Exception as e:
+            log_error(f"[grillo] Failed to update beat response: {e}")
+            return False
         finally:
             conn.close()
     

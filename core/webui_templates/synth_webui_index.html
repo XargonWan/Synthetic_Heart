@@ -1311,9 +1311,6 @@
             <button class="nav-btn active" data-tab="home" aria-controls="tab-home" aria-pressed="true">
                 <span class="icon" aria-hidden="true">🏠</span><span>Home</span>
             </button>
-            <button class="nav-btn" data-tab="diary" aria-controls="tab-diary" aria-pressed="false">
-                <span class="icon" aria-hidden="true">📓</span><span>Diary</span>
-            </button>
             <button class="nav-btn" data-tab="history" aria-controls="tab-history" aria-pressed="false">
                 <span class="icon" aria-hidden="true">📚</span><span>History</span>
             </button>
@@ -2135,7 +2132,16 @@
                                 <span class="history-entry-type">${beatTypeLabel}</span>
                             </div>
                         </div>
-                        <div class="grillo-prompt">${escapeHtml(entry.prompt_text)}</div>
+                        <div style="margin-bottom: 1rem;">
+                            <div style="font-size: 0.85rem; color: var(--text-soft); margin-bottom: 0.5rem; font-weight: 500;">Prompt:</div>
+                            <div class="grillo-prompt">${escapeHtml(entry.prompt_text)}</div>
+                        </div>
+                        ${entry.response_text ? `
+                        <div style="margin-bottom: 1rem;">
+                            <div style="font-size: 0.85rem; color: var(--text-soft); margin-bottom: 0.5rem; font-weight: 500;">Response:</div>
+                            <div class="grillo-response" style="background: rgba(76, 175, 80, 0.1); border-left: 3px solid #4CAF50; padding: 0.75rem; border-radius: 4px; font-size: 0.9rem; line-height: 1.5; color: var(--text);">${escapeHtml(entry.response_text)}</div>
+                        </div>
+                        ` : ''}
                         ${entry.has_diary ? `
                             <div class="history-entry-detail" style="margin-top: 1rem;">
                                 <strong>📝 Reflection created</strong>
@@ -2147,10 +2153,7 @@
             }
 
             function renderChatMessage(msg) {
-                const timestamp = new Date(msg.timestamp).toLocaleString('en-US', { 
-                    hour: '2-digit', 
-                    minute: '2-digit' 
-                });
+                const timestamp = formatTimestamp(msg.timestamp);
                 
                 return `
                     <div class="chat-message">
@@ -2205,11 +2208,21 @@
             }
 
             function formatTimestamp(isoString) {
-                // Converte timestamp ISO (UTC) in formato locale leggibile
+                // Il timestamp viene già ricevuto in timezone locale dal server
+                // Non fare doppia conversione, semplicemente formatta
                 if (!isoString) return 'Unknown time';
                 try {
                     const date = new Date(isoString);
-                    return date.toLocaleString();
+                    // Formatta come locale senza offset
+                    return date.toLocaleString('it-IT', {
+                        year: 'numeric',
+                        month: '2-digit',
+                        day: '2-digit',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        second: '2-digit',
+                        hour12: false
+                    });
                 } catch (e) {
                     return isoString;
                 }
