@@ -86,8 +86,14 @@ def normalize_interface_name(interface: str) -> str:
     normalized = interface_mapping.get(interface.lower(), interface.lower())
     return normalized
 
-def get_max_diary_chars(interface_name: str = None, current_prompt_length: int = 0) -> int:
-    """Calculate how many characters can be allocated to diary injection based on active LLM interface limits."""
+def get_max_diary_chars(interface_name: str = None, current_prompt_length: int = 0, context_memory: dict = None) -> int:
+    """Calculate how many characters can be allocated to diary injection based on active LLM interface limits.
+    
+    Args:
+        interface_name: Name of the interface
+        current_prompt_length: Current length of the prompt
+        context_memory: Context dictionary that may contain maximize_diary flag for memory-focused operations
+    """
     try:
         # Get limits directly from the active LLM engine
         from core.config import get_active_llm
@@ -146,14 +152,21 @@ def get_max_diary_chars(interface_name: str = None, current_prompt_length: int =
                 limits = engine.get_interface_limits()
                 max_prompt_chars = limits.get("max_prompt_chars", 128000)
         
-        # Use 30% of available prompt space for diary, with fallback
-        diary_limit = int(max_prompt_chars * 0.30)
+        # Check if this is a memory-focused operation (e.g., Grillo memory consolidation beat)
+        maximize_diary = False
+        if context_memory and isinstance(context_memory, dict):
+            maximize_diary = context_memory.get("maximize_diary", False)
+        
+        # Use 80% for memory consolidation, 30% for normal operations
+        diary_percentage = 0.80 if maximize_diary else 0.30
+        diary_limit = int(max_prompt_chars * diary_percentage)
         
         # Consider current prompt length
         available_space = max_prompt_chars - current_prompt_length
-        diary_allocation = min(diary_limit, max(available_space * 0.5, 5000))  # At least 5k if space allows
+        diary_allocation = min(diary_limit, max(available_space * (0.9 if maximize_diary else 0.5), 5000))  # Higher % when maximizing
         
-        log_debug(f"[ai_diary] Diary allocation: {diary_allocation} chars (max: {max_prompt_chars}, used: {current_prompt_length})")
+        mode = "MAXIMIZED (80%)" if maximize_diary else "standard (30%)"
+        log_info(f"[ai_diary] Diary allocation {mode}: {diary_allocation} chars (max: {max_prompt_chars}, used: {current_prompt_length})")
         return max(diary_allocation, 5000)  # Minimum 5k chars
     except Exception as e:
         log_warning(f"[ai_diary] Error calculating diary limit: {e}")
@@ -412,7 +425,8 @@ def add_diary_entry(
     involved_users: List[str] = None,
     interface: str = None,
     chat_id: str = None,
-    thread_id: str = None
+    thread_id: str = None,
+    grillo_activity_log_id: int = None
 ) -> None:
     """Add a new personal diary entry where synth records what he said and how he feels.
     
@@ -482,7 +496,7 @@ def add_diary_entry(
             continue
     
     try:
-        _run(_execute(
+        cursor = _run(_execute(
             """
             INSERT INTO ai_diary (content, personal_thought, emotions, 
                                 interaction_summary, user_message, context_tags, involved_users, interface, chat_id, thread_id)
@@ -501,9 +515,21 @@ def add_diary_entry(
                 thread_id
             )
         ))
+        diary_entry_id = cursor.lastrowid if hasattr(cursor, 'lastrowid') else None
+        
         log_debug(f"[ai_diary] Added personal diary entry: {content[:50]}...")
         if personal_thought:
             log_debug(f"[ai_diary] Personal thought: {personal_thought[:50]}...")
+        
+        # Link to grillo activity log if this entry was created from a grillo beat
+        if grillo_activity_log_id and diary_entry_id:
+            try:
+                import asyncio
+                from plugins.grillo_plugin import GrilloPlugin
+                asyncio.create_task(GrilloPlugin.link_diary_entry_to_activity(grillo_activity_log_id, diary_entry_id))
+                log_debug(f"[ai_diary] Scheduled grillo activity link: activity_log={grillo_activity_log_id}, diary={diary_entry_id}")
+            except Exception as link_error:
+                log_warning(f"[ai_diary] Failed to link grillo activity: {link_error}")
     except Exception as e:
         log_error(f"[ai_diary] Failed to add diary entry: {e}")
         # Disable plugin if database is unavailable
@@ -520,7 +546,8 @@ async def add_diary_entry_async(
     involved_users: List[str] = None,
     interface: str = None,
     chat_id: str = None,
-    thread_id: str = None
+    thread_id: str = None,
+    grillo_activity_log_id: int = None
 ) -> None:
     """Add a new personal diary entry (async version). Safe to call even if plugin is disabled."""
     global PLUGIN_ENABLED
@@ -577,28 +604,42 @@ async def add_diary_entry_async(
             continue
     
     try:
-        await _execute(
-            """
-            INSERT INTO ai_diary (content, personal_thought, emotions, 
-                                interaction_summary, user_message, context_tags, involved_users, interface, chat_id, thread_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
-            (
-                content,
-                personal_thought,
-                json.dumps(emotions),
-                interaction_summary,
-                user_message,
-                json.dumps(context_tags),
-                json.dumps(involved_users),
-                interface,
-                chat_id,
-                thread_id
+        conn = await get_conn()
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                INSERT INTO ai_diary (content, personal_thought, emotions, 
+                                    interaction_summary, user_message, context_tags, involved_users, interface, chat_id, thread_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    content,
+                    personal_thought,
+                    json.dumps(emotions),
+                    interaction_summary,
+                    user_message,
+                    json.dumps(context_tags),
+                    json.dumps(involved_users),
+                    interface,
+                    chat_id,
+                    thread_id
+                )
             )
-        )
+            diary_entry_id = cur.lastrowid
+        conn.close()
+        
         log_debug(f"[ai_diary] Added personal diary entry: {content[:50]}...")
         if personal_thought:
             log_debug(f"[ai_diary] Personal thought: {personal_thought[:50]}...")
+        
+        # Link to grillo activity log if this entry was created from a grillo beat
+        if grillo_activity_log_id and diary_entry_id:
+            try:
+                from plugins.grillo_plugin import GrilloPlugin
+                await GrilloPlugin.link_diary_entry_to_activity(grillo_activity_log_id, diary_entry_id)
+                log_debug(f"[ai_diary] Linked grillo activity: activity_log={grillo_activity_log_id}, diary={diary_entry_id}")
+            except Exception as link_error:
+                log_warning(f"[ai_diary] Failed to link grillo activity: {link_error}")
     except Exception as e:
         log_error(f"[ai_diary] Failed to add diary entry: {e}")
         # Disable plugin if database is unavailable
@@ -1300,6 +1341,9 @@ class DiaryPlugin:
                 if payload_involved_users:
                     involved_users = payload_involved_users
                 
+                # Check if this diary entry is from a grillo beat
+                grillo_activity_log_id = context.get("activity_log_id") if context else None
+                
                 # If no content provided, extract from recent actions in context
                 if not content:
                     # This will be handled by the automatic diary creation in action_parser
@@ -1318,7 +1362,8 @@ class DiaryPlugin:
                     involved_users=involved_users,
                     interface=interface_name,
                     chat_id=str(chat_id) if chat_id else None,
-                    thread_id=str(thread_id) if thread_id else None
+                    thread_id=str(thread_id) if thread_id else None,
+                    grillo_activity_log_id=grillo_activity_log_id
                 )
                 
                 log_debug(f"[ai_diary] Created diary entry via action: '{interaction_summary}'")

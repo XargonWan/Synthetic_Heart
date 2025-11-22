@@ -60,11 +60,15 @@ async def save_chat_message(
         sender_name: Optional sender name
         sender_id: Optional sender ID
         timestamp: Optional message timestamp (datetime object or ISO string)
+                   If provided, will be converted to UTC before storing.
+                   If tzinfo is None, assumes local time and converts to UTC.
     """
     if not interface_path or not message_text:
         return
     
     try:
+        from datetime import timezone
+        
         # Parse timestamp if it's a string
         if timestamp and isinstance(timestamp, str):
             try:
@@ -72,9 +76,17 @@ async def save_chat_message(
             except Exception:
                 timestamp = None
         
+        # Convert timestamp to UTC for storage
+        if timestamp:
+            if timestamp.tzinfo is None:
+                # If no timezone info, assume it's UTC (already passed as UTC from interfaces)
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
+            # Convert to UTC if in different timezone
+            timestamp = timestamp.astimezone(timezone.utc)
+        
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
-                # Insert message with timestamp
+                # Insert message with timestamp (always in UTC)
                 if timestamp:
                     await cur.execute("""
                         INSERT INTO chat_history_cache 
@@ -85,9 +97,9 @@ async def save_chat_message(
                 else:
                     await cur.execute("""
                         INSERT INTO chat_history_cache 
-                        (interface_path, sender_name, sender_id, message_text)
-                        VALUES (%s, %s, %s, %s)
-                        ON DUPLICATE KEY UPDATE timestamp=CURRENT_TIMESTAMP
+                        (interface_path, sender_name, sender_id, message_text, timestamp)
+                        VALUES (%s, %s, %s, %s, UTC_TIMESTAMP())
+                        ON DUPLICATE KEY UPDATE timestamp=UTC_TIMESTAMP()
                     """, (interface_path, sender_name, sender_id, message_text))
                 
                 # Clean up old messages beyond CHAT_HISTORY_LIMIT
@@ -107,6 +119,7 @@ async def save_chat_message(
                 log_debug(f"[chat_history_cache] Saved message for interface_path {interface_path}, sender={sender_name}, timestamp={timestamp}")
     except Exception as e:
         log_debug(f"[chat_history_cache] Failed to save message: {e}")
+
 
 
 async def load_chat_history(interface_path: str) -> deque:

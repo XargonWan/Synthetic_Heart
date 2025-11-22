@@ -48,6 +48,7 @@ import mimetypes
 BRAND_NAME = "SyntH Web UI"
 INTERFACE_NAME = "synth_webui"
 LOG_PREFIX = "[synth_webui]"
+WEBUI_LOG = "webui"  # Log file name for WebUI (logs/webui.log)
 _LEGACY_AUTOSTART_ENV = "WEBWAIFU_AUTOSTART"
 _AUTOSTART_ENV = "SYNTH_WEBUI_AUTOSTART"
 _LEGACY_VRM_DIR_ENV = "WEBWAIFU_VRM_DIR"
@@ -127,15 +128,15 @@ class SynthWebUIInterface:
         if static_dir.exists():
             self.app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
         else:
-            log_warning(f"{LOG_PREFIX} static directory not found: {static_dir}")
+            log_warning(f"{LOG_PREFIX} static directory not found: {static_dir}", log_file=WEBUI_LOG)
         
         # Mount JS directory for Mixamo animations (separate mount to avoid path conflicts)
         js_dir = Path(__file__).resolve().parent.parent / "res" / "synth_webui" / "js"
         if js_dir.exists():
             self.app.mount("/js", StaticFiles(directory=str(js_dir)), name="synth-webui-js")
-            log_info(f"{LOG_PREFIX} Mounted /js to {js_dir}")
+            log_info(f"{LOG_PREFIX} Mounted /js to {js_dir}", log_file=WEBUI_LOG)
         else:
-            log_warning(f"{LOG_PREFIX} JS directory not found: {js_dir}")
+            log_warning(f"{LOG_PREFIX} JS directory not found: {js_dir}", log_file=WEBUI_LOG)
         
         # No global animations directory: animations live inside each skin under /skins/<skin>/animations
 
@@ -202,6 +203,10 @@ class SynthWebUIInterface:
         self.app.post("/api/diary/archive")(self.archive_diary_entries)
         self.app.post("/api/diary/unarchive")(self.unarchive_diary_entries)
         self.app.delete("/api/diary/archive")(self.delete_archived_entries)
+        # History API endpoints (unified diary, grillo, chat history)
+        self.app.get("/api/history/diary")(self.history_diary)
+        self.app.get("/api/history/grillo")(self.history_grillo)
+        self.app.get("/api/history/chat")(self.history_chat)
         self.app.get("/api/selkies")(self.get_selkies_config)
         self.app.get("/api/animations/{skin}/{animation_type}")(self.get_animations_for_type)
         self.app.get("/api/locations")(self.get_suggested_locations)
@@ -210,28 +215,28 @@ class SynthWebUIInterface:
         self.app.get("/templates/{section}.html")(self.serve_template_section)
 
         register_interface(INTERFACE_NAME, self)
-        log_info(f"{LOG_PREFIX} Interface registered")
+        log_info(f"{LOG_PREFIX} Interface registered", log_file=WEBUI_LOG)
         
         # Initialize animation handler
         from core.animation_handler import get_animation_handler
         self.animation_handler = get_animation_handler()
         self.animation_handler.set_webui(self)
-        log_info(f"{LOG_PREFIX} Animation handler initialized")
+        log_info(f"{LOG_PREFIX} Animation handler initialized", log_file=WEBUI_LOG)
         
         # Initialize global action state manager
         self.action_state_manager = get_action_state_manager()
         # Register callback to broadcast state changes to all WebSocket clients
         self.action_state_manager.register_state_changed_callback(self._broadcast_action_state)
-        log_info(f"{LOG_PREFIX} Action state manager initialized with WebSocket broadcast")
+        log_info(f"{LOG_PREFIX} Action state manager initialized with WebSocket broadcast", log_file=WEBUI_LOG)
         
         # Persona manager will be initialized in start() method after core initialization
         self.persona_manager = None
         
         if self.autostart:
-            log_info(f"{LOG_PREFIX} Autostart enabled - will start server when event loop is available")
+            log_info(f"{LOG_PREFIX} Autostart enabled - will start server when event loop is available", log_file=WEBUI_LOG)
             # Don't start server here - it will be started by the main application
         else:
-            log_info(f"{LOG_PREFIX} Autostart disabled - {BRAND_NAME} will not start automatically")
+            log_info(f"{LOG_PREFIX} Autostart disabled - {BRAND_NAME} will not start automatically", log_file=WEBUI_LOG)
 
     # ------------------------------------------------------------------
     # Interface metadata
@@ -1525,6 +1530,358 @@ class SynthWebUIInterface:
         except Exception as exc:
             log_error(f"{LOG_PREFIX} Failed to delete archived diary entries: {exc}")
             raise HTTPException(status_code=500, detail=str(exc))
+
+    async def history_diary(self, request: Request):
+        """Return diary entries for the History > Diary sub-tab - optimized for speed."""
+        params = request.query_params
+
+        def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return default
+            return max(minimum, min(maximum, parsed))
+
+        page = _bounded_int(params.get("page"), default=1, minimum=1, maximum=1000)
+        per_page = _bounded_int(params.get("per_page"), default=10, minimum=1, maximum=30)  # Ridotto a 10 per pagina, max 30
+        search = params.get("search", "").strip()
+        include_archived = params.get("include_archived", "false").lower() == "true"
+        sort = params.get("sort", "desc")
+
+        try:
+            from core.db import get_conn_ctx
+            from core.time_zone_utils import utc_to_local
+            from datetime import timezone
+            
+            offset = (page - 1) * per_page
+            order = "DESC" if sort == "desc" else "ASC"
+            
+            # Strategy: skip COUNT(*) for better performance, use approximate count
+            entries = []
+            total_count = 0
+            
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    # Build optimized query - load only essential fields
+                    if search:
+                        # Search only in indexed/important fields
+                        search_term = f"%{search}%"
+                        where_clause = "WHERE (content LIKE %s OR interaction_summary LIKE %s)"
+                        search_params = [search_term, search_term]
+                    else:
+                        where_clause = ""
+                        search_params = []
+                    
+                    # Simplified query without archived for speed (most common case)
+                    if not include_archived:
+                        # Get approximate count using LIMIT + 1 trick (faster than COUNT)
+                        query = f"""
+                            SELECT id, LEFT(content, 200) as content, LEFT(personal_thought, 100) as personal_thought, 
+                                   timestamp, interaction_summary, 
+                                   JSON_EXTRACT(emotions, '$[0].type') as primary_emotion,
+                                   JSON_LENGTH(involved_users) as user_count
+                            FROM ai_diary
+                            {where_clause}
+                            ORDER BY timestamp {order}
+                            LIMIT %s OFFSET %s
+                        """
+                        params_list = search_params + [per_page + 1, offset]
+                        
+                        await cur.execute(query, params_list)
+                        rows = await cur.fetchall()
+                        
+                        # Check if there are more results
+                        has_more = len(rows) > per_page
+                        if has_more:
+                            rows = rows[:per_page]
+                        
+                        # Estimate total count based on current page
+                        if page == 1 and not has_more:
+                            total_count = len(rows)
+                        else:
+                            # Approximate: if we have full page, estimate more pages exist
+                            total_count = offset + len(rows) + (per_page if has_more else 0)
+                    else:
+                        # With archived: use simpler UNION but with LIMIT push-down
+                        query = f"""
+                            SELECT * FROM (
+                                (SELECT id, LEFT(content, 200) as content, LEFT(personal_thought, 100) as personal_thought, 
+                                       timestamp, interaction_summary,
+                                       JSON_EXTRACT(emotions, '$[0].type') as primary_emotion,
+                                       JSON_LENGTH(involved_users) as user_count,
+                                       0 as archived
+                                FROM ai_diary
+                                {where_clause}
+                                ORDER BY timestamp {order}
+                                LIMIT {per_page * 2})
+                                UNION ALL
+                                (SELECT id, LEFT(content, 200), LEFT(personal_thought, 100), 
+                                       timestamp, interaction_summary,
+                                       JSON_EXTRACT(emotions, '$[0].type'),
+                                       JSON_LENGTH(involved_users),
+                                       1 as archived
+                                FROM ai_diary_archive
+                                {where_clause}
+                                ORDER BY timestamp {order}
+                                LIMIT {per_page * 2})
+                            ) AS combined
+                            ORDER BY timestamp {order}
+                            LIMIT %s OFFSET %s
+                        """
+                        params_list = search_params * 2 + [per_page + 1, offset] if search_params else [per_page + 1, offset]
+                        
+                        await cur.execute(query, params_list)
+                        rows = await cur.fetchall()
+                        
+                        has_more = len(rows) > per_page
+                        if has_more:
+                            rows = rows[:per_page]
+                        total_count = offset + len(rows) + (per_page if has_more else 0)
+                    
+                    # Build minimal response objects with timezone conversion
+                    for row in rows:
+                        # Convert timestamp to local timezone
+                        timestamp = row[3]
+                        if timestamp:
+                            # Database timestamp is assumed to be in server timezone
+                            # Convert to UTC-aware then to local
+                            if timestamp.tzinfo is None:
+                                # Assume UTC if no timezone info
+                                timestamp = timestamp.replace(tzinfo=timezone.utc)
+                            timestamp_local = utc_to_local(timestamp)
+                            timestamp_str = timestamp_local.isoformat()
+                        else:
+                            timestamp_str = None
+                        
+                        entries.append({
+                            "id": row[0],
+                            "content": row[1],  # Already truncated by LEFT()
+                            "personal_thought": row[2],  # Already truncated
+                            "timestamp": timestamp_str,
+                            "interaction_summary": row[4],
+                            "primary_emotion": row[5],  # Single emotion instead of array
+                            "user_count": row[6] or 0,  # Count instead of full array
+                            "archived": bool(row[7]) if len(row) > 7 else False
+                        })
+            
+            # Calculate total_pages from total_count
+            total_pages = (total_count + per_page - 1) // per_page if total_count > 0 else 1
+            
+            return JSONResponse({
+                "success": True,
+                "entries": entries,
+                "page": page,
+                "per_page": per_page,
+                "total_count": total_count,
+                "total_pages": total_pages
+            })
+            
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to fetch diary history: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def history_grillo(self, request: Request):
+        """Return grillo activity log for the History > Grillo sub-tab - optimized."""
+        params = request.query_params
+
+        def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return default
+            return max(minimum, min(maximum, parsed))
+
+        page = _bounded_int(params.get("page"), default=1, minimum=1, maximum=1000)
+        per_page = _bounded_int(params.get("per_page"), default=15, minimum=1, maximum=50)  # Ridotto
+        search = params.get("search", "").strip()
+        beat_type_filter = params.get("beat_type", "").strip()
+        sort = params.get("sort", "desc")
+
+        try:
+            from core.db import get_conn_ctx
+            from core.time_zone_utils import utc_to_local
+            from datetime import timezone
+            
+            offset = (page - 1) * per_page
+            order = "DESC" if sort == "desc" else "ASC"
+            
+            # Build WHERE clause
+            where_conditions = []
+            where_params = []
+            
+            if search:
+                where_conditions.append("beat_type LIKE %s")  # Removed prompt_text search for speed
+                where_params.append(f"%{search}%")
+            
+            if beat_type_filter:
+                where_conditions.append("beat_type = %s")
+                where_params.append(beat_type_filter)
+            
+            where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
+            
+            # Fetch entries WITHOUT expensive LEFT JOIN - load diary content on-demand if needed
+            entries = []
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    # Simplified query without JOIN
+                    query = f"""
+                        SELECT id, beat_type, LEFT(prompt_text, 300) as prompt_text, 
+                               LEFT(response_text, 500) as response_text,
+                               diary_entry_id, executed_at
+                        FROM grillo_activity_log
+                        WHERE {where_clause}
+                        ORDER BY executed_at {order}
+                        LIMIT %s OFFSET %s
+                    """
+                    
+                    await cur.execute(query, where_params + [per_page + 1, offset])
+                    rows = await cur.fetchall()
+                    
+                    has_more = len(rows) > per_page
+                    if has_more:
+                        rows = rows[:per_page]
+                    
+                    for row in rows:
+                        # Convert UTC timestamp to local timezone
+                        executed_at_utc = row[5]
+                        if executed_at_utc:
+                            # Ensure it has UTC timezone info
+                            if executed_at_utc.tzinfo is None:
+                                executed_at_utc = executed_at_utc.replace(tzinfo=timezone.utc)
+                            executed_at_local = utc_to_local(executed_at_utc)
+                            executed_at_str = executed_at_local.isoformat()
+                        else:
+                            executed_at_str = None
+                        
+                        entries.append({
+                            "id": row[0],
+                            "beat_type": row[1],
+                            "prompt_text": row[2],  # Truncated for speed
+                            "response_text": row[3],  # Truncated LLM response
+                            "diary_entry_id": row[4],
+                            "executed_at": executed_at_str,
+                            "has_diary": row[4] is not None  # Flag instead of content
+                        })
+            
+            # Estimate total
+            total_count = offset + len(rows) + (per_page if has_more else 0)
+            total_pages = (total_count + per_page - 1) // per_page
+            
+            return JSONResponse({
+                "success": True,
+                "entries": entries,
+                "page": page,
+                "per_page": per_page,
+                "total_count": total_count,
+                "total_pages": total_pages
+            })
+            
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to fetch grillo history: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def history_chat(self, request: Request):
+        """Return chat history for the History > Chat sub-tab - optimized."""
+        params = request.query_params
+
+        def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return default
+            return max(minimum, min(maximum, parsed))
+
+        page = _bounded_int(params.get("page"), default=1, minimum=1, maximum=1000)
+        per_page = _bounded_int(params.get("per_page"), default=30, minimum=1, maximum=100)  # Ridotto da 50->30, max da 200->100
+        interface_path = params.get("interface_path", "").strip()
+        search = params.get("search", "").strip()
+        sort = params.get("sort", "desc")
+
+        try:
+            from core.db import get_conn_ctx
+            from core.time_zone_utils import utc_to_local
+            from datetime import timezone
+            
+            offset = (page - 1) * per_page
+            order = "DESC" if sort == "desc" else "ASC"
+            
+            # Build WHERE clause
+            where_conditions = []
+            where_params = []
+            
+            if interface_path:
+                where_conditions.append("interface_path = %s")
+                where_params.append(interface_path)
+            
+            if search:
+                where_conditions.append("message_text LIKE %s")  # Removed sender_name for speed
+                where_params.append(f"%{search}%")
+            
+            where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
+            
+            # Fetch messages with LIMIT + 1 trick
+            messages = []
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    query = f"""
+                        SELECT interface_path, sender_name, LEFT(message_text, 500) as message_text, timestamp
+                        FROM chat_history_cache
+                        WHERE {where_clause}
+                        ORDER BY timestamp {order}
+                        LIMIT %s OFFSET %s
+                    """
+                    
+                    await cur.execute(query, where_params + [per_page + 1, offset])
+                    rows = await cur.fetchall()
+                    
+                    has_more = len(rows) > per_page
+                    if has_more:
+                        rows = rows[:per_page]
+                    
+                    for row in rows:
+                        # Convert timestamp from UTC to local timezone
+                        timestamp = row[3]
+                        if timestamp:
+                            if timestamp.tzinfo is None:
+                                timestamp = timestamp.replace(tzinfo=timezone.utc)
+                            timestamp_local = utc_to_local(timestamp)
+                            timestamp_str = timestamp_local.isoformat()
+                        else:
+                            timestamp_str = None
+                        
+                        messages.append({
+                            "interface_path": row[0],
+                            "sender_name": row[1],
+                            "message_text": row[2],  # Truncated
+                            "timestamp": timestamp_str
+                        })
+            
+            # Lazy load interface_paths only when needed (not on every request)
+            interface_paths = []
+            if page == 1 and not interface_path:  # Only on first load without filter
+                async with get_conn_ctx() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute("SELECT DISTINCT interface_path FROM chat_history_cache ORDER BY interface_path LIMIT 50")
+                        rows = await cur.fetchall()
+                        interface_paths = [row[0] for row in rows]
+            
+            # Estimate total (same approach as grillo)
+            total_count = offset + len(rows) + (per_page if has_more else 0)
+            total_pages = (total_count + per_page - 1) // per_page
+            
+            return JSONResponse({
+                "success": True,
+                "messages": messages,
+                "interface_paths": interface_paths,
+                "page": page,
+                "per_page": per_page,
+                "total_count": total_count,
+                "total_pages": total_pages
+            })
+            
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to fetch chat history: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
 
     async def update_config_entry(self, request: Request):
         try:

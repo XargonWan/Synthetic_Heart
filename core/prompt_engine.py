@@ -203,7 +203,8 @@ async def build_json_prompt(message, context_memory, interface_name: str | None 
             
             # Check if we should include diary (considering space already used by chat_history)
             if should_include_diary(interface_name, current_length, max_prompt_chars):
-                max_chars = get_max_diary_chars(interface_name, current_length)
+                # Pass context_memory to allow maximizing diary space for memory-focused operations
+                max_chars = get_max_diary_chars(interface_name, current_length, context_memory)
                 
                 # Use DIARY_HISTORY_DAYS from config_registry - cast to int to
                 # avoid passing a ConfigVar-like object into timedelta()

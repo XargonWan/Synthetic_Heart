@@ -1,0 +1,141 @@
+        <section class="tab-panel" id="tab-diary" data-tab="diary" role="tabpanel">
+            <header class="section-header">
+                <h2>AI Diary</h2>
+                <div class="section-controls">
+                    <input type="text" id="diary-search" placeholder="Search diary entries..." class="search-input" />
+                    <select id="diary-sort" class="sort-select">
+                        <option value="newest">Newest First</option>
+                        <option value="oldest">Oldest First</option>
+                    </select>
+                    <label class="control-label">
+                        <input type="checkbox" id="diary-show-archived" />
+                        Show Archived
+                    </label>
+                </div>
+            </header>
+            <div id="diary-content" class="diary-container">
+                <div class="loading-state">
+                    <div class="loading-spinner"></div>
+                    <p>Loading diary entries...</p>
+                </div>
+            </div>
+        </section>
+
+        <style>
+            .diary-container {
+                flex: 1;
+                overflow-y: auto;
+                padding: 1rem min(4vw, 2.4rem);
+            }
+            .loading-state {
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                height: 200px;
+                color: var(--text-soft);
+            }
+            .loading-spinner {
+                width: 40px;
+                height: 40px;
+                border: 3px solid var(--border);
+                border-top: 3px solid var(--accent);
+                border-radius: 50%;
+                animation: spin 1s linear infinite;
+                margin-bottom: 1rem;
+            }
+            @keyframes spin {
+                0% { transform: rotate(0deg); }
+                100% { transform: rotate(360deg); }
+            }
+            .diary-entry {
+                background: var(--surface);
+                border: 1px solid var(--border);
+                border-radius: 12px;
+                padding: 1.5rem;
+                margin-bottom: 1rem;
+                transition: all 0.2s ease;
+            }
+            .diary-entry:hover {
+                border-color: var(--border-strong);
+                box-shadow: 0 8px 25px -15px rgba(0, 0, 0, 0.5);
+            }
+            .diary-entry.archived {
+                opacity: 0.6;
+                border-color: var(--text-soft);
+            }
+            .diary-entry.archived:hover {
+                opacity: 0.8;
+            }
+            .diary-entry-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: flex-start;
+                margin-bottom: 1rem;
+            }
+            .diary-entry-meta {
+                display: flex;
+                flex-direction: column;
+                gap: 0.25rem;
+            }
+            .diary-entry-date {
+                font-size: 0.85rem;
+                color: var(--text-soft);
+                font-weight: 500;
+            }
+            .diary-entry-summary {
+                font-size: 0.8rem;
+                color: var(--text-soft);
+                font-style: italic;
+            }
+            .diary-entry-actions {
+                display: flex;
+                gap: 0.5rem;
+            }
+            .diary-entry-action {
+                padding: 0.25rem 0.5rem;
+                border-radius: 4px;
+                border: 1px solid var(--border);
+                background: transparent;
+                color: var(--text-soft);
+                font-size: 0.75rem;
+                cursor: pointer;
+                transition: all 0.2s ease;
+            }
+            .diary-entry-action:hover {
+                background: var(--surface-alt);
+                color: var(--text);
+            }
+            .diary-entry-content {
+                line-height: 1.6;
+                white-space: pre-wrap;
+                word-break: break-word;
+            }
+            .diary-entry-participants {
+                margin-top: 1rem;
+                padding-top: 1rem;
+                border-top: 1px solid var(--border);
+                font-size: 0.8rem;
+                color: var(--text-soft);
+            }
+            .diary-entry-participants strong {
+                color: var(--text);
+            }
+            .sort-select {
+                padding: 0.25rem 0.5rem;
+                border-radius: 4px;
+                border: 1px solid var(--border);
+                background: rgba(12, 12, 20, 0.58);
+                color: inherit;
+            }
+            .empty-state {
+                text-align: center;
+                padding: 3rem 1rem;
+                color: var(--text-soft);
+            }
+            .empty-state .icon {
+                font-size: 3rem;
+                margin-bottom: 1rem;
+                opacity: 0.5;
+            }
+        </style>

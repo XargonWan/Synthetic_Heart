@@ -52,51 +52,69 @@ class SeleniumChatGPTPlugin(SeleniumLLMBase):
         set_active_selenium_limits(default_limit, "chatgpt")
         
         # Set up ChatGPT-specific selectors - the base will use these for automation
+        # IMPORTANT: Order matters - fast/working selectors first, general fallbacks last
         self.selectors["prompt_area"] = [
-            "div.ProseMirror.ProseMirror-focused",
-            "div.ProseMirror",
-            "div[id='prompt-textarea']",
-            "#prompt-textarea",
-            "p[data-placeholder='Ask anything']",
+            # Primary: Most reliable and specific for current ChatGPT UI
             "textarea[data-testid='prompt-textarea']",
             "div[data-testid='prompt-textarea'][contenteditable='true']",
+            "div.ProseMirror.ProseMirror-focused",
+            "div.ProseMirror",
+            # Secondary: ID-based selectors (very specific)
+            "div[id='prompt-textarea']",
+            "#prompt-textarea",
+            # Tertiary: Placeholder-based (more reliable than generic)
+            "p[data-placeholder='Ask anything']",
             "textarea[placeholder*='Message']",
             "textarea[placeholder*='Ask']",
             "textarea[placeholder*='Send a message']",
+            # Quaternary: Role-based selectors (generic but useful)
             "div[contenteditable='true'][role='textbox']",
             "div[role='textbox'][contenteditable='true']",
+            # Fallbacks: Generic (slowest, try last)
             "textarea",
             "div[contenteditable='true']",
         ]
         
         self.selectors["send_button"] = [
+            # Primary: Most specific ChatGPT send button ID
             "#composer-submit-button",
+            # Secondary: data-testid (very reliable)
             "button[data-testid='send-button']",
             "button[data-testid*='send']",
-            "button[type='submit']",
+            # Tertiary: aria-label and title (more generic but still specific)
             "button[aria-label*='Send']",
             "button[aria-label*='send']",
             "button[title*='Send']",
             "button[title*='send']",
+            # Fallback: Type-based (slowest, most likely to fail or find wrong button)
+            "button[type='submit']",
         ]
         
         self.selectors["response_text"] = [
-            "div.markdown.prose",
+            # Primary: Most specific ChatGPT response selectors
             "[data-message-author-role='assistant']",
-            "div.markdown",
+            "div.markdown.prose",
+            # Secondary: Slightly less specific
             "[role='presentation'] .markdown",
-            ".prose",
             "[data-testid*='conversation-turn'] .markdown",
+            # Tertiary: Generic class-based
+            "div.markdown",
+            ".prose",
             ".message-content .markdown",
         ]
         
         self.selectors["modal_dismissal"] = [
-            "#radix-_r_3s_ > div > div.flex.flex-col.items-center.justify-center.self-center.px-6.py-6.md\\:w-\\[464px\\].md\\:py-8 > div > button.btn.relative.btn-secondary.btn-large.w-full",
-            "div[data-modal-layer='overlay'] button",
-            "div.fixed.inset-0.z-50 button",
-            "div[role='dialog'] button[aria-label*='close' i]",
+            # Primary: Specific modal dismissal buttons
+            "button[aria-label*='close' i]",
+            "button[aria-label*='Close']",
+            # Secondary: Dialog-based
+            "div[role='dialog'] button",
             "div[data-radix-dialog-overlay] button",
-            "button[aria-label*='close'], button[aria-label*='Close']",
+            # Tertiary: Fixed positioned overlays
+            "div.fixed.inset-0.z-50 button",
+            "div[data-modal-layer='overlay'] button",
+            # Fallback: Radix-specific (long xpath-like selectors)
+            "#radix-_r_3s_ > div > div.flex.flex-col.items-center.justify-center.self-center.px-6.py-6.md\\:w-\\[464px\\].md\\:py-8 > div > button.btn.relative.btn-secondary.btn-large.w-full",
         ]
         
         # ChatGPT-specific login detection selectors

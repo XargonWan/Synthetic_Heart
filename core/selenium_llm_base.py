@@ -1464,6 +1464,7 @@ class SeleniumLLMBase(AIPluginBase):
         
         The plugin must set self.selectors["send_button"] with CSS selectors to try.
         This method tries each selector in order until one works.
+        Also includes fallback checks for visible and enabled state.
         """
         selectors = self.selectors.get("send_button", [])
         if not selectors:
@@ -1473,11 +1474,26 @@ class SeleniumLLMBase(AIPluginBase):
         for selector in selectors:
             try:
                 log_debug(f"[selenium] Trying send button selector: {selector}")
+                # First, try to wait for it to be clickable (which means visible + enabled)
                 button = WebDriverWait(driver, timeout).until(
                     EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
                 )
-                log_debug(f"[selenium] Found send button with selector: {selector}")
+                log_debug(f"[selenium] Found clickable send button with selector: {selector}")
                 return button
+            except TimeoutException:
+                # Element exists but isn't clickable yet, try to find it anyway
+                try:
+                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                    if elements:
+                        button = elements[0]
+                        # Check if it's visible at least
+                        if button.is_displayed():
+                            log_debug(f"[selenium] Found visible send button (but not clickable) with selector: {selector}")
+                            return button
+                        else:
+                            log_debug(f"[selenium] Send button found but not visible: {selector}")
+                except Exception as e:
+                    log_debug(f"[selenium] Error checking visibility for selector {selector}: {e}")
             except Exception as e:
                 log_debug(f"[selenium] Send button selector failed: {selector} - {e}")
                 continue
@@ -1712,11 +1728,10 @@ class SeleniumLLMBase(AIPluginBase):
                 final_value = textarea.get_attribute("textContent") or textarea.text or ""
             log_debug(f"[selenium] Final textarea value: '{final_value[:100] if len(final_value) > 100 else final_value}' (length: {len(final_value)})")
             
-            # Wait a bit for service to process the input before trying to send
-            import time
-            log_debug("[selenium] Waiting 2 seconds for service to process input...")
-            time.sleep(2)
-            log_debug("[selenium] Wait completed, now trying to send")
+            # Ensure the textarea still has focus before sending
+            log_debug("[selenium] Ensuring textarea has focus before send...")
+            self.driver.execute_script("arguments[0].focus();", textarea)
+            time.sleep(0.5)  # Small delay to ensure focus is set
             
             log_debug(f"[selenium] Prompt pasted, now trying to send")
             
@@ -1732,31 +1747,47 @@ class SeleniumLLMBase(AIPluginBase):
                 if is_enabled:
                     log_debug("[selenium] Clicking send button")
                     try:
+                        # Scroll button into view to ensure it's clickable
+                        self.driver.execute_script("arguments[0].scrollIntoView(true);", send_button)
+                        time.sleep(0.5)  # Wait for scroll animation
+                        
+                        # Try direct click first
                         send_button.click()
                         log_debug("[selenium] Send button clicked successfully")
                     except Exception as click_error:
                         log_debug(f"[selenium] Send button click failed: {click_error}")
-                        # Fallback to RETURN
-                        log_debug("[selenium] Falling back to RETURN key")
-                        from selenium.webdriver.common.keys import Keys
-                        textarea.click()
-                        textarea.send_keys(Keys.RETURN)
+                        log_debug("[selenium] Attempting fallback: JavaScript click on button")
+                        try:
+                            # Try JavaScript click
+                            self.driver.execute_script("arguments[0].click();", send_button)
+                            log_debug("[selenium] Send button clicked via JavaScript")
+                        except Exception as js_click_error:
+                            log_debug(f"[selenium] JavaScript click also failed: {js_click_error}")
+                            # Final fallback to keyboard shortcut (Ctrl+Return or Cmd+Return)
+                            log_debug("[selenium] Final fallback: using Ctrl+Return keyboard shortcut")
+                            textarea.click()
+                            textarea.send_keys(Keys.CONTROL, Keys.RETURN)
                 else:
-                    log_debug("[selenium] Send button is disabled, using RETURN key")
+                    log_debug("[selenium] Send button is disabled, trying keyboard shortcut (Ctrl+Return)")
                     from selenium.webdriver.common.keys import Keys
                     textarea.click()
-                    textarea.send_keys(Keys.RETURN)
+                    textarea.send_keys(Keys.CONTROL, Keys.RETURN)
             else:
-                # Fallback: Send the message using RETURN key
-                log_debug("[selenium] No send button found, using RETURN key")
+                # Fallback: Send the message using Ctrl+Return (common shortcut for ChatGPT)
+                log_debug("[selenium] No send button found, using Ctrl+Return keyboard shortcut")
                 from selenium.webdriver.common.keys import Keys
                 textarea.click()
-                textarea.send_keys(Keys.RETURN)
+                textarea.send_keys(Keys.CONTROL, Keys.RETURN)
             
             log_debug(f"[selenium] Send action completed, waiting for confirmation")
             
-            # Wait for confirmation that the prompt was sent
+            # CRITICAL: Add delay to ensure the send action (button click or keyboard) is processed by browser
+            log_debug("[selenium] Waiting 3 seconds for browser to process send action...")
+            time.sleep(3)
+            
+            # Wait for confirmation that the prompt was sent (textarea should clear or sending indicator appears)
             try:
+                log_debug("[selenium] Checking if textarea cleared after send...")
                 WebDriverWait(self.driver, 10).until(
                     lambda d: (
                         textarea.get_attribute("value") == "" or
@@ -1764,9 +1795,15 @@ class SeleniumLLMBase(AIPluginBase):
                         len(d.find_elements(By.CSS_SELECTOR, "[data-testid*='sending'], [data-testid*='send'], .sending, .loading")) > 0
                     )
                 )
-                log_debug("[selenium] Prompt sent successfully")
+                log_debug("[selenium] Prompt sent successfully - textarea cleared or sending indicator found")
             except Exception as wait_error:
-                log_debug(f"[selenium] Wait for confirmation timed out or failed: {wait_error}")
+                log_debug(f"[selenium] Wait for textarea clear timed out (may not have been sent): {wait_error}")
+                # Check at least if text is still in textarea
+                current_text = textarea.get_attribute("value") or textarea.text or ""
+                if current_text:
+                    log_error(f"[selenium] CRITICAL: Textarea still contains text after send attempt ({len(current_text)} chars). Send may have failed!")
+                else:
+                    log_debug("[selenium] Textarea is empty, send likely succeeded")
                 # Continue anyway - the message might have been sent
             
             # CRITICAL: Verify ChatGPT has started processing the request
