@@ -1,12 +1,12 @@
 {
   "intro": {
-    "end_frame": 37
+    "end_frame": 35
   },
   "loop": {
-    "start_frame": 38,
-    "end_frame": 68
+    "start_frame": 36,
+    "end_frame": 77
   },
   "outro": {
-    "start_frame": 69
+    "start_frame": 78
   }
 }
