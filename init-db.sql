@@ -30,6 +30,21 @@ CREATE TABLE IF NOT EXISTS grillo_beats (
     INDEX idx_beat_type (beat_type)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- G.R.I.L.L.O. Activity Log Table
+-- Tracks execution history of all grillo beats for WebUI display
+CREATE TABLE IF NOT EXISTS grillo_activity_log (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    beat_type VARCHAR(50) NOT NULL,
+    prompt_text TEXT NOT NULL,
+    diary_entry_id INT,
+    executed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    metadata JSON,
+    INDEX idx_executed_at (executed_at DESC),
+    INDEX idx_beat_type (beat_type),
+    INDEX idx_diary_entry (diary_entry_id),
+    FOREIGN KEY (diary_entry_id) REFERENCES ai_diary(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- Grant privileges to synth user from any host
 GRANT ALL PRIVILEGES ON synth.* TO 'synth'@'%' IDENTIFIED BY 'synth';
 FLUSH PRIVILEGES;

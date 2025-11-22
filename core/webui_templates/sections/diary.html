@@ -1,32 +1,216 @@
-        <section class="tab-panel" id="tab-diary" data-tab="diary" role="tabpanel">
-            <header class="section-header">
-                <h2>AI Diary</h2>
+        <section class="tab-panel" id="tab-history" data-tab="history" role="tabpanel">
+            <div class="history-wrapper">
+                <header class="section-header">
+                    <h2>History</h2>
+                    <nav class="sub-nav" role="tablist">
+                        <button class="sub-nav-btn active" data-subtab="diary" role="tab" aria-selected="true">
+                            <span class="icon">📖</span>
+                            <span>Diary</span>
+                        </button>
+                        <button class="sub-nav-btn" data-subtab="grillo" role="tab" aria-selected="false">
+                            <span class="icon">🦗</span>
+                            <span>Grillo</span>
+                        </button>
+                        <button class="sub-nav-btn" data-subtab="chat" role="tab" aria-selected="false">
+                            <span class="icon">💬</span>
+                            <span>Chat</span>
+                        </button>
+                    </nav>
+                </header>
+
+                <div class="sub-tabs-container">
+
+            <!-- Diary Sub-Tab -->
+            <div class="sub-tab-panel" id="subtab-diary" data-subtab="diary">
                 <div class="section-controls">
-                    <input type="text" id="diary-search" placeholder="Search diary entries..." class="search-input" />
-                    <select id="diary-sort" class="sort-select">
-                        <option value="newest">Newest First</option>
-                        <option value="oldest">Oldest First</option>
+                    <input type="text" id="history-diary-search" placeholder="Search diary entries..." class="search-input" />
+                    <select id="history-diary-sort" class="sort-select">
+                        <option value="desc">Newest First</option>
+                        <option value="asc">Oldest First</option>
                     </select>
                     <label class="control-label">
-                        <input type="checkbox" id="diary-show-archived" />
+                        <input type="checkbox" id="history-diary-archived" />
                         Show Archived
                     </label>
                 </div>
-            </header>
-            <div id="diary-content" class="diary-container">
-                <div class="loading-state">
-                    <div class="loading-spinner"></div>
-                    <p>Loading diary entries...</p>
+                <div id="history-diary-content" class="history-container">
+                    <div class="loading-state">
+                        <div class="loading-spinner"></div>
+                        <p>Loading diary entries...</p>
+                    </div>
                 </div>
+                <div id="history-diary-pagination" class="pagination-controls"></div>
             </div>
+
+            <!-- Grillo Sub-Tab -->
+            <div class="sub-tab-panel" id="subtab-grillo" data-subtab="grillo">
+                <div class="section-controls">
+                    <input type="text" id="history-grillo-search" placeholder="Search grillo activity..." class="search-input" />
+                    <select id="history-grillo-beat-type" class="filter-select">
+                        <option value="">All Beat Types</option>
+                        <option value="tag_elaboration">Tag Elaboration</option>
+                        <option value="memory_consolidation">Memory Consolidation</option>
+                        <option value="self_reflection">Self Reflection</option>
+                        <option value="curiosity">Curiosity</option>
+                        <option value="relationship">Relationship</option>
+                    </select>
+                    <select id="history-grillo-sort" class="sort-select">
+                        <option value="desc">Newest First</option>
+                        <option value="asc">Oldest First</option>
+                    </select>
+                </div>
+                <div id="history-grillo-content" class="history-container">
+                    <div class="loading-state">
+                        <div class="loading-spinner"></div>
+                        <p>Loading grillo activity...</p>
+                    </div>
+                </div>
+                <div id="history-grillo-pagination" class="pagination-controls"></div>
+            </div>
+
+            <!-- Chat Sub-Tab -->
+            <div class="sub-tab-panel" id="subtab-chat" data-subtab="chat">
+                <div class="section-controls">
+                    <select id="history-chat-interface" class="filter-select">
+                        <option value="">All Chats</option>
+                    </select>
+                    <input type="text" id="history-chat-search" placeholder="Search messages..." class="search-input" />
+                    <select id="history-chat-sort" class="sort-select">
+                        <option value="desc">Newest First</option>
+                        <option value="asc">Oldest First</option>
+                    </select>
+                </div>
+                <div id="history-chat-content" class="history-container">
+                    <div class="loading-state">
+                        <div class="loading-spinner"></div>
+                        <p>Loading chat history...</p>
+                    </div>
+                </div>
+                <div id="history-chat-pagination" class="pagination-controls"></div>
+            </div>
+                </div><!-- .sub-tabs-container -->
+            </div><!-- .history-wrapper -->
         </section>
 
         <style>
-            .diary-container {
+            /* History tab wrapper */
+            .history-wrapper {
+                display: flex;
+                flex-direction: column;
+                height: 100%;
+                width: 100%;
+            }
+
+            .section-header {
+                flex-shrink: 0;
+            }
+
+            /* Sub-navigation styles */
+            .sub-nav {
+                display: flex;
+                gap: 0.5rem;
+                margin-top: 1rem;
+                padding: 0.5rem;
+                background: rgba(12, 12, 20, 0.3);
+                border-radius: 8px;
+                border: 1px solid var(--border);
+            }
+
+            .sub-nav-btn {
+                display: flex;
+                align-items: center;
+                gap: 0.5rem;
+                padding: 0.5rem 1rem;
+                border: none;
+                background: transparent;
+                color: var(--text-soft);
+                border-radius: 6px;
+                cursor: pointer;
+                transition: all 0.2s ease;
+                font-size: 0.9rem;
+            }
+
+            .sub-nav-btn:hover {
+                background: rgba(255, 255, 255, 0.05);
+                color: var(--text);
+            }
+
+            .sub-nav-btn.active {
+                background: var(--accent);
+                color: white;
+                box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+            }
+
+            .sub-nav-btn .icon {
+                font-size: 1.1rem;
+            }
+
+            /* Sub-tabs container */
+            .sub-tabs-container {
+                flex: 1;
+                position: relative;
+                overflow: hidden;
+            }
+
+            /* Sub-tab panel styles */
+            .sub-tab-panel {
+                position: absolute;
+                top: 0;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                display: none !important; /* Forza hide */
+                flex-direction: column;
+                overflow: hidden;
+                background: var(--bg);
+            }
+
+            .sub-tab-panel.active {
+                display: flex !important; /* Forza show */
+            }
+
+            .section-controls {
+                display: flex;
+                gap: 0.75rem;
+                padding: 1rem;
+                background: rgba(12, 12, 20, 0.2);
+                border-bottom: 1px solid var(--border);
+                flex-wrap: wrap;
+            }
+
+            .search-input, .filter-select, .sort-select {
+                padding: 0.5rem 0.75rem;
+                border-radius: 6px;
+                border: 1px solid var(--border);
+                background: rgba(12, 12, 20, 0.58);
+                color: inherit;
+                font-size: 0.9rem;
+            }
+
+            .search-input {
+                flex: 1;
+                min-width: 200px;
+            }
+
+            .filter-select, .sort-select {
+                min-width: 150px;
+            }
+
+            .control-label {
+                display: flex;
+                align-items: center;
+                gap: 0.5rem;
+                font-size: 0.9rem;
+                color: var(--text-soft);
+            }
+
+            /* History container styles */
+            .history-container {
                 flex: 1;
                 overflow-y: auto;
-                padding: 1rem min(4vw, 2.4rem);
+                padding: 1rem;
             }
+
             .loading-state {
                 display: flex;
                 flex-direction: column;
@@ -35,6 +219,7 @@
                 height: 200px;
                 color: var(--text-soft);
             }
+
             .loading-spinner {
                 width: 40px;
                 height: 40px;
@@ -44,11 +229,14 @@
                 animation: spin 1s linear infinite;
                 margin-bottom: 1rem;
             }
+
             @keyframes spin {
                 0% { transform: rotate(0deg); }
                 100% { transform: rotate(360deg); }
             }
-            .diary-entry {
+
+            /* Entry card styles */
+            .history-entry {
                 background: var(--surface);
                 border: 1px solid var(--border);
                 border-radius: 12px;
@@ -56,86 +244,530 @@
                 margin-bottom: 1rem;
                 transition: all 0.2s ease;
             }
-            .diary-entry:hover {
+
+            .history-entry:hover {
                 border-color: var(--border-strong);
                 box-shadow: 0 8px 25px -15px rgba(0, 0, 0, 0.5);
             }
-            .diary-entry.archived {
+
+            .history-entry.archived {
                 opacity: 0.6;
-                border-color: var(--text-soft);
             }
-            .diary-entry.archived:hover {
-                opacity: 0.8;
-            }
-            .diary-entry-header {
+
+            .history-entry-header {
                 display: flex;
                 justify-content: space-between;
                 align-items: flex-start;
                 margin-bottom: 1rem;
             }
-            .diary-entry-meta {
+
+            .history-entry-meta {
                 display: flex;
                 flex-direction: column;
                 gap: 0.25rem;
             }
-            .diary-entry-date {
+
+            .history-entry-date {
                 font-size: 0.85rem;
                 color: var(--text-soft);
                 font-weight: 500;
             }
-            .diary-entry-summary {
-                font-size: 0.8rem;
-                color: var(--text-soft);
-                font-style: italic;
-            }
-            .diary-entry-actions {
-                display: flex;
-                gap: 0.5rem;
-            }
-            .diary-entry-action {
-                padding: 0.25rem 0.5rem;
+
+            .history-entry-type {
+                display: inline-block;
+                padding: 0.2rem 0.5rem;
                 border-radius: 4px;
-                border: 1px solid var(--border);
-                background: transparent;
-                color: var(--text-soft);
-                font-size: 0.75rem;
-                cursor: pointer;
-                transition: all 0.2s ease;
+                background: var(--accent);
+                color: white;
+                font-size: 0.7rem;
+                font-weight: 600;
+                text-transform: uppercase;
             }
-            .diary-entry-action:hover {
-                background: var(--surface-alt);
-                color: var(--text);
-            }
-            .diary-entry-content {
+
+            .history-entry-content {
                 line-height: 1.6;
                 white-space: pre-wrap;
                 word-break: break-word;
+                margin-bottom: 1rem;
             }
-            .diary-entry-participants {
-                margin-top: 1rem;
-                padding-top: 1rem;
-                border-top: 1px solid var(--border);
-                font-size: 0.8rem;
+
+            .history-entry-detail {
+                font-size: 0.85rem;
                 color: var(--text-soft);
+                margin-top: 0.5rem;
             }
-            .diary-entry-participants strong {
+
+            .history-entry-detail strong {
                 color: var(--text);
             }
-            .sort-select {
-                padding: 0.25rem 0.5rem;
+
+            .grillo-prompt {
+                background: rgba(12, 12, 20, 0.4);
+                border-left: 3px solid var(--accent);
+                padding: 0.75rem;
+                margin-top: 0.5rem;
                 border-radius: 4px;
+                font-size: 0.85rem;
+                color: var(--text-soft);
+            }
+
+            .chat-message {
+                display: flex;
+                gap: 0.75rem;
+                padding: 0.75rem;
+                border-bottom: 1px solid var(--border);
+            }
+
+            .chat-message:last-child {
+                border-bottom: none;
+            }
+
+            .chat-sender {
+                font-weight: 600;
+                color: var(--accent);
+                min-width: 120px;
+            }
+
+            .chat-text {
+                flex: 1;
+                line-height: 1.5;
+            }
+
+            .chat-time {
+                font-size: 0.75rem;
+                color: var(--text-soft);
+                min-width: 80px;
+                text-align: right;
+            }
+
+            /* Pagination styles */
+            .pagination-controls {
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                gap: 0.5rem;
+                padding: 1rem;
+                border-top: 1px solid var(--border);
+            }
+
+            .pagination-btn {
+                padding: 0.5rem 1rem;
+                border-radius: 6px;
                 border: 1px solid var(--border);
                 background: rgba(12, 12, 20, 0.58);
-                color: inherit;
+                color: var(--text);
+                cursor: pointer;
+                transition: all 0.2s ease;
             }
+
+            .pagination-btn:hover:not(:disabled) {
+                background: var(--accent);
+                color: white;
+            }
+
+            .pagination-btn:disabled {
+                opacity: 0.5;
+                cursor: not-allowed;
+            }
+
+            .pagination-info {
+                font-size: 0.9rem;
+                color: var(--text-soft);
+            }
+
             .empty-state {
                 text-align: center;
                 padding: 3rem 1rem;
                 color: var(--text-soft);
             }
+
             .empty-state .icon {
                 font-size: 3rem;
                 margin-bottom: 1rem;
                 opacity: 0.5;
             }
         </style>
+
+        <script>
+            // History tab state management
+            const historyState = {
+                currentSubTab: 'diary',
+                diary: { page: 1, per_page: 20, search: '', include_archived: false, sort: 'desc' },
+                grillo: { page: 1, per_page: 20, search: '', beat_type: '', sort: 'desc' },
+                chat: { page: 1, per_page: 50, search: '', interface_path: '', sort: 'desc' }
+            };
+
+            // Initialize history tab when it becomes active
+            function initializeHistoryTab() {
+                console.log('[History] === INITIALIZING HISTORY TAB ===');
+                
+                // FORZA rimozione active da tutti i pannelli
+                const allSubTabs = document.querySelectorAll('.sub-tab-panel');
+                console.log(`[History] Found ${allSubTabs.length} sub-tab panels`);
+                allSubTabs.forEach((tab, idx) => {
+                    tab.classList.remove('active');
+                    console.log(`[History] Removed active from panel ${idx}: ${tab.dataset.subtab}`);
+                });
+                
+                // FORZA attivazione del pannello diary
+                const diaryPanel = document.getElementById('subtab-diary');
+                if (diaryPanel) {
+                    diaryPanel.classList.add('active');
+                    console.log('[History] FORCED diary panel active');
+                    console.log('[History] Diary panel classes:', diaryPanel.className);
+                    console.log('[History] Diary panel display:', window.getComputedStyle(diaryPanel).display);
+                } else {
+                    console.error('[History] ERROR: Diary panel not found!');
+                }
+                
+                // Sub-tab switching
+                const subNavButtons = document.querySelectorAll('.sub-nav-btn[data-subtab]');
+                subNavButtons.forEach(button => {
+                    button.addEventListener('click', () => {
+                        const subtabName = button.dataset.subtab;
+                        console.log(`[History] Switching to ${subtabName} sub-tab`);
+                        
+                        // Update sub-navigation buttons
+                        subNavButtons.forEach(btn => {
+                            btn.classList.remove('active');
+                            btn.setAttribute('aria-selected', 'false');
+                        });
+                        button.classList.add('active');
+                        button.setAttribute('aria-selected', 'true');
+                        
+                        // Update sub-tab panels - hide all, show selected
+                        const subPanels = document.querySelectorAll('.sub-tab-panel');
+                        subPanels.forEach(panel => {
+                            panel.classList.remove('active');
+                            console.log(`[History] Hiding panel: ${panel.dataset.subtab}`);
+                        });
+                        
+                        const targetPanel = document.querySelector(`#subtab-${subtabName}`);
+                        if (targetPanel) {
+                            targetPanel.classList.add('active');
+                            console.log(`[History] Showing panel: ${subtabName}`);
+                            historyState.currentSubTab = subtabName;
+                            loadHistoryData(subtabName);
+                        } else {
+                            console.error(`[History] Target panel not found: subtab-${subtabName}`);
+                        }
+                    });
+                });
+
+                // Event listeners for diary controls
+                document.getElementById('history-diary-search')?.addEventListener('input', debounce(() => {
+                    historyState.diary.search = document.getElementById('history-diary-search').value;
+                    historyState.diary.page = 1;
+                    loadHistoryDiary();
+                }, 500));
+
+                document.getElementById('history-diary-sort')?.addEventListener('change', () => {
+                    historyState.diary.sort = document.getElementById('history-diary-sort').value;
+                    historyState.diary.page = 1;
+                    loadHistoryDiary();
+                });
+
+                document.getElementById('history-diary-archived')?.addEventListener('change', () => {
+                    historyState.diary.include_archived = document.getElementById('history-diary-archived').checked;
+                    historyState.diary.page = 1;
+                    loadHistoryDiary();
+                });
+
+                // Event listeners for grillo controls
+                document.getElementById('history-grillo-search')?.addEventListener('input', debounce(() => {
+                    historyState.grillo.search = document.getElementById('history-grillo-search').value;
+                    historyState.grillo.page = 1;
+                    loadHistoryGrillo();
+                }, 500));
+
+                document.getElementById('history-grillo-beat-type')?.addEventListener('change', () => {
+                    historyState.grillo.beat_type = document.getElementById('history-grillo-beat-type').value;
+                    historyState.grillo.page = 1;
+                    loadHistoryGrillo();
+                });
+
+                document.getElementById('history-grillo-sort')?.addEventListener('change', () => {
+                    historyState.grillo.sort = document.getElementById('history-grillo-sort').value;
+                    historyState.grillo.page = 1;
+                    loadHistoryGrillo();
+                });
+
+                // Event listeners for chat controls
+                document.getElementById('history-chat-interface')?.addEventListener('change', () => {
+                    historyState.chat.interface_path = document.getElementById('history-chat-interface').value;
+                    historyState.chat.page = 1;
+                    loadHistoryChat();
+                });
+
+                document.getElementById('history-chat-search')?.addEventListener('input', debounce(() => {
+                    historyState.chat.search = document.getElementById('history-chat-search').value;
+                    historyState.chat.page = 1;
+                    loadHistoryChat();
+                }, 500));
+
+                document.getElementById('history-chat-sort')?.addEventListener('change', () => {
+                    historyState.chat.sort = document.getElementById('history-chat-sort').value;
+                    historyState.chat.page = 1;
+                    loadHistoryChat();
+                });
+
+                // Load initial data - IMMEDIATO, no setTimeout
+                console.log('[History] === LOADING DIARY DATA NOW ===');
+                loadHistoryDiary();
+            }
+
+            function loadHistoryData(subtab) {
+                if (subtab === 'diary') {
+                    loadHistoryDiary();
+                } else if (subtab === 'grillo') {
+                    loadHistoryGrillo();
+                } else if (subtab === 'chat') {
+                    loadHistoryChat();
+                }
+            }
+
+            async function loadHistoryDiary() {
+                const content = document.getElementById('history-diary-content');
+                if (!content) return;
+
+                content.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><p>Loading diary entries...</p></div>';
+
+                const params = new URLSearchParams({
+                    page: historyState.diary.page,
+                    per_page: historyState.diary.per_page,
+                    search: historyState.diary.search,
+                    include_archived: historyState.diary.include_archived,
+                    sort: historyState.diary.sort
+                });
+
+                try {
+                    const response = await fetch(`/api/history/diary?${params}`);
+                    const data = await response.json();
+
+                    if (data.success && data.entries.length > 0) {
+                        content.innerHTML = data.entries.map(entry => renderDiaryEntry(entry)).join('');
+                        renderPagination('diary', data.page, data.total_pages, data.total_count);
+                    } else {
+                        content.innerHTML = '<div class="empty-state"><div class="icon">📖</div><p>No diary entries found</p></div>';
+                    }
+                } catch (error) {
+                    console.error('Failed to load diary history:', error);
+                    content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load diary entries</p></div>';
+                }
+            }
+
+            async function loadHistoryGrillo() {
+                const content = document.getElementById('history-grillo-content');
+                if (!content) return;
+
+                content.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><p>Loading grillo activity...</p></div>';
+
+                const params = new URLSearchParams({
+                    page: historyState.grillo.page,
+                    per_page: historyState.grillo.per_page,
+                    search: historyState.grillo.search,
+                    beat_type: historyState.grillo.beat_type,
+                    sort: historyState.grillo.sort
+                });
+
+                try {
+                    const response = await fetch(`/api/history/grillo?${params}`);
+                    const data = await response.json();
+
+                    if (data.success && data.entries.length > 0) {
+                        content.innerHTML = data.entries.map(entry => renderGrilloEntry(entry)).join('');
+                        renderPagination('grillo', data.page, data.total_pages, data.total_count);
+                    } else {
+                        content.innerHTML = '<div class="empty-state"><div class="icon">🦗</div><p>No grillo activity found</p></div>';
+                    }
+                } catch (error) {
+                    console.error('Failed to load grillo history:', error);
+                    content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load grillo activity</p></div>';
+                }
+            }
+
+            async function loadHistoryChat() {
+                const content = document.getElementById('history-chat-content');
+                if (!content) return;
+
+                content.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><p>Loading chat history...</p></div>';
+
+                const params = new URLSearchParams({
+                    page: historyState.chat.page,
+                    per_page: historyState.chat.per_page,
+                    search: historyState.chat.search,
+                    interface_path: historyState.chat.interface_path,
+                    sort: historyState.chat.sort
+                });
+
+                try {
+                    const response = await fetch(`/api/history/chat?${params}`);
+                    const data = await response.json();
+
+                    // Populate interface selector if empty
+                    const interfaceSelect = document.getElementById('history-chat-interface');
+                    if (interfaceSelect && interfaceSelect.options.length === 1 && data.interface_paths) {
+                        data.interface_paths.forEach(path => {
+                            const option = document.createElement('option');
+                            option.value = path;
+                            option.textContent = path;
+                            interfaceSelect.appendChild(option);
+                        });
+                    }
+
+                    if (data.success && data.messages.length > 0) {
+                        content.innerHTML = data.messages.map(msg => renderChatMessage(msg)).join('');
+                        renderPagination('chat', data.page, data.total_pages, data.total_count);
+                    } else {
+                        content.innerHTML = '<div class="empty-state"><div class="icon">💬</div><p>No chat messages found</p></div>';
+                    }
+                } catch (error) {
+                    console.error('Failed to load chat history:', error);
+                    content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load chat history</p></div>';
+                }
+            }
+
+            function renderDiaryEntry(entry) {
+                const timestamp = formatTimestamp(entry.timestamp);
+                const archived = entry.archived ? ' archived' : '';
+                
+                return `
+                    <div class="history-entry${archived}">
+                        <div class="history-entry-header">
+                            <div class="history-entry-meta">
+                                <div class="history-entry-date">📅 ${timestamp}</div>
+                                ${entry.interaction_summary ? `<div class="history-entry-detail">${escapeHtml(entry.interaction_summary)}</div>` : ''}
+                            </div>
+                        </div>
+                        <div class="history-entry-content">${escapeHtml(entry.content)}</div>
+                        ${entry.personal_thought ? `<div class="history-entry-detail"><strong>💭 Thought:</strong> ${escapeHtml(entry.personal_thought)}</div>` : ''}
+                        ${entry.primary_emotion ? `<div class="history-entry-detail"><strong>😊 Emotion:</strong> ${entry.primary_emotion}</div>` : ''}
+                        ${entry.user_count > 0 ? `<div class="history-entry-detail"><strong>👥 With:</strong> ${entry.user_count} user${entry.user_count > 1 ? 's' : ''}</div>` : ''}
+                    </div>
+                `;
+            }
+
+            function renderGrilloEntry(entry) {
+                const timestamp = formatTimestamp(entry.executed_at);
+                const beatTypeLabel = entry.beat_type.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+                
+                return `
+                    <div class="history-entry">
+                        <div class="history-entry-header">
+                            <div class="history-entry-meta">
+                                <div class="history-entry-date">🦗 ${timestamp}</div>
+                                <span class="history-entry-type">${beatTypeLabel}</span>
+                            </div>
+                        </div>
+                        <div class="grillo-prompt">${escapeHtml(entry.prompt_text)}</div>
+                        ${entry.has_diary ? `
+                            <div class="history-entry-detail" style="margin-top: 1rem;">
+                                <strong>📝 Reflection created</strong>
+                                ${entry.diary_entry_id ? `<small> (ID: ${entry.diary_entry_id})</small>` : ''}
+                            </div>
+                        ` : '<div class="history-entry-detail" style="margin-top: 0.5rem; opacity: 0.6;"><em>No diary entry created yet</em></div>'}
+                    </div>
+                `;
+            }
+
+            function renderChatMessage(msg) {
+                const timestamp = new Date(msg.timestamp).toLocaleString('en-US', { 
+                    hour: '2-digit', 
+                    minute: '2-digit' 
+                });
+                
+                return `
+                    <div class="chat-message">
+                        <div class="chat-sender">${escapeHtml(msg.sender_name || 'Unknown')}</div>
+                        <div class="chat-text">${escapeHtml(msg.message_text)}</div>
+                        <div class="chat-time">${timestamp}</div>
+                    </div>
+                `;
+            }
+
+            function renderPagination(type, currentPage, totalPages, totalCount) {
+                const paginationDiv = document.getElementById(`history-${type}-pagination`);
+                if (!paginationDiv) return;
+
+                if (totalPages <= 1) {
+                    paginationDiv.innerHTML = '';
+                    return;
+                }
+
+                paginationDiv.innerHTML = `
+                    <button class="pagination-btn" ${currentPage <= 1 ? 'disabled' : ''} onclick="changePage('${type}', ${currentPage - 1})">
+                        ← Previous
+                    </button>
+                    <span class="pagination-info">Page ${currentPage} of ${totalPages} (${totalCount} total)</span>
+                    <button class="pagination-btn" ${currentPage >= totalPages ? 'disabled' : ''} onclick="changePage('${type}', ${currentPage + 1})">
+                        Next →
+                    </button>
+                `;
+            }
+
+            function changePage(type, newPage) {
+                historyState[type].page = newPage;
+                loadHistoryData(type);
+            }
+
+            function debounce(func, wait) {
+                let timeout;
+                return function executedFunction(...args) {
+                    const later = () => {
+                        clearTimeout(timeout);
+                        func(...args);
+                    };
+                    clearTimeout(timeout);
+                    timeout = setTimeout(later, wait);
+                };
+            }
+
+            function escapeHtml(text) {
+                const div = document.createElement('div');
+                div.textContent = text;
+                return div.innerHTML;
+            }
+
+            function formatTimestamp(isoString) {
+                // Converte timestamp ISO (UTC) in formato locale leggibile
+                if (!isoString) return 'Unknown time';
+                try {
+                    const date = new Date(isoString);
+                    return date.toLocaleString();
+                } catch (e) {
+                    return isoString;
+                }
+            }
+
+            // Auto-initialize when history tab becomes visible
+            document.addEventListener('DOMContentLoaded', () => {
+                console.log('[History] DOMContentLoaded event fired');
+                const historyTab = document.querySelector('[data-tab="history"]');
+                console.log('[History] Found history tab:', historyTab);
+                
+                if (historyTab) {
+                    // Check if already active and initialize immediately
+                    if (historyTab.classList.contains('active')) {
+                        console.log('[History] Tab is already active, initializing now');
+                        initializeHistoryTab();
+                    } else {
+                        console.log('[History] Tab not active, setting up MutationObserver');
+                        // Use MutationObserver to detect when tab becomes active
+                        const observer = new MutationObserver((mutations) => {
+                            mutations.forEach((mutation) => {
+                                if (mutation.type === 'attributes' && mutation.attributeName === 'class') {
+                                    if (historyTab.classList.contains('active')) {
+                                        console.log('[History] Tab became active via MutationObserver');
+                                        initializeHistoryTab();
+                                        observer.disconnect(); // Only initialize once
+                                    }
+                                }
+                            });
+                        });
+                        observer.observe(historyTab, { attributes: true });
+                    }
+                } else {
+                    console.error('[History] History tab not found!');
+                }
+            });
+        </script>

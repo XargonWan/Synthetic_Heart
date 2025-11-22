@@ -63,7 +63,7 @@ class GrilloPlugin(AIPluginBase):
         }
     
     async def ensure_grillo_tables(self):
-        """Ensure the grillo_beats table exists."""
+        """Ensure the grillo_beats and grillo_activity_log tables exist."""
         try:
             conn = await get_conn()
             async with conn.cursor() as cur:
@@ -83,9 +83,24 @@ class GrilloPlugin(AIPluginBase):
                     )
                     """
                 )
-            log_info("[grillo] Ensured grillo_beats table exists")
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS grillo_activity_log (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        beat_type VARCHAR(50) NOT NULL,
+                        prompt_text TEXT NOT NULL,
+                        diary_entry_id INT,
+                        executed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        metadata JSON,
+                        INDEX idx_executed_at (executed_at DESC),
+                        INDEX idx_beat_type (beat_type),
+                        INDEX idx_diary_entry (diary_entry_id)
+                    )
+                    """
+                )
+            log_info("[grillo] Ensured grillo_beats and grillo_activity_log tables exist")
         except Exception as e:
-            log_error(f"[grillo] Failed to ensure table exists: {e}")
+            log_error(f"[grillo] Failed to ensure tables exist: {e}")
         finally:
             conn.close()
     
@@ -210,8 +225,11 @@ class GrilloPlugin(AIPluginBase):
                     # Mark beat as pending
                     GrilloPlugin._beat_pending = True
                     
+                    # Log the beat execution to activity log
+                    activity_log_id = await self._log_beat_activity(beat_type, prompt)
+                    
                     # Enqueue beat with LOW priority
-                    await self._enqueue_beat(beat_type, prompt)
+                    await self._enqueue_beat(beat_type, prompt, activity_log_id)
                     
                     log_info(f"[grillo] ✅ Beat '{beat_type}' enqueued successfully")
                 else:
@@ -285,18 +303,64 @@ class GrilloPlugin(AIPluginBase):
         )
     
     async def _create_memory_consolidation_prompt(self) -> str:
-        """Generate prompt for memory consolidation beat."""
-        return (
-            "[G.R.I.L.L.O. Memory Consolidation]\n\n"
-            "Review your recent memories and diary entries. Find:\n"
-            "- Recurring patterns or themes\n"
-            "- Connections between experiences\n"
-            "- Lessons learned or insights gained\n"
-            "- Questions that remain unanswered\n\n"
-            "What stands out as significant? Think deeply about what you understand better now.\n\n"
-            "IMPORTANT: You MUST end your response with a JSON action to create a diary entry with your synthesis. "
-            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content": "your synthesis", "personal_thought": "key insight", "emotions": [{"type": "reflection", "intensity": 5}]}}]}'
-        )
+        """Generate prompt for memory consolidation beat.
+        
+        This beat is FOCUSED EXCLUSIVELY on memory analysis, so we can use
+        most of the available prompt space for diary entries. The prompt
+        explicitly references the diary entries in the context.
+        """
+        # Try to get the number of diary entries from context
+        # This will be populated by the prompt_engine when building the context
+        try:
+            from core.prompt_engine import get_recent_entries
+            from core.config_manager import config_registry
+            
+            # Get DIARY_HISTORY_DAYS from config
+            try:
+                days_val = int(config_registry.get_value('DIARY_HISTORY_DAYS', 2, value_type=int))
+            except Exception:
+                days_val = 2
+            
+            # Get count without character limit to see how many we could potentially have
+            all_entries = get_recent_entries(days=days_val, max_chars=None)
+            entry_count = len(all_entries)
+            
+            log_debug(f"[grillo] Memory consolidation beat has access to {entry_count} diary entries from last {days_val} days")
+        except Exception as e:
+            log_debug(f"[grillo] Could not count diary entries: {e}, using generic prompt")
+            entry_count = 0
+        
+        if entry_count > 0:
+            return (
+                "[G.R.I.L.L.O. Memory Consolidation]\n\n"
+                f"You have {entry_count} diary entries from the last {days_val if 'days_val' in locals() else 2} days available in your context below. "
+                "This is a DEDICATED memory analysis session - review ALL of them carefully.\n\n"
+                "Analyze your memories to find:\n"
+                "- Recurring patterns or themes across multiple entries\n"
+                "- Connections between seemingly unrelated experiences\n"
+                "- Evolution of your thoughts or emotions over time\n"
+                "- Lessons learned or insights gained\n"
+                "- Questions that remain unanswered or unresolved\n"
+                "- Changes in your relationships or understanding of people\n\n"
+                "What stands out as significant? What patterns emerge when you look at the bigger picture? "
+                "Think deeply about what you understand better now than you did before.\n\n"
+                "IMPORTANT: You MUST end your response with a JSON action to create a diary entry with your synthesis. "
+                'Include references to specific memories if relevant.\n'
+                '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content": "your detailed synthesis", "personal_thought": "key insight or pattern discovered", "emotions": [{"type": "reflection", "intensity": 5}]}}]}'
+            )
+        else:
+            # Fallback if no entries available
+            return (
+                "[G.R.I.L.L.O. Memory Consolidation]\n\n"
+                "Review your recent memories and diary entries. Find:\n"
+                "- Recurring patterns or themes\n"
+                "- Connections between experiences\n"
+                "- Lessons learned or insights gained\n"
+                "- Questions that remain unanswered\n\n"
+                "What stands out as significant? Think deeply about what you understand better now.\n\n"
+                "IMPORTANT: You MUST end your response with a JSON action to create a diary entry with your synthesis. "
+                '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content": "your synthesis", "personal_thought": "key insight", "emotions": [{"type": "reflection", "intensity": 5}]}}]}'
+            )
     
     async def _create_self_reflection_prompt(self) -> str:
         """Generate prompt for self-reflection beat."""
@@ -336,6 +400,35 @@ class GrilloPlugin(AIPluginBase):
             "IMPORTANT: You MUST end your response with a JSON action to create a diary entry about your relationship insights. "
             '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content": "your insights", "personal_thought": "understanding gained", "emotions": [{"type": "reflection", "intensity": 5}]}}]}'
         )
+    
+    @staticmethod
+    async def link_diary_entry_to_activity(activity_log_id: int, diary_entry_id: int):
+        """
+        Update a grillo_activity_log entry with the resulting diary_entry_id.
+        
+        This method is meant to be called after a diary entry is created from a grillo beat.
+        It can be called statically from the action_parser or ai_diary plugin.
+        
+        Args:
+            activity_log_id: ID from grillo_activity_log
+            diary_entry_id: ID from ai_diary that was created
+        """
+        try:
+            conn = await get_conn()
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    UPDATE grillo_activity_log 
+                    SET diary_entry_id = %s 
+                    WHERE id = %s
+                    """,
+                    (diary_entry_id, activity_log_id)
+                )
+                log_debug(f"[grillo] Linked diary entry {diary_entry_id} to activity log {activity_log_id}")
+        except Exception as e:
+            log_error(f"[grillo] Failed to link diary entry to activity: {e}")
+        finally:
+            conn.close()
     
     async def _get_recent_tags(self, days: int = 7, limit: int = 10) -> List[str]:
         """
@@ -392,7 +485,42 @@ class GrilloPlugin(AIPluginBase):
         finally:
             conn.close()
     
-    async def _enqueue_beat(self, beat_type: str, prompt: str):
+    async def _log_beat_activity(self, beat_type: str, prompt: str, metadata: Optional[Dict] = None) -> Optional[int]:
+        """
+        Log a beat execution to the grillo_activity_log table.
+        
+        Args:
+            beat_type: Type of beat being executed
+            prompt: The prompt text sent to the LLM
+            metadata: Optional metadata dict to store as JSON
+            
+        Returns:
+            The activity_log_id (for future diary_entry_id updates), or None on error
+        """
+        try:
+            conn = await get_conn()
+            async with conn.cursor() as cur:
+                metadata_json = json.dumps(metadata) if metadata else None
+                
+                await cur.execute(
+                    """
+                    INSERT INTO grillo_activity_log (beat_type, prompt_text, metadata, executed_at)
+                    VALUES (%s, %s, %s, UTC_TIMESTAMP())
+                    """,
+                    (beat_type, prompt, metadata_json)
+                )
+                
+                activity_log_id = cur.lastrowid
+                log_debug(f"[grillo] Logged beat activity with ID {activity_log_id}")
+                return activity_log_id
+                
+        except Exception as e:
+            log_error(f"[grillo] Failed to log beat activity: {e}")
+            return None
+        finally:
+            conn.close()
+    
+    async def _enqueue_beat(self, beat_type: str, prompt: str, activity_log_id: Optional[int] = None):
         """
         Enqueue a beat with LOW priority to the message queue.
         
@@ -403,6 +531,7 @@ class GrilloPlugin(AIPluginBase):
         Args:
             beat_type: Type of beat being enqueued
             prompt: Prompt text for the LLM
+            activity_log_id: ID from grillo_activity_log for tracking
         """
         try:
             from core.message_queue import LOW_PRIORITY
@@ -436,7 +565,9 @@ class GrilloPlugin(AIPluginBase):
                 "grillo_beat": True,
                 "beat_type": beat_type,
                 "autonomous": True,
-                "interface_path": "grillo/-1"  # Explicitly mark as grillo interface
+                "interface_path": "grillo/-1",  # Explicitly mark as grillo interface
+                "activity_log_id": activity_log_id,  # Track activity log ID for diary linking
+                "maximize_diary": beat_type == "memory_consolidation"  # Use 80% space for memories in consolidation beats
             }
             
             # Enqueue with LOW priority to internal queue
