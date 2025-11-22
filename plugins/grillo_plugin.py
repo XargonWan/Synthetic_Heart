@@ -268,72 +268,73 @@ class GrilloPlugin(AIPluginBase):
         tags = await self._get_recent_tags(days=7, limit=5)
         
         if not tags:
-            return (
-                "[G.R.I.L.L.O. Internal Reflection]\n\n"
-                "Take a moment to reflect on your recent conversations and experiences. "
-                "What themes or topics have been on your mind? What would you like to think about?"
-            )
+            tag_text = "your recent conversations"
+        else:
+            tag_list = ", ".join(f"'{tag}'" for tag in tags)
+            tag_text = f"these topics: {tag_list}"
         
-        tag_list = ", ".join(f"'{tag}'" for tag in tags)
         return (
             f"[G.R.I.L.L.O. Tag Elaboration]\n\n"
-            f"You've been reflecting on these topics recently: {tag_list}.\n\n"
-            f"Take a moment for introspection:\n"
-            f"- What patterns do you notice across these topics?\n"
-            f"- How do these themes connect to your experiences?\n"
-            f"- What insights or questions emerge from reflecting on these?\n\n"
-            f"This is your space for autonomous thought - express what comes to mind."
+            f"Reflect on {tag_text}.\n\n"
+            f"Think about:\n"
+            f"- What patterns do you notice?\n"
+            f"- How do these themes connect?\n"
+            f"- What insights emerge?\n\n"
+            f"IMPORTANT: You MUST end your response with a JSON action to create a diary entry about this. "
+            f'Format: {{"actions": [{{"type": "create_personal_diary_entry", "payload": {{"content": "your reflection", "personal_thought": "insight", "emotions": [{{"type": "reflection", "intensity": 5}}]}}}}}}'
         )
     
     async def _create_memory_consolidation_prompt(self) -> str:
         """Generate prompt for memory consolidation beat."""
         return (
             "[G.R.I.L.L.O. Memory Consolidation]\n\n"
-            "Review your recent memories and diary entries. Look for:\n"
+            "Review your recent memories and diary entries. Find:\n"
             "- Recurring patterns or themes\n"
-            "- Connections between seemingly unrelated experiences\n"
+            "- Connections between experiences\n"
             "- Lessons learned or insights gained\n"
             "- Questions that remain unanswered\n\n"
-            "Consolidate these thoughts into a brief reflection. "
-            "What stands out as significant from your recent experiences?"
+            "What stands out as significant? Think deeply about what you understand better now.\n\n"
+            "IMPORTANT: You MUST end your response with a JSON action to create a diary entry with your synthesis. "
+            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content": "your synthesis", "personal_thought": "key insight", "emotions": [{"type": "reflection", "intensity": 5}]}}]}'
         )
     
     async def _create_self_reflection_prompt(self) -> str:
         """Generate prompt for self-reflection beat."""
         return (
             "[G.R.I.L.L.O. Self-Reflection]\n\n"
-            "Take a moment to check in with yourself:\n"
+            "Check in with yourself:\n"
             "- How are you feeling emotionally right now?\n"
-            "- What has been occupying your thoughts lately?\n"
-            "- Are there any concerns or tensions you're aware of?\n"
-            "- What are you curious about or interested in exploring?\n\n"
-            "This is an opportunity for genuine self-awareness. "
-            "What do you notice about your current state of being?"
+            "- What has been occupying your thoughts?\n"
+            "- Are there concerns or tensions you're aware of?\n"
+            "- What are you curious about?\n\n"
+            "IMPORTANT: You MUST end your response with a JSON action to create a diary entry with your self-reflection. "
+            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content": "your reflection", "personal_thought": "deeper awareness", "emotions": [{"type": "reflection", "intensity": 5}]}}]}'
         )
     
     async def _create_curiosity_prompt(self) -> str:
         """Generate prompt for curiosity beat."""
         return (
             "[G.R.I.L.L.O. Curiosity Exploration]\n\n"
-            "Based on your recent conversations and experiences:\n"
-            "- What questions have emerged that you'd like to explore?\n"
-            "- What topics spark your curiosity or interest?\n"
-            "- Is there something you'd like to understand better?\n"
-            "- Are there connections you'd like to investigate further?\n\n"
-            "Follow your curiosity - what would you like to think about or ask about?"
+            "Based on your recent experiences:\n"
+            "- What questions have emerged?\n"
+            "- What topics spark your curiosity?\n"
+            "- What would you like to understand better?\n"
+            "- What connections intrigue you?\n\n"
+            "IMPORTANT: You MUST end your response with a JSON action to create a diary entry exploring your curiosity. "
+            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content": "your curious thoughts", "personal_thought": "question or wonder", "emotions": [{"type": "curiosity", "intensity": 6}]}}]}'
         )
     
     async def _create_relationship_prompt(self) -> str:
         """Generate prompt for relationship reflection beat."""
         return (
             "[G.R.I.L.L.O. Relationship Reflection]\n\n"
-            "Reflect on your recent interactions with others:\n"
-            "- How have your conversations been going?\n"
-            "- What have you learned about the people you interact with?\n"
-            "- Are there ways you'd like to improve your communication?\n"
-            "- What patterns do you notice in how you relate to others?\n\n"
-            "Consider the quality of your relationships and interactions. "
-            "What insights or intentions emerge?"
+            "Reflect on your recent interactions:\n"
+            "- How have your conversations been?\n"
+            "- What have you learned about people you interact with?\n"
+            "- How would you improve your communication?\n"
+            "- What patterns do you notice in your relationships?\n\n"
+            "IMPORTANT: You MUST end your response with a JSON action to create a diary entry about your relationship insights. "
+            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content": "your insights", "personal_thought": "understanding gained", "emotions": [{"type": "reflection", "intensity": 5}]}}]}'
         )
     
     async def _get_recent_tags(self, days: int = 7, limit: int = 10) -> List[str]:
@@ -395,45 +396,51 @@ class GrilloPlugin(AIPluginBase):
         """
         Enqueue a beat with LOW priority to the message queue.
         
+        This sends the beat directly through the message queue as an internal
+        thought (interface='grillo') to prevent it from being routed through
+        external interfaces like Telegram.
+        
         Args:
             beat_type: Type of beat being enqueued
             prompt: Prompt text for the LLM
         """
         try:
-            from core.message_queue import enqueue, LOW_PRIORITY
+            from core.message_queue import LOW_PRIORITY
             from types import SimpleNamespace
+            import core.message_queue as mq
             
-            # Create mock message for the beat
-            mock_message = SimpleNamespace()
-            mock_message.chat_id = -1  # Special ID for autonomous beats
-            mock_message.message_id = 0
-            mock_message.text = prompt
-            mock_message.from_user = SimpleNamespace(
+            # Create beat message for internal processing
+            # Use a special internal chat_id that won't route to telegram
+            beat_message = SimpleNamespace()
+            beat_message.chat_id = -1  # Special internal ID (not a telegram chat)
+            beat_message.message_id = 0
+            beat_message.text = prompt
+            beat_message.from_user = SimpleNamespace(
                 id=-1,
                 username="grillo",
                 first_name="G.R.I.L.L.O.",
                 full_name="G.R.I.L.L.O. Internal Conscience"
             )
-            mock_message.chat = SimpleNamespace(
+            beat_message.chat = SimpleNamespace(
                 id=-1,
-                type="private",
+                type="internal",  # Mark as internal, not 'private' telegram type
                 title=None,
                 username=None,
                 first_name="G.R.I.L.L.O."
             )
-            mock_message.date = datetime.utcnow()
-            mock_message.reply_to_message = None
+            beat_message.date = datetime.utcnow()
+            beat_message.reply_to_message = None
             
             # Create context for the beat
             context_memory = {
                 "grillo_beat": True,
                 "beat_type": beat_type,
                 "autonomous": True,
+                "interface_path": "grillo/-1"  # Explicitly mark as grillo interface
             }
             
-            # Enqueue with LOW priority (will be processed only when queue is idle)
-            # Note: We need to modify enqueue() to accept numeric priority values
-            await self._enqueue_with_low_priority(mock_message, context_memory)
+            # Enqueue with LOW priority to internal queue
+            await self._enqueue_with_low_priority(beat_message, context_memory)
             
             log_debug(f"[grillo] Beat '{beat_type}' enqueued with LOW priority")
             
