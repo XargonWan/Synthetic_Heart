@@ -823,6 +823,15 @@ class SynthWebUIInterface:
 
         await websocket.send_json({"type": "message", "sender": "synth", "text": text})
         await self._append_history(str(chat_id), "synth", text)
+        
+        # Save SyntH's response via core chat_context_manager
+        try:
+            from core.chat_context_manager import save_response_message
+            msg_interface_path = f"{INTERFACE_NAME}/{chat_id}"
+            await save_response_message(msg_interface_path, text)
+        except Exception as e:
+            log_debug(f"{LOG_PREFIX} Failed to save response via context_manager: {e}")
+        
         log_info(f"{LOG_PREFIX} Sent message to session {chat_id}: {text[:80]}{'...' if len(text)>80 else ''}")
 
     async def execute_action(self, action: dict, context: dict, bot, original_message):

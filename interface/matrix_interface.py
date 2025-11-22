@@ -503,20 +503,14 @@ class MatrixInterface:
             thread_event_id=thread_event_id,
         )
         
-        # Save SyntH's response to chat history cache
+        # Save SyntH's response via core chat_context_manager
         try:
-            from core.chat_history_cache import save_chat_message
+            from core.chat_context_manager import save_response_message
             from core.interface_path_utils import build_interface_path
             interface_path = build_interface_path('matrix', str(room_id), str(thread_event_id) if thread_event_id else None)
-            await save_chat_message(
-                interface_path=interface_path,
-                message_text=text,
-                sender_name="self",
-                sender_id="self"
-            )
-            log_debug(f"[matrix_interface] Saved SyntH response to chat history cache for room {room_id}")
+            await save_response_message(interface_path, text)
         except Exception as e:
-            log_debug(f"[matrix_interface] Failed to save SyntH response to cache: {e}")
+            log_debug(f"[matrix_interface] Failed to save response via context_manager: {e}")
 
     async def _send_matrix_message(
         self,

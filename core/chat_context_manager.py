@@ -205,3 +205,28 @@ def get_context_stats() -> dict:
         }
     
     return stats
+
+
+async def save_response_message(interface_path: str, message_text: str) -> None:
+    """Save a message sent by the core (bot response).
+    
+    This should be called by the core whenever it sends a message to an interface.
+    
+    Args:
+        interface_path: Interface path (e.g., telegram_bot/123456/2)
+        message_text: The response message text
+    """
+    if not interface_path or not message_text:
+        return
+    
+    try:
+        from core.chat_history_cache import save_chat_message
+        await save_chat_message(
+            interface_path=interface_path,
+            message_text=message_text,
+            sender_name="self",
+            sender_id="self"
+        )
+        log_debug(f"[context_manager] Saved response message for interface_path {interface_path}")
+    except Exception as e:
+        log_warning(f"[context_manager] Failed to save response message: {e}")

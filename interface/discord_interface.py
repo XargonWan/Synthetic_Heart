@@ -245,20 +245,14 @@ class DiscordInterface:
         try:
             await universal_send(self._discord_send, channel_id, text=text)
             
-            # Save SyntH's response to chat history cache
+            # Save SyntH's response via core chat_context_manager
             try:
-                from core.chat_history_cache import save_chat_message
+                from core.chat_context_manager import save_response_message
                 from core.interface_path_utils import build_interface_path
                 interface_path = build_interface_path('discord_bot', str(channel_id))
-                await save_chat_message(
-                    interface_path=interface_path,
-                    message_text=text,
-                    sender_name="self",
-                    sender_id="self"
-                )
-                log_debug(f"[discord_interface] Saved SyntH response to chat history cache for channel {channel_id}")
+                await save_response_message(interface_path, text)
             except Exception as e:
-                log_debug(f"[discord_interface] Failed to save SyntH response to cache: {e}")
+                log_debug(f"[discord_interface] Failed to save response via context_manager: {e}")
             
             log_debug(f"[discord_interface] Message sent to {channel_id}: {text}")
         except Exception as e:

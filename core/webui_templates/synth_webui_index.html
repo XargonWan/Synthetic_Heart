@@ -5416,14 +5416,16 @@
                     try {
                         if (selectedFile) {
                             descriptor = await this.loadDescriptor(actionName, selectedFile);
+                            console.log(`[AnimationHandler] After loading descriptor for ${selectedFile}, descriptor is:`, descriptor);
                         }
                     } catch (err) {
-                        console.debug(`[AnimationHandler] Could not load descriptor for ${selectedFile}`);
+                        console.warn(`[AnimationHandler] Could not load descriptor for ${selectedFile}:`, err);
                     }
 
                     // Check if we should create structured animations (intro/loop/outro)
                     // This can be for 'think' state or for any animation with intro/outro in descriptor
                     const hasStructuredDescriptor = descriptor && descriptor.intro && descriptor.outro;
+                    console.log(`[AnimationHandler] For ${actionName}/${selectedFile}: hasStructuredDescriptor=${hasStructuredDescriptor}, actionName==='think' is ${actionName === 'think'}, descriptor=${descriptor ? JSON.stringify(descriptor) : 'null'}`);
                     if ((actionName === 'think' || hasStructuredDescriptor) && clip && clip.duration && THREE.AnimationUtils && typeof THREE.AnimationUtils.subclip === 'function') {
                         try {
                             const fps = 30; // assumption for subclip frame math
@@ -5465,8 +5467,10 @@
                                 outroEnd = totalFrames;
                             }
 
-                            const introClip = THREE.AnimationUtils.subclip(clip, `${actionName}_intro`, introStart / fps, introEnd / fps, fps);
-                            const outroClip = THREE.AnimationUtils.subclip(clip, `${actionName}_outro`, outroStart / fps, outroEnd / fps, fps);
+                            // Use selectedFile in clip names so they match the storage key in mixer finished handler
+                            const clipKeyBase = selectedFile ? `${actionName}:${selectedFile}` : actionName;
+                            const introClip = THREE.AnimationUtils.subclip(clip, `${clipKeyBase}_intro`, introStart / fps, introEnd / fps, fps);
+                            const outroClip = THREE.AnimationUtils.subclip(clip, `${clipKeyBase}_outro`, outroStart / fps, outroEnd / fps, fps);
                             
                             const introAction = this.mixer.clipAction(introClip);
                             const outroAction = this.mixer.clipAction(outroClip);
@@ -5485,12 +5489,12 @@
 
                             // Only create loop section if it exists in the descriptor or is default 'think'
                             if (loopStart !== null && loopEnd !== null) {
-                                const loopClip = THREE.AnimationUtils.subclip(clip, `${actionName}_loop`, loopStart / fps, loopEnd / fps, fps);
+                                const loopClip = THREE.AnimationUtils.subclip(clip, `${clipKeyBase}_loop`, loopStart / fps, loopEnd / fps, fps);
                                 const loopAction = this.mixer.clipAction(loopClip);
                                 loopAction.setLoop(THREE.LoopRepeat);
                                 loopAction.clampWhenFinished = false;
                                 structuredAction.loop = loopAction;
-                                console.log(`[AnimationHandler] Created loop section for ${actionName}: frames ${loopStart}-${loopEnd}, time ${loopStart/fps}s-${loopEnd/fps}s, setLoop(LoopRepeat)`);
+                                console.log(`[AnimationHandler] Created loop section for ${clipKeyBase}: frames ${loopStart}-${loopEnd}, time ${loopStart/fps}s-${loopEnd/fps}s, setLoop(LoopRepeat)`);
                             } else {
                                 // Mark this as a play_once only animation (no loop section)
                                 structuredAction.loop = null;
@@ -5521,6 +5525,7 @@
                 // Preload all animations across common action types (idle, think, talk, write, touch)
                 // Loads each animation clip and caches it in this.loadedAnimations to avoid
                 // re-fetching and momentary T-pose when switching clips.
+                // NOTE: Only preloads clips, NOT actions. Actions are created by startAction() with proper structure logic.
                 async preloadAllAnimations() {
                     try {
                         const actionTypes = ['idle', 'think', 'talk', 'write', 'touch'];
@@ -5528,25 +5533,15 @@
                             try {
                                 const files = await this.getAnimationsForType(at);
                                 if (!files || files.length === 0) continue;
-                                console.log(`[AnimationHandler] Preloading ${files.length} animations for ${at}`);
+                                console.log(`[AnimationHandler] Preloading ${files.length} animation clips for ${at}`);
                                 for (const f of files) {
                                     try {
                                         if (!this.loadedAnimations[f]) {
                                             const clip = await this.loadAnimation(at, f);
                                             if (clip) {
-                                                // create a non-playing action so the mixer compiles the clip
-                                                try {
-                                                    const actionKey = `${at}:${f}`;
-                                                    if (!this.actions[actionKey]) {
-                                                        const act = this.mixer.clipAction(clip);
-                                                        // keep default loop settings for cached actions
-                                                        act.setLoop(THREE.LoopRepeat);
-                                                        act.clampWhenFinished = false;
-                                                        this.actions[actionKey] = act;
-                                                    }
-                                                } catch (e) {
-                                                    // ignore action creation errors
-                                                }
+                                                console.log(`[AnimationHandler] Preloaded clip for ${at}/${f}`);
+                                                // Just load the clip, don't create actions yet
+                                                // Actions will be created by startAction() which handles structure properly
                                             }
                                         }
                                     } catch (e) {
@@ -5834,6 +5829,9 @@
                                                 // Has loop section - transition to loop
                                                 console.log(`[AnimationHandler] intro finished for ${key} -> starting loop`);
                                                 console.log(`[AnimationHandler] Loop clip: ${candidate.loop.getClip().name}, loopMode: ${candidate.loop.getClip().loop}, timeScale: ${candidate.timeScale}`);
+                                                // Ensure loop is set to LoopRepeat before playing
+                                                candidate.loop.setLoop(THREE.LoopRepeat);
+                                                candidate.loop.clampWhenFinished = false;
                                                 candidate.loop.reset().fadeIn(0.1).play();
                                                 this.currentAction = candidate.loop;
                                                 this.currentActionPhase = 'loop';
