@@ -75,6 +75,16 @@ def get_trainer_id(interface_name: str) -> int | None:
 # get_trainer_ids() instead, but we keep this symbol to avoid import errors.
 TRAINER_IDS = get_trainer_ids()
 
+# Trainer Name configuration
+TRAINER_NAME = config_registry.get_var(
+    "TRAINER_NAME",
+    "Trainer",
+    label="Trainer Name",
+    description="The name of the trainer/mentor who has responsibility over this SyntH. This will appear in the bio.",
+    group="core",
+    component="core",
+)
+
 # LLM Configuration
 LLM_MODE = config_registry.get_var(
     "LLM_MODE",

@@ -30,24 +30,24 @@
                 min-height: 0;
             }
             #chat {
-                position: absolute;
-                bottom: 1rem;
-                left: 1rem;
-                width: 400px;
-                height: 60vh;
-                max-height: 500px;
+                position: fixed;
+                bottom: 1.5rem;
+                left: 1.5rem;
+                width: 420px;
+                height: 70vh;
+                max-height: 75vh;
                 display: flex;
                 flex-direction: column;
-                background: rgba(12, 12, 20, 0.92);
+                background: rgba(12, 12, 20, 0.95);
                 backdrop-filter: blur(12px);
                 -webkit-backdrop-filter: blur(12px);
-                border: none;
+                border: 1px solid var(--border);
                 border-radius: 22px;
                 box-shadow: 0 24px 45px -38px rgba(0, 0, 0, 0.9);
                 transition: transform 0.3s ease, opacity 0.3s ease;
-                padding-top: 4rem;
                 overflow: hidden;
                 z-index: 50;
+                resize: both;
             }
             #chat.hidden {
                 display: none;

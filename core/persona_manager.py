@@ -30,6 +30,38 @@ from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.config_manager import config_registry
 from core.animation_handler import get_animation_handler, AnimationState
 
+def _build_trainer_bio_section() -> str:
+    """Build the trainer bio section with name and platform IDs.
+    
+    Returns:
+        A formatted string with trainer information, or empty string if not configured.
+    """
+    try:
+        from core import config as config_module
+        
+        trainer_name = config_module.TRAINER_NAME
+        trainer_ids = config_module.get_trainer_ids()
+        
+        if not trainer_name or trainer_name == "Trainer":
+            return ""
+        
+        # Format: "Your trainer name is [TRAINER_NAME], a mentor and supervisor responsible for your wellbeing."
+        bio = f"Your trainer name is {trainer_name}, a mentor and supervisor responsible for your growth and wellbeing"
+        
+        # Add platform IDs if available
+        if trainer_ids:
+            platforms = []
+            for interface, trainer_id in trainer_ids.items():
+                platforms.append(f"{interface}: {trainer_id}")
+            if platforms:
+                bio += ". He is known on: " + ", ".join(platforms)
+        
+        bio += "."
+        return bio
+    except Exception as e:
+        log_warning(f"[persona_manager] Error building trainer bio: {e}")
+        return ""
+
 # Global reference to persona manager for config getters/setters
 _persona_manager_instance = None
 
@@ -815,7 +847,7 @@ class PersonaManager(PluginBase):
     def _assemble_profile_from_json(self, persona_json: Dict) -> str:
         """Assemble the complete profile from persona.json data.
         
-        Format: name + base synth profile + description + appearance
+        Format: name + base synth profile + trainer info + description + appearance
         
         Args:
             persona_json: Dict with 'name', 'attributes.appearance', and 'description'
@@ -833,6 +865,12 @@ class PersonaManager(PluginBase):
             
             # Combine all parts
             parts = [base_profile]
+            
+            # Add trainer bio section if configured
+            trainer_bio = _build_trainer_bio_section()
+            if trainer_bio:
+                parts.append(trainer_bio)
+            
             if description:
                 parts.append(description)
             if appearance:

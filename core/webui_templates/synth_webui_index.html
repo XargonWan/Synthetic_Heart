@@ -195,31 +195,32 @@
         }
         #chat {
             position: fixed;
-            top: 2rem;
-            left: 2rem;
+            bottom: 1.5rem;
+            left: 1.5rem;
             right: auto;
-            bottom: auto;
-            width: 20%;
-            min-width: 250px;
-            max-width: 50%;
-            height: 60vh;
-            max-height: 500px;
+            top: auto;
+            width: 420px;
+            min-width: 280px;
+            max-width: 95%;
+            height: 70vh;
+            max-height: 75vh;
             display: flex;
             flex-direction: column;
-            background: rgba(12, 12, 20, 0.92);
+            background: rgba(12, 12, 20, 0.95);
             backdrop-filter: blur(12px);
             -webkit-backdrop-filter: blur(12px);
-            border: none;
+            border: 1px solid var(--border);
             border-radius: 22px;
             box-shadow: 0 24px 45px -38px rgba(0, 0, 0, 0.9);
-            transition: transform 0.3s ease, opacity 0.3s ease, width 0.3s ease;
-            padding-top: 4rem;
+            transition: transform 0.3s ease, opacity 0.3s ease;
             overflow: hidden;
             z-index: 50;
             /* allow manual control via the corner handle and drag (desktop only) */
-            resize: none; /* we implement custom resize */
+            resize: both;
             cursor: default;
             touch-action: none; /* Allow pointer events for dragging */
+            /* Enable resize handles on all sides */
+            overflow-clip-margin: 10px;
         }
         /* Draggable title bar (drag handle) */
         #chat-title-bar {
@@ -244,47 +245,15 @@
         #chat-title-bar:active {
             cursor: grabbing;
         }
-        #chat.dragging #chat-title-bar {
-            cursor: grabbing;
-        }
-        /* Dynamic resize cursors are handled by JS based on pointer location */
-        #chat:hover {
-            /* default to grab on hover but JS will override based on edge */
-            cursor: grab;
-        }
-        /* Corner resize handle styling (bottom-right) */
-        #chat::after {
-            content: '';
-            position: absolute;
-            right: 6px;
-            bottom: 6px;
-            width: 16px;
-            height: 16px;
-            cursor: nwse-resize;
-            background: transparent;
-            z-index: 60;
-            border-radius: 2px;
-        }
-        #chat.resizing {
-            transition: none;
-            cursor: nwse-resize;
-        }
-        #chat.resizing::after {
-            background: rgba(255, 107, 214, 0.18);
-        }
         /* On mobile, chat is not resizable or draggable */
         @media (max-width: 768px) {
             #chat {
-                width: 30%;
-                max-width: 200px;
-                right: auto;
-                height: 40vh;
-                max-height: 250px;
+                width: 85%;
+                max-width: 95%;
+                height: 50vh;
+                max-height: 60vh;
                 resize: none;
                 cursor: default;
-            }
-            #chat::after {
-                display: none;
             }
             #chat:hover {
                 cursor: default;
@@ -301,23 +270,50 @@
             flex-direction: column;
             gap: 0.9rem;
         }
+        .message-container {
+            display: flex;
+            flex-direction: column;
+            margin: 0.6rem 0;
+            gap: 0.2rem;
+        }
+        .message-container.user {
+            align-items: flex-end;
+            margin-right: 1rem;
+        }
+        .message-container.synth {
+            align-items: flex-start;
+            margin-left: 1rem;
+        }
         .bubble {
-            max-width: 72ch;
+            max-width: 80%;
             padding: 1rem 1.2rem;
             border-radius: 18px;
             line-height: 1.45;
             animation: fadeSlide 0.35s ease;
             white-space: pre-wrap;
             box-shadow: 0 18px 45px -38px rgba(0, 0, 0, 0.85);
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+        }
+        .bubble-sender {
+            font-size: 0.85rem;
+            font-weight: 600;
+            margin-bottom: 0.4rem;
+            letter-spacing: 0.05em;
         }
         .bubble.user {
-            align-self: flex-end;
             background: rgba(255, 255, 255, 0.08);
         }
+        .bubble.user .bubble-sender {
+            color: var(--text-soft);
+            text-align: right;
+        }
         .bubble.synth {
-            align-self: flex-start;
             background: linear-gradient(135deg, #ff6bd6, #7289da);
             color: #fff;
+        }
+        .bubble.synth .bubble-sender {
+            color: rgba(255, 255, 255, 0.9);
         }
         .typing-indicator {
             display: flex;
@@ -1077,9 +1073,12 @@
                 flex-direction: column;
             }
             #chat {
-                flex: 0 0 auto;
-                width: 100%;
-                padding-top: 3.5rem;
+                position: fixed;
+                width: 85%;
+                max-width: 95%;
+                height: 55vh;
+                max-height: 65vh;
+                padding-top: 0;
             }
             .home-vrm {
                 min-height: clamp(320px, 50vh, 560px);
@@ -1237,17 +1236,17 @@
                 color: var(--accent);
             }
             #chat {
-                bottom: 0;
-                left: 0;
-                width: 100%;
-                height: 40vh;
-                max-height: 280px;
-                box-shadow: none;
-                border-radius: 0;
+                bottom: 1rem;
+                left: 1rem;
+                width: calc(100% - 2rem);
+                height: 50vh;
+                max-height: 60vh;
+                box-shadow: 0 12px 30px -20px rgba(0, 0, 0, 0.9);
+                border-radius: 18px;
                 border-top: 1px solid var(--border);
-                background: rgba(12, 12, 20, 0.3);
-                backdrop-filter: blur(8px);
-                -webkit-backdrop-filter: blur(8px);
+                background: rgba(12, 12, 20, 0.92);
+                backdrop-filter: blur(10px);
+                -webkit-backdrop-filter: blur(10px);
             }
             #composer {
                 flex-direction: row;
@@ -2973,13 +2972,26 @@
         // submit event, send the message through the websocket and
         // update only the chat DOM (#messages).
         function createUserMessageBubble(text) {
-            const wrapper = document.createElement('div');
-            wrapper.className = 'bubble-row user';
+            const container = document.createElement('div');
+            container.className = 'message-container user';
+            container.style.display = 'flex';
+            container.style.flexDirection = 'column';
+            container.style.alignSelf = 'flex-end';
+            container.style.gap = '0.2rem';
+            
+            // Add sender name label
+            const senderLabel = document.createElement('div');
+            senderLabel.className = 'bubble-sender user';
+            senderLabel.textContent = 'You';
+            container.appendChild(senderLabel);
+            
+            // Add bubble
             const bubble = document.createElement('div');
             bubble.className = 'bubble';
             bubble.textContent = text;
-            wrapper.appendChild(bubble);
-            return wrapper;
+            container.appendChild(bubble);
+            
+            return container;
         }
 
         // Note: form submit handled later in the file to ensure a single unified
@@ -4755,10 +4767,22 @@
         }
 
         function addMessage(sender, text, persist = true) {
+            const container = document.createElement('div');
+            container.className = 'message-container ' + (sender === 'synth' ? 'synth' : 'user');
+            
+            // Add sender name label
+            const senderLabel = document.createElement('div');
+            senderLabel.className = 'bubble-sender ' + (sender === 'synth' ? 'synth' : 'user');
+            senderLabel.textContent = sender === 'synth' ? 'Rekku' : 'You';
+            container.appendChild(senderLabel);
+            
+            // Add bubble
             const bubble = document.createElement('div');
             bubble.className = 'bubble ' + (sender === 'synth' ? 'synth' : 'user');
             bubble.textContent = text;
-            messages.appendChild(bubble);
+            container.appendChild(bubble);
+            
+            messages.appendChild(container);
             messages.scrollTop = messages.scrollHeight;
 
             if (sender === 'synth') {
@@ -7110,274 +7134,48 @@
             });
         }
 
-        // Chat resize and drag functionality
-        (function() {
-            const chat = document.getElementById('chat');
-            const titleBar = document.getElementById('chat-title-bar');
-            
-            if (!chat) {
-                console.error('[chat-control] Chat element not found');
-                return;
-            }
-            
-            if (!titleBar) {
-                console.error('[chat-control] Chat title bar not found');
-                return;
-            }
-            
-            console.log('[chat-control] Initializing chat drag/resize with titleBar:', titleBar);
-            
+        // Chat drag functionality
+        const chat = document.getElementById('chat');
+        const chatTitleBar = document.getElementById('chat-title-bar');
+        
+        if (chatTitleBar && chat) {
             let isDragging = false;
-            let isResizing = false;
-            let resizeMode = null; // 'top' | 'bottom' | 'left' | 'right' | 'topleft' | 'topright' | 'bottomleft' | 'bottomright'
-            let dragStartX = 0;
-            let dragStartY = 0;
-            let dragStartLeft = 0;
-            let dragStartTop = 0;
-            let resizeStartX = 0;
-            let resizeStartY = 0;
-            let resizeStartWidth = 0;
-            let resizeStartHeight = 0;
-            let resizeStartLeft = 0;
-            let resizeStartTop = 0;
-
-            const MIN_WIDTH = 250;
-            const MAX_WIDTH_PCT = 0.95; // fraction of window width
-            const MIN_HEIGHT = 140;
-            const MAX_HEIGHT_PCT = 0.95;
-            const EDGE_ZONE = 15; // px sensitivity for edges
-
-            function beginDrag(e) {
-                console.log('[chat-control] Beginning drag');
+            let dragOffsetX = 0;
+            let dragOffsetY = 0;
+            
+            chatTitleBar.addEventListener('mousedown', (e) => {
                 isDragging = true;
-                dragStartX = e.clientX;
-                dragStartY = e.clientY;
-                dragStartLeft = chat.offsetLeft;
-                dragStartTop = chat.offsetTop;
-                chat.classList.add('dragging');
-                document.body.style.userSelect = 'none';
-                document.body.style.cursor = 'grabbing';
+                dragOffsetX = e.clientX - chat.offsetLeft;
+                dragOffsetY = e.clientY - chat.offsetTop;
+                chatTitleBar.style.cursor = 'grabbing';
                 e.preventDefault();
-            }
-
-            function doDrag(e) {
-                if (!isDragging) return;
-                const deltaX = e.clientX - dragStartX;
-                const deltaY = e.clientY - dragStartY;
-                
-                let newLeft = dragStartLeft + deltaX;
-                let newTop = dragStartTop + deltaY;
-                
-                // Constrain to window bounds
-                newLeft = Math.max(0, Math.min(newLeft, window.innerWidth - chat.offsetWidth));
-                newTop = Math.max(0, Math.min(newTop, window.innerHeight - chat.offsetHeight));
-                
-                chat.style.left = newLeft + 'px';
-                chat.style.top = newTop + 'px';
-                chat.style.right = 'auto';
-                chat.style.bottom = 'auto';
-                
-                if (window.resizeVRMRenderer) {
-                    try { window.resizeVRMRenderer(); } catch (err) { /* ignore */ }
-                }
-            }
-
-            function endDrag() {
-                if (!isDragging) return;
-                console.log('[chat-control] Ending drag');
-                isDragging = false;
-                chat.classList.remove('dragging');
-                document.body.style.cursor = '';
-                document.body.style.userSelect = '';
-                if (window.resizeVRMRenderer) {
-                    try { window.resizeVRMRenderer(); } catch (err) { /* ignore */ }
-                }
-            }
-
-            function beginResize(e, mode) {
-                console.log('[chat-control] Beginning resize, mode:', mode);
-                isResizing = true;
-                resizeMode = mode;
-                resizeStartX = e.clientX;
-                resizeStartY = e.clientY;
-                resizeStartWidth = chat.offsetWidth;
-                resizeStartHeight = chat.offsetHeight || Math.floor(window.innerHeight * 0.35);
-                resizeStartLeft = chat.offsetLeft;
-                resizeStartTop = chat.offsetTop;
-                chat.classList.add('resizing');
-                document.body.style.userSelect = 'none';
-                
-                // Set appropriate cursor based on mode
-                if (mode.includes('top') && mode.includes('left')) {
-                    document.body.style.cursor = 'nwse-resize';
-                } else if (mode.includes('top') && mode.includes('right')) {
-                    document.body.style.cursor = 'nesw-resize';
-                } else if (mode.includes('bottom') && mode.includes('left')) {
-                    document.body.style.cursor = 'nesw-resize';
-                } else if (mode.includes('bottom') && mode.includes('right')) {
-                    document.body.style.cursor = 'nwse-resize';
-                } else if (mode === 'top' || mode === 'bottom') {
-                    document.body.style.cursor = 'ns-resize';
-                } else if (mode === 'left' || mode === 'right') {
-                    document.body.style.cursor = 'ew-resize';
-                }
-                
-                e.preventDefault();
-                e.stopPropagation();
-            }
-
-            function doResize(e) {
-                if (!isResizing || !resizeMode) return;
-                const deltaX = e.clientX - resizeStartX;
-                const deltaY = e.clientY - resizeStartY;
-                const maxWidth = Math.floor(window.innerWidth * MAX_WIDTH_PCT);
-                const maxHeight = Math.floor(window.innerHeight * MAX_HEIGHT_PCT);
-                
-                let newWidth = resizeStartWidth;
-                let newHeight = resizeStartHeight;
-                let newLeft = resizeStartLeft;
-                let newTop = resizeStartTop;
-
-                // Handle horizontal resizing
-                if (resizeMode.includes('left')) {
-                    newWidth = Math.max(MIN_WIDTH, resizeStartWidth - deltaX);
-                    newLeft = Math.max(0, resizeStartLeft + deltaX);
-                } else if (resizeMode.includes('right')) {
-                    newWidth = Math.max(MIN_WIDTH, Math.min(resizeStartWidth + deltaX, maxWidth));
-                }
-
-                // Handle vertical resizing
-                if (resizeMode.includes('top')) {
-                    newHeight = Math.max(MIN_HEIGHT, resizeStartHeight - deltaY);
-                    newTop = Math.max(0, resizeStartTop + deltaY);
-                } else if (resizeMode.includes('bottom')) {
-                    newHeight = Math.max(MIN_HEIGHT, Math.min(resizeStartHeight + deltaY, maxHeight));
-                }
-
-                // Ensure window stays within bounds
-                newWidth = Math.min(newWidth, window.innerWidth - newLeft);
-                newHeight = Math.min(newHeight, window.innerHeight - newTop);
-
-                chat.style.width = newWidth + 'px';
-                chat.style.height = newHeight + 'px';
-                chat.style.left = newLeft + 'px';
-                chat.style.top = newTop + 'px';
-
-                if (window.resizeVRMRenderer) {
-                    try { window.resizeVRMRenderer(); } catch (err) { /* ignore */ }
-                }
-            }
-
-            function endResize() {
-                if (!isResizing) return;
-                console.log('[chat-control] Ending resize');
-                isResizing = false;
-                resizeMode = null;
-                chat.classList.remove('resizing');
-                document.body.style.cursor = '';
-                document.body.style.userSelect = '';
-                if (window.resizeVRMRenderer) {
-                    try { window.resizeVRMRenderer(); } catch (err) { /* ignore */ }
-                }
-            }
-
-            function getResizeMode(rect, x, y) {
-                const onTop = y >= rect.top - EDGE_ZONE && y <= rect.top + EDGE_ZONE;
-                const onBottom = y >= rect.bottom - EDGE_ZONE && y <= rect.bottom + EDGE_ZONE;
-                const onLeft = x >= rect.left - EDGE_ZONE && x <= rect.left + EDGE_ZONE;
-                const onRight = x >= rect.right - EDGE_ZONE && x <= rect.right + EDGE_ZONE;
-                
-                // Determine mode based on position
-                if (onTop && onLeft) return 'topleft';
-                if (onTop && onRight) return 'topright';
-                if (onBottom && onLeft) return 'bottomleft';
-                if (onBottom && onRight) return 'bottomright';
-                if (onTop) return 'top';
-                if (onBottom) return 'bottom';
-                if (onLeft) return 'left';
-                if (onRight) return 'right';
-                
-                return null;
-            }
-
-            function updateCursor(e) {
-                if (isDragging || isResizing) return; // keep current cursor while dragging/resizing
-                const rect = chat.getBoundingClientRect();
-                const mode = getResizeMode(rect, e.clientX, e.clientY);
-                
-                if (mode === 'topleft' || mode === 'bottomright') {
-                    chat.style.cursor = 'nwse-resize';
-                } else if (mode === 'topright' || mode === 'bottomleft') {
-                    chat.style.cursor = 'nesw-resize';
-                } else if (mode === 'top' || mode === 'bottom') {
-                    chat.style.cursor = 'ns-resize';
-                } else if (mode === 'left' || mode === 'right') {
-                    chat.style.cursor = 'ew-resize';
-                } else {
-                    chat.style.cursor = '';
-                }
-            }
-
-            // Title bar drag handler - only drag on title bar, not on edges
-            titleBar.addEventListener('mousedown', function(e) {
-                const chatRect = chat.getBoundingClientRect();
-                const mode = getResizeMode(chatRect, e.clientX, e.clientY);
-                
-                // If clicking near ANY resize edge, don't drag - allow resize
-                if (mode) {
-                    console.log('[chat-control] Click near edge, allowing resize');
-                    beginResize(e, mode);
-                    return;
-                }
-                
-                // Otherwise, start drag
-                console.log('[chat-control] Click on title bar, starting drag');
-                beginDrag(e);
-                e.stopPropagation();
             });
-
-            // Mouse down on chat decides which mode to start based on pointer location (for resize)
-            chat.addEventListener('mousedown', function(e) {
-                // Skip if clicking on title bar (already handled there)
-                if (e.target === titleBar || titleBar.contains(e.target)) {
-                    return;
-                }
-                
-                const rect = chat.getBoundingClientRect();
-                const mode = getResizeMode(rect, e.clientX, e.clientY);
-                
-                if (mode) {
-                    beginResize(e, mode);
-                    return;
-                }
-            });
-
-            // Track pointer to update cursor zones on chat hover
-            chat.addEventListener('mousemove', updateCursor);
-            chat.addEventListener('mouseleave', function() { if (!isDragging && !isResizing) chat.style.cursor = ''; });
-
-            // Global mouse move/up handlers for drag and resize
-            document.addEventListener('mousemove', function(e) {
-                doDrag(e);
-                doResize(e);
-            }, true); // Use capture phase
-
-            document.addEventListener('mouseup', function() {
-                endDrag();
-                endResize();
-            }, true); // Use capture phase
-
-            // Prevent context menu on edge/corner
-            chat.addEventListener('contextmenu', function(e) {
-                const rect = chat.getBoundingClientRect();
-                const mode = getResizeMode(rect, e.clientX, e.clientY);
-                if (mode) {
-                    e.preventDefault();
+            
+            document.addEventListener('mousemove', (e) => {
+                if (isDragging) {
+                    chat.style.left = (e.clientX - dragOffsetX) + 'px';
+                    chat.style.top = (e.clientY - dragOffsetY) + 'px';
+                    chat.style.bottom = 'auto';
+                    chat.style.right = 'auto';
                 }
             });
             
-            console.log('[chat-control] Chat drag/resize initialized successfully');
-        })();
+            document.addEventListener('mouseup', () => {
+                if (isDragging) {
+                    isDragging = false;
+                    chatTitleBar.style.cursor = 'grab';
+                }
+            });
+            
+            console.log('[chat-control] Chat drag enabled via title-bar');
+        }
+        
+        // Chat is using native CSS resize: both for all-sides resize
+        // Drag is implemented via JavaScript on the title-bar
+        const chatElement = document.getElementById('chat');
+        if (chatElement) {
+            console.log('[chat-control] Chat initialized with drag + native resize');
+        }
 
     </script>
 </body>
