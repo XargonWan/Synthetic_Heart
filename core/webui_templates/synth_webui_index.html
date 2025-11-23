@@ -4884,6 +4884,9 @@
                     const incomingPriority = PHASE_PRIORITIES[incomingPhase] || 0;
                     const currentPriority = PHASE_PRIORITIES[currentDisplayedPhase] || 0;
 
+                    console.log('[synth_webui] Priority check: incomingPhase=' + incomingPhase + ', incomingPriority=' + incomingPriority + ', currentPhase=' + currentDisplayedPhase + ', currentPriority=' + currentPriority);
+                    console.log('[synth_webui] currentDisplayedActionId=' + currentDisplayedActionId + ', incomingActionId=' + incomingActionId);
+
                     // If we are currently displaying an action (have an action id) and the
                     // incoming state is for a different action (or idle) with LOWER priority,
                     // ignore it — this ensures low-priority phases like IDLE won't flash over THINKING.
@@ -5528,8 +5531,15 @@
                             // Store with file-specific key if we know the file
                             const storageKey = selectedFile ? `${actionName}:${selectedFile}` : actionName;
                             this.actions[storageKey] = structuredAction;
-                            console.log(`[AnimationHandler] Stored structured action with key: ${storageKey}, playOnceOnly: ${structuredAction._playOnceOnly}`);
-                            return this.actions[storageKey];
+                            // ALSO store with generic action name key so startAction('idle') finds it on next call
+                            if (selectedFile && actionName !== 'think') {
+                                // For idle/talk/etc with specific file, also cache the generic key
+                                this.actions[actionName] = structuredAction;
+                                console.log(`[AnimationHandler] Stored structured action with keys: ${storageKey} AND ${actionName}, playOnceOnly: ${structuredAction._playOnceOnly}`);
+                            } else {
+                                console.log(`[AnimationHandler] Stored structured action with key: ${storageKey}, playOnceOnly: ${structuredAction._playOnceOnly}`);
+                            }
+                            return structuredAction;
                         } catch (err) {
                             console.warn(`[AnimationHandler] Failed to create structured subclips, falling back to full clip: ${err}`);
                             // Fall through to create single action below

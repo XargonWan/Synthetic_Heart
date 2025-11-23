@@ -45,8 +45,9 @@ def _build_trainer_bio_section() -> str:
         if not trainer_name or trainer_name == "Trainer":
             return ""
         
-        # Format: "Your trainer name is [TRAINER_NAME], a mentor and supervisor responsible for your wellbeing."
-        bio = f"Your trainer name is {trainer_name}, a mentor and supervisor responsible for your growth and wellbeing"
+        # Format: Clear distinction that this is about the person who trains/supervises the SyntH
+        # Explicitly state this is about the human trainer, not the SyntH itself
+        bio = f"Your human trainer is named {trainer_name}, a mentor and supervisor responsible for your growth and wellbeing. {trainer_name} is the person who directly manages and oversees your development"
         
         # Add platform IDs if available
         if trainer_ids:
@@ -54,7 +55,7 @@ def _build_trainer_bio_section() -> str:
             for interface, trainer_id in trainer_ids.items():
                 platforms.append(f"{interface}: {trainer_id}")
             if platforms:
-                bio += ". He is known on: " + ", ".join(platforms)
+                bio += f". {trainer_name} can be reached via: " + ", ".join(platforms)
         
         bio += "."
         return bio

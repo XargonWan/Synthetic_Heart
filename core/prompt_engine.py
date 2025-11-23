@@ -453,6 +453,7 @@ def load_json_instructions() -> str:
 - Example: if input shows interface_path='telegram_bot/-1003098886330/123', use EXACTLY 'telegram_bot/-1003098886330/123' as interface_path in your message_telegram_bot action.
 - Include reply_message_id if replying to specific messages.
 - ALWAYS include create_personal_diary_entry action to record interactions.
+- Consider responding to the user with a message action (message_telegram_bot, message_discord_bot, message_synth_webui, etc.) when appropriate - but only if you choose to.
 - Interaction_summary examples: "User asked about weather, provided forecast" or "Discussed coding, provided solutions"
 
 RESPONSE FORMAT - Your response MUST be valid JSON in this exact structure:

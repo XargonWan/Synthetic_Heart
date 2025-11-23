@@ -42,6 +42,7 @@ from core.message_chain import get_failed_message_text, RESPONSE_TIMEOUT, FAILED
 import core.plugin_instance as plugin_instance
 from core import db as core_db
 from core.action_state_manager import get_action_state_manager, AnimationPhase
+from core.animation_handler import AnimationState
 import mimetypes
 
 
@@ -221,7 +222,9 @@ class SynthWebUIInterface:
         from core.animation_handler import get_animation_handler
         self.animation_handler = get_animation_handler()
         self.animation_handler.set_webui(self)
-        log_info(f"{LOG_PREFIX} Animation handler initialized", log_file=WEBUI_LOG)
+        # Register callback to broadcast animation state changes to all WebSocket clients
+        self.animation_handler.register_animation_state_changed_callback(self._broadcast_animation_state)
+        log_info(f"{LOG_PREFIX} Animation handler initialized with WebSocket broadcast", log_file=WEBUI_LOG)
         
         # Initialize global action state manager
         self.action_state_manager = get_action_state_manager()
@@ -469,6 +472,28 @@ class SynthWebUIInterface:
         await websocket.send_json({"type": "session", "session_id": session_id})
         await self._replay_history(session_id)
         
+        # Send current centralized animation state to new client
+        try:
+            if self.animation_handler:
+                current_anim_state = self.animation_handler.get_current_animation_state()
+                if current_anim_state["animation_file"]:
+                    # Resolve the animation path
+                    resolved_path, _ = self.animation_handler._resolve_animation_descriptor(
+                        current_anim_state["animation_file"]
+                    )
+                    message = {
+                        "type": "animation",
+                        "state": current_anim_state["state"],
+                        "animation": resolved_path,
+                        "loop": current_anim_state["descriptor"].get("play_once", False) is False 
+                                if current_anim_state["descriptor"] else True,
+                        "descriptor": current_anim_state["descriptor"]
+                    }
+                    await websocket.send_json(message)
+                    log_debug(f"{LOG_PREFIX} Sent current animation state to new session {session_id}: {current_anim_state['state']}")
+        except Exception as anim_exc:
+            log_warning(f"{LOG_PREFIX} Failed to send animation state to new session {session_id}: {anim_exc}")
+        
         # Set initial idle animation for new session
         try:
             if self.persona_manager:
@@ -642,11 +667,57 @@ class SynthWebUIInterface:
             except Exception as exc:
                 log_warning(f"{LOG_PREFIX} Failed to broadcast action state to session {session_id}: {exc}")
 
+    async def _broadcast_animation_state(
+        self,
+        state: AnimationState,
+        animation_file: str,
+        descriptor: Optional[Dict[str, Any]]
+    ) -> None:
+        """
+        Broadcast the current animation state to all connected WebSocket clients.
+        
+        Called whenever the animation changes (from AnimationHandler callback).
+        This ensures all clients see the same animation on the 3D model.
+        
+        Args:
+            state: The animation state enum
+            animation_file: The animation file name
+            descriptor: The animation descriptor (may be None)
+        """
+        # Resolve the animation path
+        if self.animation_handler:
+            resolved_path, _ = self.animation_handler._resolve_animation_descriptor(animation_file)
+        else:
+            resolved_path = f"animations/{animation_file}"
+        
+        message = {
+            "type": "animation",
+            "state": state.value,
+            "animation": resolved_path,
+            "loop": descriptor.get("play_once", False) is False if descriptor else True,
+            "descriptor": descriptor
+        }
+        
+        log_info(f"{LOG_PREFIX} Broadcasting animation state to {len(self.connections)} clients: {state.value}/{animation_file}")
+        
+        # Send to all connected clients
+        for session_id, websocket in self.connections.items():
+            try:
+                await websocket.send_json(message)
+                log_debug(f"{LOG_PREFIX} ✓ Sent animation state to session {session_id}: {state.value}")
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to broadcast animation state to session {session_id}: {exc}")
+
     async def _handle_user_message(self, session_id: str, text: str) -> None:
         from types import SimpleNamespace
+        from core.config import TRAINER_NAME
+        from core import message_queue
 
         log_info(f"{LOG_PREFIX} [_handle_user_message] START: session_id={session_id}, text_len={len(text)}, text={text[:100]}")
 
+        # Get trainer name for the user
+        trainer_name = str(TRAINER_NAME) if TRAINER_NAME and TRAINER_NAME != "Trainer" else "Trainer"
+        
         message = SimpleNamespace(
             chat_id=session_id,
             interface_path=f"{INTERFACE_NAME}/{session_id}",  # Add interface_path for proper routing
@@ -655,10 +726,10 @@ class SynthWebUIInterface:
             date=datetime.utcnow(),
             from_user=SimpleNamespace(
                 id=session_id,
-                username=f"synth_{session_id[:8]}",
-                first_name="SyntH",
+                username=trainer_name,
+                first_name=trainer_name,
                 last_name="",
-                full_name="SyntH User",
+                full_name=trainer_name,
             ),
             chat=SimpleNamespace(
                 id=session_id,
@@ -701,18 +772,30 @@ class SynthWebUIInterface:
         timeout_seconds = int(RESPONSE_TIMEOUT)
         
         try:
-            # Call plugin to handle message
-            response = await asyncio.wait_for(
-                plugin_instance.handle_incoming_message(
-                    self, message, {}, INTERFACE_NAME
-                ),
-                timeout=timeout_seconds
+            # Enqueue message in the priority queue instead of processing directly
+            # The message_queue consumer will handle it and send response via the interface
+            log_info(f"{LOG_PREFIX} Enqueueing message to priority queue (skip_mention_check=True for WebUI)")
+            await message_queue.enqueue(
+                bot=self,
+                message=message,
+                context_memory={},
+                priority=False,  # Normal priority for user messages
+                interface_id=INTERFACE_NAME,
+                skip_mention_check=True,  # WebUI is 1:1 interface, skip mention check
+                original_message=message
             )
+            log_info(f"{LOG_PREFIX} Message successfully enqueued for session {session_id}")
+            
+            # For WebUI, we don't wait for a direct response here.
+            # The response will be sent via WebSocket by the message_queue consumer.
+            # Set response to None to indicate the message was enqueued
+            response = None
+            
         except asyncio.TimeoutError:
-            log_error(f"{LOG_PREFIX} Message handling timed out after {timeout_seconds}s for session {session_id}")
+            log_error(f"{LOG_PREFIX} Message enqueueing timed out after {timeout_seconds}s for session {session_id}")
             response = str(get_failed_message_text())
         except Exception as exc:  # pragma: no cover - runtime issues
-            log_error(f"{LOG_PREFIX} error handling message: {exc}")
+            log_error(f"{LOG_PREFIX} error enqueueing message: {exc}")
             response = str(get_failed_message_text())
 
         # Handle LLM_FAILED responses - use fallback message text

@@ -385,6 +385,10 @@ async def _consumer_loop() -> None:
                 continue
 
             try:
+                # Get timeout configuration from message_chain module
+                from core.message_chain import RESPONSE_TIMEOUT
+                timeout_seconds = int(RESPONSE_TIMEOUT) if RESPONSE_TIMEOUT else 240
+                
                 # Check if this is an event prompt
                 if "event_prompt" in final:
                     # Create a mock message object with event_id for events
@@ -393,10 +397,17 @@ async def _consumer_loop() -> None:
                     mock_message.chat_id = "TARDIS/system/events"  
                     mock_message.message_id = f"event_{mock_message.event_id}"
                     
-                    # Deliver the structured event prompt using the standard pipeline
-                    await plugin_instance.handle_incoming_message(
-                        final["bot"], mock_message, final["event_prompt"], final.get("interface")
-                    )
+                    # Deliver the structured event prompt using the standard pipeline with timeout
+                    try:
+                        await asyncio.wait_for(
+                            plugin_instance.handle_incoming_message(
+                                final["bot"], mock_message, final["event_prompt"], final.get("interface")
+                            ),
+                            timeout=timeout_seconds
+                        )
+                    except asyncio.TimeoutError:
+                        log_error(f"[QUEUE] Event processing timed out after {timeout_seconds}s for event {mock_message.event_id}")
+                        # Event timeout - message_chain will have already sent fallback if needed
                 else:
                     # Build interface_path and add to context for prompt_engine to use
                     chat_id = final.get("chat_id")
@@ -415,9 +426,16 @@ async def _consumer_loop() -> None:
                     else:
                         log_warning(f"[QUEUE] Context is not a dict, cannot add interface_path")
                     
-                    await plugin_instance.handle_incoming_message(
-                        final["bot"], final["message"], context, final.get("interface")
-                    )
+                    try:
+                        await asyncio.wait_for(
+                            plugin_instance.handle_incoming_message(
+                                final["bot"], final["message"], context, final.get("interface")
+                            ),
+                            timeout=timeout_seconds
+                        )
+                    except asyncio.TimeoutError:
+                        log_error(f"[QUEUE] Message processing timed out after {timeout_seconds}s for chat {chat_id}")
+                        # Timeout - message_chain will have already sent fallback if needed
             except Exception as e:  # pragma: no cover - plugin may misbehave
                 log_error(
                     f"[ERROR] Failed to process message from chat {final['chat_id']}: {e}\n{traceback.format_exc()}",
