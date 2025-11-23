@@ -1447,11 +1447,25 @@ class SeleniumLLMBase(AIPluginBase):
             try:
                 random_timeout = random.uniform(1, 5)  # Fresh random timeout per selector
                 log_debug(f"[selenium] Trying prompt area selector: {selector} (timeout: {random_timeout:.2f}s)")
-                element = WebDriverWait(driver, random_timeout).until(
-                    EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
-                )
-                log_debug(f"[selenium] Found prompt area with selector: {selector}")
-                return element
+                
+                # First try: element_to_be_clickable (strict, requires visible + enabled)
+                try:
+                    element = WebDriverWait(driver, random_timeout * 0.4).until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
+                    )
+                    log_debug(f"[selenium] Found prompt area (clickable) with selector: {selector}")
+                    return element
+                except Exception as e1:
+                    log_debug(f"[selenium] Clickable check failed for {selector}: {e1}")
+                    
+                    # Fallback: just check presence (less strict)
+                    element = WebDriverWait(driver, random_timeout * 0.6).until(
+                        EC.presence_of_all_elements_located((By.CSS_SELECTOR, selector))
+                    )
+                    if element and len(element) > 0:
+                        log_debug(f"[selenium] Found prompt area (present) with selector: {selector}")
+                        return element[0]  # Return first matching element
+                        
             except Exception as e:
                 log_debug(f"[selenium] Prompt area selector failed: {selector} - {e}")
                 continue

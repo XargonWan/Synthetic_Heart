@@ -59,17 +59,24 @@ class SeleniumChatGPTPlugin(SeleniumLLMBase):
             "div[data-testid='prompt-textarea'][contenteditable='true']",
             "div.ProseMirror.ProseMirror-focused",
             "div.ProseMirror",
+            # More recent ChatGPT versions - newer selectors
+            "div[contenteditable='true'][data-placeholder]",
+            "textarea[placeholder*='Ask']",
+            "textarea[placeholder*='Message']",
             # Secondary: ID-based selectors (very specific)
             "div[id='prompt-textarea']",
             "#prompt-textarea",
             # Tertiary: Placeholder-based (more reliable than generic)
             "p[data-placeholder='Ask anything']",
-            "textarea[placeholder*='Message']",
             "textarea[placeholder*='Ask']",
             "textarea[placeholder*='Send a message']",
             # Quaternary: Role-based selectors (generic but useful)
             "div[contenteditable='true'][role='textbox']",
             "div[role='textbox'][contenteditable='true']",
+            # Data-testid variations
+            "div[data-testid='chat-input']",
+            "div[data-testid='input-area']",
+            "input[data-testid='prompt-input']",
             # Fallbacks: Generic (slowest, try last)
             "textarea",
             "div[contenteditable='true']",

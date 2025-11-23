@@ -1404,6 +1404,13 @@ class TelegramInterface:
         interface_path = payload.get("interface_path")
         chat_name = payload.get("chat_name")
         
+        # If no interface_path and no chat_name, silently ignore (likely from synthetic event message)
+        if not interface_path and not chat_name:
+            log_debug(
+                f"[telegram_interface] Skipping send: no interface_path or chat_name provided (likely synthetic event message)"
+            )
+            return
+        
         # Extract chat_id and thread_id from interface_path if provided
         thread_id = None
         target = None

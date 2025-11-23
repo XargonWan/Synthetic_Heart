@@ -646,15 +646,22 @@ class EventPlugin(AIPluginBase):
             interface_path = None
             if original_message and hasattr(original_message, 'interface_path'):
                 interface_path = original_message.interface_path
+                log_debug(f"[event_plugin] 📍 Extracted interface_path from original_message: {interface_path}")
+            else:
+                log_debug(f"[event_plugin] 📍 No interface_path in original_message (None={original_message is None})")
             
             # Build description with interface context for proper delivery
             # Format: MESSAGE: {text} [interface_path: {interface_path}]
             description = f"MESSAGE: {text}"
             if interface_path:
                 description += f" [interface_path: {interface_path}]"
+                log_debug(f"[event_plugin] 📝 Added interface_path to description: {interface_path}")
+            else:
+                log_debug(f"[event_plugin] ⚠️ No interface_path to add to description - will use default during delivery")
             
             # Extract original context from the conversation
             original_context = self._extract_original_context(original_message)
+            log_debug(f"[event_plugin] 📋 Extracted original_context: {original_context}")
             
             # Save as a one-time reminder (will be converted to UTC by _save_scheduled_reminder)
             await self._save_scheduled_reminder(
@@ -864,6 +871,7 @@ class EventPlugin(AIPluginBase):
                     match = re.search(r'\[interface_path:\s*([^\]]+)\]', description)
                     if match:
                         interface_path = match.group(1).strip()
+                        log_debug(f"[event_plugin] ✅ Extracted interface_path from description: {interface_path}")
                     
                     # Fallback: extract from original_context if not in description
                     if not interface_path:
@@ -877,12 +885,12 @@ class EventPlugin(AIPluginBase):
                                     f"[event_plugin] ✅ Extracted interface_path from original_context: {interface_path}"
                                 )
                     
+                    # If no interface_path, do NOT use a dummy one
+                    # Leave it as None - the telegram_bot.send_message will check and silently skip
                     if not interface_path:
                         log_warning(
-                            f"[event_plugin] ⚠️ Could not extract interface_path from event {event_id} description or original_context"
+                            f"[event_plugin] ⚠️ Could not extract interface_path from event {event_id}, synthetic message will NOT be routed to any interface"
                         )
-                        # Skip this event - we need interface_path to deliver properly
-                        continue
 
                     # Extract chat_id from interface_path for compatibility
                     # Format: telegram_bot/chat_id or telegram_bot/chat_id/thread_id
@@ -897,14 +905,14 @@ class EventPlugin(AIPluginBase):
 
                     synthetic_message = SimpleNamespace(
                         message_id=f"scheduled_event_{event_id}",
-                        interface_path=interface_path,
-                        chat_id=int(chat_id) if chat_id and chat_id.lstrip('-').isdigit() else -1,
+                        interface_path=interface_path,  # Will be None if not extracted
+                        chat_id=int(chat_id) if chat_id and chat_id.lstrip('-').isdigit() else None,
                         text=f"[SCHEDULED_EVENT_{event_id}] {description[:50]}",
                         from_user=SimpleNamespace(
                             id=0, username="scheduler", full_name="Scheduler"
                         ),
                         chat=SimpleNamespace(
-                            id=int(chat_id) if chat_id and chat_id.lstrip('-').isdigit() else -1,
+                            id=int(chat_id) if chat_id and chat_id.lstrip('-').isdigit() else None,
                             type="supergroup"
                         ),
                     )
