@@ -146,10 +146,68 @@ The backend sends animation commands via WebSocket with the following format:
         "type": "animation",
         "animation": "animations/Thinking.fbx",
         "loop": true,
-        "state": "think"
+        "state": "think",
+        "descriptor": {
+            "intro": {"end_frame": 35},
+            "loop": {"start_frame": 36, "end_frame": 77},
+            "outro": {"start_frame": 78}
+        }
     }
 
 The frontend listens for these messages and triggers the appropriate animation.
+
+Centralized Animation State
+=============================
+
+The animation system maintains a **centralized state on the backend** that is synchronized
+across all connected clients. This ensures that when multiple users/devices view the same
+avatar simultaneously (through different WebUI windows), they all see the **exact same animation**.
+
+**How It Works**
+
+1. **Single Source of Truth**: ``AnimationHandler`` maintains the current animation state
+   - Current state (IDLE, THINK, WRITE, TALK)
+   - Current animation file being played
+   - Animation descriptor (frame info for intro/loop/outro)
+
+2. **State Change Notifications**: When an animation changes:
+   - Backend notifies all registered callbacks via ``_notify_animation_state_changed()``
+   - WebUI broadcasts the new animation state to all connected WebSocket clients
+   - Each client receives the identical animation command
+
+3. **New Client Synchronization**: When a client connects:
+   - WebSocket endpoint retrieves current animation state via ``get_current_animation_state()``
+   - Sends the current animation to the new client before any other messages
+   - New client immediately displays the correct animation
+
+**Use Case Example**
+
+::
+
+    Timeline:
+    --------
+    
+    User 1 (Telegram)  → sends message
+                       ↓
+    Backend (AnimationHandler) 
+                   ↓ triggers THINK animation
+                   ↓ updates _current_animation_file, _current_animation_descriptor
+                   ↓ calls _notify_animation_state_changed()
+                   ↓ WebUI broadcasts to all clients
+    
+    Client A (WebUI, Device 1) ← receives THINK animation
+    Client B (WebUI, Device 2) ← receives THINK animation  (same video view!)
+    Client C (WebUI, Phone)    ← receives THINK animation
+    
+    All three devices see the same avatar doing the same THINKING motion simultaneously.
+
+**Configuration**
+
+No special configuration required. The synchronization is automatic:
+
+1. Backend calls ``register_animation_state_changed_callback()`` during initialization
+2. WebUI broadcasts to all connected clients when animation changes
+3. New clients receive current state on connection
 
 Adding New Animations
 =====================
