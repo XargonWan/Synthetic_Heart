@@ -94,6 +94,10 @@ async def build_json_prompt(message, context_memory, interface_name: str | None 
         Maximum characters for the JSON prompt. If provided, the prompt will be
         intelligently reduced by removing oldest memories. If None, no reduction is done.
     """
+    import time
+    start_time = time.time()
+    log_info(f"[json_prompt] ⏱️ BUILD PROMPT START for interface={interface_name}")
+    
     interface_path = getattr(message, "interface_path", None)
     text = getattr(message, "text", "") or ""
     
@@ -141,6 +145,7 @@ async def build_json_prompt(message, context_memory, interface_name: str | None 
     if expanded_tags:
         # Reduced to 3 memories for lighter JSON payloads; each will be trimmed to max 400 chars during reduction if needed
         memories = await search_memories(tags=expanded_tags, limit=3)
+        log_debug(f"[json_prompt] ⏱️ Loaded {len(memories)} memories from tags in {time.time() - start_time:.2f}s")
 
     # === 3. Context base (chat_history has priority over diary) ===
     context_section = {
@@ -149,6 +154,7 @@ async def build_json_prompt(message, context_memory, interface_name: str | None 
     }
 
     # === 3a. Static injections from plugins ===
+    static_persona = None  # Extract persona separately for instructions
     try:
         from core.action_parser import gather_static_injections
 
@@ -156,6 +162,12 @@ async def build_json_prompt(message, context_memory, interface_name: str | None 
         injections = await gather_static_injections(message, context_memory)
         log_info(f"[json_prompt] 📥 gather_static_injections() returned: {list(injections.keys()) if injections else 'empty'}")
         if isinstance(injections, dict):
+            # Extract persona BEFORE adding to context - it will go to instructions instead
+            if "persona" in injections:
+                static_persona = injections.pop("persona")
+                log_info(f"[json_prompt] 👤 Extracted persona for instructions ({len(static_persona) if static_persona else 0} chars)")
+            
+            # Add remaining injections to context
             context_section.update(injections)
             log_info(f"[json_prompt] ✅ Updated context_section with injections. Keys now: {list(context_section.keys())}")
     except Exception as e:
@@ -288,6 +300,12 @@ async def build_json_prompt(message, context_memory, interface_name: str | None 
     # Add JSON instructions to the prompt
     json_instructions = load_json_instructions()
     
+    # === CRITICAL: Prepend persona to instructions so ALL LLM types see it ===
+    # Use the persona extracted during gather_static_injections() 
+    if static_persona:
+        json_instructions = f"=== CRITICAL SYSTEM IDENTITY ===\n{static_persona}\n\n=== JSON RESPONSE INSTRUCTIONS ===\n{json_instructions}"
+        log_info(f"[json_prompt] 👤 Persona prepended to instructions ({len(static_persona)} chars)")
+    
     # Interface-specific instructions are provided via the available actions block
     # No hardcoded interface references - plugins define their own instructions
 
@@ -343,6 +361,8 @@ async def build_json_prompt(message, context_memory, interface_name: str | None 
     except Exception as e:
         log_warning(f"[json_prompt] Failed to apply prompt reduction: {e}")
 
+    elapsed = time.time() - start_time
+    log_info(f"[json_prompt] ⏱️ BUILD PROMPT COMPLETE in {elapsed:.2f}s, final size: {len(json_dumps(prompt_with_instructions)) if isinstance(prompt_with_instructions, dict) else len(str(prompt_with_instructions))} chars")
     return prompt_with_instructions
 
 

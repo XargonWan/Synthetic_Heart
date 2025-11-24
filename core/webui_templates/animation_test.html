@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Animation Test</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; }
+        canvas { display: block; }
+        #debug { position: fixed; top: 0; left: 0; color: #0f0; font-family: mono; font-size: 12px; background: rgba(0,0,0,0.8); padding: 10px; max-width: 600px; max-height: 80vh; overflow: auto; z-index: 999; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="debug"></div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@r128/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@r128/examples/jsm/"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+        import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+        import { VRM, VRMLoaderPlugin } from 'https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3/lib/three-vrm.module.js';
+
+        const debug = document.getElementById('debug');
+        function log(msg) {
+            console.log(msg);
+            debug.innerHTML += msg + '<br>';
+            debug.scrollTop = debug.scrollHeight;
+        }
+
+        log('🧪 Animation Test Started');
+
+        const canvas = document.getElementById('canvas');
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setClearColor(0x1a1a1a);
+        camera.position.set(0, 1.5, 2);
+        camera.lookAt(0, 1, 0);
+
+        let vrm = null;
+        let mixer = null;
+        let action = null;
+
+        async function loadVRM() {
+            log('📦 Loading VRM...');
+            const loader = new GLTFLoader();
+            loader.register(ext => new VRMLoaderPlugin(ext));
+            
+            try {
+                const gltf = await loader.loadAsync('/skins/Rei/Rei.vrm');
+                vrm = gltf.userData.vrm;
+                log(`✓ VRM Loaded: ${vrm.meta.name}`);
+                scene.add(vrm.scene);
+                
+                // Test humanoid
+                const hips = vrm.humanoid?.getNormalizedBoneNode('hips');
+                log(`  Hips bone: ${hips ? 'FOUND' : 'MISSING'}`);
+                
+                return vrm;
+            } catch (err) {
+                log(`✗ VRM Load Error: ${err.message}`);
+                throw err;
+            }
+        }
+
+        async function loadFBXAnimation(vrm) {
+            log('📽️ Loading FBX Animation...');
+            const loader = new FBXLoader();
+            
+            try {
+                const asset = await loader.loadAsync('/skins/Rei/animations/think/Thinking.fbx');
+                log(`✓ FBX Loaded, animations: ${asset.animations?.length || 0}`);
+                asset.animations.forEach(a => log(`  - ${a.name} (${a.duration.toFixed(2)}s, ${a.tracks.length} tracks)`));
+                
+                // Find clip
+                let clip = THREE.AnimationClip.findByName(asset.animations, 'mixamo.com');
+                if (!clip && asset.animations.length > 0) {
+                    log('⚠️ mixamo.com not found, using first animation');
+                    clip = asset.animations[0];
+                }
+                
+                if (!clip) {
+                    log('✗ No animation clip found!');
+                    return null;
+                }
+                
+                log(`✓ Using clip: ${clip.name} (${clip.duration.toFixed(2)}s, ${clip.tracks.length} tracks)`);
+                
+                // Create mixer
+                mixer = new THREE.AnimationMixer(vrm.scene);
+                log(`✓ Mixer created for VRM scene`);
+                
+                // Create action
+                action = mixer.clipAction(clip);
+                log(`✓ Action created from clip`);
+                log(`  Action time scale: ${action.timeScale}`);
+                log(`  Action enabled: ${action.enabled}`);
+                
+                // Play
+                action.play();
+                log(`✓ Action.play() called`);
+                
+                return clip;
+            } catch (err) {
+                log(`✗ FBX Load Error: ${err.message}`);
+                throw err;
+            }
+        }
+
+        async function init() {
+            try {
+                await loadVRM();
+                await loadFBXAnimation(vrm);
+                log('✅ All loaded successfully!');
+                
+                // Animate
+                animate();
+            } catch (err) {
+                log(`❌ Init Error: ${err.message}`);
+            }
+        }
+
+        let clock = new THREE.Clock();
+        let frameCount = 0;
+        
+        function animate() {
+            requestAnimationFrame(animate);
+            frameCount++;
+            
+            const delta = clock.getDelta();
+            
+            if (vrm) vrm.update(delta);
+            if (mixer) {
+                mixer.update(delta);
+                if (frameCount % 60 === 0) {
+                    log(`⏱️ Frame ${frameCount}: mixer time=${mixer.time.toFixed(2)}s, action paused=${action?.paused}`);
+                }
+            }
+            
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        init();
+    </script>
+</body>
+</html>

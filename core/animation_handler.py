@@ -123,8 +123,10 @@ class AnimationHandler:
             animation_file: The animation file name
             descriptor: The animation descriptor
         """
+        log_debug(f"[AnimationHandler] _notify_animation_state_changed CALLED: state={state.value}, animation={animation_file}, callbacks_count={len(self._animation_state_changed_callbacks)}")
         for callback in self._animation_state_changed_callbacks:
             try:
+                log_debug(f"[AnimationHandler] Calling callback: {callback.__name__ if hasattr(callback, '__name__') else 'unknown'}")
                 if asyncio.iscoroutinefunction(callback):
                     await callback(state, animation_file, descriptor)
                 else:
@@ -460,6 +462,8 @@ class AnimationHandler:
             priority: Optional priority level for this animation context.
                       If not provided, uses the priority from ANIMATION_STATE_PRIORITIES mapping.
         """
+        log_info(f"[AnimationHandler] ⭐ play_animation CALLED: state={state.value}, session={session_id}, loop={loop}, context={context_id}, priority={priority}", log_file="webui")
+        
         # Check if we need to play outro before transitioning to new animation
         # This must be done BEFORE acquiring the lock to avoid deadlocks
         outro_duration = 0

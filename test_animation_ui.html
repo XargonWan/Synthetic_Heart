@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Animation</title>
+</head>
+<body>
+    <h1>Animation Test Console</h1>
+    <p>Open browser DevTools (F12) and paste these commands:</p>
+    <pre>
+// Test 1: Start thinking animation
+animationHandler.startAction('think');
+
+// Test 2: Check if VRM is loaded
+console.log('VRM loaded:', window.currentVRM ? 'YES' : 'NO');
+
+// Test 3: Check if mixer is updating
+console.log('Mixer:', window.currentMixer ? 'YES' : 'NO');
+
+// Test 4: Manually trigger animation state message (simulating backend)
+window.handleAnimationMessage({
+    action: 'animate',
+    state: 'think',
+    animation: 'Thinking.fbx',
+    descriptor: {"intro":{"end_frame":35},"loop":{"start_frame":36,"end_frame":77},"outro":{"start_frame":78}}
+});
+
+// Test 5: Check animation handler state
+console.log('Animation Handler loaded actions:', Object.keys(window.animationHandler?.actions || {}));
+
+// Test 6: Get the current action playing
+console.log('Current mixer actions:', window.currentMixer?._actions || []);
+    </pre>
+</body>
+</html>

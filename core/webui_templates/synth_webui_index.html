@@ -4944,6 +4944,13 @@
                     }
                     return;
                 }
+                if (data.type === 'message_ack') {
+                    // Message acknowledgement - show thinking animation
+                    console.log('[synth_webui] Received message ACK, showing thinking indicator');
+                    showTypingIndicator();
+                    // The actual response will arrive as a 'message' type later
+                    return;
+                }
                 if (data.type === 'message') {
                     removeTypingIndicator(); // Remove typing indicator before showing actual message
                     const sender = data.sender || 'synth';
@@ -5664,11 +5671,13 @@
 
                                         if (loopStart !== null && loopEnd !== null) {
                                             const loopClip = THREE.AnimationUtils.subclip(clip, `${specificKey}_loop`, loopStart / fps, loopEnd / fps, fps);
+                                            // CRITICAL: Set loop directly on the clip BEFORE creating action
+                                            loopClip.loop = THREE.LoopRepeat;
                                             const loopAction = this.mixer.clipAction(loopClip);
                                             loopAction.setLoop(THREE.LoopRepeat);
                                             loopAction.clampWhenFinished = false;
                                             structuredAction.loop = loopAction;
-                                            console.log(`[AnimationHandler] Created loop section: frames ${loopStart}-${loopEnd-1}, setLoop(LoopRepeat), clamped=false`);
+                                            console.log(`[AnimationHandler] Created loop section: frames ${loopStart}-${loopEnd-1}, setLoop(LoopRepeat), clip.loop=${loopClip.loop}, clamped=false`);
                                         } else {
                                             structuredAction.loop = null;
                                             structuredAction._playOnceOnly = true;
@@ -5842,7 +5851,11 @@
                             this.mixer.addEventListener('finished', (evt) => {
                                 try {
                                     const finishedAction = evt.action;
-                                    const finishedClipName = finishedAction && finishedAction.getClip && finishedAction.getClip().name;
+                                    const finishedClip = finishedAction && finishedAction.getClip ? finishedAction.getClip() : null;
+                                    const finishedClipName = finishedClip?.name;
+                                    
+                                    console.log(`[AnimationHandler] 🎬 Finished event: clip=${finishedClipName}, loopMode=${finishedClip?.loop}, action.looping=${finishedAction?.looping}`);
+                                    
                                     // Iterate structured actions to find matching intro/loop/outro
                                     for (const key in this.actions) {
                                         const candidate = this.actions[key];
@@ -5862,24 +5875,25 @@
                                             } else if (candidate.loop) {
                                                 // Has loop section - transition to loop
                                                 console.log(`[AnimationHandler] intro finished for ${key} -> starting loop`);
-                                                console.log(`[AnimationHandler] Loop clip: ${candidate.loop.getClip().name}, loopMode: ${candidate.loop.getClip().loop}, timeScale: ${candidate.timeScale}`);
-                                                // Ensure loop is set to LoopRepeat before playing
+                                                // Ensure loop is set to LoopRepeat BOTH on clip and action
+                                                const loopClip = candidate.loop.getClip();
+                                                if (loopClip) loopClip.loop = THREE.LoopRepeat;
                                                 candidate.loop.setLoop(THREE.LoopRepeat);
                                                 candidate.loop.clampWhenFinished = false;
-                                                candidate.loop.reset().fadeIn(0.1).play();
+                                                candidate.loop.reset();
+                                                candidate.loop.fadeIn(0.2).play();
                                                 this.currentAction = candidate.loop;
                                                 this.currentActionPhase = 'loop';
+                                                console.log(`[AnimationHandler] Loop started: clip.loop=${loopClip?.loop}, action.loop=${candidate.loop.getClip()?.loop}`);
                                             }
                                             break;
                                         }
                                         if (finishedClipName === loopName && candidate.loop) {
-                                            // Loop finished - check if it was marked as playOnce
-                                            if (candidate.loop._playOnce) {
-                                                console.log(`[AnimationHandler] loop finished (playOnce=true) for ${key} -> starting outro`);
-                                                candidate.outro.reset().fadeIn(0.1).play();
-                                                this.currentAction = candidate.outro;
-                                                this.currentActionPhase = 'outro';
-                                            }
+                                            // Loop finished - this should NOT happen if LoopRepeat is working!
+                                            console.warn(`[AnimationHandler] ⚠️ UNEXPECTED: Loop finished event for ${key}, loopMode:${candidate.loop.getClip()?.loop}, _playOnce:${candidate.loop._playOnce}`);
+                                            // DO NOT try to restart the loop here - if LoopRepeat is working, this should never happen
+                                            // If it does happen, there's a deeper issue with the clip itself
+                                            // For now, just log it and ignore
                                             break;
                                         }
                                         if (finishedClipName === outroName) {
@@ -6542,7 +6556,31 @@
                     }
                     currentVRM.update(delta);
                 }
-                if (currentMixer) currentMixer.update(delta);
+                if (currentMixer) {
+                    currentMixer.update(delta);
+                    
+                    // Monitor loop status and keep it alive
+                    if (animationHandler && animationHandler.currentActionPhase === 'loop') {
+                        const action = animationHandler.currentAction;
+                        if (action) {
+                            const clip = action.getClip?.();
+                            
+                            // Solo monitoraggio: se il loop è paused, logga ma non forzare restart
+                            if (action.paused) {
+                                console.warn(`[render] ❌ LOOP PAUSED! (no force-restart)`);
+                            }
+                            
+                            if (!animationHandler._loopMonitorFrame) animationHandler._loopMonitorFrame = 0;
+                            animationHandler._loopMonitorFrame++;
+                            
+                            if (animationHandler._loopMonitorFrame % 60 === 0) {
+                                const loopMode = clip?.loop;
+                                const loopModeStr = loopMode === THREE.LoopRepeat ? '∞' : loopMode === THREE.LoopOnce ? '1x' : '?';
+                                console.log(`[render] 🔄 LOOP STATUS: paused=${action.paused}, time=${action.time?.toFixed(2)}s, clip=${clip?.name}, loopMode=${loopModeStr}`);
+                            }
+                        }
+                    }
+                }
                 controls.update();
                 resizeRenderer();
                 renderer.render(scene, camera);

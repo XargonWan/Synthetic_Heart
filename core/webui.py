@@ -177,6 +177,7 @@ class SynthWebUIInterface:
         self.app.get("/stats")(self.stats)
         self.app.get("/logs")(self.logs_page)
         self.app.get("/diary")(self.diary_page)
+        self.app.post("/api/log-console")(self.log_console_endpoint)
         self.app.websocket("/ws")(self.websocket_endpoint)
         self.app.websocket("/logs")(self.logs_ws_endpoint)
         self.app.get("/api/vrm")(self.list_vrm_models)
@@ -399,6 +400,33 @@ class SynthWebUIInterface:
                 "timestamp": datetime.utcnow().isoformat(),
                 "error": str(e),
             })
+
+    async def log_console_endpoint(self, request: Request):
+        """Receive console logs from the WebUI frontend and write them to webui.log.
+        
+        This endpoint allows the JavaScript console logs (log, error, warn, info)
+        to be captured and written to the webui.log file for persistence and debugging.
+        """
+        try:
+            data = await request.json()
+            level = data.get('level', 'info').upper()
+            message = data.get('message', '')
+            
+            if message:
+                # Log to webui.log with appropriate level
+                if level == 'ERROR':
+                    log_error(f"[console] {message}", log_file=WEBUI_LOG)
+                elif level == 'WARNING':
+                    log_warning(f"[console] {message}", log_file=WEBUI_LOG)
+                elif level == 'DEBUG':
+                    log_debug(f"[console] {message}", log_file=WEBUI_LOG)
+                else:  # info
+                    log_info(f"[console] {message}", log_file=WEBUI_LOG)
+            
+            return JSONResponse({"status": "logged"})
+        except Exception as e:
+            log_error(f"{LOG_PREFIX} Failed to log console message: {e}")
+            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
 
     async def stats(self):
         uptime = int((datetime.utcnow() - self.start_time).total_seconds())
@@ -684,6 +712,8 @@ class SynthWebUIInterface:
             animation_file: The animation file name
             descriptor: The animation descriptor (may be None)
         """
+        log_debug(f"{LOG_PREFIX} [_broadcast_animation_state] CALLED: state={state}, animation={animation_file}, has_descriptor={descriptor is not None}")
+        
         # Resolve the animation path
         if self.animation_handler:
             resolved_path, _ = self.animation_handler._resolve_animation_descriptor(animation_file)
@@ -698,7 +728,8 @@ class SynthWebUIInterface:
             "descriptor": descriptor
         }
         
-        log_info(f"{LOG_PREFIX} Broadcasting animation state to {len(self.connections)} clients: {state.value}/{animation_file}")
+        client_count = len(self.connections)
+        log_info(f"{LOG_PREFIX} Broadcasting animation state to {client_count} clients: {state.value}/{animation_file}", log_file=WEBUI_LOG)
         
         # Send to all connected clients
         for session_id, websocket in self.connections.items():
@@ -775,6 +806,22 @@ class SynthWebUIInterface:
             # Enqueue message in the priority queue instead of processing directly
             # The message_queue consumer will handle it and send response via the interface
             log_info(f"{LOG_PREFIX} Enqueueing message to priority queue (skip_mention_check=True for WebUI)")
+            
+            # Send immediate acknowledgement to client that message was received
+            try:
+                websocket = self.connections.get(session_id)
+                if websocket:
+                    ack_message = {
+                        "type": "message_ack",
+                        "message_id": message.message_id,
+                        "status": "received",
+                        "text": "📝 Ricevuto il tuo messaggio, sto elaborando..."
+                    }
+                    await websocket.send_json(ack_message)
+                    log_info(f"{LOG_PREFIX} Sent immediate ACK to session {session_id}")
+            except Exception as ack_exc:
+                log_warning(f"{LOG_PREFIX} Failed to send ACK message: {ack_exc}")
+            
             await message_queue.enqueue(
                 bot=self,
                 message=message,
@@ -970,7 +1017,7 @@ class SynthWebUIInterface:
         
         # Fallback to first available model, preferring SynTh.vrm as default
         available_vrms = list(sorted(self.vrm_dir.glob("*.vrm")))
-        log_debug(f"{LOG_PREFIX} Available VRM files: {[v.name for v in available_vrms]}")
+        log_debug(f"{LOG_PREFIX} Available VRM files in temp dir: {[v.name for v in available_vrms]}")
         
         # Prefer SyntH.vrm as the default model
         synth_vrm = self.vrm_dir / "SyntH.vrm"
@@ -979,12 +1026,39 @@ class SynthWebUIInterface:
             self._set_active_vrm(synth_vrm.name)
             return synth_vrm.name
         
-        # Otherwise use first available
+        # Otherwise use first available from temp
         for candidate in available_vrms:
-            log_info(f"{LOG_PREFIX} Using first available VRM: {candidate.name}")
+            log_info(f"{LOG_PREFIX} Using first available VRM from temp: {candidate.name}")
             return candidate.name
         
-        log_warning(f"{LOG_PREFIX} No VRM models found in directory")
+        # Fallback: try to find a model in the current persona's folder
+        try:
+            from core.persona_manager import get_persona_manager
+            persona_mgr = get_persona_manager()
+            current_persona = persona_mgr.get_current_persona()
+            if current_persona and current_persona.name:
+                persona_folder = Path(__file__).resolve().parent.parent / "skins" / current_persona.name
+                persona_vrm = persona_folder / "model.vrm"
+                if persona_vrm.exists():
+                    log_info(f"{LOG_PREFIX} Using VRM from current persona folder: {persona_vrm}")
+                    # Return as relative URL from web root
+                    try:
+                        web_path = persona_vrm.relative_to(Path(__file__).resolve().parent.parent)
+                        return f"/{web_path}"
+                    except ValueError:
+                        return f"/skins/{current_persona.name}/model.vrm"
+        except Exception as exc:
+            log_debug(f"{LOG_PREFIX} Failed to find VRM from persona manager: {exc}")
+        
+        # Last resort: try common persona folders
+        skins_dir = Path(__file__).resolve().parent.parent / "skins"
+        for persona_folder in ["Rei", "Rekku", "Zero"]:
+            persona_vrm = skins_dir / persona_folder / "model.vrm"
+            if persona_vrm.exists():
+                log_info(f"{LOG_PREFIX} Using fallback VRM from {persona_folder}: {persona_vrm}")
+                return f"/skins/{persona_folder}/model.vrm"
+        
+        log_warning(f"{LOG_PREFIX} No VRM models found in any location")
         return None
 
     def _set_active_vrm(self, model_name: Optional[str]) -> None:
@@ -2053,7 +2127,13 @@ class SynthWebUIInterface:
     async def get_active_vrm_endpoint(self):
         log_debug(f"{LOG_PREFIX} Getting active VRM: {self.active_vrm}")
         if self.active_vrm:
-            # Build URL relative to web root based on vrm_dir
+            # If active_vrm already starts with /, it's already a web URL
+            if self.active_vrm.startswith("/"):
+                result = {"name": self.active_vrm.split("/")[-1], "url": self.active_vrm}
+                log_debug(f"{LOG_PREFIX} Active VRM response (URL path): {result}")
+                return JSONResponse(result)
+            
+            # Otherwise, build URL from vrm_dir
             vrm_path = self.vrm_dir / self.active_vrm
             # Convert absolute path to web-accessible URL
             try:
