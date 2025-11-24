@@ -5503,8 +5503,8 @@
 
                             // Use selectedFile in clip names so they match the storage key in mixer finished handler
                             const clipKeyBase = selectedFile ? `${actionName}:${selectedFile}` : actionName;
-                            const introClip = THREE.AnimationUtils.subclip(clip, `${clipKeyBase}_intro`, introStart / fps, introEnd / fps, fps);
-                            const outroClip = THREE.AnimationUtils.subclip(clip, `${clipKeyBase}_outro`, outroStart / fps, outroEnd / fps, fps);
+                            const introClip = THREE.AnimationUtils.subclip(clip, `${clipKeyBase}_intro`, introStart, introEnd, fps);
+                            const outroClip = THREE.AnimationUtils.subclip(clip, `${clipKeyBase}_outro`, outroStart, outroEnd, fps);
                             
                             const introAction = this.mixer.clipAction(introClip);
                             const outroAction = this.mixer.clipAction(outroClip);
@@ -5523,7 +5523,12 @@
 
                             // Only create loop section if it exists in the descriptor or is default 'think'
                             if (loopStart !== null && loopEnd !== null) {
-                                const loopClip = THREE.AnimationUtils.subclip(clip, `${clipKeyBase}_loop`, loopStart / fps, loopEnd / fps, fps);
+                                            const loopClip = THREE.AnimationUtils.subclip(clip, `${clipKeyBase}_loop`, loopStart, loopEnd, fps);
+                                            // Attach loop frame metadata so we can verify during playback
+                                            try {
+                                                loopClip._meta = loopClip._meta || {};
+                                                loopClip._meta.loopFrames = { startFrame: loopStart, endFrame: loopEnd, fps };
+                                            } catch (e) { /* ignore metadata attach errors */ }
                                 const loopAction = this.mixer.clipAction(loopClip);
                                 loopAction.setLoop(THREE.LoopRepeat);
                                 loopAction.clampWhenFinished = false;
@@ -5652,8 +5657,8 @@
                                             outroEnd = descriptor.outro?.end_frame ?? totalFrames;
                                         }
 
-                                        const introClip = THREE.AnimationUtils.subclip(clip, `${specificKey}_intro`, introStart / fps, introEnd / fps, fps);
-                                        const outroClip = THREE.AnimationUtils.subclip(clip, `${specificKey}_outro`, outroStart / fps, outroEnd / fps, fps);
+                                        const introClip = THREE.AnimationUtils.subclip(clip, `${specificKey}_intro`, introStart, introEnd, fps);
+                                        const outroClip = THREE.AnimationUtils.subclip(clip, `${specificKey}_outro`, outroStart, outroEnd, fps);
                                         
                                         const introAction = this.mixer.clipAction(introClip);
                                         const outroAction = this.mixer.clipAction(outroClip);
@@ -5670,9 +5675,14 @@
                                         };
 
                                         if (loopStart !== null && loopEnd !== null) {
-                                            const loopClip = THREE.AnimationUtils.subclip(clip, `${specificKey}_loop`, loopStart / fps, loopEnd / fps, fps);
-                                            // CRITICAL: Set loop directly on the clip BEFORE creating action
-                                            loopClip.loop = THREE.LoopRepeat;
+                                                    const loopClip = THREE.AnimationUtils.subclip(clip, `${specificKey}_loop`, loopStart, loopEnd, fps);
+                                                        // Attach loop frame metadata so we can verify during playback
+                                                        try {
+                                                            loopClip._meta = loopClip._meta || {};
+                                                            loopClip._meta.loopFrames = { startFrame: loopStart, endFrame: loopEnd, fps };
+                                                        } catch (e) { /* ignore */ }
+                                                        // CRITICAL: Set loop directly on the clip BEFORE creating action
+                                                        loopClip.loop = THREE.LoopRepeat;
                                             const loopAction = this.mixer.clipAction(loopClip);
                                             loopAction.setLoop(THREE.LoopRepeat);
                                             loopAction.clampWhenFinished = false;
@@ -5881,7 +5891,33 @@
                                                 candidate.loop.setLoop(THREE.LoopRepeat);
                                                 candidate.loop.clampWhenFinished = false;
                                                 candidate.loop.reset();
+                                                // Protect against corrupted local time (NaN) — ensure starting time is valid
+                                                try {
+                                                    if (!Number.isFinite(candidate.loop.time)) {
+                                                        console.warn(`[AnimationHandler] 🚑 loop action time invalid (${candidate.loop.time}) — resetting to 0`);
+                                                        candidate.loop.time = 0;
+                                                    }
+                                                } catch (e) {
+                                                    console.warn('[AnimationHandler] Failed to validate loop action time:', e);
+                                                }
+                                                // Make sure it's enabled and unpaused before playing
+                                                try {
+                                                    candidate.loop.enabled = true;
+                                                    candidate.loop.paused = false;
+                                                } catch (e) {
+                                                    /* ignore */
+                                                }
                                                 candidate.loop.fadeIn(0.2).play();
+                                                // When we start the loop, log expected vs actual and ensure frames match
+                                                const loopClipMeta = candidate.loop.getClip()?._meta?.loopFrames;
+                                                if (loopClipMeta) {
+                                                    const expectedDuration = (loopClipMeta.endFrame - loopClipMeta.startFrame) / loopClipMeta.fps;
+                                                    const actualDuration = candidate.loop.getClip().duration || 0;
+                                                    console.log(`[AnimationHandler] ▶ Loop metadata: start=${loopClipMeta.startFrame}, end=${loopClipMeta.endFrame}, fps=${loopClipMeta.fps}, expectedDuration=${expectedDuration.toFixed(3)}s, actualClipDuration=${actualDuration.toFixed(3)}s`);
+                                                    if (Math.abs(expectedDuration - actualDuration) > 0.05) {
+                                                        console.warn(`[AnimationHandler] ⚠️ Loop duration mismatch for ${key}: expected ${expectedDuration.toFixed(3)}s != actual ${actualDuration.toFixed(3)}s`);
+                                                    }
+                                                }
                                                 this.currentAction = candidate.loop;
                                                 this.currentActionPhase = 'loop';
                                                 console.log(`[AnimationHandler] Loop started: clip.loop=${loopClip?.loop}, action.loop=${candidate.loop.getClip()?.loop}`);
@@ -6572,11 +6608,33 @@
                             
                             if (!animationHandler._loopMonitorFrame) animationHandler._loopMonitorFrame = 0;
                             animationHandler._loopMonitorFrame++;
+
+                            // Fix suspicious NaN times in render loop when seen — try to recover safely
+                            try {
+                                if (!Number.isFinite(action.time) || Number.isNaN(action.time)) {
+                                    console.warn('[render] ⚠️ Detected invalid action.time (NaN). Resetting to 0 to recover.');
+                                    action.time = 0;
+                                    try { action.enabled = true; action.paused = false; } catch (e) { /* ignore */ }
+                                }
+                            } catch (e) {
+                                /* ignore */
+                            }
                             
                             if (animationHandler._loopMonitorFrame % 60 === 0) {
                                 const loopMode = clip?.loop;
                                 const loopModeStr = loopMode === THREE.LoopRepeat ? '∞' : loopMode === THREE.LoopOnce ? '1x' : '?';
-                                console.log(`[render] 🔄 LOOP STATUS: paused=${action.paused}, time=${action.time?.toFixed(2)}s, clip=${clip?.name}, loopMode=${loopModeStr}`);
+                                // If clip has loop frame metadata, compute current frame (relative to source)
+                                const loopMeta = clip?._meta?.loopFrames;
+                                if (loopMeta && loopMeta.fps) {
+                                    const currentFrame = Math.round(loopMeta.startFrame + (Number.isFinite(action.time) ? action.time * loopMeta.fps : 0));
+                                    const inRange = currentFrame >= loopMeta.startFrame && currentFrame <= loopMeta.endFrame;
+                                    console.log(`[render] 🔄 LOOP STATUS: paused=${action.paused}, time=${action.time?.toFixed(2)}s, clip=${clip?.name}, loopMode=${loopModeStr}, currentFrame=${currentFrame} (range ${loopMeta.startFrame}-${loopMeta.endFrame})`);
+                                    if (!inRange) {
+                                        console.warn(`[render] ⚠️ LOOP FRAME OUT OF RANGE: ${currentFrame} not in ${loopMeta.startFrame}-${loopMeta.endFrame}`);
+                                    }
+                                } else {
+                                    console.log(`[render] 🔄 LOOP STATUS: paused=${action.paused}, time=${action.time?.toFixed(2)}s, clip=${clip?.name}, loopMode=${loopModeStr}`);
+                                }
                             }
                         }
                     }
