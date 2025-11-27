@@ -4891,7 +4891,14 @@
                     // incoming state is for a different action (or idle) with LOWER priority,
                     // ignore it — this ensures low-priority phases like IDLE won't flash over THINKING.
                     if (currentDisplayedActionId && incomingActionId !== currentDisplayedActionId && incomingPriority < currentPriority) {
-                        console.log('[synth_webui] Ignoring lower-priority incoming state', incomingPhase, 'that would interrupt', currentDisplayedPhase);
+                        console.log('[synth_webui] Lower-priority incoming state', incomingPhase, 'would interrupt', currentDisplayedPhase, '- queuing it to apply after current action finishes');
+                        // Rather than dropping it we remember it and apply it when the current
+                        // high-priority action completes (especially its outro). This avoids
+                        // losing state transitions that occur while THINKING is active.
+                        window.__synth_pending_action_state = data; // session-local queue holder
+                        // Also set a lightweight timeout to drop stale pending states after a while
+                        try { if (window.__synth_pending_action_state_timeout) clearTimeout(window.__synth_pending_action_state_timeout); } catch (e) {}
+                        window.__synth_pending_action_state_timeout = setTimeout(() => { try { window.__synth_pending_action_state = null; window.__synth_pending_action_state_timeout = null; } catch (e) {} }, 120000);
                         return;
                     }
 
@@ -5763,31 +5770,69 @@
                             if (this.currentActionPhase === 'intro' || this.currentActionPhase === 'loop') {
                                 console.log(`[AnimationHandler] Currently in ${this.currentActionPhase} phase, transitioning to outro...`);
                                 try {
-                                    // Stop the current phase
+                                    // Stop the current phase (fade) and then ensure it's stopped to avoid overlay
+                                    const fadeDuration = 150; // ms
                                     if (this.currentActionPhase === 'intro' && this.currentStructuredAction.intro) {
-                                        this.currentStructuredAction.intro.fadeOut(0.15);
+                                        this.currentStructuredAction.intro.fadeOut(fadeDuration / 1000);
                                     } else if (this.currentActionPhase === 'loop' && this.currentStructuredAction.loop) {
-                                        this.currentStructuredAction.loop.fadeOut(0.15);
+                                        // Fade out the loop gently
+                                        this.currentStructuredAction.loop.fadeOut(fadeDuration / 1000);
                                     }
-                                    
-                                    // Start outro
-                                    if (this.currentStructuredAction.outro) {
-                                        this.currentStructuredAction.outro.reset().fadeIn(0.1).play();
-                                        this.currentAction = this.currentStructuredAction.outro;
-                                        this.currentActionPhase = 'outro';
-                                        console.log(`[AnimationHandler] Started outro for ${this.currentActionName}`);
-                                        // Schedule the next action after outro completes
-                                        const outroClip = this.currentStructuredAction.outro.getClip();
-                                        const outroDuration = (outroClip ? outroClip.duration : 1) * 1000;
-                                        setTimeout(() => {
-                                            console.log(`[AnimationHandler] Outro completed for ${this.currentActionName}, now starting ${actionName}`);
-                                            this.startAction(actionName, animationFile, playOnce, playSection);
-                                        }, Math.round(outroDuration) + 100);
-                                        return;
-                                    }
+
+                                    // After fade completes, explicitly stop (to avoid residual state) then start outro
+                                    setTimeout(() => {
+                                        try {
+                                            // stop previous phase to make way for outro
+                                            try {
+                                                if (this.currentActionPhase === 'intro' && this.currentStructuredAction.intro) {
+                                                    this.currentStructuredAction.intro.stop();
+                                                } else if (this.currentActionPhase === 'loop' && this.currentStructuredAction.loop) {
+                                                    this.currentStructuredAction.loop.stop();
+                                                }
+                                            } catch (e) { /* ignore */ }
+
+                                            // Start outro if available
+                                            if (this.currentStructuredAction.outro) {
+                                                // Ensure outro starts at time 0 and plays once
+                                                try {
+                                                    const outroAction = this.currentStructuredAction.outro;
+                                                    outroAction.reset();
+                                                    outroAction.setLoop(THREE.LoopOnce, 0);
+                                                    outroAction.clampWhenFinished = true;
+                                                    outroAction.enabled = true;
+                                                    outroAction.paused = false;
+                                                    outroAction.fadeIn(0.1).play();
+                                                } catch (e) {
+                                                    // fallback using existing code if above fails
+                                                    this.currentStructuredAction.outro.reset().fadeIn(0.1).play();
+                                                }
+
+                                                this.currentAction = this.currentStructuredAction.outro;
+                                                this.currentActionPhase = 'outro';
+                                                console.log(`[AnimationHandler] Started outro for ${this.currentActionName} (after fade stop of prior phase)`);
+
+                                                // Determine duration reliably, fallback to 1s
+                                                const outroClip = this.currentStructuredAction.outro.getClip();
+                                                const outroDuration = (outroClip && Number.isFinite(outroClip.duration) ? outroClip.duration : 1) * 1000;
+
+                                                // Schedule the next action after outro completes
+                                                setTimeout(() => {
+                                                    console.log(`[AnimationHandler] Outro completed for ${this.currentActionName}, now starting ${actionName}`);
+                                                    try { this.startAction(actionName, animationFile, playOnce, playSection); } catch (e) { console.warn('[AnimationHandler] Failed to start next action after outro:', e); }
+                                                }, Math.round(outroDuration) + 100);
+                                                return;
+                                            }
+                                        } catch (errInner) {
+                                            console.warn('[AnimationHandler] Error while handling fade->stop->outro transition:', errInner);
+                                        }
+                                    }, fadeDuration + 10);
                                 } catch (err) {
                                     console.warn('[AnimationHandler] Error during transition to outro:', err);
                                 }
+
+                                // We've scheduled the outro and the next action to start after it — don't continue
+                                // starting the new action now.
+                                return;
                             }
                         }
 
@@ -5939,6 +5984,11 @@
                                             this.currentActionName = null;
                                             this.currentStructuredAction = null;
                                             
+                                            // Signal to the page that a structured outro finished for this key
+                                            try {
+                                                window.dispatchEvent(new CustomEvent('synth_animation_outro_completed', { detail: { key } }));
+                                            } catch (e) { /* ignore non-browser env */ }
+
                                             // If this was an idle animation, advance to next random idle
                                             if (key.startsWith('idle:') || key === 'idle') {
                                                 console.log(`[AnimationHandler] Outro finished for idle animation -> starting next idle`);
@@ -6215,6 +6265,105 @@
                         }
                     } catch (err) {
                         console.warn('[AnimationHandler] Failed to clear playOnce timers on stopAll:', err);
+                    }
+                }
+
+                // -----------------------------
+                // Debug: temporary loop override (WEB_DEBUG only, session-local)
+                // -----------------------------
+                async startTemporaryLoop(actionName, animationFile, startFrame, endFrame, fps = 30) {
+                    // Create an ephemeral looping action that will override the current animation until cleared
+                    try {
+                        console.log(`[AnimationHandler] startTemporaryLoop called: ${actionName}, ${animationFile}, frames ${startFrame}-${endFrame}`);
+
+                        // Clear existing debug override if present
+                        if (this._debugOverride && this._debugOverride.action) {
+                            try { this.clearTemporaryOverride(); } catch (e) { /* ignore */ }
+                        }
+
+                        let clip = null;
+                        if (animationFile) {
+                            // ensure it's loaded
+                            clip = this.loadedAnimations[animationFile] || await this.loadAnimation(actionName, animationFile);
+                        } else {
+                            // no file provided: try to pick a default for the action
+                            const files = await this.getAnimationsForType(actionName);
+                            const pick = (files && files.length) ? files[0] : null;
+                            clip = pick ? (this.loadedAnimations[pick] || await this.loadAnimation(actionName, pick)) : null;
+                        }
+
+                        if (!clip) {
+                            console.warn('[AnimationHandler] No clip available to create temporary loop');
+                            return null;
+                        }
+
+                        // Create subclip using frame indices
+                        const tfps = Number.isFinite(fps) ? fps : 30;
+                        const subName = `debug:${actionName}:${animationFile || clip.name}:${startFrame}-${endFrame}`;
+                        const loopClip = THREE.AnimationUtils.subclip(clip, subName, Math.max(0, Math.floor(startFrame)), Math.max(1, Math.floor(endFrame)), tfps);
+                        try { loopClip._meta = loopClip._meta || {}; loopClip._meta.loopFrames = { startFrame: startFrame, endFrame: endFrame, fps: tfps }; } catch (e) { /* ignore */ }
+
+                        // Ensure the clip intends to repeat
+                        loopClip.loop = THREE.LoopRepeat;
+                        const loopAction = this.mixer.clipAction(loopClip);
+                        loopAction.setLoop(THREE.LoopRepeat);
+                        loopAction.clampWhenFinished = false;
+
+                        // Save the previous current action to restore later
+                        const prevAction = this.currentAction;
+                        const prevPhase = this.currentActionPhase;
+                        const prevStructured = this.currentStructuredAction;
+
+                        // Fade out current and play debug loop
+                        try { if (this.currentAction && this.currentAction !== loopAction) this.currentAction.fadeOut(0.15); } catch (e) { /* ignore */ }
+                        loopAction.reset(); loopAction.enabled = true; loopAction.paused = false; loopAction.fadeIn(0.15).play();
+
+                        this._debugOverride = { action: loopAction, clip: loopClip, previous: { action: prevAction, phase: prevPhase, structured: prevStructured }, params: { actionName, animationFile, startFrame, endFrame, fps: tfps } };
+
+                        // Make sure we mark the current state so UI can reflect it
+                        this.currentAction = loopAction;
+                        this.currentActionName = actionName;
+                        this.currentActionPhase = 'debug_loop';
+                        this.currentStructuredAction = null;
+
+                        console.log('[AnimationHandler] Temporary debug loop started', this._debugOverride);
+                        return this._debugOverride;
+                    } catch (err) {
+                        console.warn('[AnimationHandler] startTemporaryLoop failed:', err);
+                        return null;
+                    }
+                }
+
+                clearTemporaryOverride() {
+                    try {
+                        if (!this._debugOverride) return;
+                        const debug = this._debugOverride;
+                        console.log('[AnimationHandler] Clearing temporary debug override:', debug);
+
+                        try { if (debug.action) debug.action.fadeOut(0.12); } catch (e) { /* ignore */ }
+
+                        // Try to restore prior action
+                        const prev = debug.previous || {};
+                        setTimeout(() => {
+                            try {
+                                if (prev.action) {
+                                    try { prev.action.reset().fadeIn(0.15).play(); } catch (e) { /* ignore */ }
+                                    this.currentAction = prev.action;
+                                    this.currentActionPhase = prev.phase || null;
+                                    this.currentStructuredAction = prev.structured || null;
+                                } else {
+                                    // If nothing to restore, default to idle
+                                    try { this.startAction('idle'); } catch (e) { /* ignore */ }
+                                }
+                            } catch (errInner) {
+                                console.warn('[AnimationHandler] Error restoring previous action after clearing debug override:', errInner);
+                            }
+                        }, 150);
+
+                        // Remove debug override reference
+                        delete this._debugOverride;
+                    } catch (err) {
+                        console.warn('[AnimationHandler] clearTemporaryOverride failed:', err);
                     }
                 }
             }
@@ -6655,6 +6804,199 @@
             window.animationHandler = animationHandler;
             console.log('[synth_webui] Animation functions exposed globally via window.VRMAnimations');
             console.log('[synth_webui] animationHandler exposed globally');
+
+            // When a structured action's outro finishes, the AnimationHandler will
+            // emit a custom event so we can resume any queued lower-priority
+            // state (that we previously cached instead of dropping).
+            try {
+                window.addEventListener('synth_animation_outro_completed', (ev) => {
+                    try {
+                        console.log('[synth_webui] Received synth_animation_outro_completed for', ev?.detail?.key);
+                        const pending = window.__synth_pending_action_state || null;
+                        if (!pending) return;
+
+                        console.log('[synth_webui] Applying previously-queued action_state after outro:', pending);
+                        // Re-run the action_state processing path with the stored payload
+                        // (we re-run minimal logic to avoid duplicating queuing behavior)
+                        const phaseToAnimationState = {
+                            'THINKING': 'think', 'WRITING': 'write', 'CORRECTING': 'think', 'TALKING': 'talk', 'IDLE': 'idle'
+                        };
+                        const incomingPhase = pending.phase || 'IDLE';
+                        const incomingActionId = pending.action_id || null;
+                        const animationState = phaseToAnimationState[incomingPhase] || 'idle';
+
+                        // Apply the incoming state now that the previous high-priority action is done
+                        currentDisplayedPhase = incomingPhase;
+                        currentDisplayedActionId = incomingActionId;
+
+                        if (animationHandler) {
+                            console.log('[synth_webui] Starting queued animation state:', animationState);
+                            animationHandler.startAction(animationState);
+                        } else {
+                            pendingAnimationCommands.push({ state: animationState, phase: incomingPhase, action_id: incomingActionId });
+                        }
+
+                        // Clear pending
+                        window.__synth_pending_action_state = null;
+                        try { if (window.__synth_pending_action_state_timeout) clearTimeout(window.__synth_pending_action_state_timeout); window.__synth_pending_action_state_timeout = null; } catch (e) {}
+                    } catch (err) { console.warn('[synth_webui] Error while applying queued action_state after outro:', err); }
+                });
+            } catch (e) { /* ignore */ }
+
+            // Initialize debug UI when WEB_DEBUG is enabled in the base template
+            try {
+                const synthDebug = document.getElementById('synth-debug');
+                const debugEnabled = synthDebug && (synthDebug.dataset.debugEnabled === '1' || synthDebug.dataset.debugEnabled === 'true');
+                if (debugEnabled) {
+                    console.log('[synth_webui] WEB_DEBUG enabled — injecting animation debug panel');
+
+                    // Create draggable debug panel
+                    const panel = document.createElement('div');
+                    panel.id = 'animation-debug-panel';
+                    panel.style.position = 'fixed';
+                    panel.style.right = '18px';
+                    panel.style.bottom = '18px';
+                    panel.style.width = '340px';
+                    panel.style.maxWidth = 'calc(100% - 40px)';
+                    panel.style.zIndex = 99999;
+                    panel.style.background = 'rgba(12,12,12,0.9)';
+                    panel.style.color = '#fff';
+                    panel.style.border = '1px solid rgba(255,255,255,0.06)';
+                    panel.style.padding = '8px';
+                    panel.style.borderRadius = '8px';
+                    panel.style.fontSize = '12px';
+                    panel.style.boxShadow = '0 8px 30px rgba(0,0,0,0.7)';
+                    panel.style.userSelect = 'none';
+
+                    panel.innerHTML = `
+                        <div id="animation-debug-header" style="display:flex;align-items:center;justify-content:space-between;cursor:move;margin-bottom:6px;">
+                            <div style="font-weight:700;">Animation Debug</div>
+                            <div style="font-size:11px;opacity:0.7">Session only</div>
+                        </div>
+                        <div id="animation-debug-body" style="display:flex;flex-direction:column;gap:6px;">
+                            <div id="animation-debug-status" style="font-size:12px;line-height:1.1;">
+                                <div>Current: <span id="animation-debug-current">—</span></div>
+                                <div>Phase: <span id="animation-debug-phase">—</span></div>
+                                <div>Frame: <span id="animation-debug-frame">—</span></div>
+                            </div>
+
+                            <div style="display:flex;gap:6px;align-items:center;">
+                                <select id="animation-debug-type" style="flex:1;padding:6px;border-radius:6px;background:#111;border:1px solid rgba(255,255,255,0.06);color:#fff;"></select>
+                                <select id="animation-debug-file" style="flex:2;padding:6px;border-radius:6px;background:#111;border:1px solid rgba(255,255,255,0.06);color:#fff;"></select>
+                            </div>
+
+                            <div style="display:flex;gap:6px;">
+                                <input id="animation-debug-start" type="number" placeholder="start" style="flex:1;padding:6px;border-radius:6px;background:#111;border:1px solid rgba(255,255,255,0.06);color:#fff;" />
+                                <input id="animation-debug-end" type="number" placeholder="end" style="flex:1;padding:6px;border-radius:6px;background:#111;border:1px solid rgba(255,255,255,0.06);color:#fff;" />
+                            </div>
+
+                            <div style="display:flex;gap:6px;">
+                                <button id="animation-debug-start-loop" style="flex:1;padding:6px;border-radius:6px;background:linear-gradient(0deg,#0b7be6,#0b62d7);border:0;color:#fff;">Start Temp Loop</button>
+                                <button id="animation-debug-clear-loop" style="flex:1;padding:6px;border-radius:6px;background:#333;border:1px solid rgba(255,255,255,0.06);color:#fff;">Clear Override</button>
+                            </div>
+
+                            <div style="display:flex;gap:6px;justify-content:space-between;align-items:center;font-size:11px;opacity:0.8;">
+                                <div id="animation-debug-last" style="flex:1">Loaded actions: <span id="animation-debug-loaded">0</span></div>
+                                <div style="display:flex;gap:6px;">
+                                    <button id="animation-debug-refresh-files" style="padding:6px;border-radius:6px;background:#222;border:1px solid rgba(255,255,255,0.03);color:#fff;">Refresh</button>
+                                </div>
+                            </div>
+                        </div>`;
+
+                    document.body.appendChild(panel);
+
+                    // Dragging
+                    (function makeDraggable(el) {
+                        const header = document.getElementById('animation-debug-header');
+                        let dragging = false, startX = 0, startY = 0, startRight = 0, startBottom = 0;
+                        header.addEventListener('pointerdown', (ev) => { dragging = true; startX = ev.clientX; startY = ev.clientY; startRight = parseFloat(getComputedStyle(el).right); startBottom = parseFloat(getComputedStyle(el).bottom); document.body.style.userSelect = 'none'; });
+                        window.addEventListener('pointermove', (ev) => {
+                            if (!dragging) return;
+                            const dx = ev.clientX - startX; const dy = ev.clientY - startY;
+                            el.style.right = (startRight - dx) + 'px';
+                            el.style.bottom = (startBottom - dy) + 'px';
+                        });
+                        window.addEventListener('pointerup', () => { dragging = false; document.body.style.userSelect = ''; });
+                    })(panel);
+
+                    // Fill action types
+                    const types = ['idle','think','talk','write','touch'];
+                    const selType = document.getElementById('animation-debug-type');
+                    const selFile = document.getElementById('animation-debug-file');
+                    const startInput = document.getElementById('animation-debug-start');
+                    const endInput = document.getElementById('animation-debug-end');
+
+                    for (const t of types) {
+                        const opt = document.createElement('option'); opt.value = t; opt.textContent = t; selType.appendChild(opt);
+                    }
+
+                    async function refreshFilesForType(actionType) {
+                        try {
+                            const files = animationHandler ? await animationHandler.getAnimationsForType(actionType) : (animationMappings[actionType] || []);
+                            selFile.innerHTML = '';
+                            if (!files || files.length === 0) {
+                                const o = document.createElement('option'); o.value = ''; o.textContent = '— no files —'; selFile.appendChild(o); return;
+                            }
+                            for (const f of files) {
+                                const o = document.createElement('option'); o.value = f; o.textContent = f; selFile.appendChild(o);
+                            }
+                            document.getElementById('animation-debug-loaded').textContent = files.length;
+                        } catch (err) { console.warn('[synth_webui] Failed to refresh debug file list:', err); }
+                    }
+
+                    selType.addEventListener('change', () => refreshFilesForType(selType.value));
+                    document.getElementById('animation-debug-refresh-files').addEventListener('click', () => refreshFilesForType(selType.value));
+
+                    // Start the first refresh for 'think'
+                    (async () => { try { selType.value = 'think'; await refreshFilesForType('think'); } catch (e) { /* ignore */ } })();
+
+                    // Trigger start debug loop button
+                    document.getElementById('animation-debug-start-loop').addEventListener('click', async () => {
+                        try {
+                            const aType = selType.value;
+                            const aFile = selFile.value || null;
+                            const s = parseInt(startInput.value || '0', 10);
+                            const e = parseInt(endInput.value || '0', 10);
+                            if (!animationHandler) return console.warn('[synth_webui] No animationHandler');
+                            if (!aFile) return alert('Please select an animation file first');
+                            if (!Number.isFinite(s) || !Number.isFinite(e)) return alert('Please enter numeric frame values');
+                            if (e <= s) return alert('end must be > start');
+                            await animationHandler.startTemporaryLoop(aType, aFile, s, e);
+                        } catch (err) { console.warn('[synth_webui] start temp loop error:', err); }
+                    });
+
+                    document.getElementById('animation-debug-clear-loop').addEventListener('click', () => {
+                        try { if (!animationHandler) return; animationHandler.clearTemporaryOverride(); } catch (err) { console.warn('[synth_webui] clear temp loop failed:', err); }
+                    });
+
+                    // Live updater for current action/frame
+                    const curSpan = document.getElementById('animation-debug-current');
+                    const phaseSpan = document.getElementById('animation-debug-phase');
+                    const frameSpan = document.getElementById('animation-debug-frame');
+
+                    setInterval(() => {
+                        try {
+                            if (!animationHandler || !animationHandler.currentAction) { curSpan.textContent = '—'; phaseSpan.textContent = '—'; frameSpan.textContent = '—'; return; }
+                            const act = animationHandler.currentAction;
+                            const clip = act.getClip ? act.getClip() : null;
+                            curSpan.textContent = (animationHandler.currentActionName || clip?.name || 'unknown');
+                            phaseSpan.textContent = animationHandler.currentActionPhase || (act === animationHandler.currentStructuredAction?.loop ? 'loop' : 'clip');
+                            if (clip && clip._meta?.loopFrames && Number.isFinite(act.time)) {
+                                const lm = clip._meta.loopFrames;
+                                const currentFrame = Math.round(lm.startFrame + act.time * lm.fps);
+                                frameSpan.textContent = `${currentFrame} / ${lm.startFrame}-${lm.endFrame}`;
+                            } else if (clip && Number.isFinite(act.time)) {
+                                // show time in seconds if frames missing
+                                frameSpan.textContent = `${act.time.toFixed(2)}s`;
+                            } else {
+                                frameSpan.textContent = '—';
+                            }
+                        } catch (err) { /* ignore */ }
+                    }, 250);
+                }
+            } catch (err) {
+                console.warn('[synth_webui] Failed to init animation debug panel:', err);
+            }
 
             // ------------------------------------------------------------------
             // Touch interaction: tap (pointer click without drag) on the model
