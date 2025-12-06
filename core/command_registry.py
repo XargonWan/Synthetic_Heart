@@ -123,6 +123,7 @@ async def help_command() -> str:
         "`/purge_map [days]` – Purge old mappings\n"
         "`/clean_chat_link <chat_id>` – Remove the link between a chat and conversation.\n"
         "`/logchat` – Set the current chat as the log chat\n"
+            "`/splitprompt [on|off]` – Enable/disable double-prompt mode (PART1/PART2)\n"
     )
     return help_text
 
@@ -278,6 +279,43 @@ register_command("llm", llm_command)
 register_command("model", model_command)
 register_command("last_chats", last_chats_command)
 register_command("context", context_command)
+
+
+async def splitprompt_command(*args) -> str:
+    """Toggle or query the double-prompt (split prompt) feature.
+
+    Usage:
+      /splitprompt           -> Show current state
+      /splitprompt on|enable -> Enable double-prompt
+      /splitprompt off|disable -> Disable double-prompt
+    """
+    try:
+        # Lazy import to avoid cycles
+        from core.config_manager import config_registry
+
+        key = "SELENIUM_DOUBLE_PROMPT"
+
+        if not args:
+            val = config_registry.get_value(key, True)
+            state = "enabled ✅" if bool(val) else "disabled ❌"
+            return f"🔀 Double-prompt (PART1/PART2) is currently *{state}* (config: `{key}`)."
+
+        arg = args[0].lower()
+        if arg in ["on", "enable", "true", "1"]:
+            await config_registry.set_value(key, True)
+            return "✅ Double-prompt enabled. Calls will split large prompts into PART1 (context) + PART2 (message)."
+        elif arg in ["off", "disable", "false", "0"]:
+            await config_registry.set_value(key, False)
+            return "❌ Double-prompt disabled. Prompts will be sent in a single pass as before."
+        else:
+            return "❌ Use: `/splitprompt [on|off]` or `/splitprompt` to show the current state."
+
+    except Exception as e:
+        log_debug(f"[command_registry] Error in splitprompt_command: {e}")
+        return f"❌ Error handling splitprompt command: {e}"
+
+
+register_command("splitprompt", splitprompt_command)
 
 
 async def block_command(*args) -> str:
