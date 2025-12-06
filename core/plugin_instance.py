@@ -331,7 +331,23 @@ async def handle_incoming_message(bot, message, context_memory_or_prompt, interf
 
     # Trace handoff to LLM plugin
     try:
-        log_info(f"[flow] -> LLM plugin: handing off chat_id={getattr(message, 'chat_id', None)} interface={interface} prompt_len={len(json_dumps(prompt)) if isinstance(prompt, (dict, list)) else len(str(prompt))}")
+        # If prompt contains pre-reduction size metadata, include it in logs for debugging
+        pre_size = None
+        try:
+            if isinstance(prompt, dict):
+                # Prefer explicit pre_reduction_size if provided by build_json_prompt
+                pre_size = prompt.get('__pre_reduction_size', None)
+                # If not present, compute a fallback (note: this is post-reduction size)
+                if pre_size is None:
+                    try:
+                        pre_size = len(json_dumps(prompt))
+                        log_debug(f"[flow] pre_reduction_size missing, using computed size={pre_size} (post-reduction)")
+                    except Exception:
+                        pre_size = None
+        except Exception:
+            pre_size = None
+
+        log_info(f"[flow] -> LLM plugin: handing off chat_id={getattr(message, 'chat_id', None)} interface={interface} prompt_len={len(json_dumps(prompt)) if isinstance(prompt, (dict, list)) else len(str(prompt))} pre_reduction_size={pre_size}")
     except Exception:
         log_info(f"[flow] -> LLM plugin: handing off chat_id={getattr(message, 'chat_id', None)} interface={interface}")
 

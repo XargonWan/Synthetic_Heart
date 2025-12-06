@@ -480,6 +480,26 @@ class SeleniumLLMBase(AIPluginBase):
         self._queue_lock = asyncio.Lock()
         self._queue_worker: asyncio.Task | None = None
 
+        # Double-prompt toggle (exposed configuration)
+        # Default: enabled (True)
+        try:
+            self.SPLIT_PROMPT_VAR = config_registry.get_var(
+                "SELENIUM_DOUBLE_PROMPT",
+                True,
+                label="Enable Double Prompt (PART1/PART2)",
+                description="When enabled, oversized prompts are split: PART1 (context/memories) and PART2 (actual message).",
+                value_type=bool,
+                group="llm",
+                component="selenium",
+                advanced=False,
+            )
+        except Exception:
+            # Fallback property if config registry not available
+            self.SPLIT_PROMPT_VAR = True
+
+        # Internal flag to avoid re-splitting or recursive behaviour for PART2
+        self._skip_double_prompt_for_this_send: bool = False
+
     # === DRIVER MANAGEMENT ===
 
     def _locate_chromium_binary(self) -> Optional[str]:
@@ -2118,6 +2138,13 @@ class SeleniumLLMBase(AIPluginBase):
                     pass
             
             messages = []
+            # If prompt was provided as a dict by plugin_instance, it may contain
+            # a pre-reduction size metadata field that we should use for deciding
+            # about double-prompt splitting. Extract and remove it so it is NOT
+            # inadvertently sent to the LLM.
+            pre_reduction_size = None
+            if isinstance(prompt, dict):
+                pre_reduction_size = prompt.pop("__pre_reduction_size", None)
             
             # Build system message to enforce JSON-only responses
             if system_message_dict:
@@ -2204,7 +2231,7 @@ class SeleniumLLMBase(AIPluginBase):
 
 
             # The response will be returned to plugin_instance which passes it to message_chain
-            response = await self.generate_response(messages)
+            response = await self.generate_response(messages, pre_reduction_size=pre_reduction_size)
             
             # Simply return the response - don't send it directly!
             # plugin_instance will handle passing it to message_chain for proper validation
@@ -2217,7 +2244,7 @@ class SeleniumLLMBase(AIPluginBase):
             error_msg = f"❌ Error processing message: {e}"
             return error_msg
 
-    async def generate_response(self, messages):
+    async def generate_response(self, messages, pre_reduction_size: int | None = None):
         """Send messages to the LLM engine and receive the response."""
         try:
             # Check if engine was properly initialized
@@ -2290,9 +2317,16 @@ class SeleniumLLMBase(AIPluginBase):
                 log_info(f"[selenium] Using fresh shared driver with {window_count} window(s)")
 
 
+            # Check for double-prompt split condition (only when not explicitly skipping)
             try:
-                # Execute interaction in a single thread (driver is now guaranteed to be ready)
-                response = await asyncio.to_thread(self._execute_complete_workflow, prompt_text)
+                # Determine whether we must split into PART1/PART2
+                # Decide about double prompt using pre_reduction_size (if provided)
+                if self._should_double_prompt(prompt_text, pre_reduction_size=pre_reduction_size):
+                    log_info("[selenium] 🔀 Double-prompt condition met — executing PART1/PART2 workflow")
+                    response = await asyncio.to_thread(self._execute_double_prompt_workflow, prompt_text)
+                else:
+                    # Execute interaction in a single thread (driver is now guaranteed to be ready)
+                    response = await asyncio.to_thread(self._execute_complete_workflow, prompt_text)
                 
                 # Simply return the response as-is from ChatGPT
                 # Validation and correction will be handled by the message chain / transport layer
@@ -2306,6 +2340,305 @@ class SeleniumLLMBase(AIPluginBase):
         except Exception as e:
             log_error(f"[selenium] Failed to generate response: {e}", e)
             return f"❌ Error generating response: {e}"
+
+    # === DOUBLE PROMPT HELPERS ===
+    def _should_double_prompt(self, prompt_text: str, pre_reduction_size: int | None = None) -> bool:
+        """Return True if we should split this prompt into PART1/PART2.
+
+        Conditions:
+        - Split feature enabled via config
+        - Not currently sending PART2 (internal flag)
+        - prompt_text length > model limit (character limit)
+        """
+        try:
+            enabled = bool(self.SPLIT_PROMPT_VAR.value) if hasattr(self, 'SPLIT_PROMPT_VAR') else bool(self.SPLIT_PROMPT_VAR)
+        except Exception:
+            enabled = bool(getattr(self, 'SPLIT_PROMPT_VAR', True))
+
+        if not enabled:
+            return False
+
+        # If we're explicitly skipping (we are in PART2) do not split again
+        if getattr(self, '_skip_double_prompt_for_this_send', False):
+            log_debug('[selenium] skipping double-prompt because _skip_double_prompt_for_this_send=True')
+            return False
+
+        # Determine model limit
+        try:
+            # Prefer engine-provided limit
+            lim = self._get_model_char_limit(self._get_current_model_name())
+        except Exception:
+            lim = _active_selenium_max_prompt_chars
+
+        try:
+            size = len(prompt_text)
+        except Exception:
+            size = 0
+
+        # If a pre_reduction_size is provided, prefer it to decide splitting (ensures split happens before any minification)
+        if pre_reduction_size is not None:
+            try:
+                pre_size_int = int(pre_reduction_size)
+                if pre_size_int > 0:
+                    size_to_check = pre_size_int
+                else:
+                    size_to_check = size
+            except Exception:
+                size_to_check = size
+        else:
+            size_to_check = size
+
+        log_debug(f"[selenium] Double-prompt decision check: size_to_check={size_to_check}, model_limit={lim}")
+        if lim and size_to_check > lim:
+            # Only split when the prompt contains JSON context we can safely extract.
+            # Prevent accidental splitting of plain text user messages into PART1.
+            try:
+                # Use the same parsing logic as _split_prompt_text_into_parts to detect JSON
+                json_candidate = None
+                if "\n---\n" in prompt_text:
+                    idx = prompt_text.find("\n---\n")
+                    remainder = prompt_text[idx + len("\n---\n"):].strip()
+                    brace_idx = remainder.find("{")
+                    json_candidate = remainder[brace_idx:] if brace_idx != -1 else remainder
+                else:
+                    first_brace = prompt_text.find("{")
+                    json_candidate = prompt_text[first_brace:] if first_brace != -1 else None
+
+                if json_candidate:
+                    parsed = json.loads(json_candidate)
+                    # Only enable double-prompt when we find explicit context keys
+                    if isinstance(parsed, dict) and (
+                        'context' in parsed or
+                        any(k in parsed for k in ('chat_history', 'memories', 'diary', 'diary_entries', 'ai_diary', 'recent_entries'))
+                    ):
+                        log_debug(f"[selenium] prompt length {size} exceeds model limit {lim} and contains context keys, enabling double-prompt")
+                        return True
+                    else:
+                        log_debug(f"[selenium] prompt length > limit but no explicit context found in JSON; skipping double-prompt")
+                        return False
+                else:
+                    log_debug("[selenium] prompt length > limit but no JSON found; skipping double-prompt")
+                    return False
+            except Exception as e:
+                log_warning(f"[selenium] Error while checking for JSON context before split: {e}; skipping double-prompt")
+                return False
+
+        return False
+
+    def _split_prompt_text_into_parts(self, prompt_text: str) -> tuple[str, str]:
+        """Try to split prompt_text into PART1 (context) and PART2 (main prompt).
+
+        Strategy:
+        1. If prompt_text contains a JSON body (common with build_json_prompt), parse it and extract 'context' for PART1.
+           - PART1 will be header + JSON of context only
+           - PART2 will be the original prompt with 'context' replaced by an empty object (or minimal persona kept)
+        2. If parsing fails, fallback to simple character-based split with PART1 = first half and PART2 = remainder.
+        """
+        try:
+            # Try to find JSON part (after the canonical separator) and parse it
+            json_start = None
+            if "\n---\n" in prompt_text:
+                idx = prompt_text.find("\n---\n")
+                # JSON likely after the separator
+                remainder = prompt_text[idx + len("\n---\n"):].strip()
+                # Find first brace
+                brace_idx = remainder.find("{")
+                if brace_idx != -1:
+                    json_candidate = remainder[brace_idx:]
+                else:
+                    json_candidate = remainder
+            else:
+                # No separator - try to find the first JSON object in the string
+                first_brace = prompt_text.find("{")
+                if first_brace != -1:
+                    json_candidate = prompt_text[first_brace:]
+                else:
+                    json_candidate = None
+
+            parsed = None
+            if json_candidate:
+                parsed = None
+                # Try parsing raw candidate
+                try:
+                    parsed = json.loads(json_candidate)
+                except Exception:
+                    # Attempt to extract from first '{' to last '}'
+                    try:
+                        first = json_candidate.find('{')
+                        last = json_candidate.rfind('}')
+                        if first != -1 and last != -1 and last > first:
+                            sub = json_candidate[first:last+1]
+                            parsed = json.loads(sub)
+                        else:
+                            # Try wrapping the candidate with braces in case outer braces were omitted
+                            wrapped = '{' + json_candidate.strip().strip('{}') + '}'
+                            parsed = json.loads(wrapped)
+                    except Exception:
+                        parsed = None
+
+            # If parsed JSON with context
+            # parsed JSON may include context in different shapes. We detect:
+            # - a 'context' key (preferred)
+            # - or top-level keys like 'chat_history', 'memories', 'diary', 'diary_entries'
+            if isinstance(parsed, dict):
+                # Simplified behavior requested by the user: extract ONLY `chat_history` and `ai_diary`
+                # (and common alias 'diary' / 'diary_entries') from the parsed JSON. Do not
+                # perform aggressive deep extraction. The prompt JSON format normally places
+                # these keys either at top-level or under a 'context' key.
+                context_obj = {}
+
+                # Prefer the 'context' dict if present
+                source = parsed.get('context') if isinstance(parsed.get('context'), dict) else parsed
+
+                # Helper: copy keys if present
+                def copy_if_present(dst, src, key):
+                    if key in src:
+                        dst[key] = src[key]
+
+                # Copy only the keys requested for PART1: chat_history, ai_diary, memories
+                copy_if_present(context_obj, source, 'chat_history')
+                copy_if_present(context_obj, source, 'ai_diary')
+                copy_if_present(context_obj, source, 'memories')
+
+                # Only create PART1 if we actually found memory/chat keys
+                if context_obj:
+                    # Build PART1 header and payload
+                    part1_header = (
+                    "[INTERNAL-PART1] This message contains CONTEXT for memory persistence. "
+                    "Read it carefully and keep it available for subsequent messages. "
+                    "Do NOT act on this message. Reply ONLY with an empty JSON object: {}"
+                )
+
+                    # Build PART1 payload containing ONLY ai_diary, chat_history, memories
+                    part1_payload = {
+                        "ai_diary": context_obj.get('ai_diary', []),
+                        "chat_history": context_obj.get('chat_history', []),
+                        "memories": context_obj.get('memories', []),
+                    }
+
+                    part1_text = part1_header + "\n\n" + json.dumps(part1_payload)
+
+                    # Build PART2 by removing the context keys from the original parsed prompt
+                    parsed_part2 = dict(parsed)  # shallow copy
+
+                    # If the original had a 'context' dict, only remove the keys we moved to PART1
+                    if 'context' in parsed_part2 and isinstance(parsed_part2['context'], dict):
+                        for k in ('chat_history', 'memories', 'ai_diary'):
+                            if k in parsed_part2['context']:
+                                # Empty lists for removed context
+                                parsed_part2['context'][k] = []
+
+                    # Also remove top-level occurrences of these keys if present
+                    for k in ('chat_history', 'memories', 'ai_diary'):
+                        if k in parsed_part2:
+                            parsed_part2[k] = []
+
+                    part2_text = json.dumps(parsed_part2)
+
+                    # Apply minification to PART2 so it fits model limits better
+                    try:
+                        model_limit = self._get_model_char_limit(self._get_current_model_name())
+                        # Only attempt reduction if model limit is set and part2 exceeds it
+                        if model_limit and len(part2_text) > model_limit:
+                            reduced = reduce_json_text_for_transmission(part2_text, model_limit)
+                            if isinstance(reduced, str) and len(reduced) < len(part2_text):
+                                log_info(f"[selenium] PART2 minified from {len(part2_text)} to {len(reduced)} chars")
+                                part2_text = reduced
+                    except Exception as e:
+                        log_warning(f"[selenium] Could not minify PART2: {e}")
+
+                    return part1_text, part2_text
+
+        except Exception as e:
+            log_debug(f"[selenium] _split_prompt_text_into_parts JSON parse fallback: {e}")
+
+        # Fallback: if we couldn't parse a JSON context, DO NOT attempt to naively split user text.
+        # Returning an empty PART1 and the full prompt as PART2 avoids accidental inclusion of
+        # user messages inside PART1. _should_double_prompt should normally prevent calling this.
+        try:
+            size = len(prompt_text)
+            mid = max(1, size // 2)
+            # Return an empty context PART1 and the full prompt as PART2
+            empty_header = (
+                "[INTERNAL-PART1] This message is intended for CONTEXT only. "
+                "If present, read/store chat_history/diary/memories. Reply ONLY with {}."
+            )
+            # Empty context payload
+            return empty_header + "\n\n{}", prompt_text
+        except Exception:
+            # As a last resort, return original as part2 and empty part1
+            return "{}", prompt_text
+
+    def _execute_double_prompt_workflow(self, prompt_text: str) -> str:
+        """Execute PART1 then PART2 sequentially, ignoring PART1's content for actions.
+
+        PART1: send only context/memories and instruct to reply with {}.
+        PART2: send main prompt (without the context, relying on PART1) and return PART2's response.
+
+        The internal flag _skip_double_prompt_for_this_send is used to avoid re-splitting PART2.
+        """
+        part1_text, part2_text = self._split_prompt_text_into_parts(prompt_text)
+
+        # Send PART1 and wait for a response (we ignore content, but we log parsing/results)
+        try:
+            part1_len = len(part1_text) if isinstance(part1_text, str) else None
+        except Exception:
+            part1_len = None
+        log_info(f"[selenium] PART1 -> sending context part to LLM (expecting JSON {{}}) size={part1_len}")
+        # Retry PART1 up to CORRECTOR_RETRIES (if defined); if engine returns any response we proceed
+        max_retries = CORRECTOR_RETRIES if 'CORRECTOR_RETRIES' in globals() else 3
+        part1_resp = None
+        for attempt in range(1, max_retries + 1):
+            log_info(f"[selenium] PART1 attempt {attempt}/{max_retries}")
+            try:
+                part1_resp = self._execute_complete_workflow(part1_text)
+            except Exception as e:
+                log_warning(f"[selenium] PART1 attempt {attempt} failed with error: {e}")
+                # If this was the last attempt, we'll continue to PART2 anyway
+                if attempt < max_retries:
+                    time.sleep(1)
+                    continue
+                else:
+                    part1_resp = None
+                    break
+
+            # We received a response -> try to parse and log result
+            if isinstance(part1_resp, str) and part1_resp.strip() != "":
+                try:
+                    parsed = json.loads(part1_resp)
+                except Exception:
+                    parsed = None
+
+                if parsed == {}:
+                    log_info(f"[selenium] PART1 attempt {attempt} parsed as {{}} (OK)")
+                else:
+                    log_warning(f"[selenium] PART1 attempt {attempt} response did not strictly parse as {{}} - proceeding anyway")
+
+                # PART1 considered received as soon as LLM returns any response
+                break
+
+            # Empty or no response, retry unless out of attempts
+            log_warning(f"[selenium] PART1 attempt {attempt} returned empty response; retrying...")
+            if attempt < max_retries:
+                time.sleep(1)
+                continue
+            else:
+                log_warning("[selenium] PART1 exhausted retries without valid response; proceeding to PART2")
+
+        # Send PART2 - ensure we do not re-split
+        try:
+            part2_len = len(part2_text) if isinstance(part2_text, str) else None
+        except Exception:
+            part2_len = None
+        log_info(f"[selenium] PART2 -> sending main prompt (is_part2=True) size_before_minify={part2_len}")
+        self._skip_double_prompt_for_this_send = True
+        try:
+            resp = self._execute_complete_workflow(part2_text)
+            log_info("[selenium] PART2 response received — treating as final response for action parsing/corrector flow")
+            return resp
+        finally:
+            # Always reset the flag to avoid residual state
+            self._skip_double_prompt_for_this_send = False
 
     def _execute_complete_workflow(self, prompt_text: str) -> str:
         """Execute the complete workflow (interaction only) in a single thread."""

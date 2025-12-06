@@ -180,6 +180,19 @@ def extract_json_from_text(text: str, return_metadata: bool = False) -> Optional
                     log_debug(f"[extract_json_from_text] Found JSON with {extra_chars} extra chars (best so far)")
 
             except json.JSONDecodeError as e:
+                # Save helpful error info (used by the corrector middleware)
+                try:
+                    err_msg = _format_json_error(text_variant, e)
+                except Exception:
+                    err_msg = str(e)
+
+                try:
+                    global LAST_JSON_ERROR_INFO
+                    LAST_JSON_ERROR_INFO = err_msg
+                except Exception:
+                    pass
+
+                metadata.setdefault('error_messages', []).append(err_msg)
                 log_debug(f"[extract_json_from_text] JSON decode error at position {start}: {e}")
                 metadata['had_errors'] = True
                 metadata['error_count'] += 1
@@ -210,7 +223,165 @@ def extract_json_from_text(text: str, return_metadata: bool = False) -> Optional
         metadata['recovered'] = True
         log_warning(f"[extract_json_from_text] ⚠️ JSON recovered after {metadata['error_count']} parsing errors - may be incomplete")
 
+        # Attempt to recover missing/partially-corrupted actions that the
+        # JSON decoder couldn't parse due to poor quoting inside string values
+        try:
+            # Normalize: if the decoder returned a single action dict instead of
+            # a top-level object containing 'actions', convert it into an actions list
+            if isinstance(found_json, dict) and 'actions' not in found_json and 'type' in found_json:
+                # Make top-level actions list containing the single decoded action
+                found_json = {'actions': [found_json]}
+
+            # Only attempt targeted recovery when we have an actions array
+            if isinstance(found_json, dict) and 'actions' in found_json and isinstance(found_json['actions'], list):
+                _attempt_recover_actions_from_text(text, found_json, metadata)
+        except Exception as e:
+            log_debug(f"[extract_json_from_text] Action recovery failed: {e}")
+
     return (found_json, metadata) if return_metadata else found_json
+
+
+def _attempt_recover_actions_from_text(original_text: str, found_json: dict, metadata: dict):
+    """Targeted recovery for common LLM output corruption patterns.
+
+    Current heuristic:
+      - If the recovered JSON has an 'actions' list but some action types are
+        missing (commonly message_telegram_bot), try to find those action
+        blocks in the raw original_text and reconstruct a safe action dict
+        by extracting the 'text' value and escaping internal quotes.
+
+    This is intentionally conservative (only reconstructs small, well-known
+    message actions) to avoid introducing invalid actions from garbage.
+
+    Mutates found_json in-place when successful and updates metadata.
+    """
+    try:
+        text = original_text or ''
+        # Collect types already present
+        existing = set()
+        try:
+            for a in found_json.get('actions', []):
+                if isinstance(a, dict) and 'type' in a:
+                    existing.add(a['type'])
+        except Exception:
+            existing = set()
+
+        # Candidate action types we try to recover if missing
+        candidates = ['message_telegram_bot', 'message_synth_webui', 'message_ollama_serve', 'message_discord_bot']
+
+        for candidate in candidates:
+            if candidate in existing:
+                continue
+
+            # Find occurrences of the candidate type in the original text
+            for m in re.finditer(rf'"type"\s*:\s*"{re.escape(candidate)}"', text):
+                # Locate the payload region after this occurrence
+                start_pos = m.start()
+                payload_idx = text.find('"payload"', start_pos)
+                if payload_idx == -1:
+                    continue
+
+                # Find where payload object starts
+                brace_idx = text.find('{', payload_idx)
+                if brace_idx == -1:
+                    continue
+
+                # Try to extract a reasonable slice for the payload by searching
+                # for the next '}' that likely terminates the payload object.
+                # Use a conservative search window to avoid expensive scans.
+                window = text[brace_idx:brace_idx + 8000]  # a large but bounded window
+
+                # Attempt to find the closing brace for this payload using simple balance
+                depth = 0
+                end_idx = None
+                for i, ch in enumerate(window):
+                    if ch == '{':
+                        depth += 1
+                    elif ch == '}':
+                        depth -= 1
+                        if depth == 0:
+                            end_idx = brace_idx + i + 1
+                            break
+
+                if end_idx is None:
+                    # fallback: try to locate a following known key which likely marks end
+                    next_key_pos = len(text)
+                    for k in ('"type"', '"actions"', '\n\n'):
+                        kp = text.find(k, brace_idx + 1)
+                        if kp != -1:
+                            next_key_pos = min(next_key_pos, kp)
+                    end_idx = next_key_pos
+
+                payload_text = text[brace_idx:end_idx]
+
+                # Attempt to extract 'text' field from payload_text using a heuristic
+                text_field_match = re.search(r'"text"\s*:\s*"', payload_text)
+                if not text_field_match:
+                    # Nothing to recover here
+                    continue
+
+                # position of actual text value start
+                val_start = text_field_match.end()
+
+                # Find a conservative marker to end the text value: look for common next keys
+                markers = ['"interface_path"', '"reply_to_message_id"', '"chat_name"', '"reply_to_message_id"', '"send_in"', '"send_at"']
+                marker_pos = None
+                search_base = brace_idx + val_start
+                for mk in markers:
+                    pos = text.find(mk, search_base)
+                    if pos != -1:
+                        marker_pos = pos
+                        break
+
+                if marker_pos is None:
+                    # fallback: look for the end of payload object
+                    marker_pos = end_idx
+
+                raw_value = text[brace_idx + val_start:marker_pos]
+
+                # Trim trailing characters that may belong to JSON punctuation (like ",)
+                raw_value = raw_value.rstrip(' ,\n\r\t}')
+
+                # Remove a possible leading quote or stray characters
+                if raw_value.startswith('"'):
+                    raw_value = raw_value[1:]
+                if raw_value.endswith('"'):
+                    raw_value = raw_value[:-1]
+
+                recovered_text = raw_value.strip()
+
+                if not recovered_text:
+                    continue
+
+                # Escape double quotes inside recovered_text to make it safe for JSON
+                safe_text = recovered_text.replace('"', '\\"')
+
+                # Try to extract interface_path similarly (optional)
+                interface_path = None
+                ip_match = re.search(r'"interface_path"\s*:\s*"([^"]*)"', payload_text)
+                if ip_match:
+                    interface_path = ip_match.group(1)
+
+                # Build recovered action and append
+                recovered_action = {
+                    'type': candidate,
+                    'payload': {
+                        'text': safe_text
+                    }
+                }
+                if interface_path:
+                    recovered_action['payload']['interface_path'] = interface_path
+
+                # Append recovered action only if not present already
+                found_json.setdefault('actions', [])
+                found_json['actions'].append(recovered_action)
+                metadata['recovered'] = True
+                metadata['recovery_attempts'] = metadata.get('recovery_attempts', 0) + 1
+                log_info(f"[extract_json_from_text] Recovered missing action {candidate} (heuristic)")
+                # Break after first recovery for this candidate to avoid duplicates
+                break
+    except Exception as e:
+        log_debug(f"[attempt_recover] Recovery routine error: {e}")
 
 
 

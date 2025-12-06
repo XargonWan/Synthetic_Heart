@@ -315,6 +315,15 @@ async def build_json_prompt(message, context_memory, interface_name: str | None 
         "instructions": json_instructions,
     }
 
+    # Record full prompt size BEFORE injecting actions/minification so callers
+    # can decide split based on the original size.
+    try:
+        pre_reduction_size = len(json_dumps(prompt_with_instructions))
+        prompt_with_instructions["__pre_reduction_size"] = pre_reduction_size
+        log_debug(f"[json_prompt] __pre_reduction_size={pre_reduction_size}")
+    except Exception:
+        prompt_with_instructions["__pre_reduction_size"] = None
+
     # Include unified actions metadata from the initializer
     # Use minified version to keep prompt size manageable
     try:
