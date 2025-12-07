@@ -38,6 +38,41 @@ def _extract_json_local(text: str):
     return extract_json_from_text(text, return_metadata=False)
 
 
+def _maybe_unescape_text_in_payload(payload: dict) -> None:
+    """Detect and unescape common double-escaped sequences in payload['text'].
+
+    Many LLMs or intermediate handlers sometimes produce double-escaped JSON
+    strings (e.g. "\\u2728" or "\\n\\n" inside the value). This helper
+    safely attempts to decode those sequences into proper unicode / newlines
+    so interfaces receive human-readable text.
+
+    The function mutates payload in-place and is intentionally conservative
+    (swallows exceptions) to avoid breaking other flows.
+    """
+    if not isinstance(payload, dict):
+        return
+
+    text = payload.get("text")
+    if not text or not isinstance(text, str):
+        return
+
+    # Quick heuristic — only attempt to decode when we see backslash escapes
+    if "\\n" not in text and "\\u" not in text and "\\t" not in text and "\\r" not in text and "\\x" not in text:
+        return
+
+    try:
+        # unicode_escape converts sequences like \uXXXX, \n, \t into their
+        # actual characters. Use a bytes->unicode roundtrip for robustness.
+        unescaped = bytes(text, "utf-8").decode("unicode_escape")
+
+        # Only replace when the result is different (avoid accidental transformations)
+        if unescaped != text:
+            payload["text"] = unescaped
+    except Exception:
+        # Non-fatal — leave payload untouched on error
+        return
+
+
 ERROR_RETRY_POLICY = {
     "description": (
         "If you receive a system_message of type 'error' with the phrase 'Please repeat your "
@@ -570,6 +605,11 @@ async def _handle_plugin_action(
             interface = INTERFACE_REGISTRY.get(iface_name) if iface_name else None
             if interface and action_type.startswith("message") and hasattr(interface, "send_message"):
                 payload = action.get("payload", {})
+                # Normalize text payloads to recover double-escaped sequences
+                try:
+                    _maybe_unescape_text_in_payload(payload)
+                except Exception:
+                    log_debug("[action_parser] Text unescape normalization failed (non-fatal)")
                 log_info(
                     f"[action_parser] ✉️ Dispatching message action to interface '{iface_name}'"
                 )
@@ -611,6 +651,11 @@ async def _handle_plugin_action(
         if hasattr(plugin, "send_message") and action_type.startswith("message"):
             try:
                 payload = action.get("payload", {})
+                # Normalize text payload content produced by LLMs (double-escaped unicode/newlines)
+                try:
+                    _maybe_unescape_text_in_payload(payload)
+                except Exception:
+                    log_debug("[action_parser] Text unescape normalization failed for plugin send_message (non-fatal)")
                 log_info(
                     f"[action_parser] ✉️ Dispatching message action to interface '{plugin_iface}' via send_message"
                 )
@@ -632,6 +677,11 @@ async def _handle_plugin_action(
                 payload = action.get("payload", {})
                 if not isinstance(payload, dict):
                     payload = vars(payload)
+                # Normalize payload.text for execute_action consumers too
+                try:
+                    _maybe_unescape_text_in_payload(payload)
+                except Exception:
+                    log_debug("[action_parser] Text unescape normalization failed for plugin execute_action (non-fatal)")
                 new_action = {**action, "payload": payload}
                 log_info(
                     f"[action_parser] 🚀 Delegating action to {plugin.__class__.__name__}: type={action_type} interface={plugin_iface}"

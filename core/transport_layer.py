@@ -423,13 +423,27 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
         try:
             from core.chat_context_manager import add_message_to_context
             from datetime import datetime
-            
-            # Only save non-JSON text (actual messages to users)
-            # JSON-only responses are internal and shouldn't be in chat history
-            json_data = extract_json_from_text(text)
-            log_debug(f"[transport] JSON data extracted: {json_data is not None}")
-            
-            text_content = text.replace(json_data, "").strip() if json_data else text
+
+            # Extract JSON and metadata to decide what (if any) human-readable
+            # companion text should be saved alongside LLM-originated JSON.
+            json_payload, json_meta = extract_json_from_text(text, return_metadata=True)
+            log_debug(f"[transport] JSON data extracted: {json_payload is not None} metadata: {bool(json_meta)}")
+
+            # If JSON present and metadata indicates extra text (prefix/suffix), use those.
+            if json_payload is None:
+                text_content = text
+            else:
+                if json_meta and (json_meta.get('prefix') or json_meta.get('suffix')):
+                    # Compose companion text from prefix+suffix
+                    parts = []
+                    if json_meta.get('prefix'):
+                        parts.append(json_meta.get('prefix').strip())
+                    if json_meta.get('suffix'):
+                        parts.append(json_meta.get('suffix').strip())
+                    text_content = "\n".join(parts).strip()
+                else:
+                    # Pure JSON only — nothing to save as user-visible content
+                    text_content = ""
             log_debug(f"[transport] Text content for history: {len(text_content)} chars (was {len(text)})")
             
             if text_content:  # Only save if there's actual message content
