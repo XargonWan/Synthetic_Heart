@@ -1,8 +1,23 @@
 # Import the base Selenium LLM library
 from core.selenium_llm_base import SeleniumLLMBase
 from core.logging_utils import log_debug
+from core.variables_engine import register_exposed_var
 from selenium.webdriver.common.by import By
 import time
+
+# Register exposed variables for WebUI
+register_exposed_var(
+    "CHATGPT_MODEL",
+    label="ChatGPT Model",
+    default="",
+    value_type=str,
+    ui_type="string",
+    description="Model name for ChatGPT/OpenAI API calls (e.g., gpt-4o, gpt-4-turbo, gpt-3.5-turbo). Leave empty to use default.",
+    scope="llm",
+    component="selenium_chatgpt",
+    tags=["llm_engine"],
+    advanced=True,
+)
 
 # ChatGPT configuration - constants only
 SERVICE_URL = "https://chat.openai.com"

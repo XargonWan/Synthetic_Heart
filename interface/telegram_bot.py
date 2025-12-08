@@ -59,12 +59,27 @@ from typing import Any
 from types import SimpleNamespace
 from core.interfaces_registry import get_interface_registry
 from core.config_manager import config_registry
+from core.variables_engine import register_exposed_var
 
 # Get interface registry for trainer verification
 _interface_registry = get_interface_registry()
 
 # Load environment variables
 load_dotenv()
+
+# Register exposed variable for WebUI
+register_exposed_var(
+    "BOTFATHER_TOKEN",
+    label="Telegram Bot Token",
+    default=None,
+    value_type=str,
+    ui_type="string",
+    description="Bot token provided by BotFather on Telegram.",
+    scope="interface",
+    tags=["sensitive"],
+    needs_component_reload=True,
+    component="telegram_bot",
+)
 
 # Read Telegram-specific configuration using config_registry
 # This supports: env override -> database -> default (None)

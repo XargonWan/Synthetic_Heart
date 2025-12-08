@@ -1,8 +1,22 @@
 # Import the base Selenium LLM library
 from core.selenium_llm_base import SeleniumLLMBase
 from core.logging_utils import log_debug
+from core.variables_engine import register_exposed_var
 from selenium.webdriver.common.by import By
 import time
+
+# Register exposed variables for WebUI
+register_exposed_var(
+    "GROK_MODEL",
+    label="Grok Model",
+    default="",
+    value_type=str,
+    ui_type="string",
+    description="Model name for Grok API calls. Leave empty to use default.",
+    scope="llm",
+    component="selenium_grok",
+    tags=["llm_engine"],
+)
 
 # Grok configuration - constants only
 SERVICE_URL = "https://grok.x.ai"

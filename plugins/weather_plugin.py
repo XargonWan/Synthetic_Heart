@@ -12,6 +12,7 @@ from core.core_initializer import core_initializer, register_plugin
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.time_zone_utils import get_local_location
 from core.config_manager import config_registry
+from core.variables_engine import register_exposed_var
 
 # Injection priority for weather information
 INJECTION_PRIORITY = 2  # High priority - weather is contextually important
@@ -25,6 +26,19 @@ def register_injection_priority():
 
 # Register priority when module is loaded
 register_injection_priority()
+
+# Register exposed variable for WebUI
+register_exposed_var(
+    "WEATHER_FETCH_TIME",
+    label="Weather Fetch Interval",
+    default=60,
+    value_type=int,
+    ui_type="number",
+    description="Minutes between weather data fetches",
+    scope="plugins",
+    component="weather_plugin",
+    tags=["plugin"],
+)
 
 
 class WeatherPlugin:

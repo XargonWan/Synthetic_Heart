@@ -61,11 +61,61 @@ from core.transport_layer import llm_to_interface
 from core.logging_utils import log_debug, log_error, log_warning, log_info, _LOG_DIR
 from core.notifier import set_notifier
 from core.config_manager import config_registry
+from core.variables_engine import register_exposed_var
 import core.recent_chats as recent_chats
 from core.ai_plugin_base import AIPluginBase
 from core.action_parser import CORRECTOR_RETRIES
 from core.message_chain import RESPONSE_TIMEOUT
 from core.prompt_engine import reduce_json_text_for_transmission
+
+# Register exposed variables for WebUI (shared by all Selenium-based LLM engines)
+register_exposed_var(
+    "CHROMIUM_HEADLESS",
+    label="Chromium Headless Mode",
+    default=0,
+    value_type=int,
+    ui_type="bool",
+    description="Set to 1 for headless mode (no browser window), 0 for non-headless mode (visible browser window)",
+    scope="llm",
+    advanced=True,
+    component="selenium_llm_base",
+)
+
+register_exposed_var(
+    "SELENIUM_MAX_RETRIES",
+    label="Selenium Max Retries",
+    default=3,
+    value_type=int,
+    ui_type="number",
+    description="Maximum number of retries for Selenium driver initialization",
+    scope="llm",
+    advanced=True,
+    component="selenium_llm_base",
+)
+
+register_exposed_var(
+    "AWAIT_RESPONSE_TIMEOUT",
+    label="Response Timeout (Selenium)",
+    default=240,
+    value_type=int,
+    ui_type="number",
+    description="Seconds to wait for ChatGPT response before timing out",
+    scope="llm",
+    component="selenium_chatgpt_legacy",
+    tags=["llm_engine"],
+)
+
+register_exposed_var(
+    "CORRECTOR_RETRIES",
+    label="Corrector Retries",
+    default=2,
+    value_type=int,
+    ui_type="number",
+    description="Maximum number of retries for the response corrector",
+    scope="llm",
+    component="selenium_chatgpt_legacy",
+    tags=["llm_engine"],
+)
 
 # Use global timeout
 AWAIT_RESPONSE_TIMEOUT = RESPONSE_TIMEOUT

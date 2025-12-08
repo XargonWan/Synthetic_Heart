@@ -18,6 +18,7 @@ from core.command_registry import execute_command
 from core import message_queue
 from plugins.chat_link import ChatLinkStore
 from core.config_manager import config_registry
+from core.variables_engine import register_exposed_var
 
 
 context_memory: dict[int, deque] = {}
@@ -559,6 +560,20 @@ class DiscordInterface:
 
 # Expose class for dynamic loading
 INTERFACE_CLASS = DiscordInterface
+
+# Register exposed variable for WebUI
+register_exposed_var(
+    "DISCORD_BOT_TOKEN",
+    label="Discord Bot Token",
+    default="",
+    value_type=str,
+    ui_type="string",
+    description="Bot token provided by the Discord developer portal.",
+    scope="interface",
+    tags=["sensitive"],
+    needs_component_reload=True,
+    component="discord_bot",
+)
 
 # Instantiate and register the interface at import time so the core
 # initializer can discover it during startup.

@@ -25,6 +25,7 @@ from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.config_manager import config_registry
 from core.config import get_trainer_id as core_get_trainer_id
 from plugins.chat_link import ChatLinkStore
+from core.variables_engine import register_exposed_var
 
 load_dotenv()
 
@@ -558,6 +559,101 @@ class MatrixInterface:
 
 # ----------------------------------------------------------------------
 # Configuration via registry
+
+# Register exposed variables for WebUI
+register_exposed_var(
+    "MATRIX_HOMESERVER",
+    label="Matrix Homeserver",
+    default="https://matrix.org/homeserver",
+    value_type=str,
+    ui_type="string",
+    description="Base URL of the Matrix homeserver (e.g. https://matrix.org/homeserver)",
+    scope="interface",
+    component="matrix_chat",
+)
+
+register_exposed_var(
+    "MATRIX_USER",
+    label="Matrix User ID",
+    default="",
+    value_type=str,
+    ui_type="string",
+    description="Matrix MXID used by the bot (e.g. @yoursynth:matrix.org).",
+    scope="interface",
+    component="matrix_chat",
+)
+
+register_exposed_var(
+    "MATRIX_PASSWORD",
+    label="Matrix Password",
+    default=None,
+    value_type=str,
+    ui_type="password",
+    description="Password used when logging into the homeserver (ignored if access token is provided).",
+    scope="interface",
+    tags=["sensitive"],
+    needs_component_reload=True,
+    component="matrix_bot",
+)
+
+register_exposed_var(
+    "MATRIX_ACCESS_TOKEN",
+    label="Matrix Access Token",
+    default=None,
+    value_type=str,
+    ui_type="password",
+    description="Optional long-lived access token used instead of password-based login.",
+    scope="interface",
+    tags=["sensitive"],
+    needs_component_reload=True,
+    component="matrix_bot",
+)
+
+register_exposed_var(
+    "MATRIX_DEVICE_ID",
+    label="Matrix Device ID",
+    default=None,
+    value_type=str,
+    ui_type="string",
+    description="Device identifier to reuse when establishing a session.",
+    scope="interface",
+    component="matrix_chat",
+)
+
+register_exposed_var(
+    "MATRIX_DEVICE_NAME",
+    label="Matrix Device Name",
+    default="SyntH",
+    value_type=str,
+    ui_type="string",
+    description="Human readable name for the device registered on the homeserver.",
+    scope="interface",
+    component="matrix_chat",
+)
+
+register_exposed_var(
+    "MATRIX_STORE_PATH",
+    label="Matrix Store Path",
+    default=None,
+    value_type=str,
+    ui_type="string",
+    description="Filesystem path where the Matrix client should store sync data.",
+    scope="interface",
+    tags=["bootstrap"],
+    hidden=True,
+    component="matrix_chat",
+)
+
+register_exposed_var(
+    "MATRIX_ALLOWED_ROOMS",
+    label="Matrix Allowed Rooms",
+    default="",
+    value_type=str,
+    ui_type="string",
+    description="Comma separated list of room IDs the bot is allowed to respond in. Leave empty to allow all rooms.",
+    scope="interface",
+    component="matrix_chat",
+)
 
 MATRIX_HOMESERVER = config_registry.get_var(
     "MATRIX_HOMESERVER",
