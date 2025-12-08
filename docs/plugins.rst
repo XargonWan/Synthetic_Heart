@@ -255,6 +255,8 @@ Chat activity is now tracked automatically whenever ``add_message_to_context()``
 * ``event`` – Schedule and deliver reminders. Requires ``DB_HOST``, ``DB_PORT``, ``DB_USER``, ``DB_PASS``, ``DB_NAME`` and optional ``CORRECTOR_RETRIES``.
 * ``reddit_plugin`` – Submit posts and comments to Reddit. Requires ``REDDIT_CLIENT_ID``, ``REDDIT_CLIENT_SECRET``, ``REDDIT_USERNAME``, ``REDDIT_PASSWORD`` and ``REDDIT_USER_AGENT``.
 * ``selenium_elevenlabs`` – Generate speech audio with ElevenLabs. Set ``ELEVENLABS_EMAIL`` and ``ELEVENLABS_PASSWORD`` (``synth_SELENIUM_HEADLESS`` controls headless mode).
+* ``selenium_ttsfree`` – Generate speech audio by automating https://ttsfree.com. No credentials required; set ``synth_SELENIUM_HEADLESS`` to control headless mode. Use action ``voice_message_ttsfree`` with payload: ``{message, language, voice, interface_path}``.
+    - Exposed variable: ``Free_TTS_VOICES`` (mapping language -> voice definition). Configure this in the Web UI under Settings → Plugins to map language keys to voice options used by the plugin.
 * ``terminal`` – Run shell commands or interactive sessions. Uses ``TELEGRAM_TRAINER_ID`` to authorize access.
 
 Terminal Plugin
