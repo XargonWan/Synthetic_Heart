@@ -643,14 +643,22 @@
             border-radius: 50%;
             box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
         }
-        input[type="checkbox"]:checked + .toggle-slider {
+        input[type="checkbox"]:checked + .toggle-slider,
+        /* support case where the slider is wrapped inside a label that follows the input
+           e.g. <input /><label class="toggle-switch"><span class="toggle-slider"></span></label> */
+        input[type="checkbox"]:checked + .toggle-switch .toggle-slider,
+        input[type="checkbox"]:checked + label .toggle-slider {
             background: linear-gradient(135deg, #ff6bd6, #7289da);
             border-color: #ff6bd6;
         }
-        input[type="checkbox"]:checked + .toggle-slider:before {
+        input[type="checkbox"]:checked + .toggle-slider:before,
+        input[type="checkbox"]:checked + .toggle-switch .toggle-slider:before,
+        input[type="checkbox"]:checked + label .toggle-slider:before {
             transform: translateX(24px);
         }
-        input[type="checkbox"]:disabled + .toggle-slider {
+        input[type="checkbox"]:disabled + .toggle-slider,
+        input[type="checkbox"]:disabled + .toggle-switch .toggle-slider,
+        input[type="checkbox"]:disabled + label .toggle-slider {
             opacity: 0.5;
             cursor: not-allowed;
         }
