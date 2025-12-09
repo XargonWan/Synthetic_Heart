@@ -138,6 +138,10 @@ class SynthWebUIInterface:
             log_info(f"{LOG_PREFIX} Mounted /js to {js_dir}", log_file=WEBUI_LOG)
         else:
             log_warning(f"{LOG_PREFIX} JS directory not found: {js_dir}", log_file=WEBUI_LOG)
+
+        # Use the bundled static logo path. The image is expected to be present
+        # in the image under /app/res/synth_webui/static/synth_logo_bg.png.
+        self.logo_url = '/static/synth_logo_bg.png'
         
         # No global animations directory: animations live inside each skin under /skins/<skin>/animations
 
@@ -303,7 +307,7 @@ class SynthWebUIInterface:
             
             replacements = {
                 '%%BRAND_NAME%%': BRAND_NAME,
-                '%%LOGO_URL%%': '/js/synth_logo_bg.png',  # Logo served from /js directory
+                '%%LOGO_URL%%': str(getattr(self, 'logo_url', '/static/synth_logo_bg.png')),
                 '%%RESPONSE_TIMEOUT%%': str(int(RESPONSE_TIMEOUT)),
                 '%%FAILED_MESSAGE_TEXT%%': str(get_failed_message_text()),
                 # Expose WEB_DEBUG flag to the template (default false)
