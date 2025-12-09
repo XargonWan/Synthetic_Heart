@@ -4286,6 +4286,8 @@
             Object.entries(groupedByComponent).forEach(([componentName, group]) => {
                 const card = document.createElement('article');
                 card.className = 'card config-accordion';
+                // Start collapsed by default to keep long lists tidy
+                card.classList.add('collapsed');
                 
                 const header = document.createElement('div');
                 header.className = 'accordion-header';
@@ -4328,6 +4330,7 @@
                 });
                 
                 Object.entries(advancedByComponent).forEach(([componentName, group]) => {
+                    // Advanced items are already under Advanced card; no additional accordion here
                     group.items.forEach((item) => {
                         const row = createConfigRow(item);
                         if (row) {

@@ -308,7 +308,7 @@ SYNTH_DISLIKES_TRIGGER = config_registry.get_var(
     label="Activate on Synth's Dislikes",
     description="Activate bot when synth's dislikes are mentioned in messages",
     group="synth",
-    component="core",
+    component="persona",
 )
 
 SYNTH_PROFILE = config_registry.get_var(
@@ -317,7 +317,7 @@ SYNTH_PROFILE = config_registry.get_var(
     label="Synth Profile",
     description="Core personality description of the current synth",
     group="synth",
-    component="core",
+    component="persona",
 )
 
 # Migrate SYNTH_NAME to the Exposed Variables engine which centralizes
@@ -335,6 +335,7 @@ try:
         ui_type="string",
         description="Name of the current synth",
         scope="synth",
+        component="persona",
         tags=["persona"],
     )
 
@@ -366,7 +367,7 @@ SYNTH_ALIASES = config_registry.get_var(
     label="Synth Aliases",
     description="Alternative names the synth responds to",
     group="synth",
-    component="core",
+    component="persona",
     value_type="json",
 )
 
@@ -378,19 +379,19 @@ try:
         label="Synth Full Aliases",
         description="Canonical alias list (base aliases + current name + additional aliases)",
         group="synth",
-        component="core",
+        component="persona",
         value_type="json",
         getter=_get_full_aliases,
     )
 except Exception:
     # Fallback: if registration fails, expose a simple placeholder
-    SYNTH_FULL_ALIASES = config_registry.get_var(
+        SYNTH_FULL_ALIASES = config_registry.get_var(
         "SYNTH_FULL_ALIASES",
         ["SyntH", "Synthetic Heart"],
         label="Synth Full Aliases",
         description="Canonical alias list (base aliases + current name + additional aliases)",
         group="synth",
-        component="core",
+        component="persona",
         value_type="json",
     )
 
@@ -400,6 +401,7 @@ SYNTH_CURRENT_ANIMATION = config_registry.get_var(
     label="Current Animation State",
     description="Current animation being played (idle, thinking, talking, etc)",
     group="synth",
+    component="persona",
     getter=_get_persona_aliases,
     setter=_set_persona_aliases,
 )

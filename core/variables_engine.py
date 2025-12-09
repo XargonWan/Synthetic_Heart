@@ -149,6 +149,9 @@ class ExposedVariableRegistry:
             value_type = definition.value_type
             tags = list(definition.tags) + ['exposed']
             # Use get_var to register and ensure the config machinery knows about it
+            # Use the component name supplied by the exposed var definition if present
+            # so the UI can attribute exposed variables to their owning plugin/interface
+            # instead of grouping them all under a generic 'exposed' component.
             config_registry.get_var(
                 definition.key,
                 definition.default,
@@ -156,7 +159,7 @@ class ExposedVariableRegistry:
                 description=definition.description,
                 value_type=value_type,
                 group=definition.scope,
-                component='exposed',
+                component=definition.component or 'exposed',
                 advanced=definition.advanced,
                 tags=tags,
                 needs_component_reload=definition.needs_component_reload,
@@ -299,6 +302,7 @@ def register_all():
         ui_type="textarea",
         description="Core personality description of the current synth",
         scope="synth",
+        component="persona",
         tags=["persona"],
     )
 
@@ -312,6 +316,7 @@ def register_all():
         ui_type="tags",
         description="Alternative names the synth responds to",
         scope="synth",
+        component="persona",
         tags=["persona"],
     )
 
@@ -323,6 +328,7 @@ def register_all():
         ui_type="tags",
         description="Canonical alias list (base aliases + current name + additional aliases)",
         scope="synth",
+        component="persona",
         tags=["persona"],
     )
 
@@ -334,6 +340,7 @@ def register_all():
         ui_type="string",
         description="Current animation being played (idle, thinking, talking, etc)",
         scope="synth",
+        component="animation",
     )
 
     # --- Core: Trainer IDs ---
@@ -345,6 +352,7 @@ def register_all():
         ui_type="string",
         description="Comma-separated list of trainer IDs for each interface (format: interface_name:user_id)",
         scope="core",
+        component="core",
         tags=["key_value_list"],
     )
 
@@ -357,6 +365,7 @@ def register_all():
         ui_type="string",
         description="Fallback message when LLM fails to respond or correct response.",
         scope="core",
+        component="core",
     )
 
     register_exposed_var(
@@ -367,6 +376,7 @@ def register_all():
         ui_type="number",
         description="Maximum time in seconds to wait for LLM responses before sending fallback message.",
         scope="core",
+        component="core",
     )
 
     register_exposed_var(
@@ -377,6 +387,7 @@ def register_all():
         ui_type="select",
         description=("Controls who can send images, audio, video, and other sensitive content to the LLM: 'off' (everyone), 'trainer_only' (only trainer), 'deny_all' (nobody)"),
         scope="core",
+        component="core",
         tags=["access_control"],
     )
 
@@ -404,6 +415,7 @@ def register_all():
         ui_type="combobox",
         description="Location for prompts and plugins (select from list or enter custom: 'City,Country')",
         scope="core",
+        component="core",
         options=locs,
         validator={
             "type": "custom",
@@ -431,6 +443,7 @@ def register_all():
         ui_type="number",
         description="Number of recent messages to include in chat history context.",
         scope="core",
+        component="conversation",
     )
 
     register_exposed_var(
@@ -441,6 +454,7 @@ def register_all():
         ui_type="number",
         description="Number of days of AI diary history to include in context.",
         scope="core",
+        component="diary",
     )
 
     register_exposed_var(
@@ -452,6 +466,7 @@ def register_all():
         description=("Emoji to use as reaction when bot is mentioned. Leave empty to disable. "
                      "⚠️ Note: Some interfaces or servers/channels may not support all emojis as reactions."),
         scope="core",
+        component="reactions",
     )
 
     log_info("[variables_engine] Completed explicit exposed var registrations")
