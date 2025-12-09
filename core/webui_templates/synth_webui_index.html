@@ -79,6 +79,12 @@
             flex-wrap: wrap;
             gap: 0.6rem;
         }
+          /* Collapsible card helper: wrap content in `.card-content` so collapse only hides this wrapper
+              and avoids interfering with nested cards which may be re-rendered. */
+          .card .card-content { display: block; }
+          .card.collapsed .card-content { display: none; }
+          .card h2 { display: flex; align-items: center; gap: 0.5rem; justify-content: space-between; }
+        .card-toggle { background: transparent; border: 0; color: var(--text-soft); cursor: pointer; font-size: 0.95rem; }
         .nav-btn {
             display: inline-flex;
             align-items: center;
@@ -683,16 +689,16 @@
         .config-list {
             display: flex;
             flex-direction: column;
-            gap: 0.9rem;
+            gap: 0.45rem; /* tighter spacing */
         }
         .config-row {
             display: flex;
             flex-direction: column;
-            gap: 0.45rem;
-            padding: 0.85rem 1rem;
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            border-radius: 16px;
-            background: rgba(255, 255, 255, 0.04);
+            gap: 0.25rem;
+            padding: 0.45rem 0.6rem; /* compact padding */
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.03);
         }
         .config-label-line {
             display: flex;
@@ -701,9 +707,9 @@
             font-weight: 600;
         }
         .config-label-sub {
-            font-size: 0.8rem;
+            font-size: 0.78rem;
             color: var(--text-soft);
-            letter-spacing: 0.05em;
+            letter-spacing: 0.04em;
         }
         .config-input {
             display: flex;
@@ -713,12 +719,12 @@
         .config-input input,
         .config-input select {
             flex: 1;
-            border-radius: 12px;
+            border-radius: 8px;
             border: 1px solid var(--border);
             background: rgba(12, 12, 20, 0.58);
             color: var(--text);
-            padding: 0.55rem 0.85rem;
-            font-size: 0.95rem;
+            padding: 0.35rem 0.6rem; /* smaller input padding */
+            font-size: 0.9rem;
         }
         .config-input input:disabled {
             opacity: 0.55;
@@ -4260,7 +4266,6 @@
                 const header = document.createElement('div');
                 header.className = 'accordion-header';
                 header.innerHTML = `
-                    <div class="accordion-toggle">▼</div>
                     <h3>PERSONA TRIGGERS</h3>
                 `;
                 header.onclick = function(e) {
@@ -4292,7 +4297,6 @@
                 const header = document.createElement('div');
                 header.className = 'accordion-header';
                 header.innerHTML = `
-                    <div class="accordion-toggle">▼</div>
                     <h3>${group.label.toUpperCase()}</h3>
                 `;
                 header.onclick = function(e) {
@@ -4353,6 +4357,8 @@
             if (configAdvancedWarning && data?.messages?.advanced_warning) {
                 configAdvancedWarning.textContent = data.messages.advanced_warning;
             }
+            // Ensure every time we render config, the top-level cards get collapsers
+            try { addCardCollapsers(); } catch (e) { /* ignore if helper not available yet */ }
         }
 
         // Expand/Collapse All buttons handlers
@@ -4384,6 +4390,12 @@
             if (!interfaceOptions.length) {
                 await ensureInterfaceOptions();
             }
+
+            // addCardCollapsers is defined globally below; call it here to ensure collapsers added after rendering
+            // (renderConfig will call addCardCollapsers directly as well)
+
+            // Call once after render and also if new content injected
+            addCardCollapsers();
 
             configLoading = true;
             try {
@@ -4472,6 +4484,46 @@
                 mainNav?.classList.remove('open');
             });
         });
+
+        // Global helper: add collapse/expand toggles to article.card elements.
+        // This creates a stable `.card-content` wrapper (if missing) so collapsing
+        // doesn't remove or break inner DOM nodes created by other renderers.
+        function addCardCollapsers() {
+            document.querySelectorAll('article.card').forEach((card) => {
+                const header = card.querySelector('h2');
+                if (!header) return;
+
+                let contentWrapper = card.querySelector('.card-content');
+                if (!contentWrapper) {
+                    contentWrapper = document.createElement('div');
+                    contentWrapper.className = 'card-content';
+                    const children = Array.from(card.childNodes);
+                    for (const node of children) {
+                        if (node === header) continue;
+                        contentWrapper.appendChild(node);
+                    }
+                    card.appendChild(contentWrapper);
+                }
+
+                // keep single toggle button and sync icon with current state
+                let btn = header.querySelector('.card-toggle');
+                if (!btn) {
+                    btn = document.createElement('button');
+                    btn.className = 'card-toggle';
+                    header.appendChild(btn);
+                }
+                btn.type = 'button';
+                btn.title = 'Collapse / expand section';
+                btn.textContent = card.classList.contains('collapsed') ? '▸' : '▾';
+
+                btn.onclick = (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    card.classList.toggle('collapsed');
+                    btn.textContent = card.classList.contains('collapsed') ? '▸' : '▾';
+                };
+            });
+        }
 
         // Logging Level dropdown handler
         const loggingLevelSelect = document.getElementById('logging-level');
@@ -7318,7 +7370,7 @@
                             <div class="diary-date-group">
                                 <div class="diary-date-header" onclick="toggleDateGroup(this)">
                                     <span>${date}</span>
-                                    <span class="toggle-icon">▼</span>
+                                    
                                 </div>
                                 <div class="diary-date-content">
                                     ${grouped[date].map(entry => renderDiaryEntry(entry)).join('')}
@@ -7401,13 +7453,10 @@
             }
 
             function toggleDateGroup(header) {
-                if (content.style.display === 'none') {
-                    content.style.display = 'block';
-                    icon.textContent = '▼';
-                } else {
-                    content.style.display = 'none';
-                    icon.textContent = '▶';
-                }
+                const content = header.nextElementSibling;
+                if (!content) return;
+                // Toggle visibility of the content without manipulating decorative glyphs
+                content.style.display = (content.style.display === 'none') ? 'block' : 'none';
             }
 
             function toggleEntrySelection(id) {

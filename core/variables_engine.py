@@ -160,6 +160,7 @@ class ExposedVariableRegistry:
                 value_type=value_type,
                 group=definition.scope,
                 component=definition.component or 'exposed',
+                readonly=definition.readonly,
                 advanced=definition.advanced,
                 tags=tags,
                 needs_component_reload=definition.needs_component_reload,
@@ -341,6 +342,7 @@ def register_all():
         description="Current animation being played (idle, thinking, talking, etc)",
         scope="synth",
         component="animation",
+        readonly=True,
     )
 
     # --- Core: Trainer IDs ---

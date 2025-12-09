@@ -1196,7 +1196,8 @@ class SynthWebUIInterface:
                     "sensitive": entry["sensitive"],
                     "env_override": entry["env_override"],
                     "value_type": entry["value_type"],
-                    "editable": not entry["env_override"],
+                    # A variable is editable only if it's not overridden by env AND not explicitly readonly
+                    "editable": (not entry["env_override"]) and (not entry.get("readonly", False)),
                     "constraints": entry.get("constraints"),
                     "ui_type": ui_type,
                     "options": options,

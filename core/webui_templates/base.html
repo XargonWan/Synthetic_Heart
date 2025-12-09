@@ -567,16 +567,16 @@
         .config-list {
             display: flex;
             flex-direction: column;
-            gap: 0.9rem;
+            gap: 0.45rem; /* tighter spacing */
         }
         .config-row {
             display: flex;
             flex-direction: column;
-            gap: 0.45rem;
-            padding: 0.85rem 1rem;
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            border-radius: 16px;
-            background: rgba(255, 255, 255, 0.04);
+            gap: 0.25rem;
+            padding: 0.45rem 0.6rem; /* compact padding */
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.03);
         }
         .config-label-line {
             display: flex;
@@ -585,9 +585,9 @@
             font-weight: 600;
         }
         .config-label-sub {
-            font-size: 0.8rem;
+            font-size: 0.78rem;
             color: var(--text-soft);
-            letter-spacing: 0.05em;
+            letter-spacing: 0.04em;
         }
         .config-input {
             display: flex;
@@ -597,12 +597,12 @@
         .config-input input,
         .config-input select {
             flex: 1;
-            border-radius: 12px;
+            border-radius: 8px;
             border: 1px solid var(--border);
             background: rgba(12, 12, 20, 0.58);
             color: var(--text);
-            padding: 0.55rem 0.85rem;
-            font-size: 0.95rem;
+            padding: 0.35rem 0.6rem; /* smaller input padding */
+            font-size: 0.9rem;
         }
         .config-input input:disabled {
             opacity: 0.55;

@@ -119,6 +119,8 @@ class ConfigDefinition:
     setter: Optional[Callable[[Any], None]] = None
     # If True, hide this variable from graphical UI listings (but keep API access)
     hidden: bool = False
+    # If True, the config is read-only in the UI (no edits allowed)
+    readonly: bool = False
 
     value: Any = None
     raw_value: Optional[str] = None
@@ -168,6 +170,7 @@ class ConfigRegistry:
         getter: Optional[Callable[[], Any]] = None,
         setter: Optional[Callable[[Any], None]] = None,
         needs_component_reload: bool = False,
+        readonly: bool = False,
         hidden: bool = False,
     ) -> Any:
         """Return the typed value for ``key`` or register it if unknown."""
@@ -184,6 +187,7 @@ class ConfigRegistry:
             sensitive=sensitive,
             tags=tags,
             needs_component_reload=needs_component_reload,
+            readonly=readonly,
             hidden=hidden,
             constraints=constraints,
             getter=getter,
@@ -210,6 +214,7 @@ class ConfigRegistry:
         getter: Optional[Callable[[], Any]] = None,
         setter: Optional[Callable[[Any], None]] = None,
         needs_component_reload: bool = False,
+        readonly: bool = False,
         hidden: bool = False,
     ) -> ConfigVar:
         """
@@ -240,6 +245,7 @@ class ConfigRegistry:
             tags=tags,
             needs_component_reload=needs_component_reload,
             hidden=hidden,
+            readonly=readonly,
             constraints=constraints,
             getter=getter,
             setter=setter,
@@ -401,6 +407,7 @@ class ConfigRegistry:
                     "value_type": self._type_name(defn.value_type),
                     "needs_component_reload": getattr(defn, 'needs_component_reload', False),
                     "hidden": getattr(defn, 'hidden', False),
+                    "readonly": getattr(defn, 'readonly', False),
                     "tags": list(defn.tags),
                     "constraints": defn.constraints,
                 }
@@ -425,6 +432,7 @@ class ConfigRegistry:
         tags: Optional[Iterable[str]],
         needs_component_reload: bool = False,
         hidden: bool = False,
+        readonly: bool = False,
         constraints: Optional[Dict[str, Any]],
         getter: Optional[Callable[[], Any]] = None,
         setter: Optional[Callable[[Any], None]] = None,
@@ -449,6 +457,7 @@ class ConfigRegistry:
             setter=setter,
             needs_component_reload=needs_component_reload,
             hidden=hidden,
+            readonly=readonly,
         )
         self._definitions[key] = definition
         log_debug(f"[config] Registered setting '{key}' (component={component})")

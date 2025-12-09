@@ -2,12 +2,8 @@
             <header class="section-header">
                 <h2>Configuration</h2>
                 <div class="section-controls">
-                    <button id="config-expand-all" class="pill secondary" title="Expand all sections">
-                        <span class="icon">▼</span>
-                    </button>
-                    <button id="config-collapse-all" class="pill secondary" title="Collapse all sections">
-                        <span class="icon">▶</span>
-                    </button>
+                    <button id="config-expand-all" class="pill secondary" title="Expand all sections">Expand</button>
+                    <button id="config-collapse-all" class="pill secondary" title="Collapse all sections">Collapse</button>
                     <button id="config-save" class="pill primary">
                         <span class="icon">💾</span>
                         Save Changes
@@ -33,7 +29,6 @@
 
                 <article class="card warning-card config-accordion" id="config-advanced-card">
                     <div class="accordion-header" onclick="this.parentElement.classList.toggle('collapsed')">
-                        <div class="accordion-toggle">▼</div>
                         <div class="warning-header">
                             <div class="warning-icon">🚨</div>
                             <h4>Advanced Settings</h4>
@@ -96,19 +91,7 @@
                 background: rgba(255, 107, 214, 0.08);
             }
             
-            .accordion-toggle {
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                font-size: 0.9rem;
-                color: var(--text-soft);
-                min-width: 24px;
-                transition: transform 0.3s;
-            }
-            
-            .config-accordion.collapsed .accordion-toggle {
-                transform: rotate(-90deg);
-            }
+            /* decorative caret removed (was .accordion-toggle) */
             
             .accordion-content {
                 padding: 1.5rem;

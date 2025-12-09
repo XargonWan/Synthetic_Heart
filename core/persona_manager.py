@@ -219,6 +219,16 @@ def _get_full_aliases():
         pass
     return list(CANONICAL_ALIASES)
 
+
+def _get_persona_current_animation():
+    """Return the current animation for the active persona or 'idle' as default."""
+    try:
+        if _persona_manager_instance and _persona_manager_instance._current_persona:
+            return _persona_manager_instance._current_persona.current_animation or "idle"
+    except Exception:
+        pass
+    return "idle"
+
 def _update_persona_configs(persona: 'PersonaData') -> None:
     """Synchronize persona data to config_registry for webui/API access.
     
@@ -401,10 +411,17 @@ SYNTH_CURRENT_ANIMATION = config_registry.get_var(
     label="Current Animation State",
     description="Current animation being played (idle, thinking, talking, etc)",
     group="synth",
-    component="persona",
-    getter=_get_persona_aliases,
-    setter=_set_persona_aliases,
+    component="animation",
+    value_type=str,
+    getter=_get_persona_current_animation,
+    readonly=True,
 )
+
+# Ensure getter/readonly applied if variable was registered earlier (e.g., by variables_registry)
+if 'SYNTH_CURRENT_ANIMATION' in config_registry._definitions:
+    defn = config_registry._definitions['SYNTH_CURRENT_ANIMATION']
+    defn.getter = _get_persona_current_animation
+    defn.readonly = True
 
 # Update existing config definitions to use dynamic getters/setters
 # Note: update_definition method doesn't exist, relying on initial get_var calls with getters/setters
