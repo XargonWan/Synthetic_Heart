@@ -2253,6 +2253,18 @@ class SeleniumLLMBase(AIPluginBase):
                 # Normal scenario - convert prompt to messages
                 if isinstance(prompt_for_llm, dict):
                     try:
+                        # If a verbose (unminified) instruction for chats is present,
+                        # include it as a system message so Selenium-driven UI flows
+                        # embed it verbatim at the top of the prompt.
+                        verbose = None
+                        try:
+                            verbose = prompt_for_llm.get("instructions_verbose")
+                        except Exception:
+                            verbose = None
+
+                        if verbose:
+                            messages.append({"role": "system", "content": verbose})
+
                         # Simply convert prompt to JSON for user message
                         prompt_text = json.dumps(prompt_for_llm)
                         messages.append({"role": "user", "content": prompt_text})

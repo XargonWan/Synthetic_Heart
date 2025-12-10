@@ -198,6 +198,19 @@ class TestReducePromptForLLMLimit:
         # Input should be identical
         assert reduced["input"] == original_input, "Input should not be modified"
 
+    def test_preserves_instructions_verbose(self):
+        """If an unminified instructions_verbose exists it should be preserved."""
+        prompt = self.create_test_prompt(num_memories=5, num_chat_messages=5)
+        # Add an unminified verbose instruction as would be created for chat interfaces
+        prompt["instructions_verbose"] = "You are participating in a live chat conversation. Be concise. THIS TEXT MUST NOT BE MINIFIED."
+
+        original_size = len(json_dumps(prompt))
+        reduced = reduce_prompt_for_llm_limit(prompt, original_size - 3000)
+
+        # instructions_verbose must remain intact
+        assert "instructions_verbose" in reduced
+        assert "THIS TEXT MUST NOT BE MINIFIED" in reduced["instructions_verbose"]
+
 
 class TestIntegrationMinificationWithReduction:
     """Integration tests for the full flow."""

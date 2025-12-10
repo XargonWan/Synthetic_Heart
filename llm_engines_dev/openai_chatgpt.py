@@ -199,6 +199,11 @@ class OpenAIPlugin(AIPluginBase):
 
         messages = []
 
+        # If there's an unminified chat instruction, send it first as a system message
+        verbose = prompt.get("instructions_verbose")
+        if verbose:
+            messages.append({"role": "system", "content": verbose})
+
         # Include interface information in system message
         interface = prompt.get("input", {}).get("interface", "unknown")
         messages.append({

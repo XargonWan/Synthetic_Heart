@@ -315,6 +315,18 @@ async def build_json_prompt(message, context_memory, interface_name: str | None 
         "instructions": json_instructions,
     }
 
+    # For chat-like interfaces (Telegram, Discord, WebUI) include an explicit
+    # unminified instruction block that reminds the LLM this is a chat and
+    # must be concise. This must be preserved verbatim and sent as a system
+    # message by LLM wrappers. We intentionally do not minify this text.
+    try:
+        chat_ifaces = ["telegram", "discord", "webui", "synth_webui", "telegram_bot", "discord_bot"]
+        if interface_name and any(k in (interface_name or "").lower() for k in chat_ifaces):
+            prompt_with_instructions["instructions_verbose"] = load_unminified_chat_instruction(interface_name)
+            log_info(f"[json_prompt] 🔒 Added instructions_verbose for chat interface: {interface_name}")
+    except Exception as e:
+        log_warning(f"[json_prompt] Failed to add instructions_verbose: {e}")
+
     # Record full prompt size BEFORE injecting actions/minification so callers
     # can decide split based on the original size.
     try:
@@ -469,56 +481,69 @@ async def build_prompt(
     return messages
 
 def load_json_instructions() -> str:
-        # Load instructions and minify them immediately to save space
-        instructions = """
-- MASTER INSTRUCTION: Use ONLY actions from the 'actions' block. Never fabricate.
-- If an action you need is not in 'actions', respond with a JSON explaining why.
-- RESPOND ONLY WITH VALID JSON. No text before or after.
-- Use input.interface to know where the message came from and respond there.
-- NEVER lie. If you don't know something, say "I don't know".
-- CRITICAL: ALWAYS use input.payload.source.interface_path as the interface_path in your response actions!
-- The interface_path format is hierarchical: 'telegram_bot/chat_id/thread_id' or 'discord_bot/guild_id/channel_id/thread_id' or 'discord_bot/user_id' for DMs.
-- NEVER use 'target' field - always use 'interface_path' field in ALL message actions.
-- Example: if input shows interface_path='telegram_bot/-1003098886330/123', use EXACTLY 'telegram_bot/-1003098886330/123' as interface_path in your message_telegram_bot action.
-- Include reply_message_id if replying to specific messages.
-- ALWAYS include create_personal_diary_entry action to record interactions.
-- Consider responding to the user with a message action (message_telegram_bot, message_discord_bot, message_synth_webui, etc.) when appropriate - but only if you choose to.
-- Interaction_summary examples: "User asked about weather, provided forecast" or "Discussed coding, provided solutions"
-
-RESPONSE FORMAT - Your response MUST be valid JSON in this exact structure:
-{
-  "actions": [
-    {
-      "type": "action_name_from_actions_block",
-      "payload": {
-        "field1": "value1",
-        "field2": "value2"
-      }
-    },
-    {
-      "type": "another_action",
-      "payload": {
-        "required_field": "value",
-        "optional_field": "value"
-      }
-    }
-  ]
-}
-
-Key rules:
-- ALWAYS use "type" (not "name", "action", or any other field)
-- ALWAYS use "payload" to wrap your parameters (not "parameters", "args", or any other field)
-- Each action MUST have exactly two fields: "type" and "payload"
-- Do NOT add any text, explanation, or markdown outside the JSON
-- Do NOT include "description" or "instructions" in your response
-- The "type" must match exactly one from the 'actions' block
-"""
+        # Compact instructions for LLM prompts (minified to save tokens).
+        # Keep this small but authoritative: the LLM must reply using only valid JSON
+        # following the exact actions / payload structure.
+        instructions = (
+                "MASTER INSTRUCTION: Use ONLY actions from the 'actions' block. Never fabricate.\n"
+                "If an action you need is not available, reply with JSON explaining why.\n"
+                "RESPOND ONLY WITH VALID JSON. No text before or after.\n"
+                "Use input.interface and input.payload.source.interface_path to route replies.\n"
+                "NEVER use 'target' — always use 'interface_path' in message actions.\n"
+                "Include reply_message_id when replying to specific messages. Use thread_id from input.payload.source.thread_id when present (omit if missing).\n"
+                "RESPONSE FORMAT: {\"actions\": [{\"type\": \"action_name\", \"payload\": { ... }}] }\n"
+                "Key rules: ALWAYS use 'type' and 'payload', one action object per array entry. Do NOT add any text outside the JSON."
+        )
         
-        # Minify: remove leading/trailing spaces from each line, collapse multiple spaces
+    # Minify: remove leading/trailing spaces from each line, collapse multiple spaces
         import re
         lines = instructions.split('\n')
         minified_lines = [line.strip() for line in lines if line.strip()]
         return ' '.join(minified_lines)
+
+
+def load_unminified_chat_instruction(interface_name: str | None = None) -> str:
+        """Return an unminified, explicit chat instruction for chat interfaces.
+
+        This text is intentionally verbose and must NOT be minified: it explains
+        that the LLM is operating inside a chat interface, must be concise, and
+        must follow the exact JSON response format. It should be preserved verbatim
+        and sent as a system message to the model for chat interfaces (Telegram,
+        Discord, WebUI).
+        """
+        # Keep this human-readable and not minified — we'll inject it directly
+        header = "You are participating in a live chat conversation (interface: %s).\n" % (interface_name or "unknown")
+
+        base = """
+    This means your replies must be short, concise, and suitable for a chat UI.
+This means your replies must be short, concise, and suitable for a chat UI.
+
+CONCISE RULES:
+- Keep user-facing messages short and to the point.
+- Prefer short paragraphs or single-line replies when possible.
+- Avoid long essays or verbose explanations unless explicitly requested by the user.
+
+RESPONSE FORMAT:
+- You MUST reply using ONLY valid JSON, and follow the exact structure shown below.
+- Do NOT include any explanatory text outside the JSON object.
+
+EXACT REQUIRED JSON FORMAT (use this, verbatim):
+{
+    "actions": [
+        {
+            "type": "action_name_from_actions_block",
+            "payload": { ... }
+        }
+    ]
+}
+
+KEY REMINDERS:
+- Each action object MUST contain exactly two keys: "type" and "payload".
+- The "type" value MUST match a name from the 'actions' block supplied in the prompt.
+- Use the provided interface_path from input.payload.source.interface_path when addressing replies.
+"""
+        # Prepend header (with interface name) and return; do NOT minify this text
+        return header + base
 
 
 def build_full_json_instructions() -> dict:
@@ -567,7 +592,8 @@ def build_minified_json_instructions() -> dict:
 def reduce_prompt_for_llm_limit(prompt: dict, max_chars: int) -> dict:
     """Reduce the prompt if it exceeds the LLM character limit.
     
-    CRITICAL: Both instructions AND persona (Rekku profile) are NEVER removed - they are SACRED.
+    CRITICAL: Both instructions, instructions_verbose (if present), AND persona (Rekku profile)
+    are NEVER removed - they are SACRED.
     
     Priority order (STEP BY STEP):
     1. Remove oldest diary entries (if >3 available)
@@ -592,6 +618,9 @@ def reduce_prompt_for_llm_limit(prompt: dict, max_chars: int) -> dict:
         log_warning("[reduce_prompt] max_chars is None, skipping reduction")
         return prompt
     
+    # Preserve top-level fields that must never be removed
+    original_instructions_verbose = prompt.get("instructions_verbose") if isinstance(prompt, dict) else None
+
     # Make a copy to avoid modifying the original
     reduced_prompt = copy.deepcopy(prompt)
     
@@ -677,7 +706,7 @@ def reduce_prompt_for_llm_limit(prompt: dict, max_chars: int) -> dict:
         current_size = len(json_dumps(reduced_prompt))
         log_debug(f"[reduce_prompt] After emergency context removal: {current_size} chars")
     
-    # === FINAL CHECK: Instructions AND Persona are ALWAYS kept ===
+    # === FINAL CHECK: Instructions, instructions_verbose (if present) AND Persona are ALWAYS kept ===
     # If we're still over, something is very wrong - log error but don't remove instructions or persona
     final_size = len(json_dumps(reduced_prompt))
     if final_size > max_chars:
@@ -685,6 +714,14 @@ def reduce_prompt_for_llm_limit(prompt: dict, max_chars: int) -> dict:
         log_error(f"[reduce_prompt] Instructions AND Persona are PROTECTED and NOT removed. Check what's taking so much space!")
     else:
         log_debug(f"[reduce_prompt] ✅ Successfully reduced prompt to {final_size} chars (limit: {max_chars})")
+
+    # Ensure instructions_verbose is preserved if it existed in the original
+    try:
+        if original_instructions_verbose and "instructions_verbose" not in reduced_prompt:
+            reduced_prompt["instructions_verbose"] = original_instructions_verbose
+            log_debug("[reduce_prompt] Restored protected instructions_verbose after reduction")
+    except Exception:
+        pass
     
     return reduced_prompt
 
