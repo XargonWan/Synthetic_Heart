@@ -799,8 +799,10 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
                 log_debug(f"[corrector_middleware] Could not extract attempted action info: {e}")
 
             # Use the thread_id from the original conversation if available
-            # The interface (e.g., telegram_bot) should have already normalized message_thread_id to thread_id
-            payload_thread_id = thread_id if thread_id is not None else 0
+            # Avoid defaulting to 0. If there's no thread_id, leave it as None so
+            # downstream code doesn't accidentally route to thread 0.
+            payload_thread_id = thread_id if thread_id is not None else None
+            log_debug(f"[corrector_middleware] Using payload_thread_id={payload_thread_id} for corrector request")
 
             # Extract the original user message text from context if available
             # This is CRUCIAL: when the corrector retries, the LLM needs to know what the
@@ -880,7 +882,7 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
                         "type": "message_telegram_bot",
                         "payload": {
                             "text": "Your message content here (optional - only if you want to reply to user)",
-                            "interface_path": f"telegram_bot/{chat_id or '-1003098886330'}/{payload_thread_id or 0}"
+                            "interface_path": f"telegram_bot/{chat_id or '-1003098886330'}/{payload_thread_id if payload_thread_id is not None else ''}"
                         }
                     }
                 ]

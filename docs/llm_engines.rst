@@ -150,6 +150,9 @@ The ``selenium_chatgpt`` engine controls a real ChatGPT browser session using th
 - **Captcha Handling**: Manual intervention required for initial setup and captchas
 - **Visual Desktop**: Optional web interface at ``http://<host>:5006`` for monitoring
 - **Model Selection**: Supports different ChatGPT models via ``CHATGPT_MODEL`` environment variable
+    - Preview models like ``gpt-5.1-codex-max`` are available (add to ``MODEL_LIMITS_MAP``).
+        To enable the preview model for all clients, set the environment variable or component configuration to that model name, e.g.:
+        ``CHATGPT_MODEL=gpt-5.1-codex-max``
 
 **Key Features:**
 
@@ -170,6 +173,8 @@ Setup Steps:
 .. code-block:: bash
 
    CHATGPT_MODEL=gpt-4o  # Optional, defaults to gpt-4o
+    # To enable GPT-5.1-Codex-Max (Preview) for all clients, you can set:
+    # CHATGPT_MODEL=gpt-5.1-codex-max
 
 **Response Selectors:**
 

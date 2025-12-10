@@ -79,6 +79,11 @@ async def send_llm_fallback_message(bot, message: SimpleNamespace, failure_reaso
         fallback_text = fallback_text.get_value()
     fallback_text = str(fallback_text)
     chat_id = getattr(message, 'chat_id', None)
+    # Preserve thread_id when available so the fallback message is routed to the
+    # same message thread and not defaulted to 0
+    thread_id = getattr(message, 'thread_id', None)
+    if not thread_id and context:
+        thread_id = context.get('thread_id')
     
     # Extract interface_path from message or context - CRITICAL for routing to correct interface
     interface_path = getattr(message, 'interface_path', None)
@@ -86,7 +91,7 @@ async def send_llm_fallback_message(bot, message: SimpleNamespace, failure_reaso
         interface_path = context.get('interface_path')
     
     # Log detailed error
-    log_error(f"[message_chain] LLM FAILURE - Chat: {chat_id}, Interface: {interface_path}, Reason: {failure_reason}")
+    log_error(f"[message_chain] LLM FAILURE - Chat: {chat_id}, Interface: {interface_path}, Thread: {thread_id}, Reason: {failure_reason}")
     log_error(f"[message_chain] Sending fallback message: '{fallback_text}'")
     
     # Send fallback message through transport layer
@@ -99,11 +104,12 @@ async def send_llm_fallback_message(bot, message: SimpleNamespace, failure_reaso
                 chat_id,
                 text=fallback_text,
                 interface_path=interface_path,
+                thread_id=thread_id,
                 is_llm_response=True  # Mark as LLM response so interface handles normally
             )
         else:
             log_warning(f"[message_chain] Bot does not have send_message method, cannot send fallback")
-        log_debug(f"[message_chain] Fallback message sent to chat {chat_id} via interface_path {interface_path}")
+        log_debug(f"[message_chain] Fallback message sent to chat {chat_id} via interface_path {interface_path} thread_id={thread_id}")
         return fallback_text
     except Exception as e:
         log_error(f"[message_chain] Failed to send fallback message: {e}")

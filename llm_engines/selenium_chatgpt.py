@@ -36,6 +36,8 @@ MODEL_LIMITS_MAP = {
     "gpt-3.5-turbo": 30000,  # 30,000 characters max
     "o1-preview": 50000,     # 50,000 characters max
     "o1-mini": 50000,        # 50,000 characters max
+    # Preview model: GPT-5.1 Codex family (Codex-Max preview)
+    "gpt-5.1-codex-max": 100000,  # 100,000 characters max - Preview
     "unlogged": 20000,       # 20,000 characters max (free tier limited)
     "default": 51000         # 51,000 characters max (safe default for unknown models)
 }

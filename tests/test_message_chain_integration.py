@@ -165,6 +165,60 @@ class TestMessageChainIntegration(unittest.TestCase):
         result = extract_json_from_text("Just plain text")
         self.assertIsNone(result)
 
+    @patch('core.transport_layer.universal_send')
+    async def test_llm_failure_fallback_preserves_thread(self, mock_universal_send):
+        """Test that send_llm_fallback_message preserves and forwards thread_id correctly."""
+        from core import message_chain
+
+        # Mock universal_send to avoid real interface calls
+        mock_universal_send.return_value = None
+
+        # Build a fake bot with a send_message function
+        bot = MagicMock()
+        bot.send_message = AsyncMock()
+
+        # Create fake message that contains a thread id
+        msg = SimpleNamespace(
+            chat_id=123,
+            thread_id=42,
+            text='',
+            interface_path='telegram_bot/123/42'
+        )
+
+        # Call fallback sender
+        result = await message_chain.send_llm_fallback_message(bot, msg, 'Test failure', context={'interface_path': 'telegram_bot/123/42', 'thread_id': 42})
+
+        # universal_send should be called with thread_id=42
+        mock_universal_send.assert_called_once()
+        call_args, call_kwargs = mock_universal_send.call_args
+        self.assertEqual(call_args[0], bot.send_message)
+        self.assertEqual(call_args[1], 123)
+        self.assertEqual(call_kwargs.get('thread_id'), 42)
+
+    @patch('core.transport_layer.extract_json_from_text')
+    async def test_corrector_preserves_thread(self, mock_extract):
+        """Test that run_corrector_middleware passes the thread_id to the LLM plugin message."""
+        from core import transport_layer
+        import core.plugin_instance as plugin_instance
+
+        # Force extract_json to return None to trigger correction
+        mock_extract.return_value = (None, {'had_errors': False})
+
+        recorded = {}
+
+        class FakePlugin:
+            async def handle_incoming_message(self, bot, message, text):
+                recorded['thread_id'] = getattr(message, 'thread_id', None)
+                # Return valid JSON to stop correction loop
+                return '{"actions": [{"type": "message_telegram_bot", "payload": {"text": "ok"}}]}'
+
+        plugin_instance.plugin = FakePlugin()
+
+        result = await transport_layer.run_corrector_middleware("broken json", bot=MagicMock(), context=None, chat_id=123, thread_id=99)
+
+        # After completion, the fake plugin should have received message.thread_id == 99
+        self.assertEqual(recorded.get('thread_id'), 99)
+
         # Test invalid JSON
         result = extract_json_from_text('{"invalid": json}')
         self.assertIsNone(result)
