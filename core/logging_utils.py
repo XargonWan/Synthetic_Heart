@@ -5,6 +5,14 @@ import traceback
 from logging.handlers import RotatingFileHandler
 from typing import Optional
 
+# Try to load environment variables from .env early so logging defaults reflect .env
+try:
+    # load_dotenv is optional; don't crash if package is missing
+    from dotenv import load_dotenv
+    load_dotenv(dotenv_path="/app/.env", override=False)
+except Exception:
+    pass
+
 
 _logger: Optional[logging.Logger] = None
 
@@ -22,7 +30,7 @@ _LEVELS = {
 }
 
 # Global variables for logging configuration
-_LOGGING_LEVEL = "ERROR"
+_LOGGING_LEVEL = os.getenv("LOGGING_LEVEL", "INFO").upper()  # Default to INFO or env value
 _LOGGING_LOGCHAT_LEVEL = "ERROR"
 
 
@@ -34,42 +42,56 @@ def _register_logging_config():
     global _LOGGING_LEVEL, _LOGGING_LOGCHAT_LEVEL
     
     try:
-        from core.config_manager import config_registry
-        
-        def _update_logging_level(value: str | None) -> None:
-            global _LOGGING_LEVEL
-            _LOGGING_LEVEL = (value or "ERROR").upper()
-            # Re-setup logging with new level
-            if _logger:
-                _logger.setLevel(_LEVELS.get(_LOGGING_LEVEL, logging.ERROR))
-        
-        def _update_logchat_level(value: str | None) -> None:
-            global _LOGGING_LOGCHAT_LEVEL
-            _LOGGING_LOGCHAT_LEVEL = (value or "ERROR").upper()
-        
-        _LOGGING_LEVEL = config_registry.get_value(
-            "LOGGING_LEVEL",
-            "ERROR",
-            label="Logging Level",
-            description="Minimum log level to record: DEBUG, INFO, WARNING, ERROR",
-            group="logging",
-            component="core",
-            constraints={"choices": ["DEBUG", "INFO", "WARNING", "ERROR"]},
-            tags=["logs_only"],
-        ).upper()
-        config_registry.add_listener("LOGGING_LEVEL", _update_logging_level)
-        
-        _LOGGING_LOGCHAT_LEVEL = config_registry.get_value(
-            "LOGGING_LOGCHAT_LEVEL",
-            "ERROR",
-            label="LogChat Notification Level",
-            description="Send log notifications to LogChat (configure with /logchat command in your chat)",
-            group="logging",
-            component="core",
-            constraints={"choices": ["DEBUG", "INFO", "WARNING", "ERROR"]},
-            tags=["logs_only"],
-        ).upper()
-        config_registry.add_listener("LOGGING_LOGCHAT_LEVEL", _update_logchat_level)
+        # If environment variables are present, honor them first to avoid
+        # connecting to DB during early startup (DB might not be available).
+        env_level = os.getenv("LOGGING_LEVEL")
+        if env_level:
+            _LOGGING_LEVEL = env_level.upper()
+        env_logchat = os.getenv("LOGGING_LOGCHAT_LEVEL")
+        if env_logchat:
+            _LOGGING_LOGCHAT_LEVEL = env_logchat.upper()
+
+        # If env var was not set, fall back to config_registry defaults
+        if not env_level or not env_logchat:
+            from core.config_manager import config_registry
+
+            def _update_logging_level(value: str | None) -> None:
+                global _LOGGING_LEVEL
+                _LOGGING_LEVEL = (value or "ERROR").upper()
+                # Re-setup logging with new level
+                if _logger:
+                    _logger.setLevel(_LEVELS.get(_LOGGING_LEVEL, logging.ERROR))
+
+            def _update_logchat_level(value: str | None) -> None:
+                global _LOGGING_LOGCHAT_LEVEL
+                _LOGGING_LOGCHAT_LEVEL = (value or "ERROR").upper()
+
+            # Only query config_registry if needed (we didn't find env vars above)
+            if not env_level:
+                _LOGGING_LEVEL = config_registry.get_value(
+                    "LOGGING_LEVEL",
+                    "INFO",
+                    label="Logging Level",
+                    description="Minimum log level to record: DEBUG, INFO, WARNING, ERROR",
+                    group="logging",
+                    component="core",
+                    constraints={"choices": ["DEBUG", "INFO", "WARNING", "ERROR"]},
+                    tags=["logs_only"],
+                ).upper()
+                config_registry.add_listener("LOGGING_LEVEL", _update_logging_level)
+
+            if not env_logchat:
+                _LOGGING_LOGCHAT_LEVEL = config_registry.get_value(
+                    "LOGGING_LOGCHAT_LEVEL",
+                    "ERROR",
+                    label="LogChat Notification Level",
+                    description="Send log notifications to LogChat (configure with /logchat command in your chat)",
+                    group="logging",
+                    component="core",
+                    constraints={"choices": ["DEBUG", "INFO", "WARNING", "ERROR"]},
+                    tags=["logs_only"],
+                ).upper()
+                config_registry.add_listener("LOGGING_LOGCHAT_LEVEL", _update_logchat_level)
     except ImportError:
         # If config_manager is not available yet, use defaults
         pass
@@ -143,6 +165,11 @@ def setup_logging() -> logging.Logger:
         logger.addHandler(ch)
 
     _logger = logger
+    # Log effective logging configuration at startup
+    try:
+        logger.log(_LEVELS.get(_LOGGING_LEVEL, logging.INFO), f"[logging_utils] Started synth logger with level={_LOGGING_LEVEL}, log_file={_LOG_FILE}")
+    except Exception:
+        pass
     return logger
 
 
