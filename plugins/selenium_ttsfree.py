@@ -208,7 +208,30 @@ class SeleniumTTSFreePlugin:
             resolved_voice = mapping.get(voice) or mapping.get(voice.lower())
         else:
             # Try to find mapping by language key
-            resolved_voice = mapping.get(language) or mapping.get(language.lower())
+            # First try exact match, then lowercase, then convert ISO codes (it-IT -> italian, en-US -> english)
+            resolved_voice = mapping.get(language)
+            if not resolved_voice and language:
+                resolved_voice = mapping.get(language.lower())
+            if not resolved_voice and language:
+                # Try ISO code conversion: "it-IT" -> "italian", "en-US" -> "english"
+                iso_to_name = {
+                    "it": "italian",
+                    "en": "english",
+                    "es": "spanish",
+                    "fr": "french",
+                    "de": "german",
+                    "pt": "portuguese",
+                    "ja": "japanese",
+                    "zh": "chinese",
+                    "ko": "korean",
+                    "ru": "russian",
+                    "ar": "arabic",
+                }
+                lang_code = language.split("-")[0].lower()  # "it-IT" -> "it"
+                lang_name = iso_to_name.get(lang_code)
+                if lang_name:
+                    resolved_voice = mapping.get(lang_name)
+                    log_debug(f"[selenium_ttsfree] Converted ISO code '{language}' to '{lang_name}'")
 
         if not resolved_voice:
             log_warning(f"[selenium_ttsfree] No voice mapping found for language/key '{voice or language}', using fallback voice")
@@ -397,15 +420,29 @@ class SeleniumTTSFreePlugin:
                     log_error("[selenium_ttsfree] Could not find input_text textarea")
                     raise
 
-                # Click Convert Now
+                # Click Convert Now - handle ad popup blocking
                 try:
                     convert_btn = driver.find_element(By.CSS_SELECTOR, "a.convert-now")
-                    convert_btn.click()
+                    # Scroll to button to ensure visibility
+                    driver.execute_script("arguments[0].scrollIntoView(true);", convert_btn)
+                    time.sleep(1)  # Wait for ads to settle
+                    
+                    # Try to click via JavaScript if normal click is blocked
+                    try:
+                        convert_btn.click()
+                    except Exception:
+                        log_debug("[selenium_ttsfree] Normal click blocked, using JavaScript click")
+                        driver.execute_script("arguments[0].click();", convert_btn)
                 except Exception:
                     # try alternative button text search
                     try:
                         btn = driver.find_element(By.XPATH, "//a[contains(., 'Convert Now') or contains(., 'Convert now')]")
-                        btn.click()
+                        driver.execute_script("arguments[0].scrollIntoView(true);", btn)
+                        time.sleep(1)
+                        try:
+                            btn.click()
+                        except Exception:
+                            driver.execute_script("arguments[0].click();", btn)
                     except Exception:
                         log_error("[selenium_ttsfree] Convert Now button not found")
                         raise
