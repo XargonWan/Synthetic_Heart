@@ -117,6 +117,18 @@ register_exposed_var(
     tags=["llm_engine"],
 )
 
+register_exposed_var(
+    "SELENIUM_PART1_PROCESSING_TIMEOUT",
+    label="Selenium PART1 Processing Timeout (sec)",
+    default=8,
+    value_type=int,
+    ui_type="number",
+    description="Seconds to wait for ChatGPT to start responding for PART1 (smaller than AWAIT_RESPONSE_TIMEOUT)",
+    scope="llm",
+    component="selenium_llm_base",
+    tags=["llm_engine"],
+)
+
 # Use global timeout
 AWAIT_RESPONSE_TIMEOUT = RESPONSE_TIMEOUT
 
@@ -1627,7 +1639,7 @@ class SeleniumLLMBase(AIPluginBase):
             log_error(f"[selenium] Failed to navigate to {service_url}: {e}")
             raise
 
-    def _send_prompt_with_confirmation(self, textarea, prompt_text: str) -> bool:
+    def _send_prompt_with_confirmation(self, textarea, prompt_text: str, processing_max_wait: int | None = None) -> bool:
         """Send the prompt to the LLM service and wait for confirmation.
         
         This generic implementation:
@@ -1639,6 +1651,12 @@ class SeleniumLLMBase(AIPluginBase):
         The plugin must have configured:
         - self.selectors["send_button"]: CSS selectors for the send button
         """
+        def _get_part1_max_wait():
+            try:
+                return int(config_registry.get_value("SELENIUM_PART1_PROCESSING_TIMEOUT", 8))
+            except Exception:
+                return 8
+
         try:
             if not textarea:
                 log_error("[selenium] No textarea provided")
@@ -1895,7 +1913,11 @@ class SeleniumLLMBase(AIPluginBase):
             log_debug("[selenium] Verifying ChatGPT has started processing...")
             processing_started = False
             start_time = time.time()
-            max_wait = 30  # Wait maximum 30 seconds for ChatGPT to start responding
+            # Default waiting time for ChatGPT to start processing; can be overridden
+            # by callers who may want shorter wait (e.g., PART1 of double-prompt)
+            default_processing_max_wait = 30
+            # Allow callers to pass a shorter processing timeout (e.g., PART1)
+            max_wait = int(processing_max_wait) if processing_max_wait is not None else default_processing_max_wait
             
             while time.time() - start_time < max_wait:
                 try:
@@ -2642,6 +2664,11 @@ class SeleniumLLMBase(AIPluginBase):
         part1_text, part2_text = self._split_prompt_text_into_parts(prompt_text)
 
         # Send PART1 and wait for a response (we ignore content, but we log parsing/results)
+        # Use a shorter processing wait for PART1 to avoid long delays before sending PART2
+        try:
+            part1_processing_timeout = int(config_registry.get_value("SELENIUM_PART1_PROCESSING_TIMEOUT", 8))
+        except Exception:
+            part1_processing_timeout = 8
         try:
             part1_len = len(part1_text) if isinstance(part1_text, str) else None
         except Exception:
@@ -2653,7 +2680,14 @@ class SeleniumLLMBase(AIPluginBase):
         for attempt in range(1, max_retries + 1):
             log_info(f"[selenium] PART1 attempt {attempt}/{max_retries}")
             try:
-                part1_resp = self._execute_complete_workflow(part1_text)
+                attempt_start = time.time()
+                part1_resp = self._execute_complete_workflow(
+                    part1_text,
+                    processing_max_wait=part1_processing_timeout,
+                    stabilize_max_wait=part1_processing_timeout,
+                )
+                attempt_elapsed = time.time() - attempt_start
+                log_debug(f"[selenium] PART1 attempt {attempt} completed in {attempt_elapsed:.1f}s")
             except Exception as e:
                 log_warning(f"[selenium] PART1 attempt {attempt} failed with error: {e}")
                 # If this was the last attempt, we'll continue to PART2 anyway
@@ -2694,6 +2728,11 @@ class SeleniumLLMBase(AIPluginBase):
             part2_len = None
         log_info(f"[selenium] PART2 -> sending main prompt (is_part2=True) size_before_minify={part2_len}")
         self._skip_double_prompt_for_this_send = True
+        # Give the browser a very short grace to process previous message before sending PART2
+        try:
+            time.sleep(0.1)
+        except Exception:
+            pass
         try:
             resp = self._execute_complete_workflow(part2_text)
             log_info("[selenium] PART2 response received — treating as final response for action parsing/corrector flow")
@@ -2702,7 +2741,7 @@ class SeleniumLLMBase(AIPluginBase):
             # Always reset the flag to avoid residual state
             self._skip_double_prompt_for_this_send = False
 
-    def _execute_complete_workflow(self, prompt_text: str) -> str:
+    def _execute_complete_workflow(self, prompt_text: str, processing_max_wait: int | None = None, stabilize_max_wait: int | None = None) -> str:
         """Execute the complete workflow (interaction only) in a single thread."""
         try:
             log_debug(f"[selenium] _execute_complete_workflow called with driver: {self.driver is not None}")
@@ -2725,14 +2764,18 @@ class SeleniumLLMBase(AIPluginBase):
             textarea = self._locate_prompt_area(self.driver)
 
             # Send prompt and wait for response
-            if not self._send_prompt_with_confirmation(textarea, prompt_text):
+            if not self._send_prompt_with_confirmation(textarea, prompt_text, processing_max_wait=processing_max_wait):
                 return "❌ Failed to send prompt"
 
             # Handle response choice if applicable (e.g., ChatGPT offers two responses)
             self._handle_response_choice(self.driver)
 
             # Wait for response to stabilize (text stops growing for N seconds)
-            response = self.wait_until_response_stabilizes(self.driver)
+            # Use a shorter stabilization timeout for PART1 when requested
+            if stabilize_max_wait is not None:
+                response = self.wait_until_response_stabilizes(self.driver, max_total_wait=stabilize_max_wait)
+            else:
+                response = self.wait_until_response_stabilizes(self.driver)
 
             # Log the full response for debugging
             if response:

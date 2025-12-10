@@ -205,7 +205,7 @@ def test_execute_double_prompt_workflow_retries_and_flag_reset(monkeypatch):
 
     calls = {"part1": 0, "part2": 0}
 
-    def fake_execute_complete_workflow(payload):
+    def fake_execute_complete_workflow(payload, *args, **kwargs):
         # First two calls are PART1 attempts returning empty once then malformed
         if calls["part1"] < 1:
             calls["part1"] += 1
