@@ -51,7 +51,6 @@ Beta, but stable enough for daily use. Development branch gives access to the la
 - Action plugins such as a persistent terminal and scheduled events
 - Action plugins such as a persistent terminal and scheduled events
 - G.R.I.L.L.O. ("grillo"): an autonomous internal "beat" system that periodically triggers reflective prompts (memory consolidation, tag elaboration, self-reflection, curiosity, relationship checks) and can create diary entries, schedule actions, or enqueue other tasks. G.R.I.L.L.O. stands for "Generator for Reflective Inner Loop & Logical Observation" — and the word "grillo" in Italian literally means 'cricket' (see the Pinocchio reference: "grillo parlante", the talking cricket). See `plugins/grillo_plugin.py` for details; it's configurable and may be enabled or disabled.
-- Context memory injection with `/context`
 - Ollama-compatible HTTP bridge so existing Ollama clients can talk to Synthetic Heart
 - Docker deployment with automatic database backups
 
