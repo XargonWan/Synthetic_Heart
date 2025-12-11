@@ -31,8 +31,9 @@ RUN echo 'Package: snapd' > /etc/apt/preferences.d/no-snap && \
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       python3 python3-venv python3-pip \
-      git curl wget unzip nano vim \
+    git curl wget unzip nano vim \
       lsb-release ca-certificates \
+    openssl \
       htop net-tools iputils-ping \
       ffmpeg mariadb-client libmariadb3 libmariadb-dev && \
     # Force update of CA certificates bundle

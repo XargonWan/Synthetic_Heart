@@ -29,6 +29,7 @@ services:
       - ROOT_PASSWORD=${ROOT_PASSWORD:-"password"}
       - TZ=${TZ:-Asia/Tokyo}
       - SECURE_CONNECTION=${SECURE_CONNECTION:-1}
+      - SYNTH_WEBUI_TLS=${SYNTH_WEBUI_TLS:-${SECURE_CONNECTION:-1}}
       - DB_HOST=${DB_HOST:-synth-db}
       - CLI_SERVER_PORT=${CLI_SERVER_PORT:-5555}
     restart: unless-stopped

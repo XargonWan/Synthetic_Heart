@@ -81,6 +81,7 @@ The project ships with an **Ollama-compatible interface** (`interface/ollama_com
    ```
 3. If using the Selenium engine with ChatGPT or Gemini, open `http://<host>:5006` and log into the web interface. You might want to send a message to the bot to trigger a browser session if you're unsure.
 From there you can login.
+4. If you want the Web UI to serve HTTPS you can enable TLS by setting `SYNTH_WEBUI_TLS=1` in your `.env` file. In development this will generate a self-signed certificate under `/config/ssl` if not provided.
 
 See the [documentation](https://synthetic-heart.readthedocs.io) for installation details, advanced features and contribution guidelines.
 

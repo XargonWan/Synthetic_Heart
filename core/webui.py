@@ -83,6 +83,11 @@ class SynthWebUIInterface:
         except Exception:
             self.port = 8080
         self.log_level = os.getenv('SYNTH_WEBUI_LOG_LEVEL', 'info')
+        # TLS / HTTPS configuration
+        # By default, reuse SECURE_CONNECTION if set by the caller (e.g. compose env)
+        self.tls_enabled = os.getenv('SYNTH_WEBUI_TLS', os.getenv('SECURE_CONNECTION', '0')) == '1'
+        self.tls_certfile = os.getenv('SYNTH_WEBUI_CERTFILE', None)
+        self.tls_keyfile = os.getenv('SYNTH_WEBUI_KEYFILE', None)
         # Selkies desktop ports used for UI hints
         try:
             self.selkies_https_port = int(os.getenv('SELKIES_HTTPS_PORT', '3000'))
@@ -2938,14 +2943,29 @@ class SynthWebUIInterface:
         import uvicorn
 
         try:
-            log_info(f"{LOG_PREFIX} Creating Uvicorn config for http://{self.host}:{self.port}")
-            config = uvicorn.Config(
-                self.app,
+            scheme = "https" if self.tls_enabled else "http"
+            log_info(f"{LOG_PREFIX} Creating Uvicorn config for {scheme}://{self.host}:{self.port}")
+            # If TLS is enabled, ensure certs exist (or generate self-signed)
+            if self.tls_enabled:
+                try:
+                    self._ensure_tls_files()
+                except Exception as tls_exc:
+                    log_warning(f"{LOG_PREFIX} TLS requested but failed to prepare certificates: {tls_exc}")
+                    self.tls_enabled = False
+            config_kwargs = dict(
+                app=self.app,
                 host=self.host,
                 port=self.port,
                 log_level=self.log_level or "info",
                 lifespan="off",
             )
+            if self.tls_enabled and self.tls_certfile and self.tls_keyfile:
+                log_info(f"{LOG_PREFIX} TLS enabled, using certfile={self.tls_certfile} keyfile={self.tls_keyfile}")
+                config_kwargs.update({
+                    'ssl_certfile': self.tls_certfile,
+                    'ssl_keyfile': self.tls_keyfile,
+                })
+            config = uvicorn.Config(**config_kwargs)
             server = uvicorn.Server(config)
             with self._server_lock:
                 self._server = server
@@ -2971,6 +2991,108 @@ class SynthWebUIInterface:
                 pass
         if self._server_thread and self._server_thread.is_alive():
             self._server_thread.join(timeout=2)
+
+    def _ensure_tls_files(self) -> None:
+        """Ensure TLS certificate and key files exist, generating self-signed files if needed.
+
+        The generated files are stored under a default cert dir, by default `/config/ssl`.
+        This function will update `self.tls_certfile` and `self.tls_keyfile` to point to
+        the created or provided files.
+        """
+        if not self.tls_enabled:
+            return
+
+        cert_dir = os.getenv('SYNTH_WEBUI_CERT_DIR', '/config/ssl')
+        try:
+            Path(cert_dir).mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            log_warning(f"{LOG_PREFIX} Could not create cert dir {cert_dir}: {e}")
+
+        if self.tls_certfile and self.tls_keyfile:
+            if Path(self.tls_certfile).exists() and Path(self.tls_keyfile).exists():
+                return
+            else:
+                log_warning(f"{LOG_PREFIX} Provided TLS files not found: cert={self.tls_certfile}, key={self.tls_keyfile}")
+
+        # Use default filenames if not specified
+        default_cert = os.getenv('SYNTH_WEBUI_CERTFILE', os.path.join(cert_dir, 'synth_webui.crt'))
+        default_key = os.getenv('SYNTH_WEBUI_KEYFILE', os.path.join(cert_dir, 'synth_webui.key'))
+
+        # if both exist, use them
+        if Path(default_cert).exists() and Path(default_key).exists():
+            self.tls_certfile = default_cert
+            self.tls_keyfile = default_key
+            return
+
+        # Attempt to generate a self-signed cert using openssl if available
+        import shutil
+        import subprocess
+        openssl_path = shutil.which('openssl')
+        if not openssl_path:
+            # If openssl is not available, try to use Python's cryptography package
+            try:
+                from cryptography import x509  # type: ignore
+                has_cryptography = True
+            except Exception:
+                has_cryptography = False
+
+            if not has_cryptography:
+                raise RuntimeError('Cannot generate self-signed certificate: openssl not found and cryptography not installed')
+
+            # Use cryptography to generate self-signed cert
+            try:
+                from cryptography.hazmat.primitives import serialization, hashes
+                from cryptography.hazmat.primitives.asymmetric import rsa
+                from cryptography.hazmat.primitives.serialization import BestAvailableEncryption
+                from cryptography.x509.oid import NameOID
+                import datetime
+
+                key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+                subject = issuer = x509.Name([
+                    x509.NameAttribute(NameOID.COUNTRY_NAME, u"US"),
+                    x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, u"NA"),
+                    x509.NameAttribute(NameOID.LOCALITY_NAME, u"Local"),
+                    x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"Synthetic Heart"),
+                    x509.NameAttribute(NameOID.COMMON_NAME, u"localhost"),
+                ])
+                cert = (
+                    x509.CertificateBuilder()
+                    .subject_name(subject)
+                    .issuer_name(issuer)
+                    .public_key(key.public_key())
+                    .serial_number(x509.random_serial_number())
+                    .not_valid_before(datetime.datetime.utcnow())
+                    .not_valid_after(datetime.datetime.utcnow() + datetime.timedelta(days=3650))
+                    .add_extension(x509.SubjectAlternativeName([x509.DNSName(u"localhost")]), critical=False)
+                    .sign(key, hashes.SHA256())
+                )
+                with open(default_key, 'wb') as f:
+                    f.write(key.private_bytes(
+                        encoding=serialization.Encoding.PEM,
+                        format=serialization.PrivateFormat.TraditionalOpenSSL,
+                        encryption_algorithm=serialization.NoEncryption(),
+                    ))
+                with open(default_cert, 'wb') as f:
+                    f.write(cert.public_bytes(serialization.Encoding.PEM))
+                self.tls_certfile = default_cert
+                self.tls_keyfile = default_key
+                log_info(f"{LOG_PREFIX} Generated self-signed TLS certificate using cryptography at {default_cert}")
+                return
+            except Exception as exc:
+                raise RuntimeError(f'cryptography generation failed: {exc}')
+
+        # If openssl exists, use it to generate cert/key
+        subj = os.getenv('SYNTH_WEBUI_CERT_SUBJ', '/CN=localhost')
+        days = os.getenv('SYNTH_WEBUI_CERT_DAYS', '3650')
+        cmd = [openssl_path, 'req', '-x509', '-nodes', '-days', str(days), '-newkey', 'rsa:2048', '-keyout', default_key, '-out', default_cert, '-subj', subj]
+        try:
+            log_info(f"{LOG_PREFIX} Generating self-signed certificate using openssl at {default_cert}")
+            subprocess.run(cmd, check=True)
+            self.tls_certfile = default_cert
+            self.tls_keyfile = default_key
+            log_info(f"{LOG_PREFIX} Self-signed certificate generated: cert={self.tls_certfile} key={self.tls_keyfile}")
+        except Exception as exc:
+            raise RuntimeError(f'Failed to generate self-signed certificate: {exc}')
 
     async def start(self) -> None:
         """Start the web UI interface if autostart is enabled."""
