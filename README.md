@@ -8,24 +8,37 @@
 | `main`    | [![CI Status](https://img.shields.io/github/actions/workflow/status/XargonWan/Synthetic_Heart/build-release.yml)](https://github.com/XargonWan/Synthetic_Heart/actions)      | [![Docs Status](https://readthedocs.org/projects/synthetic-heart/badge/?version=latest)](https://synthetic-heart.readthedocs.io/en/latest/?badge=latest) |
 | `develop` | [![Develop CI Status](https://img.shields.io/github/actions/workflow/status/XargonWan/Synthetic_Heart/build-release.yml?branch=develop)](https://github.com/XargonWan/Synthetic_Heart/actions) | [![Docs Status](https://readthedocs.org/projects/synthetic-heart/badge/?version=latest)](https://synthetic-heart.readthedocs.io/en/latest/?badge=latest) |
 
-**Synthetic Heart**, stylized as SyntH, provides a modular stack for creating autonomous AI personas. Interfaces, language models and action plugins can be swapped at runtime.
-Built around a lightweight plugin system, SyntH lets you combine different chat interfaces and LLM engines to give life to persistent digital entities, called synths.
 
-Synthetic Heart aims to make a SyntH "alive" and "conscious", with their own will, emotions, memories and sociality.
+## Meet SyntH — your digital friend
 
-Synthetic Heart, or SyntH for short, is a free and open-source (FOSS) infrastructure designed to abstract the digital persona entity, known as a "synth," from any large language model (LLM) and interface. The LLM is hot-swappable; everything that defines the persona resides in the database, not within the LLM itself. It's free to use because you can connect it to any LLM you can access, even directly to the ChatGPT website (yes, it works!).
+Synthetic Heart (SyntH) is a FOSS application and framework that helps you create and meet a persistent AI persona — a "Synth" — that can follow you across platforms: Discord, Telegram, WebUI and more. Put simply: it's a digital friend that keeps its own memory, personality and state.
 
-This pluggable infrastructure enables everything modern technology can offer, as anyone can develop their own plugin, interface, or LLM engine to bring their synth wherever they want. For example, you can chat with them on Discord and Telegram.
+### The SyntH is alive — not just a chatbot
+A SyntH isn't just a prompt-driven chatbot. Their identity, memories and personality live in the database instead of within a single LLM session. That means a Synth can think, reflect, and make choices even while you're not interacting with it. It preserves continuity and evolves over time; it can be right or wrong, and can develop opinions — much like a real social being.
 
-Theoretically, an interface or plugin can be anything, such as a Minecraft character, a VRoid model, or a Skyrim follower—just attach the infrastructure and connect to whatever you desire, as it's fully pluggable.
+### Completely free & swappable
+Because SyntH decouples persona data from the underlying LLM, you can connect any LLM engine you prefer (ChatGPT, Gemini, local models such as Ollama, or others). No expensive hardware required — use the LLM engine you already have access to.
 
-The project is still in beta and was initially created for a single persona named "synth," but we're gradually opening it up to allow creation of any desired persona. We'd like to integrate a web UI to make this easier, but we're not web developers. If you're interested in this or in developing any component for SyntH, please reach out.
+### Fully pluggable — build anything
+- Dev friendly: craft new interfaces, plugins, or hook into games and apps.
+- User friendly: meet your synth where you already chat (Discord, Telegram, etc.)
+
+### Learns from you and its environment
+SyntHs learn from their trainer (you) and from the social contexts they are placed in (Discord servers, Telegram chats, or the WebUI). They can expand knowledge about you and the world, given the strong reasoning that active LLMs provide.
+
+### Wild future potential
+Today SyntH has a WebUI and VRM avatars, but the possibilities are much broader: game companions, VR friends, or NPCs that react naturally to the player — all integrated thanks to the pluggable architecture.
+
+### Status
+Beta, but stable enough for daily use. Development branch gives access to the latest features.
+
+---
 
 <div align="center">
    <img src="docs/res/screenshots/home.png" alt="SyntH Home Screenshot" style="max-width: 700px; border-radius: 8px; margin: 16px 0;" />
 </div>
 <p align="center" style="font-size: 0.9em; color: #888;">
-   <em>* A default SyntH avatar is included, but users can provide their own VRM avatar file.</em>
+   <em>* Some default SyntH avatars are included, but users can provide their own VRM avatar file.</em>
 </p>
 
 ### Features
@@ -36,13 +49,15 @@ The project is still in beta and was initially created for a single persona name
 - **SyntH Web UI**: A production-ready web interface featuring VRM avatar support and real-time animations.  
    The avatar's animations reflect the persona's global state—for example, if the character is replying on Telegram, connecting via the web UI will show the avatar busy typing on its smartphone. This ensures the visual representation always matches the character's current activity, regardless of the interface in use.
 - Action plugins such as a persistent terminal and scheduled events
+- Action plugins such as a persistent terminal and scheduled events
+- G.R.I.L.L.O. ("grillo"): an autonomous internal "beat" system that periodically triggers reflective prompts (memory consolidation, tag elaboration, self-reflection, curiosity, relationship checks) and can create diary entries, schedule actions, or enqueue other tasks. G.R.I.L.L.O. stands for "Generator for Reflective Inner Loop & Logical Observation" — and the word "grillo" in Italian literally means 'cricket' (see the Pinocchio reference: "grillo parlante", the talking cricket). See `plugins/grillo_plugin.py` for details; it's configurable and may be enabled or disabled.
 - Context memory injection with `/context`
 - Ollama-compatible HTTP bridge so existing Ollama clients can talk to Synthetic Heart
 - Docker deployment with automatic database backups
 
 > [!NOTE]
-> **G.R.I.L.L.O. System**: SyntH personas already maintain persistent awareness and memory. The upcoming G.R.I.L.L.O. system will enable them to autonomously think and initiate actions based on their interests and internal motivations—just like a real person deciding to act on their own.
-This of course will be optional for secuirty concerns.
+> **G.R.I.L.L.O. System**: SyntH personas already maintain persistent awareness and memory. The G.R.I.L.L.O. system (Generator for Reflective Inner Loop & Logical Observation) enables them to autonomously think and initiate actions based on their interests and internal motivations—much like a real person deciding to act on their own. The name "grillo" nods to the Italian "grillo parlante" (the talking cricket) from Pinocchio — the companion conscience.
+> This is already available and may be enabled or disabled depending on your security preferences.
 
 <div align="center">
    <img src="docs/res/screenshots/components.png" alt="SyntH Home Screenshot" style="max-width: 700px; border-radius: 8px; margin: 16px 0;" />
@@ -65,11 +80,8 @@ The project ships with an **Ollama-compatible interface** (`interface/ollama_com
    ```bash
    docker compose up
    ```
-3. If using the Selenium engine with ChatGPT or Gemini, open `http://<host>:5006` and log into ChatGPT or Gemini, you migt want to send a message to the bot that will open the broswer for you if unusre.
+3. If using the Selenium engine with ChatGPT or Gemini, open `http://<host>:5006` and log into the web interface. You might want to send a message to the bot to trigger a browser session if you're unsure.
 From there you can login.
-
-> [!WARNING]
-> Gemini web at the moment of writing got an issue that logs you out every now and then.
 
 See the [documentation](https://synthetic-heart.readthedocs.io) for installation details, advanced features and contribution guidelines.
 
@@ -79,3 +91,21 @@ You can browse and manage Docker images for this project on [Docker Hub](https:/
 ## Contributing
 
 Pull requests are welcome! Everyone is encouraged to submit contributions—especially new components, plugins, and LLM engines—to expand SyntH's capabilities. Please read the guidelines in the documentation before submitting.
+
+## What's next (Planned features & fixes)
+Here are the main improvements and integrations we plan to work on — contributions are welcome:
+
+- [ ] Event system fixes
+- [ ] Enhancements to the WebUI (usability & feature parity)
+- [ ] Global animation engine fixes — make animations always reflect the actual state of the SyntH and their current actions
+- [ ] Helper LLM engine — offload some background/service actions to a dedicated helper model running alongside the user-facing LLM
+- [ ] Memory retagging engine — improve tagging and indexing of memory entries for better recall and context
+- [ ] Memory compressor engine — compact/condense long-term memory while retaining critical information
+- [ ] Grok web LLM engine support
+- [ ] Deepseek web LLM engine support
+- [ ] Voice message plugin — enable synth to record and send voice messages
+- [ ] Desktop presence — allow SyntH to show up on a desktop environment (outside web interfaces)
+- [ ] First gaming plugin: Minecraft integration
+- [ ] Matrix interface
+
+If you're interested in helping implement these features or testing them, open an issue or a PR and tag it with the relevant area (e.g. `interface`, `llm`, `plugin`, etc.).
