@@ -660,6 +660,12 @@
                             </div>
                         </div>
                         <div class="grillo-prompt">${escapeHtml(entry.prompt_text)}</div>
+                        ${entry.response_text ? `
+                        <div style="margin-top: 0.75rem;">
+                            <div style="font-size: 0.85rem; color: var(--text-soft); margin-bottom: 0.5rem; font-weight: 500;">Response:</div>
+                            <div class="grillo-response" style="background: rgba(76, 175, 80, 0.1); border-left: 3px solid #4CAF50; padding: 0.75rem; border-radius: 4px; font-size: 0.9rem; line-height: 1.5; color: var(--text);">${escapeHtml(entry.response_text)}</div>
+                        </div>
+                        ` : ''}
                         ${entry.has_diary ? `
                             <div class="history-entry-detail" style="margin-top: 1rem;">
                                 <strong>📝 Reflection created</strong>

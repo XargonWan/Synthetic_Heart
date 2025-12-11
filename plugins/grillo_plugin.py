@@ -1,170 +1,112 @@
-# plugins/grillo_plugin.py
-"""
-G.R.I.L.L.O. Plugin - Generator for Reflective Inner Loop & Logical Observation
+"""Backward-compatible wrapper for the Grillo plugin implementation.
 
-Inspired by Pinocchio's talking cricket (grillo parlante), this plugin provides
-SyntH with an internal conscience system that generates autonomous "beat" events
-for reflection, memory elaboration, and self-awareness.
-
-Beat types:
-- tag_elaboration: Reflect on recently used tags and associated memories
-- memory_consolidation: Synthesize similar memories into patterns
-- self_reflection: Examine current emotional state and recent interactions
-- curiosity: Generate questions about recent conversations
-- relationship: Reflect on interactions with specific users
+The main implementation lives under `plugins/grillo/grillo_impl.py`. This module
+keeps the `PLUGIN_CLASS` export for backward compatibility with existing
+imports that use `plugins.grillo_plugin`.
 """
 
-import asyncio
-import json
-import random
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
+try:
+    from plugins.grillo.grillo_impl import GrilloPlugin  # type: ignore
+except Exception:
+    GrilloPlugin = None  # type: ignore
 
-from core.ai_plugin_base import AIPluginBase
-from core.db import get_conn
-from core.logging_utils import log_debug, log_info, log_warning, log_error
-from core.config_manager import config_registry
+PLUGIN_CLASS = GrilloPlugin
+"""Backward-compatible wrapper for the Grillo plugin implementation.
+
+The main implementation lives under `plugins/grillo/grillo_impl.py`. This module
+keeps the `PLUGIN_CLASS` export for backward compatibility with existing
+imports that use `plugins.grillo_plugin`.
+"""
+
+try:
+    from plugins.grillo.grillo_impl import GrilloPlugin  # type: ignore
+except Exception:
+    GrilloPlugin = None  # type: ignore
+
+PLUGIN_CLASS = GrilloPlugin
+"""Backward-compatible wrapper for the Grillo plugin implementation.
+
+The main implementation lives under `plugins/grillo/grillo_impl.py`. This module
+keeps the `PLUGIN_CLASS` export for backward compatibility with existing
+imports that use `plugins.grillo_plugin`.
+"""
+
+try:
+    from plugins.grillo.grillo_impl import GrilloPlugin  # type: ignore
+except Exception:
+    GrilloPlugin = None  # type: ignore
+
+PLUGIN_CLASS = GrilloPlugin
+"""Backward-compatible wrapper for the Grillo plugin implementation.
+
+The main implementation lives under `plugins/grillo/grillo_impl.py`. This module
+keeps the `PLUGIN_CLASS` export for backward compatibility with existing
+imports that use `plugins.grillo_plugin`.
+"""
+
+try:
+    from plugins.grillo.grillo_impl import GrilloPlugin  # type: ignore
+except Exception:
+    GrilloPlugin = None  # type: ignore
+
+PLUGIN_CLASS = GrilloPlugin
 
 
-class GrilloPlugin(AIPluginBase):
-    """
-    G.R.I.L.L.O. - Autonomous thought beat generator for SyntH's internal conscience.
-    
-    Generates periodic "beats" that trigger autonomous reflection and thought processes,
-    simulating human-like internal dialogue and self-awareness patterns.
-    """
-    
-    # Class-level state for singleton scheduler
-    _scheduler_running = False
-    _scheduler_task: Optional[asyncio.Task] = None
-    _beat_pending = False  # Flag to prevent flooding queue with beats
-    
-    # Beat types and their relative weights for random selection
-    BEAT_TYPES = {
-        "tag_elaboration": 0.3,      # 30% - Reflect on recent tags
-        "memory_consolidation": 0.15, # 15% - Synthesize memories
-        "self_reflection": 0.25,      # 25% - Examine emotional state
-        "curiosity": 0.20,            # 20% - Generate questions
-        "relationship": 0.10,         # 10% - Reflect on user interactions
-    }
-    
-    def __init__(self):
-        super().__init__()
-        self.beat_interval = 1800  # Default 30 minutes
-        self._config_var = None
-        
-    def get_metadata(self) -> dict:
-        """Return plugin metadata."""
-        return {
-            "name": "grillo",
-            "version": "1.0.0",
-            "description": "G.R.I.L.L.O. - Generator for Reflective Inner Loop & Logical Observation",
-            "author": "SyntH Core Team",
-        }
-    
-    async def ensure_grillo_tables(self):
-        """Ensure the grillo_beats and grillo_activity_log tables exist."""
-        try:
-            conn = await get_conn()
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS grillo_beats (
-                        id INT AUTO_INCREMENT PRIMARY KEY,
-                        beat_type VARCHAR(50) NOT NULL,
-                        next_beat DATETIME NOT NULL,
-                        metadata JSON,
-                        enabled BOOLEAN DEFAULT 1,
-                        plugin_enabled BOOLEAN DEFAULT 1,
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                        INDEX idx_next_beat (next_beat, enabled, plugin_enabled),
-                        INDEX idx_beat_type (beat_type)
-                    )
-                    """
-                )
-                await cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS grillo_activity_log (
-                        id INT AUTO_INCREMENT PRIMARY KEY,
-                        beat_type VARCHAR(50) NOT NULL,
-                        prompt_text TEXT NOT NULL,
-                        diary_entry_id INT,
-                        executed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        metadata JSON,
-                        INDEX idx_executed_at (executed_at DESC),
-                        INDEX idx_beat_type (beat_type),
-                        INDEX idx_diary_entry (diary_entry_id)
-                    )
-                    """
-                )
-            log_info("[grillo] Ensured grillo_beats and grillo_activity_log tables exist")
-        except Exception as e:
-            log_error(f"[grillo] Failed to ensure tables exist: {e}")
-        finally:
-            conn.close()
-    
-    async def _enable_all_beats(self):
-        """Re-enable all beats on plugin start."""
-        try:
-            conn = await get_conn()
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "UPDATE grillo_beats SET plugin_enabled = 1 WHERE plugin_enabled = 0"
-                )
-                if cur.rowcount > 0:
-                    log_info(f"[grillo] Re-enabled {cur.rowcount} beats")
-        except Exception as e:
-            log_error(f"[grillo] Failed to enable beats: {e}")
-        finally:
-            conn.close()
-    
-    async def _disable_all_beats(self):
-        """Disable all beats on plugin stop (without deleting them)."""
-        try:
-            conn = await get_conn()
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "UPDATE grillo_beats SET plugin_enabled = 0 WHERE plugin_enabled = 1"
-                )
-                if cur.rowcount > 0:
-                    log_info(f"[grillo] Disabled {cur.rowcount} beats")
-        except Exception as e:
-            log_error(f"[grillo] Failed to disable beats: {e}")
-        finally:
-            conn.close()
-    
-    def _on_interval_changed(self, new_value: int):
-        """Callback when GRILLO_BEAT_INTERVAL config changes."""
-        log_info(f"[grillo] Beat interval changed to {new_value} seconds")
-        self.beat_interval = new_value
-    
-    async def start(self):
-        """Start the G.R.I.L.L.O. beat scheduler."""
-        log_info(
-            f"[grillo] start() called, scheduler_running={GrilloPlugin._scheduler_running}"
-        )
-        
-        # Register configuration variable
-        self._config_var = config_registry.get_var(
-            "GRILLO_BEAT_INTERVAL",
-            default=1800,
-            label="G.R.I.L.L.O. Beat Interval",
-            description="Seconds between autonomous thinking beats (default: 1800 = 30 minutes)",
-            value_type=int,
-            group="autonomous",
-            component="grillo_plugin",
-            advanced=True
-        )
-        self.beat_interval = self._config_var.value
-        
-        # Register listener for dynamic updates
+"""Backward-compatible wrapper for the Grillo plugin implementation.
+
+The main implementation lives under `plugins/grillo/grillo_impl.py`. This module
+keeps the `PLUGIN_CLASS` export for backward compatibility with existing
+imports that use `plugins.grillo_plugin`.
+"""
+
+try:
+    from plugins.grillo.grillo_impl import GrilloPlugin  # type: ignore
+except Exception:
+    GrilloPlugin = None  # type: ignore
+
+PLUGIN_CLASS = GrilloPlugin
+"""Backward-compatible wrapper for the Grillo plugin implementation.
+
+The main implementation lives under `plugins/grillo/grillo_impl.py`. This module
+keeps the `PLUGIN_CLASS` export for backward compatibility with existing
+imports that use `plugins.grillo_plugin`.
+"""
+
+try:
+    from plugins.grillo.grillo_impl import GrilloPlugin  # type: ignore
+except Exception:
+    GrilloPlugin = None  # type: ignore
+
+PLUGIN_CLASS = GrilloPlugin
+"""Backward-compatible wrapper for the Grillo plugin implementation.
+
+The main implementation lives under `plugins/grillo/grillo_impl.py`. This module
+keeps the `PLUGIN_CLASS` export for backward compatibility.
+"""
+
+try:
+    from plugins.grillo.grillo_impl import GrilloPlugin  # type: ignore
+except Exception:
+    GrilloPlugin = None  # type: ignore
+
+PLUGIN_CLASS = GrilloPlugin
         definition = config_registry._definitions.get("GRILLO_BEAT_INTERVAL")
         if definition:
             definition.listeners.append(self._on_interval_changed)
         
         await self.ensure_grillo_tables()
         await self._enable_all_beats()
+
+        # Try to locate history_evaluator plugin (optional) in PLUGIN_REGISTRY
+        try:
+            from core.core_initializer import PLUGIN_REGISTRY
+            self.history_evaluator = PLUGIN_REGISTRY.get("history_evaluator")
+            if self.history_evaluator:
+                log_info("[grillo] history_evaluator plugin located in PLUGIN_REGISTRY")
+            else:
+                log_debug("[grillo] history_evaluator plugin not registered in PLUGIN_REGISTRY")
+        except Exception as e:
+            log_debug(f"[grillo] Could not access PLUGIN_REGISTRY: {e}")
         
         task = GrilloPlugin._scheduler_task
         
@@ -291,16 +233,38 @@ class GrilloPlugin(AIPluginBase):
             tag_list = ", ".join(f"'{tag}'" for tag in tags)
             tag_text = f"these topics: {tag_list}"
         
-        return (
+        # If history evaluator is available, add a short history-based lead-in
+        history_snippet = None
+        if self.history_evaluator:
+            try:
+                import core.recent_chats as recent_chats
+                last = await recent_chats.get_last_active_chats_verbose(1)
+                if last:
+                    chat_id, _ = last[0]
+                    chat_path = recent_chats.get_chat_path(chat_id) or f"telegram_bot/{chat_id}"
+                else:
+                    chat_path = None
+
+                if chat_path:
+                    history_snippet = await self.history_evaluator.evaluate_history(chat_path, entries=3)
+            except Exception as e:
+                log_debug(f"[grillo] history_evaluator evaluation failed for tag_elaboration: {e}")
+
+        lead_in = ""
+        if history_snippet:
+            lead_in = "Below is a short history-derived prompt to help you reflect:\n\n" + history_snippet + "\n\n"
+
+        base = (
             f"[G.R.I.L.L.O. Tag Elaboration]\n\n"
-            f"Reflect on {tag_text}.\n\n"
+            f"{lead_in}Reflect on {tag_text}.\n\n"
             f"Think about:\n"
             f"- What patterns do you notice?\n"
             f"- How do these themes connect?\n"
             f"- What insights emerge?\n\n"
             f"IMPORTANT: You MUST end your response with a JSON action to create a diary entry about this. "
-            f'Format: {{"actions": [{{"type": "create_personal_diary_entry", "payload": {{"content": "your reflection", "personal_thought": "insight", "emotions": [{{"type": "reflection", "intensity": 5}}]}}}}}}'
+            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content": "your reflection", "personal_thought": "insight", "emotions": [{"type": "reflection", "intensity": 5}]}}]}'
         )
+        return base
     
     async def _create_memory_consolidation_prompt(self) -> str:
         """Generate prompt for memory consolidation beat.
@@ -330,11 +294,37 @@ class GrilloPlugin(AIPluginBase):
             log_debug(f"[grillo] Could not count diary entries: {e}, using generic prompt")
             entry_count = 0
         
+        # Optionally request history snippets via history evaluator
+        history_snippet = None
+        if self.history_evaluator:
+            try:
+                import core.recent_chats as recent_chats
+                last = await recent_chats.get_last_active_chats_verbose(1)
+                if last:
+                    chat_id, _ = last[0]
+                    chat_path = recent_chats.get_chat_path(chat_id) or f"telegram_bot/{chat_id}"
+                else:
+                    chat_path = None
+                if chat_path:
+                    history_snippet = await self.history_evaluator.evaluate_history(chat_path, entries=5)
+            except Exception as e:
+                log_debug(f"[grillo] history_evaluator evaluation failed for memory_consolidation: {e}")
+
         if entry_count > 0:
-            return (
+            # Build base consolidation prompt
+            base = (
                 "[G.R.I.L.L.O. Memory Consolidation]\n\n"
                 f"You have {entry_count} diary entries from the last {days_val if 'days_val' in locals() else 2} days available in your context below. "
                 "This is a DEDICATED memory analysis session - review ALL of them carefully.\n\n"
+            )
+
+            if history_snippet:
+                base = (
+                    "[G.R.I.L.L.O. Memory Consolidation]\n\n"
+                    "History-derived lead-in:\n\n" + history_snippet + "\n\n" + base
+                )
+
+            base += (
                 "Analyze your memories to find:\n"
                 "- Recurring patterns or themes across multiple entries\n"
                 "- Connections between seemingly unrelated experiences\n"
@@ -348,6 +338,8 @@ class GrilloPlugin(AIPluginBase):
                 'Include references to specific memories if relevant.\n'
                 '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content": "your detailed synthesis", "personal_thought": "key insight or pattern discovered", "emotions": [{"type": "reflection", "intensity": 5}]}}]}'
             )
+
+            return base
         else:
             # Fallback if no entries available
             return (
@@ -377,8 +369,29 @@ class GrilloPlugin(AIPluginBase):
     
     async def _create_curiosity_prompt(self) -> str:
         """Generate prompt for curiosity beat."""
-        return (
-            "[G.R.I.L.L.O. Curiosity Exploration]\n\n"
+        # If history evaluator is available, include its suggestions as a lead-in
+        history_snippet = None
+        if self.history_evaluator:
+            try:
+                # Get last active chat and its path
+                import core.recent_chats as recent_chats
+                last = await recent_chats.get_last_active_chats_verbose(1)
+                if last:
+                    chat_id, _ = last[0]
+                    chat_path = recent_chats.get_chat_path(chat_id) or f"telegram_bot/{chat_id}"
+                else:
+                    chat_path = None
+
+                if chat_path:
+                    history_snippet = await self.history_evaluator.evaluate_history(chat_path, entries=3)
+            except Exception as e:
+                log_debug(f"[grillo] history_evaluator evaluation failed: {e}")
+
+        intro = "[G.R.I.L.L.O. Curiosity Exploration]\n\n"
+        if history_snippet:
+            intro += "Below is a short history-derived prompt to help you be curious:\n\n" + history_snippet + "\n\n"
+
+        intro += (
             "Based on your recent experiences:\n"
             "- What questions have emerged?\n"
             "- What topics spark your curiosity?\n"
@@ -387,6 +400,8 @@ class GrilloPlugin(AIPluginBase):
             "IMPORTANT: You MUST end your response with a JSON action to create a diary entry exploring your curiosity. "
             '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content": "your curious thoughts", "personal_thought": "question or wonder", "emotions": [{"type": "curiosity", "intensity": 6}]}}]}'
         )
+
+        return intro
     
     async def _create_relationship_prompt(self) -> str:
         """Generate prompt for relationship reflection beat."""
