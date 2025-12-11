@@ -104,8 +104,8 @@ The web interface provides browser-based access:
 
 .. code-block:: bash
 
-   WEBUI_HOST=0.0.0.0
-   WEBUI_PORT=5006
+   SYNTH_WEBUI_HOST=0.0.0.0
+   SYNTH_WEBUI_PORT=5006
 
 **Features:**
 
@@ -187,12 +187,55 @@ Creating a new interface requires implementing the interface contract:
 
        @staticmethod
        def get_supported_actions() -> dict:
-           """Return action schemas."""
+           """Return action schemas using the optimized format."""
            return {
                "message_myinterface": {
-                   "description": "Send a message via MyInterface",
-                   "required_fields": ["text", "target"],
-                   "optional_fields": ["media"],
+                   "schema": {
+                       "type": "object",
+                       "properties": {
+                           "text": {
+                               "type": "string",
+                               "description": "Message content to send"
+                           },
+                           "interface_path": {
+                               "type": "string",
+                               "description": "Hierarchical interface path (e.g., 'telegram_bot/chat_id/thread_id')"
+                           },
+                           "media": {
+                               "type": "string",
+                               "description": "Optional media attachment URL"
+                           }
+                       },
+                       "required": ["text", "target"]
+                   },
+                   "brief": "Send a message via MyInterface",
+                   "examples": {
+                       "description": "Send a message through MyInterface with optional media attachment.",
+                       "instructions": {
+                           "when_to_use": "Use to communicate through MyInterface channels or direct messages.",
+                           "common_pitfalls": [
+                               "Ensure target exists and is accessible",
+                               "Media URLs must be publicly accessible"
+                           ]
+                       },
+                       "examples": [
+                           {
+                               "scenario": "Send text message",
+                               "payload": {
+                                   "text": "Hello world!",
+                                   "interface_path": "myinterface/channel1"
+                               }
+                           },
+                           {
+                               "scenario": "Send message with media",
+                               "payload": {
+                                   "text": "Check this out",
+                                   "interface_path": "myinterface/user123",
+                                   "media": "https://example.com/image.jpg"
+                               }
+                           }
+                       ]
+                   }
                }
            }
 
@@ -203,7 +246,7 @@ Creating a new interface requires implementing the interface contract:
                    "description": "Send a message through MyInterface.",
                    "payload": {
                        "text": {"type": "string", "description": "Message content"},
-                       "target": {"type": "string", "description": "Recipient identifier"},
+                       "interface_path": {"type": "string", "description": "Hierarchical interface path (e.g., 'myinterface/channel1')"},
                        "media": {"type": "string", "description": "Optional media URL"}
                    }
                }
@@ -215,8 +258,8 @@ Creating a new interface requires implementing the interface contract:
            if action_type == "message_myinterface":
                if "text" not in payload:
                    errors.append("payload.text is required")
-               if "target" not in payload:
-                   errors.append("payload.target is required")
+               if "interface_path" not in payload:
+                   errors.append("payload.interface_path is required")
            return errors
 
        async def start(self):
@@ -254,7 +297,7 @@ Interfaces can provide actions that LLMs can invoke:
      "type": "message_telegram_bot",
      "payload": {
        "text": "Hello from synth!",
-       "chat_id": "123456789"
+       "interface_path": "telegram_bot/123456789/2"
      }
    }
 
@@ -266,7 +309,7 @@ Interfaces can provide actions that LLMs can invoke:
      "type": "send_media_discord",
      "payload": {
        "file_url": "https://example.com/image.png",
-       "channel_id": "987654321"
+       "interface_path": "discord_interface/987654321/123"
      }
    }
 
@@ -300,6 +343,9 @@ All inputs are validated before processing:
 Best Practices
 --------------
 
+**Action Schema Design**
+    Use the new three-tier action format for optimal prompt efficiency. See :doc:`action_schema_format` for details.
+
 **Error Handling**
     Implement comprehensive error handling with user feedback.
 
@@ -313,6 +359,6 @@ Best Practices
     Respect platform rate limits and content policies.
 
 **Documentation**
-    Provide clear action schemas and examples.
+    Provide clear action schemas and examples in the ``examples`` tier.
 
 For complete implementations, examine ``interface/telegram_bot.py`` or ``interface/discord_interface.py`` in the repository.

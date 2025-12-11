@@ -3,7 +3,7 @@ import signal
 import sys
 import subprocess
 import asyncio
-from core.db import init_db, test_connection, get_conn
+from core.db import init_db, test_connection, get_conn_ctx
 # from core.blocklist import init_blocklist_table  # Now handled by blocklist plugin
 from core.logging_utils import (
     log_debug,
@@ -12,6 +12,13 @@ from core.logging_utils import (
     setup_logging,
     log_error,
 )
+
+# Import exposed variables EARLY to ensure correct type registrations
+# before any circular import chains or dynamic calls can cause premature registration
+try:
+    import core.variables_engine  # noqa: F401
+except Exception as e:
+    print(f"[main] Warning: Failed to import variables_engine early: {e}", flush=True)
 
 # Global restart flag
 _restart_requested = False
@@ -85,20 +92,16 @@ async def initialize_database():
     # Verifica dei permessi dell'utente del database
     async def check_permissions():
         log_debug("[main] Checking database permissions...")
-        conn = None
         try:
-            conn = await get_conn()
-            async with conn.cursor() as cur:
-                await cur.execute("SHOW GRANTS FOR CURRENT_USER()")
-                grants = await cur.fetchall()
-                log_debug("[main] Database permissions check completed")
-                return grants
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute("SHOW GRANTS FOR CURRENT_USER()")
+                    grants = await cur.fetchall()
+                    log_debug("[main] Database permissions check completed")
+                    return grants
         except Exception as e:
             log_error(f"[main] Error checking database permissions: {repr(e)}")
             raise
-        finally:
-            if conn:
-                conn.close()
 
     try:
         grants = await check_permissions()
@@ -120,10 +123,9 @@ async def initialize_database():
         await config_registry.persist_bootstrap_configs()
         log_debug("[main] Bootstrap configurations persisted")
         
-        # Load all other configurations from DB
-        log_debug("[main] Loading all configurations from DB...")
-        await config_registry.load_all_from_db()
-        log_debug("[main] All configurations loaded from DB")
+        # NOTE: load_all_from_db() is called later in core_initializer.initialize_all()
+        # after all variable registrations are complete. Do not call it here as it would
+        # skip loading persona configurations due to incomplete registration.
         
         # Blocklist table now handled by blocklist plugin
         # log_info("[main] Initializing blocklist table...")
@@ -147,30 +149,6 @@ if __name__ == "__main__":
     setup_logging()
     log_info("[main] Starting synth application...")
     
-    # Test DB connectivity and initialize tables with retry mechanism
-    import time
-    max_retries = 30
-    retry_delay = 2
-    
-    for attempt in range(max_retries):
-        try:
-            log_info(f"[main] Attempting database connection (attempt {attempt + 1}/{max_retries})...")
-            
-            # Initialize database async
-            if asyncio.run(initialize_database()):
-                break
-            else:
-                raise Exception("Database initialization failed")
-            
-        except Exception as e:
-            if attempt < max_retries - 1:
-                log_warning(f"[main] Database connection attempt {attempt + 1} failed: {e}")
-                log_info(f"[main] Retrying in {retry_delay} seconds...")
-                time.sleep(retry_delay)
-            else:
-                log_error(f"[main] Critical error during database initialization after {max_retries} attempts: {e}")
-                sys.exit(1)
-
     # 🌐 Show where the Webtop/VNC interface is available
     host = os.environ.get("WEBVIEW_HOST", "localhost")
     port = os.environ.get("WEBVIEW_PORT", "3000")
@@ -182,6 +160,37 @@ if __name__ == "__main__":
     async def start_application():
         """Start the application and handle restart requests."""
         global _restart_requested, _restart_event
+        
+        # Test DB connectivity and initialize tables with retry mechanism
+        # This must be done in the main event loop to avoid creating separate pools
+        
+        # Register main loop with notifier so it doesn't create new event loops
+        from core.notifier import _set_main_loop
+        loop = asyncio.get_running_loop()
+        _set_main_loop(loop)
+        
+        import time
+        max_retries = 30
+        retry_delay = 2
+        
+        for attempt in range(max_retries):
+            try:
+                log_info(f"[main] Attempting database connection (attempt {attempt + 1}/{max_retries})...")
+                
+                # Initialize database async
+                if await initialize_database():
+                    break
+                else:
+                    raise Exception("Database initialization failed")
+                
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    log_warning(f"[main] Database connection attempt {attempt + 1} failed: {e}")
+                    log_info(f"[main] Retrying in {retry_delay} seconds...")
+                    await asyncio.sleep(retry_delay)
+                else:
+                    log_error(f"[main] Critical error during database initialization after {max_retries} attempts: {e}")
+                    sys.exit(1)
         
         while True:
             _restart_requested = False
@@ -203,6 +212,7 @@ if __name__ == "__main__":
                 # Start webui server if available
                 try:
                     from core.core_initializer import INTERFACE_REGISTRY
+                    # If discovery populated the registry, use that instance.
                     if 'synth_webui' in INTERFACE_REGISTRY:
                         webui_interface = INTERFACE_REGISTRY['synth_webui']
                         if hasattr(webui_interface, 'start'):
@@ -211,6 +221,30 @@ if __name__ == "__main__":
                         elif hasattr(webui_interface, 'start_server_async'):
                             webui_interface.start_server_async()
                             log_info("[main] WebUI server started")
+                    else:
+                        # Fallback: attempt to import and initialize the core.webui module
+                        # This ensures the Web UI is created even if discovery missed it
+                        try:
+                            import importlib
+                            log_info("[main] synth_webui not found in INTERFACE_REGISTRY - attempting direct initialization")
+                            webui_mod = importlib.import_module('core.webui')
+                            if hasattr(webui_mod, 'initialize_interface'):
+                                webui_mod.initialize_interface()
+                                # If the module created the instance it should be in the registry now
+                                if 'synth_webui' in INTERFACE_REGISTRY:
+                                    webui_interface = INTERFACE_REGISTRY['synth_webui']
+                                    if hasattr(webui_interface, 'start'):
+                                        await webui_interface.start()
+                                        log_info("[main] WebUI interface started (fallback initialization)")
+                                    elif hasattr(webui_interface, 'start_server_async'):
+                                        webui_interface.start_server_async()
+                                        log_info("[main] WebUI server started (fallback initialization)")
+                                else:
+                                    log_warning("[main] core.webui.initialize_interface() did not register synth_webui")
+                            else:
+                                log_warning("[main] core.webui has no initialize_interface() - cannot initialize Web UI")
+                        except Exception as e:
+                            log_warning(f"[main] Fallback initialization of synth_webui failed: {e}")
                 except Exception as e:
                     log_warning(f"[main] Could not start webui interface: {e}")
                 

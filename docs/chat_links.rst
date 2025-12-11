@@ -5,13 +5,12 @@ synth maintains a central **ChatLinkStore** that records the relationship
 between chat identifiers and human‑readable names. Each entry stores:
 
 * ``interface`` – originating interface (e.g. ``telegram``, ``discord``)
-* ``chat_id`` – numeric identifier for the chat
-* ``thread_id`` – optional thread/topic id
+* ``interface_path`` – hierarchical path identifying the conversation (e.g., "telegram_bot/chat_id/thread_id")
 * ``chat_name`` – optional parent chat title (Telegram chat, Discord server)
 * ``message_thread_name`` – optional thread or channel title
 
-Interfaces can resolve a link by supplying any combination of IDs or names.
-This allows actions to target a conversation using ``chat_id``/``thread_id``
+Interfaces can resolve a link by supplying any combination of interface_path or names.
+This allows actions to target a conversation using ``interface_path``
 or by specifying ``chat_name``/``message_thread_name``.
 
 Updating names

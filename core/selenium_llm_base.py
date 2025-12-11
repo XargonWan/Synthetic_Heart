@@ -18,6 +18,7 @@ import threading
 import asyncio
 import logging
 import requests
+import random
 
 try:
     from selenium_stealth import stealth
@@ -60,10 +61,73 @@ from core.transport_layer import llm_to_interface
 from core.logging_utils import log_debug, log_error, log_warning, log_info, _LOG_DIR
 from core.notifier import set_notifier
 from core.config_manager import config_registry
+from core.variables_engine import register_exposed_var
 import core.recent_chats as recent_chats
 from core.ai_plugin_base import AIPluginBase
 from core.action_parser import CORRECTOR_RETRIES
 from core.message_chain import RESPONSE_TIMEOUT
+from core.prompt_engine import reduce_json_text_for_transmission
+
+# Register exposed variables for WebUI (shared by all Selenium-based LLM engines)
+register_exposed_var(
+    "CHROMIUM_HEADLESS",
+    label="Chromium Headless Mode",
+    default=0,
+    value_type=int,
+    ui_type="bool",
+    description="Set to 1 for headless mode (no browser window), 0 for non-headless mode (visible browser window)",
+    scope="llm",
+    advanced=True,
+    component="selenium_llm_base",
+)
+
+register_exposed_var(
+    "SELENIUM_MAX_RETRIES",
+    label="Selenium Max Retries",
+    default=3,
+    value_type=int,
+    ui_type="number",
+    description="Maximum number of retries for Selenium driver initialization",
+    scope="llm",
+    advanced=True,
+    component="selenium_llm_base",
+)
+
+register_exposed_var(
+    "AWAIT_RESPONSE_TIMEOUT",
+    label="Response Timeout (Selenium)",
+    default=240,
+    value_type=int,
+    ui_type="number",
+    description="Seconds to wait for ChatGPT response before timing out",
+    scope="llm",
+    component="selenium_chatgpt_legacy",
+    tags=["llm_engine"],
+)
+
+register_exposed_var(
+    "CORRECTOR_RETRIES",
+    label="Corrector Retries",
+    default=2,
+    value_type=int,
+    ui_type="number",
+    description="Maximum number of retries for the response corrector",
+    scope="llm",
+    component="selenium_chatgpt_legacy",
+    tags=["llm_engine"],
+)
+
+register_exposed_var(
+    "SELENIUM_PART1_PROCESSING_TIMEOUT",
+    label="Selenium PART1 Processing Timeout (sec)",
+    default=8,
+    value_type=int,
+    ui_type="number",
+    description="Seconds to wait for ChatGPT to start responding for PART1 (smaller than AWAIT_RESPONSE_TIMEOUT)",
+    scope="llm",
+    component="selenium_llm_base",
+    tags=["llm_engine"],
+)
 
 # Use global timeout
 AWAIT_RESPONSE_TIMEOUT = RESPONSE_TIMEOUT
@@ -84,6 +148,46 @@ _shared_driver = None
 _shared_driver_lock = threading.Lock()
 _shared_driver_ref_count = 0
 
+# Global prompt character limit from the active Selenium LLM engine
+# Updated when an engine is loaded or model is switched
+# Default value comes from ChatGPT's MODEL_LIMITS_MAP["default"] = 51,000
+_active_selenium_max_prompt_chars = 51000  # Safe default (ChatGPT default), will be updated when engine loads
+_active_selenium_llm_name = "unknown"  # Track which Selenium engine is active
+
+
+def set_active_selenium_limits(max_prompt_chars: int, llm_name: str = "") -> None:
+    """Update the global prompt character limit for the active Selenium LLM engine.
+    
+    This is called by Selenium engine implementations (ChatGPT, Grok, etc.)
+    when they are initialized or when the model is switched.
+    
+    Parameters
+    ----------
+    max_prompt_chars : int
+        Maximum prompt characters supported by the active LLM engine
+    llm_name : str
+        Name of the active LLM engine (e.g., "gpt-4o", "grok-beta")
+    """
+    global _active_selenium_max_prompt_chars, _active_selenium_llm_name
+    _active_selenium_max_prompt_chars = max_prompt_chars
+    _active_selenium_llm_name = llm_name
+    from core.logging_utils import log_info
+    log_info(f"[selenium_llm_base] Active Selenium LLM limits updated: {llm_name} max_prompt_chars={max_prompt_chars}")
+
+
+def get_active_selenium_limits() -> dict:
+    """Get the current limits from the active Selenium LLM engine.
+    
+    Returns
+    -------
+    dict
+        Dictionary with keys: max_prompt_chars, llm_name
+    """
+    return {
+        "max_prompt_chars": _active_selenium_max_prompt_chars,
+        "llm_name": _active_selenium_llm_name
+    }
+
 
 class SeleniumLLMBase(AIPluginBase):
     """
@@ -101,16 +205,24 @@ class SeleniumLLMBase(AIPluginBase):
         """Get the single global shared driver instance."""
         async with cls._global_driver_lock:
             if cls._global_shared_driver is None:
-                log_info("[selenium] 🌍 CREATING GLOBAL shared driver instance")
-                import traceback
-                creation_stack = "".join(traceback.format_stack()[-5:-1])
-                log_debug(f"[selenium] Global driver creation from:\n{creation_stack}")
-                cls._global_shared_driver = await asyncio.to_thread(cls._create_shared_driver)
-                cls._global_ref_count = 1
-                log_info(f"[selenium] 🌍 GLOBAL driver CREATED, windows: {len(cls._global_shared_driver.window_handles)}")
+                log_info("[selenium] 🌍 Creating global shared driver instance with 120s timeout")
+                try:
+                    # Add timeout to prevent infinite blocking on driver creation
+                    cls._global_shared_driver = await asyncio.wait_for(
+                        asyncio.to_thread(cls._create_shared_driver),
+                        timeout=120  # 120 seconds max for driver creation
+                    )
+                    cls._global_ref_count = 1
+                    log_info(f"[selenium] 🌍 Global driver created with {len(cls._global_shared_driver.window_handles)} window(s)")
+                except asyncio.TimeoutError:
+                    log_error("[selenium] 🔴 Driver creation timed out after 120s - browser failed to start")
+                    raise Exception("Selenium driver creation timeout - browser failed to initialize")
+                except Exception as e:
+                    log_error(f"[selenium] 🔴 Failed to create global driver: {e}")
+                    raise
             else:
                 cls._global_ref_count += 1
-                log_debug(f"[selenium] 🌍 Reusing GLOBAL driver (ref count: {cls._global_ref_count})")
+                log_debug(f"[selenium] 🌍 Reusing global driver (ref count: {cls._global_ref_count})")
 
                 # Always ensure single window for global driver
                 await asyncio.to_thread(cls._ensure_single_window, cls._global_shared_driver)
@@ -314,11 +426,64 @@ class SeleniumLLMBase(AIPluginBase):
         self.link_column = self.config.get('link_column', '')
         self.component_name = self.config.get('component_name', 'selenium_llm')
 
+        # Model management - to be set by subclasses
+        # model_limits_map: Dict[model_name] -> max_chars
+        # Example: {"gpt-4o": 128000, "gpt-4": 8000, "default": 128000}
+        self.model_limits_map: dict = {}
+        
+        # model_config_var: name of the config variable that holds the current model name
+        # Example: "CHATGPT_MODEL" or "GEMINI_MODEL"
+        self.model_config_var: str = ""
+        
+        # default_model: fallback model to use if config var not set
+        # Example: "gpt-4o" or "gemini-1.5-pro"
+        self.default_model: str = ""
+
         # Driver and state
         self.driver: Optional[webdriver.Remote] = None
         self._worker_task: Optional[asyncio.Task] = None
         self._driver_lock = asyncio.Lock()
         self._initialized = False
+
+        # Login detection configuration - to be set by subclasses
+        # Format: list of tuples (By, selector) for detecting login buttons
+        self.login_detection_selectors: list = []
+        # Fallback common login button selectors used if no specific ones provided
+        self.common_login_selectors = [
+            (By.CSS_SELECTOR, "button:contains('Log in')"),
+            (By.CSS_SELECTOR, "button:contains('Sign in')"),
+            (By.CSS_SELECTOR, "button:contains('Login')"),
+            (By.CSS_SELECTOR, "a:contains('Log in')"),
+            (By.CSS_SELECTOR, "a:contains('Sign in')"),
+            (By.CSS_SELECTOR, "a:contains('Login')"),
+            (By.CSS_SELECTOR, "[data-testid*='login']"),
+            (By.CSS_SELECTOR, "[data-testid*='signin']"),
+            (By.CLASS_NAME, "login"),
+            (By.CLASS_NAME, "signin"),
+        ]
+
+        # Selenium automation selectors - to be set by subclasses
+        # Each selector set is a list of CSS selector strings tried in order
+        self.selectors = {
+            # Prompt input area - where user types the message
+            "prompt_area": [],
+            # Send button - to submit the prompt
+            "send_button": [],
+            # Response text area - where the LLM response appears
+            "response_text": [],
+            # Modal dismissal buttons - for closing any modal dialogs
+            "modal_dismissal": [],
+        }
+        
+        # Interface limits - to be set by subclasses
+        # Default values can be overridden by subclasses via set_interface_limits()
+        self.interface_limits = {
+            "max_prompt_chars": 10000,
+            "max_response_chars": 4000,
+            "supports_images": True,
+            "supports_functions": False,
+            "model_name": "default"
+        }
 
         # Initialize components
         self._init_components()
@@ -376,6 +541,26 @@ class SeleniumLLMBase(AIPluginBase):
         self._prompt_queue: asyncio.Queue = asyncio.Queue()
         self._queue_lock = asyncio.Lock()
         self._queue_worker: asyncio.Task | None = None
+
+        # Double-prompt toggle (exposed configuration)
+        # Default: enabled (True)
+        try:
+            self.SPLIT_PROMPT_VAR = config_registry.get_var(
+                "SELENIUM_DOUBLE_PROMPT",
+                True,
+                label="Enable Double Prompt (PART1/PART2)",
+                description="When enabled, oversized prompts are split: PART1 (context/memories) and PART2 (actual message).",
+                value_type=bool,
+                group="llm",
+                component="selenium",
+                advanced=False,
+            )
+        except Exception:
+            # Fallback property if config registry not available
+            self.SPLIT_PROMPT_VAR = True
+
+        # Internal flag to avoid re-splitting or recursive behaviour for PART2
+        self._skip_double_prompt_for_this_send: bool = False
 
     # === DRIVER MANAGEMENT ===
 
@@ -1029,6 +1214,9 @@ class SeleniumLLMBase(AIPluginBase):
     def wait_until_response_stabilizes(self, driver, max_total_wait: int = AWAIT_RESPONSE_TIMEOUT,
                                       no_change_grace: float = 3.5) -> str:
         """Return the last response text once its length stops growing."""
+        # Convert max_total_wait to int in case it's a ConfigVar
+        max_total_wait = int(max_total_wait)
+        
         start = time.time()
         last_len = -1
         last_change = start
@@ -1038,6 +1226,12 @@ class SeleniumLLMBase(AIPluginBase):
             if time.time() - start >= max_total_wait:
                 log_warning("[selenium] Timeout while waiting for response")
                 return final_text
+
+            # Dismiss any modal that might have appeared during response waiting
+            # Uses the engine-specific selectors set in selectors["modal_dismissal"]
+            modal_selectors = self.selectors.get("modal_dismissal", [])
+            if modal_selectors:
+                self._dismiss_modal_with_selectors(driver, modal_selectors)
 
             text = self._extract_response_text(driver)
             current_len = len(text)
@@ -1061,33 +1255,114 @@ class SeleniumLLMBase(AIPluginBase):
 
             time.sleep(0.5)
 
-    def _extract_response_text(self, driver) -> str:
-        """Extract response text from the page (to be overridden by subclasses)."""
-        # Default implementation - subclasses should override
+    def _dismiss_modal_with_selectors(self, driver, modal_selectors: list) -> bool:
+        """Dismiss any modal/dialog overlay using provided selectors.
+        
+        This is a generic method that can be called from any step of the Selenium flow.
+        Each LLM engine (ChatGPT, Grok, Gemini, etc.) provides its own list of selectors.
+        
+        Only logs if a modal was actually dismissed.
+        
+        Args:
+            driver: Selenium WebDriver instance
+            modal_selectors: List of CSS selector strings to try for dismissing modals
+        
+        Returns:
+            True if a modal was dismissed, False if no modal was found
+        """
         try:
-            # Try common selectors
-            selectors = [
-                "div.markdown",
-                "[data-message-author-role='model']",
-                "div.model-response-text",
-                ".response-content"
-            ]
-
-            for selector in selectors:
+            for selector in modal_selectors:
                 try:
-                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                    if elements:
-                        return elements[-1].text or ""
+                    buttons = driver.find_elements(By.CSS_SELECTOR, selector)
+                    if buttons:
+                        for button in buttons:
+                            try:
+                                # Try to click the button if it's visible
+                                if button.is_displayed():
+                                    driver.execute_script("arguments[0].click();", button)
+                                    time.sleep(0.5)
+                                    log_debug(f"[selenium] Modal dismissed with selector: {selector}")
+                                    return True
+                            except Exception:
+                                continue
                 except Exception:
                     continue
+            
+            return False
+        except Exception as e:
+            log_debug(f"[selenium] Modal dismissal check failed: {e}")
+            return False
 
+    
+    def _get_response_selectors(self) -> list:
+        """Get the CSS selectors for extracting response text.
+        
+        Subclasses should override this to provide service-specific selectors.
+        Returns a list of CSS selector strings (tried in order).
+        """
+        # Default generic selectors - subclasses should override with specific ones
+        return [
+            "div.markdown",
+            "[data-message-author-role='model']",
+            "div.model-response-text",
+            ".response-content"
+        ]
+
+    def _extract_response_text(self, driver) -> str:
+        """Extract response text from the page using service-specific selectors.
+        
+        This standardized method:
+        1. Gets selectors from _get_response_selectors() (can be overridden by subclass)
+        2. Tries each selector in order
+        3. Returns text from the LAST matching element (most recent response)
+        4. Handles both .text and .textContent attributes
+        5. Returns empty string if no response found
+        
+        This approach works for ChatGPT, Grok, Gemini, etc. - just override
+        _get_response_selectors() in subclass to provide the right selectors.
+        """
+        try:
+            selectors = self._get_response_selectors()
+            
+            for selector in selectors:
+                try:
+                    log_debug(f"[selenium] Trying response selector: {selector}")
+                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                    
+                    if elements:
+                        # Get the LAST element (most recent response in chat)
+                        last_element = elements[-1]
+                        
+                        # Try .text first (Selenium's smart getter)
+                        text = last_element.text or ""
+                        
+                        # Fallback to textContent if .text is empty
+                        if not text:
+                            text = last_element.get_attribute("textContent") or ""
+                        
+                        # Clean up whitespace
+                        text = text.strip()
+                        
+                        if text:
+                            log_debug(f"[selenium] Found response with selector '{selector}': {len(text)} chars")
+                            return text
+                            
+                except Exception as e:
+                    log_debug(f"[selenium] Selector '{selector}' failed: {e}")
+                    continue
+            
+            log_debug("[selenium] No response found with any selector")
             return ""
+            
         except Exception as e:
             log_warning(f"[selenium] Error extracting response text: {e}")
             return ""
 
     def wait_for_response_completion(self, driver, timeout: int = AWAIT_RESPONSE_TIMEOUT) -> bool:
         """Wait until the current response finishes streaming."""
+        # Convert timeout to int in case it's a ConfigVar
+        timeout = int(timeout)
+        
         start_time = time.time()
         end_time = start_time + timeout
 
@@ -1151,6 +1426,62 @@ class SeleniumLLMBase(AIPluginBase):
                     continue
         return False
 
+    # === RESPONSE CHOICE HANDLING ===
+
+    def _get_response_choice_selectors(self) -> list:
+        """Get CSS selectors for response choice buttons (when LLM offers multiple options).
+        
+        Subclasses should override this to provide service-specific selectors for choice buttons.
+        Returns a list of CSS selector strings (tried in order).
+        Default returns empty list (no choice handling).
+        """
+        return []
+
+    def _handle_response_choice(self, driver) -> bool:
+        """Handle response choice selection (when LLM offers multiple response options).
+        
+        Some LLMs like ChatGPT offer users to choose between multiple response versions.
+        This method detects and automatically selects the first option.
+        
+        Args:
+            driver: Selenium WebDriver instance
+            
+        Returns:
+            bool: True if a choice was found and selected, False otherwise
+        """
+        from selenium.webdriver.common.by import By
+        from core.logging_utils import log_debug, log_warning
+        
+        selectors = self._get_response_choice_selectors()
+        if not selectors:
+            log_debug("[selenium] No response choice selectors configured")
+            return False
+        
+        log_debug(f"[selenium] Checking for response choice buttons with {len(selectors)} selector(s)")
+        
+        for selector in selectors:
+            try:
+                elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                if elements:
+                    log_debug(f"[selenium] Found {len(elements)} choice button(s) with selector: {selector}")
+                    # Click the first button (first response option)
+                    try:
+                        first_button = elements[0]
+                        if first_button.is_displayed():
+                            log_debug("[selenium] Clicking first response choice button")
+                            first_button.click()
+                            return True
+                        else:
+                            log_debug("[selenium] First choice button not visible, skipping")
+                    except Exception as click_err:
+                        log_warning(f"[selenium] Failed to click choice button: {click_err}")
+            except Exception as e:
+                log_debug(f"[selenium] Error checking choice selector '{selector}': {e}")
+                continue
+        
+        log_debug("[selenium] No response choice buttons found")
+        return False
+
     # === QUEUE MANAGEMENT ===
 
     async def _queue_worker_loop(self) -> None:
@@ -1169,14 +1500,110 @@ class SeleniumLLMBase(AIPluginBase):
         """Enqueue prompt_text for sequential sending."""
         await self._prompt_queue.put((textarea, prompt_text))
         log_debug(f"[selenium] Prompt enqueued (size={self._prompt_queue.qsize()})")
-        if self._queue_worker is None or self._queue_worker.done():
-            self._queue_worker = asyncio.create_task(self._queue_worker_loop())
+        # Ensure we always create a fresh coroutine object for the queue worker.
+        try:
+            if self._queue_worker is None or self._queue_worker.done():
+                self._queue_worker = asyncio.create_task(self._queue_worker_loop())
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+            loop.call_soon_threadsafe(lambda: asyncio.create_task(self._queue_worker_loop()))
 
-    # === ABSTRACT METHODS (to be implemented by subclasses) ===
+    # === GENERIC SELECTOR-BASED METHODS (using selectors from plugin config) ===
 
-    def _locate_prompt_area(self, driver, timeout: int = 10):
-        """Locate the prompt area (to be overridden by subclasses)."""
-        raise NotImplementedError
+    def _locate_prompt_area(self, driver, timeout: int = None):
+        """Locate the prompt area using CSS selectors from self.selectors["prompt_area"].
+        
+        The plugin must set self.selectors["prompt_area"] with CSS selectors to try.
+        This method tries each selector in order until one works.
+        Uses random timeout (1-5 seconds per selector) to avoid timing issues.
+        """
+        if timeout is None:
+            timeout = random.uniform(1, 5)  # Random timeout between 1-5 seconds
+        
+        selectors = self.selectors.get("prompt_area", [])
+        if not selectors:
+            log_error("[selenium] No prompt area selectors configured in plugin")
+            return None
+        
+        for selector in selectors:
+            try:
+                random_timeout = random.uniform(1, 5)  # Fresh random timeout per selector
+                log_debug(f"[selenium] Trying prompt area selector: {selector} (timeout: {random_timeout:.2f}s)")
+                
+                # First try: element_to_be_clickable (strict, requires visible + enabled)
+                try:
+                    element = WebDriverWait(driver, random_timeout * 0.4).until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
+                    )
+                    log_debug(f"[selenium] Found prompt area (clickable) with selector: {selector}")
+                    return element
+                except Exception as e1:
+                    log_debug(f"[selenium] Clickable check failed for {selector}: {e1}")
+                    
+                    # Fallback: just check presence (less strict)
+                    element = WebDriverWait(driver, random_timeout * 0.6).until(
+                        EC.presence_of_all_elements_located((By.CSS_SELECTOR, selector))
+                    )
+                    if element and len(element) > 0:
+                        log_debug(f"[selenium] Found prompt area (present) with selector: {selector}")
+                        return element[0]  # Return first matching element
+                        
+            except Exception as e:
+                log_debug(f"[selenium] Prompt area selector failed: {selector} - {e}")
+                continue
+        
+        log_error("[selenium] Could not locate prompt input area with any selector")
+        return None
+
+    def _find_send_button(self, driver, timeout=5):
+        """Find the send/submit button using CSS selectors from self.selectors["send_button"].
+        
+        The plugin must set self.selectors["send_button"] with CSS selectors to try.
+        This method tries each selector in order until one works.
+        Also includes fallback checks for visible and enabled state.
+        """
+        selectors = self.selectors.get("send_button", [])
+        if not selectors:
+            log_debug("[selenium] No send button selectors configured in plugin")
+            return None
+        
+        for selector in selectors:
+            try:
+                log_debug(f"[selenium] Trying send button selector: {selector}")
+                # First, try to wait for it to be clickable (which means visible + enabled)
+                button = WebDriverWait(driver, timeout).until(
+                    EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
+                )
+                log_debug(f"[selenium] Found clickable send button with selector: {selector}")
+                return button
+            except TimeoutException:
+                # Element exists but isn't clickable yet, try to find it anyway
+                try:
+                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                    if elements:
+                        button = elements[0]
+                        # Check if it's visible at least
+                        if button.is_displayed():
+                            log_debug(f"[selenium] Found visible send button (but not clickable) with selector: {selector}")
+                            return button
+                        else:
+                            log_debug(f"[selenium] Send button found but not visible: {selector}")
+                except Exception as e:
+                    log_debug(f"[selenium] Error checking visibility for selector {selector}: {e}")
+            except Exception as e:
+                log_debug(f"[selenium] Send button selector failed: {selector} - {e}")
+                continue
+        
+        log_debug("[selenium] No send button found with any selector")
+        return None
+    
+    def _get_response_selectors(self) -> list:
+        """Get CSS selectors for extracting response text.
+        
+        Returns selectors from self.selectors["response_text"] that the plugin configured.
+        Can be overridden by subclass if needed.
+        """
+        return self.selectors.get("response_text", [])
 
     def _navigate_to_service_url(self, driver, service_url: str) -> None:
         """Navigate to service URL safely without opening new tabs/windows."""
@@ -1212,27 +1639,447 @@ class SeleniumLLMBase(AIPluginBase):
             log_error(f"[selenium] Failed to navigate to {service_url}: {e}")
             raise
 
-    def _send_prompt_with_confirmation(self, textarea, prompt_text: str) -> None:
-        """Send prompt and wait for response (to be overridden by subclasses)."""
-        raise NotImplementedError
+    def _send_prompt_with_confirmation(self, textarea, prompt_text: str, processing_max_wait: int | None = None) -> bool:
+        """Send the prompt to the LLM service and wait for confirmation.
+        
+        This generic implementation:
+        1. Clears any existing text in the textarea
+        2. Sends the prompt text using send_keys or JavaScript
+        3. Finds and clicks the send button (using selectors from plugin config)
+        4. Returns True on success
+        
+        The plugin must have configured:
+        - self.selectors["send_button"]: CSS selectors for the send button
+        """
+        def _get_part1_max_wait():
+            try:
+                return int(config_registry.get_value("SELENIUM_PART1_PROCESSING_TIMEOUT", 8))
+            except Exception:
+                return 8
+
+        try:
+            if not textarea:
+                log_error("[selenium] No textarea provided")
+                return False
+            
+            # Dismiss any modal/dialog that might be blocking interaction
+            modal_selectors = self.selectors.get("modal_dismissal", [])
+            if modal_selectors:
+                self._dismiss_modal_with_selectors(self.driver, modal_selectors)
+            
+            # Filter out non-BMP characters that ChromeDriver can't handle
+            # NOTE: Modern ChromeDriver supports full Unicode, so this should rarely happen
+            # Only filter if the prompt becomes suspiciously small after filtering
+            def filter_bmp_chars(text):
+                """Filter out characters outside the Basic Multilingual Plane (BMP)."""
+                return ''.join(char for char in text if ord(char) <= 0xFFFF)
+            
+            # First, try to use the full prompt as-is
+            filtered_prompt = prompt_text
+            
+            # Only apply BMP filtering if the prompt seems to have problematic characters
+            # (This is a safety measure for older ChromeDriver versions)
+            try:
+                # Try to encode as UTF-8 to check for issues
+                prompt_text.encode('utf-8')
+                # If encoding works, use the original prompt
+                log_debug(f"[selenium] Prompt encoded successfully as UTF-8, no filtering needed")
+            except Exception as e:
+                log_warning(f"[selenium] Prompt encoding issue: {e}, applying BMP filter")
+                filtered_prompt = filter_bmp_chars(prompt_text)
+            
+            if len(filtered_prompt) != len(prompt_text):
+                removed_chars = len(prompt_text) - len(filtered_prompt)
+                log_warning(f"[selenium] Filtered {removed_chars} characters from prompt")
+            
+            # Try intelligent reduction for JSON prompts (removes only oldest memories)
+            # The goal is to fit within the MODEL's actual character/token limits
+            # 
+            # Get the active model's limit dynamically - this is the SOURCE OF TRUTH
+            # not arbitrary UI limits or fallbacks
+            global _active_selenium_max_prompt_chars
+            model_limit = _active_selenium_max_prompt_chars  # Fallback to global limit
+            try:
+                if hasattr(self, 'llm_registry') and self.llm_registry:
+                    active_llm = getattr(self.llm_registry, 'active_llm', None)
+                    if active_llm and hasattr(active_llm, 'get_model_context_length'):
+                        try:
+                            model_limit = active_llm.get_model_context_length()
+                            log_debug(f"[selenium] Got model limit from registry: {model_limit}")
+                        except Exception:
+                            log_debug(f"[selenium] Could not fetch model limit from active_llm")
+            except Exception as e:
+                log_debug(f"[selenium] Could not fetch model limit: {e}")
+            
+            # Apply intelligent reduction if prompt exceeds model limit
+            if len(filtered_prompt) > model_limit:
+                try:
+                    # Try to reduce as JSON (intelligently removes oldest memories)
+                    reduced_json = reduce_json_text_for_transmission(filtered_prompt, model_limit)
+                    if len(reduced_json) < len(filtered_prompt):
+                        filtered_prompt = reduced_json
+                        log_info(f"[selenium] Applied intelligent JSON reduction: {len(prompt_text)} → {len(filtered_prompt)} chars (model limit: {model_limit})")
+                    else:
+                        # Fallback: dumb truncation to model limit
+                        original_length = len(filtered_prompt)
+                        filtered_prompt = filtered_prompt[:model_limit]
+                        log_warning(f"[selenium] Dumb truncation: {original_length} → {len(filtered_prompt)} chars (model limit: {model_limit})")
+                except Exception as e:
+                    log_debug(f"[selenium] Intelligent reduction failed: {e}, falling back to emergency truncation")
+                    original_length = len(filtered_prompt)
+                    
+                    # Emergency truncation: try to preserve minimum valid JSON structure
+                    truncated = filtered_prompt[:model_limit]
+                    
+                    # If it looks like a JSON object was being cut off, try to close it gracefully
+                    if truncated.count('{') > truncated.count('}'):
+                        # Find the last complete object/array and close it
+                        last_bracket = max(truncated.rfind('}'), truncated.rfind(']'))
+                        if last_bracket > 0:
+                            truncated = truncated[:last_bracket+1]
+                            log_debug(f"[selenium] Closed unclosed JSON at position {last_bracket}")
+                    
+                    # If truncation resulted in invalid JSON structure, use safe minimal version
+                    if '{"' not in truncated[:50]:  # Likely not valid JSON
+                        truncated = '{"status": "event_reminder_truncated", "message": "Context too large, using fallback"}'
+                        log_warning(f"[selenium] Extreme emergency: JSON was too corrupted, using minimal fallback structure")
+                    
+                    filtered_prompt = truncated
+                    log_warning(f"[selenium] Emergency fallback truncation: {original_length} → {len(filtered_prompt)} chars (model limit: {model_limit})")
+            
+            log_debug(f"[selenium] About to clear textarea and send prompt (size: {len(filtered_prompt)}, model limit: {model_limit})")
+            
+            # Wait for textarea to be ready for input
+            WebDriverWait(self.driver, 10).until(
+                EC.element_to_be_clickable(textarea)
+            )
+            log_debug(f"[selenium] Textarea is clickable")
+            
+            # Determine if it's a textarea or contenteditable div
+            tag_name = textarea.tag_name.lower()
+            is_textarea = tag_name == "textarea"
+            is_contenteditable = textarea.get_attribute("contenteditable") == "true"
+            
+            log_debug(f"[selenium] Element type: tag={tag_name}, is_textarea={is_textarea}, is_contenteditable={is_contenteditable}")
+            
+            # Check current content before clearing
+            if is_textarea:
+                current_value = textarea.get_attribute("value") or ""
+            else:
+                current_value = textarea.get_attribute("textContent") or textarea.text or ""
+            log_debug(f"[selenium] Current textarea value before clear: '{current_value[:100] if len(current_value) > 100 else current_value}' (length: {len(current_value)})")
+            
+            # Clear any existing text
+            log_debug(f"[selenium] Clearing textarea")
+            if is_textarea:
+                textarea.clear()
+            else:
+                # For contenteditable divs, use JavaScript to clear
+                self.driver.execute_script("arguments[0].textContent = '';", textarea)
+            log_debug(f"[selenium] Textarea cleared")
+            
+            # Check content after clearing
+            if is_textarea:
+                after_clear_value = textarea.get_attribute("value") or ""
+            else:
+                after_clear_value = textarea.get_attribute("textContent") or textarea.text or ""
+            log_debug(f"[selenium] Textarea value after clear: '{after_clear_value}' (length: {len(after_clear_value)})")
+            
+            # Paste the filtered prompt text
+            log_debug(f"[selenium] Sending text to textarea: '{filtered_prompt[:100]}...' (length: {len(filtered_prompt)})")
+            
+            if is_textarea:
+                # For textarea elements, use send_keys
+                try:
+                    textarea.send_keys(filtered_prompt)
+                    log_debug(f"[selenium] Keys sent to textarea via send_keys")
+                except Exception as send_keys_error:
+                    log_debug(f"[selenium] send_keys failed: {send_keys_error}")
+                    # Try alternative method: use JavaScript to set value
+                    try:
+                        self.driver.execute_script("arguments[0].value = arguments[1];", textarea, filtered_prompt)
+                        # Trigger input event to make sure service detects the change
+                        self.driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", textarea)
+                        log_debug(f"[selenium] Text set via JavaScript")
+                    except Exception as js_error:
+                        log_debug(f"[selenium] JavaScript method also failed: {js_error}")
+                        raise send_keys_error  # Re-raise original error
+            else:
+                # For contenteditable divs, use JavaScript to insert text
+                log_debug(f"[selenium] Inserting text via JavaScript for contenteditable div")
+                try:
+                    # Focus the element first
+                    self.driver.execute_script("arguments[0].focus();", textarea)
+                    # Set the text content
+                    self.driver.execute_script("arguments[0].textContent = arguments[1];", textarea, filtered_prompt)
+                    # Trigger input and change events
+                    self.driver.execute_script("""
+                        const elem = arguments[0];
+                        elem.dispatchEvent(new Event('input', { bubbles: true }));
+                        elem.dispatchEvent(new Event('change', { bubbles: true }));
+                    """, textarea)
+                    log_debug(f"[selenium] Text injected via JavaScript for contenteditable")
+                except Exception as js_error:
+                    log_error(f"[selenium] Failed to inject text via JavaScript: {js_error}")
+                    raise
+            
+            # Check final content
+            if is_textarea:
+                final_value = textarea.get_attribute("value") or ""
+            else:
+                final_value = textarea.get_attribute("textContent") or textarea.text or ""
+            log_debug(f"[selenium] Final textarea value: '{final_value[:100] if len(final_value) > 100 else final_value}' (length: {len(final_value)})")
+            
+            # Ensure the textarea still has focus before sending
+            log_debug("[selenium] Ensuring textarea has focus before send...")
+            self.driver.execute_script("arguments[0].focus();", textarea)
+            time.sleep(0.5)  # Small delay to ensure focus is set
+            
+            log_debug(f"[selenium] Prompt pasted, now trying to send")
+            
+            # Try to find and click send button first
+            send_button = self._find_send_button(self.driver, timeout=3)
+            if send_button:
+                log_debug(f"[selenium] Send button found: {send_button.tag_name} with text: '{send_button.text}'")
+                
+                # Check if button is enabled
+                is_enabled = send_button.is_enabled()
+                log_debug(f"[selenium] Send button enabled: {is_enabled}")
+                
+                if is_enabled:
+                    log_debug("[selenium] Clicking send button")
+                    try:
+                        # Scroll button into view to ensure it's clickable
+                        self.driver.execute_script("arguments[0].scrollIntoView(true);", send_button)
+                        time.sleep(0.5)  # Wait for scroll animation
+                        
+                        # Try direct click first
+                        send_button.click()
+                        log_debug("[selenium] Send button clicked successfully")
+                    except Exception as click_error:
+                        log_debug(f"[selenium] Send button click failed: {click_error}")
+                        log_debug("[selenium] Attempting fallback: JavaScript click on button")
+                        try:
+                            # Try JavaScript click
+                            self.driver.execute_script("arguments[0].click();", send_button)
+                            log_debug("[selenium] Send button clicked via JavaScript")
+                        except Exception as js_click_error:
+                            log_debug(f"[selenium] JavaScript click also failed: {js_click_error}")
+                            # Final fallback to keyboard shortcut (Ctrl+Return or Cmd+Return)
+                            log_debug("[selenium] Final fallback: using Ctrl+Return keyboard shortcut")
+                            textarea.click()
+                            textarea.send_keys(Keys.CONTROL, Keys.RETURN)
+                else:
+                    log_debug("[selenium] Send button is disabled, trying keyboard shortcut (Ctrl+Return)")
+                    from selenium.webdriver.common.keys import Keys
+                    textarea.click()
+                    textarea.send_keys(Keys.CONTROL, Keys.RETURN)
+            else:
+                # Fallback: Send the message using Ctrl+Return (common shortcut for ChatGPT)
+                log_debug("[selenium] No send button found, using Ctrl+Return keyboard shortcut")
+                from selenium.webdriver.common.keys import Keys
+                textarea.click()
+                textarea.send_keys(Keys.CONTROL, Keys.RETURN)
+            
+            log_debug(f"[selenium] Send action completed, waiting for confirmation")
+            
+            # CRITICAL: Add delay to ensure the send action (button click or keyboard) is processed by browser
+            log_debug("[selenium] Waiting 3 seconds for browser to process send action...")
+            time.sleep(3)
+            
+            # Wait for confirmation that the prompt was sent (textarea should clear or sending indicator appears)
+            try:
+                log_debug("[selenium] Checking if textarea cleared after send...")
+                WebDriverWait(self.driver, 10).until(
+                    lambda d: (
+                        textarea.get_attribute("value") == "" or
+                        textarea.text == "" or
+                        len(d.find_elements(By.CSS_SELECTOR, "[data-testid*='sending'], [data-testid*='send'], .sending, .loading")) > 0
+                    )
+                )
+                log_debug("[selenium] Prompt sent successfully - textarea cleared or sending indicator found")
+            except Exception as wait_error:
+                log_debug(f"[selenium] Wait for textarea clear timed out (may not have been sent): {wait_error}")
+                # Check at least if text is still in textarea
+                current_text = textarea.get_attribute("value") or textarea.text or ""
+                if current_text:
+                    log_error(f"[selenium] CRITICAL: Textarea still contains text after send attempt ({len(current_text)} chars). Send may have failed!")
+                else:
+                    log_debug("[selenium] Textarea is empty, send likely succeeded")
+                # Continue anyway - the message might have been sent
+            
+            # CRITICAL: Verify ChatGPT has started processing the request
+            # Wait for signs that ChatGPT is actually responding (streaming indicator, response area changes, etc.)
+            log_debug("[selenium] Verifying ChatGPT has started processing...")
+            processing_started = False
+            start_time = time.time()
+            # Default waiting time for ChatGPT to start processing; can be overridden
+            # by callers who may want shorter wait (e.g., PART1 of double-prompt)
+            default_processing_max_wait = 30
+            # Allow callers to pass a shorter processing timeout (e.g., PART1)
+            max_wait = int(processing_max_wait) if processing_max_wait is not None else default_processing_max_wait
+            
+            while time.time() - start_time < max_wait:
+                try:
+                    # Check for response area containing text or streaming indicators
+                    response_selectors = self.selectors.get("response_container", [])
+                    for selector in response_selectors:
+                        try:
+                            elements = self.driver.find_elements(selector[0], selector[1])
+                            for elem in elements:
+                                # Check if element has any text content (ChatGPT started writing)
+                                if elem.text and len(elem.text.strip()) > 0:
+                                    processing_started = True
+                                    log_debug(f"[selenium] ChatGPT has started processing - found response text ({len(elem.text)} chars)")
+                                    break
+                        except:
+                            pass
+                    
+                    if processing_started:
+                        break
+                    
+                    # Also check for "stop generating" button which appears when ChatGPT is writing
+                    try:
+                        stop_buttons = self.driver.find_elements(By.CSS_SELECTOR, "[aria-label*='Stop'], button:has-text('Stop')")
+                        if len(stop_buttons) > 0:
+                            processing_started = True
+                            log_debug("[selenium] ChatGPT has started processing - found stop button")
+                            break
+                    except:
+                        pass
+                    
+                    time.sleep(0.5)
+                except Exception as e:
+                    log_debug(f"[selenium] Error while checking for processing: {e}")
+                    break
+            
+            if not processing_started:
+                log_warning(f"[selenium] ChatGPT did not start processing within {max_wait}s - prompt may not have been sent successfully")
+                # Don't fail here - let wait_until_response_stabilizes handle the timeout
+            else:
+                log_debug(f"[selenium] ChatGPT processing confirmed after {time.time() - start_time:.1f}s")
+            
+            return True  # Prompt was sent successfully
+        
+        except Exception as e:
+            log_error(f"[selenium] Failed to send prompt: {e}")
+            raise
 
     def get_supported_models(self):
         """Get supported models (to be overridden by subclasses)."""
         return []
+
+    def _get_model_char_limit(self, model_name: str) -> int:
+        """Get character limit for a specific model.
+        
+        Uses the model_limits_map set by subclass. Returns default if model not found.
+        
+        Args:
+            model_name: Name of the model (e.g., "gpt-4o", "gemini-1.5-pro")
+            
+        Returns:
+            Integer character limit for the model
+        """
+        if not self.model_limits_map:
+            return 10000  # Fallback default
+            
+        # Normalize model name (lowercase, strip)
+        normalized = model_name.lower().strip()
+        
+        # Direct match
+        if normalized in self.model_limits_map:
+            return self.model_limits_map[normalized]
+        
+        # Try partial match
+        for key in self.model_limits_map.keys():
+            if key in normalized or normalized.endswith(key):
+                return self.model_limits_map[key]
+        
+        # Return default if exists
+        if "default" in self.model_limits_map:
+            return self.model_limits_map["default"]
+            
+        # Last resort fallback
+        return 10000
+
+    def _get_current_model_name(self) -> str:
+        """Get current model name from config or use default.
+        
+        Uses model_config_var to look up the config value, falls back to default_model.
+        Subclasses can override this for custom logic.
+        
+        Returns:
+            String name of the current model
+        """
+        if self.model_config_var:
+            from core.config_manager import config_registry
+            configured_model = config_registry.get_value(self.model_config_var, "")
+            if configured_model:
+                return configured_model
+        
+        return self.default_model or "default"
+
+    def _update_interface_limits(self):
+        """Update interface limits based on current model.
+        
+        Subclasses can override this for custom logic.
+        This method is called automatically to sync limits when model changes.
+        """
+        model_name = self._get_current_model_name()
+        max_chars = self._get_model_char_limit(model_name)
+        
+        # Update interface limits
+        self.interface_limits["max_prompt_chars"] = max_chars
+        self.interface_limits["model_name"] = model_name
 
     def get_current_model(self):
         """Get current model (to be overridden by subclasses)."""
         return None
 
     def get_interface_limits(self):
-        """Get interface limits (to be overridden by subclasses)."""
-        return {
-            "max_prompt_chars": 1000,
-            "max_response_chars": 1000,
-            "supports_images": False,
-            "supports_functions": False,
-            "model_name": "default"
-        }
+        """Get interface limits.
+        
+        Returns the interface_limits dict that was set by subclass.
+        Subclasses should call _update_interface_limits() to sync with current model.
+        """
+        return self.interface_limits
+
+    def is_user_logged_in(self) -> bool:
+        """
+        Centralized login state detection.
+        
+        Checks if user is logged in by looking for login/signin buttons.
+        Uses selectors provided by subclass or common fallbacks.
+        
+        Returns True if user is LOGGED IN, False if login button found (NOT logged in).
+        """
+        # If driver is not initialized, assume not logged in
+        if self.driver is None:
+            log_debug(f"[{self.component_name}] Driver not initialized, assuming not logged in")
+            return False
+        
+        try:
+            # Combine specific selectors with common fallbacks
+            all_selectors = self.login_detection_selectors + self.common_login_selectors
+            
+            # Check for login buttons - if we find ANY, user is NOT logged in
+            for by, selector in all_selectors:
+                try:
+                    elements = self.driver.find_elements(by, selector)
+                    if elements:
+                        log_debug(f"[{self.component_name}] Found login button with selector {selector}, user NOT logged in")
+                        return False
+                except Exception:
+                    # This selector doesn't exist, try next one
+                    pass
+            
+            # If we didn't find any login button, assume user IS logged in
+            log_debug(f"[{self.component_name}] No login buttons found, user appears to be logged in")
+            return True
+            
+        except Exception as e:
+            log_warning(f"[{self.component_name}] Error checking login status: {e}, assuming not logged in")
+            return False
 
     # === COMMON LIFECYCLE METHODS ===
 
@@ -1265,11 +2112,27 @@ class SeleniumLLMBase(AIPluginBase):
             log_error(f"[selenium] Error stopping {self.component_name}: {e}", e)
 
     def cleanup(self):
-        """Clean up resources."""
+        """Clean up resources when switching plugins."""
         try:
-            # Release shared driver reference instead of closing directly
-            # Note: This is synchronous, so we can't await _release_shared_driver
-            # The __del__ method will handle cleanup when the instance is destroyed
+            log_info(f"[selenium] Cleaning up {self.component_name}")
+            
+            # Close the driver immediately (synchronously) to ensure it doesn't stay open
+            # This is critical when switching between Selenium plugins
+            if self.driver is not None:
+                try:
+                    self.driver.quit()
+                    log_info(f"[selenium] ✅ Driver closed successfully during cleanup")
+                except Exception as e:
+                    log_warning(f"[selenium] ⚠️ Error quitting driver during cleanup: {e}")
+                    # Still try to close windows
+                    try:
+                        # Force close any remaining windows
+                        import subprocess
+                        subprocess.run(["pkill", "-f", "chromium", "-15"], timeout=5)
+                        log_debug(f"[selenium] Force killed chromium processes")
+                    except Exception as pk_err:
+                        log_debug(f"[selenium] Could not force kill chromium: {pk_err}")
+            
             self.driver = None
 
             # Note: We no longer clean up the shared profile directory to maintain login sessions
@@ -1318,68 +2181,195 @@ class SeleniumLLMBase(AIPluginBase):
     # === AI PLUGIN BASE INTERFACE IMPLEMENTATION ===
 
     async def handle_incoming_message(self, bot, message, prompt):
-        """Process a message using a pre-built prompt."""
+        """Process a message using a pre-built prompt.
+        
+        This method:
+        1. Sends to ChatGPT via generate_response() with proper role separation
+        2. Returns the response to the caller (plugin_instance)
+        
+        The response will then be passed to message_chain.handle_incoming_message()
+        for validation, correction, and action execution. This ensures all LLM responses
+        are properly validated through the central message chain, not sent directly to interfaces.
+        """
         try:
-            # Convert prompt to text format for LLM
-            if isinstance(prompt, list):
-                # Convert message list to text
-                prompt_text = ""
-                for msg in prompt:
-                    if isinstance(msg, dict) and "content" in msg:
-                        role = msg.get("role", "user")
-                        content = msg.get("content", "")
-                        prompt_text += f"{role}: {content}\n"
-                    else:
-                        prompt_text += str(msg) + "\n"
+            # Check if prompt contains a system_message (correction scenario)
+            system_message_dict = None
+            prompt_for_llm = prompt
+            
+            # Try to parse prompt if it's a string that looks like JSON
+            if isinstance(prompt, str):
+                try:
+                    parsed = json.loads(prompt)
+                    if isinstance(parsed, dict) and "system_message" in parsed:
+                        system_message_dict = parsed.get("system_message", {})
+                        # Extract the actual JSON instructions or format requirements
+                        prompt_for_llm = parsed
+                        log_debug(f"[selenium] Detected correction scenario with system_message type={system_message_dict.get('type')}")
+                except (json.JSONDecodeError, ValueError):
+                    # Not JSON, proceed normally
+                    pass
+            
+            messages = []
+            # If prompt was provided as a dict by plugin_instance, it may contain
+            # a pre-reduction size metadata field that we should use for deciding
+            # about double-prompt splitting. Extract and remove it so it is NOT
+            # inadvertently sent to the LLM.
+            pre_reduction_size = None
+            if isinstance(prompt, dict):
+                pre_reduction_size = prompt.pop("__pre_reduction_size", None)
+            
+            # Build system message to enforce JSON-only responses
+            if system_message_dict:
+                # This is a correction/error scenario - we MUST get JSON back
+                error_msg = system_message_dict.get("message", "Invalid JSON")
+                required_format = system_message_dict.get("required_format", {})
+                strict_requirements = system_message_dict.get("strict_requirements", [])
+                original_user_message = system_message_dict.get("original_user_message", "")
+                
+                # Build a comprehensive system prompt that forces JSON response
+                system_prompt = (
+                    "You are a JSON-only assistant. Your task is to respond with ONLY valid JSON.\n"
+                    f"Error: {error_msg}\n"
+                    "\nYou MUST respond with ONLY valid JSON, nothing else.\n"
+                    "NO text outside JSON. NO markdown. NO explanations.\n"
+                    "Strict requirements:\n"
+                )
+                for req in strict_requirements:
+                    system_prompt += f"- {req}\n"
+                
+                system_prompt += (
+                    "\nRespond with this exact structure:\n"
+                    f"{json.dumps(required_format, indent=2)}\n"
+                    "\nDo not deviate. Respond ONLY with valid JSON."
+                )
+                
+                # Build user message with context
+                # Include the ORIGINAL user message so LLM knows what to respond to
+                user_content = (
+                    "Please provide a valid JSON response following the structure shown above.\n\n"
+                )
+                
+                if original_user_message:
+                    user_content += (
+                        f"ORIGINAL USER MESSAGE YOU SHOULD RESPOND TO:\n"
+                        f"\"{original_user_message}\"\n\n"
+                    )
+                
+                user_content += (
+                    f"Your previous response was:\n{system_message_dict.get('your_reply', 'N/A')}\n\n"
+                    "Now provide ONLY a valid JSON response following the structure shown above, "
+                    "as if responding to the original user message. Respond ONLY with valid JSON, nothing else."
+                )
+                
+                messages.append({"role": "system", "content": system_prompt})
+                messages.append({"role": "user", "content": user_content})
+                
+                log_info(f"[selenium] 🔧 Correction scenario: system prompt enforces JSON-only responses")
+                log_debug(f"[selenium] System prompt length: {len(system_prompt)} chars")
+                if original_user_message:
+                    log_info(f"[selenium] 📝 Original user message in correction: \"{original_user_message}\"")
+                else:
+                    log_warning(f"[selenium] ⚠️ No original user message available in correction scenario!")
+                
             else:
-                prompt_text = str(prompt)
+                # Normal scenario - convert prompt to messages
+                if isinstance(prompt_for_llm, dict):
+                    try:
+                        # If a verbose (unminified) instruction for chats is present,
+                        # include it as a system message so Selenium-driven UI flows
+                        # embed it verbatim at the top of the prompt.
+                        verbose = None
+                        try:
+                            verbose = prompt_for_llm.get("instructions_verbose")
+                        except Exception:
+                            verbose = None
 
-            # Send to LLM and get response (like the old plugin did)
-            response = await self.generate_response([{"role": "user", "content": prompt_text}])
+                        if verbose:
+                            messages.append({"role": "system", "content": verbose})
 
-            # Send response back via bot
-            if bot and response:
-                from interface.telegram_utils import safe_send
-                chat_id = message.chat_id if hasattr(message, 'chat_id') else message.get('chat_id')
-                if chat_id:
-                    await safe_send(bot, chat_id, response)
+                        # Simply convert prompt to JSON for user message
+                        prompt_text = json.dumps(prompt_for_llm)
+                        messages.append({"role": "user", "content": prompt_text})
+                        log_debug(f"[selenium] Built user message from prompt ({len(prompt_text)} chars)")
+                    except Exception as e:
+                        log_warning(f"[selenium] Error processing prompt: {e}")
+                        prompt_text = str(prompt_for_llm)
+                        messages.append({"role": "user", "content": prompt_text})
+                    
+                else:
+                    # If prompt is already a list or string, convert to text format
+                    if isinstance(prompt_for_llm, list):
+                        # Convert message list to text
+                        prompt_text = ""
+                        for msg in prompt_for_llm:
+                            if isinstance(msg, dict) and "content" in msg:
+                                role = msg.get("role", "user")
+                                content = msg.get("content", "")
+                                prompt_text += f"{role}: {content}\n"
+                            else:
+                                prompt_text += str(msg) + "\n"
+                    else:
+                        prompt_text = str(prompt_for_llm)
+                    
+                    messages.append({"role": "user", "content": prompt_text})
+
+
+            # The response will be returned to plugin_instance which passes it to message_chain
+            response = await self.generate_response(messages, pre_reduction_size=pre_reduction_size)
+            
+            # Simply return the response - don't send it directly!
+            # plugin_instance will handle passing it to message_chain for proper validation
+            log_debug(f"[selenium] Response generated ({len(response) if response else 0} chars), returning to plugin_instance for message chain processing")
+            return response
 
         except Exception as e:
             log_error(f"[selenium] Failed to handle incoming message: {e}", e)
-            if bot:
-                from interface.telegram_utils import safe_send
-                chat_id = message.chat_id if hasattr(message, 'chat_id') else message.get('chat_id')
-                if chat_id:
-                    await safe_send(bot, chat_id, f"❌ Error processing message: {e}")
+            # Return error message instead of sending directly
+            error_msg = f"❌ Error processing message: {e}"
+            return error_msg
 
-    async def generate_response(self, messages):
+    async def generate_response(self, messages, pre_reduction_size: int | None = None):
         """Send messages to the LLM engine and receive the response."""
         try:
             # Check if engine was properly initialized
             if not getattr(self, '_initialized', False):
                 return "❌ LLM engine not properly initialized"
 
-            # Log who's calling this (to debug 30 tabs issue)
-            import traceback
-            caller_info = "".join(traceback.format_stack()[-3:-1])
-            log_warning(f"[selenium] ⚠️ generate_response called! Caller:\n{caller_info}")
-            
             log_debug(f"[selenium] generate_response called with {len(messages) if isinstance(messages, list) else 1} message(s)")
             
-            # Convert messages to text
+            # Log the system prompt if present (for debugging)
+            if isinstance(messages, list) and len(messages) > 0:
+                for msg in messages:
+                    if isinstance(msg, dict) and msg.get("role") == "system":
+                        system_content = msg.get("content", "")
+                        log_info(f"[selenium] 📋 System prompt sent to LLM:\n{system_content[:500]}...")
+                        log_debug(f"[selenium] Full system prompt ({len(system_content)} chars):\n{system_content}")
+            
+            # Convert messages to text for Selenium interaction
+            # Selenium can't use API "system" roles directly, so we need to embed instructions
             if isinstance(messages, list):
                 prompt_text = ""
+                system_instructions = ""
+                
+                # Extract system messages and user messages separately
                 for msg in messages:
-                    if isinstance(msg, dict) and "content" in msg:
+                    if isinstance(msg, dict):
                         role = msg.get("role", "user")
                         content = msg.get("content", "")
-                        prompt_text += f"{role}: {content}\n"
-                    else:
-                        prompt_text += str(msg) + "\n"
+                        
+                        if role == "system":
+                            system_instructions += content + "\n"
+                        else:
+                            prompt_text += f"{role}: {content}\n"
+                
+                # Prepend system instructions to the final prompt
+                if system_instructions:
+                    prompt_text = system_instructions + "\n---\n" + prompt_text
             else:
                 prompt_text = str(messages)
 
-            log_warning(f"[selenium] ⚠️ About to call _execute_complete_workflow with prompt: {prompt_text}")
+            log_debug(f"[selenium] About to call _execute_complete_workflow with prompt ({len(prompt_text)} chars)")
+            log_debug(f"[selenium] 📤 FULL PROMPT SENT TO LLM ({len(prompt_text)} chars):\n{prompt_text}")
 
             # Lazy driver initialization - create only when first actual request comes in
             if self.driver is None:
@@ -1388,12 +2378,43 @@ class SeleniumLLMBase(AIPluginBase):
                 self.driver = shared_driver  # Assign to instance for compatibility
                 log_info(f"[selenium] ✅ Driver ready for {self.component_name}")
 
-            # Log window count before processing
-            log_info(f"[selenium] Using shared driver with {len(self.driver.window_handles)} window(s)")
-
+            # Health check: verify driver is still alive
+            driver_is_dead = False
             try:
-                # Execute interaction in a single thread (driver is now guaranteed to be ready)
-                response = await asyncio.to_thread(self._execute_complete_workflow, prompt_text)
+                window_count = len(self.driver.window_handles)
+                log_info(f"[selenium] Using shared driver with {window_count} window(s)")
+            except Exception as health_check_error:
+                log_warning(f"[selenium] ⚠️ Driver health check failed: {health_check_error}")
+                driver_is_dead = True
+
+            # If driver is dead, reset and recreate it
+            if driver_is_dead:
+                log_warning(f"[selenium] 🔴 Driver is dead, resetting global driver")
+                # Reset global driver so it gets recreated
+                SeleniumLLMBase._global_shared_driver = None
+                SeleniumLLMBase._global_ref_count = 0
+                # Get a fresh driver
+                shared_driver = await self._get_shared_driver()
+                self.driver = shared_driver
+                log_info(f"[selenium] ✅ Fresh driver ready for {self.component_name}")
+                window_count = len(self.driver.window_handles)
+                log_info(f"[selenium] Using fresh shared driver with {window_count} window(s)")
+
+
+            # Check for double-prompt split condition (only when not explicitly skipping)
+            try:
+                # Determine whether we must split into PART1/PART2
+                # Decide about double prompt using pre_reduction_size (if provided)
+                if self._should_double_prompt(prompt_text, pre_reduction_size=pre_reduction_size):
+                    log_info("[selenium] 🔀 Double-prompt condition met — executing PART1/PART2 workflow")
+                    response = await asyncio.to_thread(self._execute_double_prompt_workflow, prompt_text)
+                else:
+                    # Execute interaction in a single thread (driver is now guaranteed to be ready)
+                    response = await asyncio.to_thread(self._execute_complete_workflow, prompt_text)
+                
+                # Simply return the response as-is from ChatGPT
+                # Validation and correction will be handled by the message chain / transport layer
+                # NOT by this LLM engine itself (to avoid recursive loops)
                 return response or "No response received from LLM"
             finally:
                 # Don't release the shared driver here - let it persist for other requests
@@ -1404,7 +2425,323 @@ class SeleniumLLMBase(AIPluginBase):
             log_error(f"[selenium] Failed to generate response: {e}", e)
             return f"❌ Error generating response: {e}"
 
-    def _execute_complete_workflow(self, prompt_text: str) -> str:
+    # === DOUBLE PROMPT HELPERS ===
+    def _should_double_prompt(self, prompt_text: str, pre_reduction_size: int | None = None) -> bool:
+        """Return True if we should split this prompt into PART1/PART2.
+
+        Conditions:
+        - Split feature enabled via config
+        - Not currently sending PART2 (internal flag)
+        - prompt_text length > model limit (character limit)
+        """
+        try:
+            enabled = bool(self.SPLIT_PROMPT_VAR.value) if hasattr(self, 'SPLIT_PROMPT_VAR') else bool(self.SPLIT_PROMPT_VAR)
+        except Exception:
+            enabled = bool(getattr(self, 'SPLIT_PROMPT_VAR', True))
+
+        if not enabled:
+            return False
+
+        # If we're explicitly skipping (we are in PART2) do not split again
+        if getattr(self, '_skip_double_prompt_for_this_send', False):
+            log_debug('[selenium] skipping double-prompt because _skip_double_prompt_for_this_send=True')
+            return False
+
+        # Determine model limit
+        try:
+            # Prefer engine-provided limit
+            lim = self._get_model_char_limit(self._get_current_model_name())
+        except Exception:
+            lim = _active_selenium_max_prompt_chars
+
+        try:
+            size = len(prompt_text)
+        except Exception:
+            size = 0
+
+        # If a pre_reduction_size is provided, prefer it to decide splitting (ensures split happens before any minification)
+        if pre_reduction_size is not None:
+            try:
+                pre_size_int = int(pre_reduction_size)
+                if pre_size_int > 0:
+                    size_to_check = pre_size_int
+                else:
+                    size_to_check = size
+            except Exception:
+                size_to_check = size
+        else:
+            size_to_check = size
+
+        log_debug(f"[selenium] Double-prompt decision check: size_to_check={size_to_check}, model_limit={lim}")
+        if lim and size_to_check > lim:
+            # Only split when the prompt contains JSON context we can safely extract.
+            # Prevent accidental splitting of plain text user messages into PART1.
+            try:
+                # Use the same parsing logic as _split_prompt_text_into_parts to detect JSON
+                json_candidate = None
+                if "\n---\n" in prompt_text:
+                    idx = prompt_text.find("\n---\n")
+                    remainder = prompt_text[idx + len("\n---\n"):].strip()
+                    brace_idx = remainder.find("{")
+                    json_candidate = remainder[brace_idx:] if brace_idx != -1 else remainder
+                else:
+                    first_brace = prompt_text.find("{")
+                    json_candidate = prompt_text[first_brace:] if first_brace != -1 else None
+
+                if json_candidate:
+                    parsed = json.loads(json_candidate)
+                    # Only enable double-prompt when we find explicit context keys
+                    if isinstance(parsed, dict) and (
+                        'context' in parsed or
+                        any(k in parsed for k in ('chat_history', 'memories', 'diary', 'diary_entries', 'ai_diary', 'recent_entries'))
+                    ):
+                        log_debug(f"[selenium] prompt length {size} exceeds model limit {lim} and contains context keys, enabling double-prompt")
+                        return True
+                    else:
+                        log_debug(f"[selenium] prompt length > limit but no explicit context found in JSON; skipping double-prompt")
+                        return False
+                else:
+                    log_debug("[selenium] prompt length > limit but no JSON found; skipping double-prompt")
+                    return False
+            except Exception as e:
+                log_warning(f"[selenium] Error while checking for JSON context before split: {e}; skipping double-prompt")
+                return False
+
+        return False
+
+    def _split_prompt_text_into_parts(self, prompt_text: str) -> tuple[str, str]:
+        """Try to split prompt_text into PART1 (context) and PART2 (main prompt).
+
+        Strategy:
+        1. If prompt_text contains a JSON body (common with build_json_prompt), parse it and extract 'context' for PART1.
+           - PART1 will be header + JSON of context only
+           - PART2 will be the original prompt with 'context' replaced by an empty object (or minimal persona kept)
+        2. If parsing fails, fallback to simple character-based split with PART1 = first half and PART2 = remainder.
+        """
+        try:
+            # Try to find JSON part (after the canonical separator) and parse it
+            json_start = None
+            if "\n---\n" in prompt_text:
+                idx = prompt_text.find("\n---\n")
+                # JSON likely after the separator
+                remainder = prompt_text[idx + len("\n---\n"):].strip()
+                # Find first brace
+                brace_idx = remainder.find("{")
+                if brace_idx != -1:
+                    json_candidate = remainder[brace_idx:]
+                else:
+                    json_candidate = remainder
+            else:
+                # No separator - try to find the first JSON object in the string
+                first_brace = prompt_text.find("{")
+                if first_brace != -1:
+                    json_candidate = prompt_text[first_brace:]
+                else:
+                    json_candidate = None
+
+            parsed = None
+            if json_candidate:
+                parsed = None
+                # Try parsing raw candidate
+                try:
+                    parsed = json.loads(json_candidate)
+                except Exception:
+                    # Attempt to extract from first '{' to last '}'
+                    try:
+                        first = json_candidate.find('{')
+                        last = json_candidate.rfind('}')
+                        if first != -1 and last != -1 and last > first:
+                            sub = json_candidate[first:last+1]
+                            parsed = json.loads(sub)
+                        else:
+                            # Try wrapping the candidate with braces in case outer braces were omitted
+                            wrapped = '{' + json_candidate.strip().strip('{}') + '}'
+                            parsed = json.loads(wrapped)
+                    except Exception:
+                        parsed = None
+
+            # If parsed JSON with context
+            # parsed JSON may include context in different shapes. We detect:
+            # - a 'context' key (preferred)
+            # - or top-level keys like 'chat_history', 'memories', 'diary', 'diary_entries'
+            if isinstance(parsed, dict):
+                # Simplified behavior requested by the user: extract ONLY `chat_history` and `ai_diary`
+                # (and common alias 'diary' / 'diary_entries') from the parsed JSON. Do not
+                # perform aggressive deep extraction. The prompt JSON format normally places
+                # these keys either at top-level or under a 'context' key.
+                context_obj = {}
+
+                # Prefer the 'context' dict if present
+                source = parsed.get('context') if isinstance(parsed.get('context'), dict) else parsed
+
+                # Helper: copy keys if present
+                def copy_if_present(dst, src, key):
+                    if key in src:
+                        dst[key] = src[key]
+
+                # Copy only the keys requested for PART1: chat_history, ai_diary, memories
+                copy_if_present(context_obj, source, 'chat_history')
+                copy_if_present(context_obj, source, 'ai_diary')
+                copy_if_present(context_obj, source, 'memories')
+
+                # Only create PART1 if we actually found memory/chat keys
+                if context_obj:
+                    # Build PART1 header and payload
+                    part1_header = (
+                    "[INTERNAL-PART1] This message contains CONTEXT for memory persistence. "
+                    "Read it carefully and keep it available for subsequent messages. "
+                    "Do NOT act on this message. Reply ONLY with an empty JSON object: {}"
+                )
+
+                    # Build PART1 payload containing ONLY ai_diary, chat_history, memories
+                    part1_payload = {
+                        "ai_diary": context_obj.get('ai_diary', []),
+                        "chat_history": context_obj.get('chat_history', []),
+                        "memories": context_obj.get('memories', []),
+                    }
+
+                    part1_text = part1_header + "\n\n" + json.dumps(part1_payload)
+
+                    # Build PART2 by removing the context keys from the original parsed prompt
+                    parsed_part2 = dict(parsed)  # shallow copy
+
+                    # If the original had a 'context' dict, only remove the keys we moved to PART1
+                    if 'context' in parsed_part2 and isinstance(parsed_part2['context'], dict):
+                        for k in ('chat_history', 'memories', 'ai_diary'):
+                            if k in parsed_part2['context']:
+                                # Empty lists for removed context
+                                parsed_part2['context'][k] = []
+
+                    # Also remove top-level occurrences of these keys if present
+                    for k in ('chat_history', 'memories', 'ai_diary'):
+                        if k in parsed_part2:
+                            parsed_part2[k] = []
+
+                    part2_text = json.dumps(parsed_part2)
+
+                    # Apply minification to PART2 so it fits model limits better
+                    try:
+                        model_limit = self._get_model_char_limit(self._get_current_model_name())
+                        # Only attempt reduction if model limit is set and part2 exceeds it
+                        if model_limit and len(part2_text) > model_limit:
+                            reduced = reduce_json_text_for_transmission(part2_text, model_limit)
+                            if isinstance(reduced, str) and len(reduced) < len(part2_text):
+                                log_info(f"[selenium] PART2 minified from {len(part2_text)} to {len(reduced)} chars")
+                                part2_text = reduced
+                    except Exception as e:
+                        log_warning(f"[selenium] Could not minify PART2: {e}")
+
+                    return part1_text, part2_text
+
+        except Exception as e:
+            log_debug(f"[selenium] _split_prompt_text_into_parts JSON parse fallback: {e}")
+
+        # Fallback: if we couldn't parse a JSON context, DO NOT attempt to naively split user text.
+        # Returning an empty PART1 and the full prompt as PART2 avoids accidental inclusion of
+        # user messages inside PART1. _should_double_prompt should normally prevent calling this.
+        try:
+            size = len(prompt_text)
+            mid = max(1, size // 2)
+            # Return an empty context PART1 and the full prompt as PART2
+            empty_header = (
+                "[INTERNAL-PART1] This message is intended for CONTEXT only. "
+                "If present, read/store chat_history/diary/memories. Reply ONLY with {}."
+            )
+            # Empty context payload
+            return empty_header + "\n\n{}", prompt_text
+        except Exception:
+            # As a last resort, return original as part2 and empty part1
+            return "{}", prompt_text
+
+    def _execute_double_prompt_workflow(self, prompt_text: str) -> str:
+        """Execute PART1 then PART2 sequentially, ignoring PART1's content for actions.
+
+        PART1: send only context/memories and instruct to reply with {}.
+        PART2: send main prompt (without the context, relying on PART1) and return PART2's response.
+
+        The internal flag _skip_double_prompt_for_this_send is used to avoid re-splitting PART2.
+        """
+        part1_text, part2_text = self._split_prompt_text_into_parts(prompt_text)
+
+        # Send PART1 and wait for a response (we ignore content, but we log parsing/results)
+        # Use a shorter processing wait for PART1 to avoid long delays before sending PART2
+        try:
+            part1_processing_timeout = int(config_registry.get_value("SELENIUM_PART1_PROCESSING_TIMEOUT", 8))
+        except Exception:
+            part1_processing_timeout = 8
+        try:
+            part1_len = len(part1_text) if isinstance(part1_text, str) else None
+        except Exception:
+            part1_len = None
+        log_info(f"[selenium] PART1 -> sending context part to LLM (expecting JSON {{}}) size={part1_len}")
+        # Retry PART1 up to CORRECTOR_RETRIES (if defined); if engine returns any response we proceed
+        max_retries = CORRECTOR_RETRIES if 'CORRECTOR_RETRIES' in globals() else 3
+        part1_resp = None
+        for attempt in range(1, max_retries + 1):
+            log_info(f"[selenium] PART1 attempt {attempt}/{max_retries}")
+            try:
+                attempt_start = time.time()
+                part1_resp = self._execute_complete_workflow(
+                    part1_text,
+                    processing_max_wait=part1_processing_timeout,
+                    stabilize_max_wait=part1_processing_timeout,
+                )
+                attempt_elapsed = time.time() - attempt_start
+                log_debug(f"[selenium] PART1 attempt {attempt} completed in {attempt_elapsed:.1f}s")
+            except Exception as e:
+                log_warning(f"[selenium] PART1 attempt {attempt} failed with error: {e}")
+                # If this was the last attempt, we'll continue to PART2 anyway
+                if attempt < max_retries:
+                    time.sleep(1)
+                    continue
+                else:
+                    part1_resp = None
+                    break
+
+            # We received a response -> try to parse and log result
+            if isinstance(part1_resp, str) and part1_resp.strip() != "":
+                try:
+                    parsed = json.loads(part1_resp)
+                except Exception:
+                    parsed = None
+
+                if parsed == {}:
+                    log_info(f"[selenium] PART1 attempt {attempt} parsed as {{}} (OK)")
+                else:
+                    log_warning(f"[selenium] PART1 attempt {attempt} response did not strictly parse as {{}} - proceeding anyway")
+
+                # PART1 considered received as soon as LLM returns any response
+                break
+
+            # Empty or no response, retry unless out of attempts
+            log_warning(f"[selenium] PART1 attempt {attempt} returned empty response; retrying...")
+            if attempt < max_retries:
+                time.sleep(1)
+                continue
+            else:
+                log_warning("[selenium] PART1 exhausted retries without valid response; proceeding to PART2")
+
+        # Send PART2 - ensure we do not re-split
+        try:
+            part2_len = len(part2_text) if isinstance(part2_text, str) else None
+        except Exception:
+            part2_len = None
+        log_info(f"[selenium] PART2 -> sending main prompt (is_part2=True) size_before_minify={part2_len}")
+        self._skip_double_prompt_for_this_send = True
+        # Give the browser a very short grace to process previous message before sending PART2
+        try:
+            time.sleep(0.1)
+        except Exception:
+            pass
+        try:
+            resp = self._execute_complete_workflow(part2_text)
+            log_info("[selenium] PART2 response received — treating as final response for action parsing/corrector flow")
+            return resp
+        finally:
+            # Always reset the flag to avoid residual state
+            self._skip_double_prompt_for_this_send = False
+
+    def _execute_complete_workflow(self, prompt_text: str, processing_max_wait: int | None = None, stabilize_max_wait: int | None = None) -> str:
         """Execute the complete workflow (interaction only) in a single thread."""
         try:
             log_debug(f"[selenium] _execute_complete_workflow called with driver: {self.driver is not None}")
@@ -1427,11 +2764,24 @@ class SeleniumLLMBase(AIPluginBase):
             textarea = self._locate_prompt_area(self.driver)
 
             # Send prompt and wait for response
-            if not self._send_prompt_with_confirmation(textarea, prompt_text):
+            if not self._send_prompt_with_confirmation(textarea, prompt_text, processing_max_wait=processing_max_wait):
                 return "❌ Failed to send prompt"
 
-            # Wait for and extract response
-            response = self._extract_response_text(self.driver)
+            # Handle response choice if applicable (e.g., ChatGPT offers two responses)
+            self._handle_response_choice(self.driver)
+
+            # Wait for response to stabilize (text stops growing for N seconds)
+            # Use a shorter stabilization timeout for PART1 when requested
+            if stabilize_max_wait is not None:
+                response = self.wait_until_response_stabilizes(self.driver, max_total_wait=stabilize_max_wait)
+            else:
+                response = self.wait_until_response_stabilizes(self.driver)
+
+            # Log the full response for debugging
+            if response:
+                log_debug(f"[selenium] 📨 FULL LLM RESPONSE ({len(response)} chars):\n{response}")
+            else:
+                log_warning("[selenium] Received empty response from LLM")
 
             return response
 

@@ -146,10 +146,68 @@ The backend sends animation commands via WebSocket with the following format:
         "type": "animation",
         "animation": "animations/Thinking.fbx",
         "loop": true,
-        "state": "think"
+        "state": "think",
+        "descriptor": {
+            "intro": {"end_frame": 35},
+            "loop": {"start_frame": 36, "end_frame": 77},
+            "outro": {"start_frame": 78}
+        }
     }
 
 The frontend listens for these messages and triggers the appropriate animation.
+
+Centralized Animation State
+=============================
+
+The animation system maintains a **centralized state on the backend** that is synchronized
+across all connected clients. This ensures that when multiple users/devices view the same
+avatar simultaneously (through different WebUI windows), they all see the **exact same animation**.
+
+**How It Works**
+
+1. **Single Source of Truth**: ``AnimationHandler`` maintains the current animation state
+   - Current state (IDLE, THINK, WRITE, TALK)
+   - Current animation file being played
+   - Animation descriptor (frame info for intro/loop/outro)
+
+2. **State Change Notifications**: When an animation changes:
+   - Backend notifies all registered callbacks via ``_notify_animation_state_changed()``
+   - WebUI broadcasts the new animation state to all connected WebSocket clients
+   - Each client receives the identical animation command
+
+3. **New Client Synchronization**: When a client connects:
+   - WebSocket endpoint retrieves current animation state via ``get_current_animation_state()``
+   - Sends the current animation to the new client before any other messages
+   - New client immediately displays the correct animation
+
+**Use Case Example**
+
+::
+
+    Timeline:
+    --------
+    
+    User 1 (Telegram)  → sends message
+                       ↓
+    Backend (AnimationHandler) 
+                   ↓ triggers THINK animation
+                   ↓ updates _current_animation_file, _current_animation_descriptor
+                   ↓ calls _notify_animation_state_changed()
+                   ↓ WebUI broadcasts to all clients
+    
+    Client A (WebUI, Device 1) ← receives THINK animation
+    Client B (WebUI, Device 2) ← receives THINK animation  (same video view!)
+    Client C (WebUI, Phone)    ← receives THINK animation
+    
+    All three devices see the same avatar doing the same THINKING motion simultaneously.
+
+**Configuration**
+
+No special configuration required. The synchronization is automatic:
+
+1. Backend calls ``register_animation_state_changed_callback()`` during initialization
+2. WebUI broadcasts to all connected clients when animation changes
+3. New clients receive current state on connection
 
 Adding New Animations
 =====================
@@ -216,6 +274,58 @@ Example for an interface that wants to show the avatar is "thinking":
                     session_id=webui_session,
                     context_id=f"interface_{message.message_id}"
                 )
+
+Flexible Animation Sections (Intro/Loop/Outro)
+================================================
+
+The animation system supports flexible combinations of intro, loop, and outro sections,
+allowing for more sophisticated animation sequences:
+
+**Full Animation Flow**
+
+An animation can define up to three sections:
+
+- **Intro**: Initial/setup frames (e.g., transition into thinking pose)
+- **Loop**: Repeating frames that play continuously (e.g., thinking motion)
+- **Outro**: Wind-down/transition frames (e.g., returning to rest pose)
+
+.. code-block:: json
+
+    {
+      "intro": {"start_frame": 0, "end_frame": 20},
+      "loop": {"start_frame": 21, "end_frame": 120},
+      "outro": {"start_frame": 121, "end_frame": 160}
+    }
+
+**Smart Playback**
+
+When ``play_animation()`` is called:
+
+- If ``loop`` section exists → always loop until ``stop_animation()`` is called
+- If only ``intro`` → play once and stop automatically
+- WebUI uses the descriptor to determine which frames to play
+
+
+**Graceful Stopping**
+
+When ``stop_animation()`` is called:
+
+- If ``outro`` exists → play outro sequence before returning to Idle
+- If no outro → immediately return to Idle
+- Duration calculated from frame count (approximately 30fps)
+
+**Supported Combinations**
+
+All combinations work correctly:
+
+- intro + loop + outro: Full animation flow
+- loop + outro: Repeating with graceful ending
+- intro + loop: Intro then repeating motion
+- loop only: Simple repeating animation
+- intro + outro: One-shot animation
+- Any solo section: Works as expected
+
+See :doc:`animation_flow_flexible` for detailed documentation.
 
 Debugging
 =========

@@ -84,7 +84,8 @@ async def test_animation_with_multiple_files(animation_handler, mock_webui):
         animations_used.add(animation_handler.current_animation)
     
     # Should have used at least one of the idle animations
-    expected_animations = {"Idle.fbx", "Idle2.fbx", "Happy Idle.fbx"}
+    # (actual animations may vary based on skins available)
+    expected_animations = {"Idle.fbx", "Idle2.fbx", "Happy Idle.fbx", "Look Around.fbx"}
     assert animations_used.issubset(expected_animations)
 
 

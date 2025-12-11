@@ -24,7 +24,7 @@ class AbstractMessage:
     text: Optional[str] = None
     user: Optional[AbstractUser] = None
     chat_id: Union[int, str] = None
-    thread_id: Optional[Union[int, str]] = None
+    interface_path: Optional[str] = None
     interface_name: Optional[str] = None
     raw_data: Optional[Dict[str, Any]] = None
 

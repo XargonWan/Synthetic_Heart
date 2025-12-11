@@ -10,18 +10,18 @@ services:
       - "${SELKIES_HTTPS_PORT:-3000}:3000"
       - "${SELKIES_HTTP_PORT:-3001}:3001"
       - "${CLI_SERVER_PORT:-5555}:5555"
-      - "${WEBUI_PORT:-8000}:${WEBUI_PORT:-8000}"
+      - "${SYNTH_WEBUI_PORT:-8000}:${SYNTH_WEBUI_PORT:-8000}"
       - "${OLLAMA_PORT:-11434}:11434"
     volumes:
       - synth_data:/config
-      - synth_res:/app/res
+      - ./skins:/app/skins
       - ./logs:/app/logs
       - .env:/app/.env:ro
     environment:
       - WEBVIEW_PORT=${WEBVIEW_PORT:-5006}
       - WEBVIEW_HOST=${WEBVIEW_HOST:-localhost}
-      - WEBUI_PORT=${WEBUI_PORT:-8000}
-      - WEBUI_HOST=${WEBUI_HOST:-0.0.0.0}
+      - SYNTH_WEBUI_PORT=${SYNTH_WEBUI_PORT:-8000}
+      - SYNTH_WEBUI_HOST=${SYNTH_WEBUI_HOST:-0.0.0.0}
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
       - DISPLAY_WIDTH=${DISPLAY_WIDTH:-1280}
@@ -52,9 +52,11 @@ services:
       MYSQL_DATABASE: ${DB_NAME:-synth}
       MYSQL_USER: ${DB_USER:-synth}
       MYSQL_PASSWORD: ${DB_PASS:-synth}
-    command: --bind-address=0.0.0.0
+      MARIADB_AUTO_UPGRADE: 1
+    command: --max-connections=200
     volumes:
       - synth_db_data:/var/lib/mysql
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
     restart: unless-stopped
     networks:
       - synth_network
@@ -87,7 +89,6 @@ services:
 volumes:
   synth_db_data:
   synth_data:
-  synth_res:
 
 networks:
   synth_network:

@@ -5,59 +5,57 @@ from __future__ import annotations
 import time
 from typing import Optional, Tuple, Dict, Any
 
-from core.db import get_conn
+from core.db import get_conn_ctx
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.core_initializer import core_initializer, register_plugin
 
 
 async def init_message_map_table():
     """Initialize the message_map table if it doesn't exist."""
-    conn = await get_conn()
-    try:
-        async with conn.cursor() as cur:
-            # Check if table exists and has correct structure
-            await cur.execute("SHOW TABLES LIKE 'message_map'")
-            table_exists = await cur.fetchone()
-            
-            if table_exists:
-                # Check column types
-                await cur.execute("DESCRIBE message_map")
-                columns = await cur.fetchall()
-                chat_id_type = None
-                for col in columns:
-                    if col[0] == 'chat_id':
-                        chat_id_type = col[1]
-                        break
+    async with get_conn_ctx() as conn:
+        try:
+            async with conn.cursor() as cur:
+                # Check if table exists and has correct structure
+                await cur.execute("SHOW TABLES LIKE 'message_map'")
+                table_exists = await cur.fetchone()
                 
-                # If chat_id is not BIGINT, recreate table
-                if chat_id_type and 'bigint' not in chat_id_type.lower():
-                    log_warning(f"[message_map] chat_id column type is {chat_id_type}, recreating table")
-                    await cur.execute("DROP TABLE message_map")
-                    table_exists = None
-            
-            if not table_exists:
-                # Create table with correct structure
-                await cur.execute(
-                    """
-                    CREATE TABLE message_map (
-                        trainer_message_id INTEGER PRIMARY KEY,
-                        chat_id BIGINT NOT NULL,
-                        message_id INTEGER NOT NULL,
-                        timestamp REAL
+                if table_exists:
+                    # Check column types
+                    await cur.execute("DESCRIBE message_map")
+                    columns = await cur.fetchall()
+                    chat_id_type = None
+                    for col in columns:
+                        if col[0] == 'chat_id':
+                            chat_id_type = col[1]
+                            break
+                    
+                    # If chat_id is not BIGINT, recreate table
+                    if chat_id_type and 'bigint' not in chat_id_type.lower():
+                        log_warning(f"[message_map] chat_id column type is {chat_id_type}, recreating table")
+                        await cur.execute("DROP TABLE message_map")
+                        table_exists = None
+                
+                if not table_exists:
+                    # Create table with correct structure
+                    await cur.execute(
+                        """
+                        CREATE TABLE message_map (
+                            trainer_message_id INTEGER PRIMARY KEY,
+                            chat_id BIGINT NOT NULL,
+                            message_id INTEGER NOT NULL,
+                            timestamp REAL
+                        )
+                        """
                     )
-                    """
-                )
-                log_info("[message_map] Created message_map table with correct structure")
-            else:
-                log_debug("[message_map] message_map table already exists with correct structure")
-            
-            await conn.commit()
-            log_debug("[message_map] message_map table initialized")
-    except Exception as e:
-        log_error(f"[message_map] Failed to initialize message_map table: {e}")
-        raise
-    finally:
-        conn.close()
+                    log_info("[message_map] Created message_map table with correct structure")
+                else:
+                    log_debug("[message_map] message_map table already exists with correct structure")
+                
+                await conn.commit()
+                log_debug("[message_map] message_map table initialized")
+        except Exception as e:
+            log_error(f"[message_map] Failed to initialize message_map table: {e}")
+            raise
 
 
 async def store_message_mapping(trainer_message_id: int, chat_id: int, message_id: int):
@@ -72,104 +70,96 @@ async def store_message_mapping(trainer_message_id: int, chat_id: int, message_i
     # Log the values being stored for debugging
     log_debug(f"[message_map] Storing mapping: trainer_msg={trainer_message_id} (type: {type(trainer_message_id)}), chat_id={chat_id} (type: {type(chat_id)}), message_id={message_id} (type: {type(message_id)})")
 
-    conn = await get_conn()
-    try:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                REPLACE INTO message_map 
-                (trainer_message_id, chat_id, message_id, timestamp)
-                VALUES (%s, %s, %s, %s)
-                """,
-                (trainer_message_id, chat_id, message_id, time.time())
-            )
-            await conn.commit()
-            log_debug(f"[message_map] Stored mapping: trainer_msg={trainer_message_id} -> chat={chat_id}, msg={message_id}")
-            return True
-    except Exception as e:
-        log_error(f"[message_map] Failed to store mapping: {e}")
-        raise
-    finally:
-        conn.close()
+    async with get_conn_ctx() as conn:
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    REPLACE INTO message_map 
+                    (trainer_message_id, chat_id, message_id, timestamp)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (trainer_message_id, chat_id, message_id, time.time())
+                )
+                await conn.commit()
+                log_debug(f"[message_map] Stored mapping: trainer_msg={trainer_message_id} -> chat={chat_id}, msg={message_id}")
+                return True
+        except Exception as e:
+            log_error(f"[message_map] Failed to store mapping: {e}")
+            raise
 
 
 async def get_original_message(trainer_message_id: int) -> Optional[Tuple[int, int]]:
     """Get the original chat_id and message_id for a trainer message."""
     await init_message_map_table()
-    conn = await get_conn()
-    try:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                SELECT chat_id, message_id 
-                FROM message_map 
-                WHERE trainer_message_id = %s
-                """,
-                (trainer_message_id,)
-            )
-            result = await cur.fetchone()
-            if result:
-                log_debug(f"[message_map] Found mapping: trainer_msg={trainer_message_id} -> chat={result[0]}, msg={result[1]}")
-                return (result[0], result[1])
-            else:
-                log_debug(f"[message_map] No mapping found for trainer_message_id={trainer_message_id}")
-                return None
-    except Exception as e:
-        log_error(f"[message_map] Failed to get original message: {e}")
-        return None
-    finally:
-        conn.close()
+    async with get_conn_ctx() as conn:
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    SELECT chat_id, message_id 
+                    FROM message_map 
+                    WHERE trainer_message_id = %s
+                    """,
+                    (trainer_message_id,)
+                )
+                result = await cur.fetchone()
+                if result:
+                    log_debug(f"[message_map] Found mapping: trainer_msg={trainer_message_id} -> chat={result[0]}, msg={result[1]}")
+                    return (result[0], result[1])
+                else:
+                    log_debug(f"[message_map] No mapping found for trainer_message_id={trainer_message_id}")
+                    return None
+        except Exception as e:
+            log_error(f"[message_map] Failed to get original message: {e}")
+            return None
 
 
 async def cleanup_old_mappings(older_than_hours: int = 24):
     """Remove old message mappings to prevent table bloat."""
     await init_message_map_table()
     cutoff_time = time.time() - (older_than_hours * 3600)
-    conn = await get_conn()
-    try:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                DELETE FROM message_map 
-                WHERE timestamp < %s
-                """,
-                (cutoff_time,)
-            )
-            deleted_count = cur.rowcount
-            await conn.commit()
-            log_info(f"[message_map] Cleaned up {deleted_count} old message mappings")
-    except Exception as e:
-        log_error(f"[message_map] Failed to cleanup old mappings: {e}")
-    finally:
-        conn.close()
+    async with get_conn_ctx() as conn:
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    DELETE FROM message_map 
+                    WHERE timestamp < %s
+                    """,
+                    (cutoff_time,)
+                )
+                deleted_count = cur.rowcount
+                await conn.commit()
+                log_info(f"[message_map] Cleaned up {deleted_count} old message mappings")
+        except Exception as e:
+            log_error(f"[message_map] Failed to cleanup old mappings: {e}")
 
 
 async def get_mapping_stats() -> Dict[str, int]:
     """Get statistics about message mappings."""
     await init_message_map_table()
-    conn = await get_conn()
-    try:
-        async with conn.cursor() as cur:
-            await cur.execute("SELECT COUNT(*) FROM message_map")
-            total_count = (await cur.fetchone())[0]
-            
-            # Count mappings from last 24 hours
-            cutoff_time = time.time() - (24 * 3600)
-            await cur.execute(
-                "SELECT COUNT(*) FROM message_map WHERE timestamp > %s",
-                (cutoff_time,)
-            )
-            recent_count = (await cur.fetchone())[0]
-            
-            return {
-                "total_mappings": total_count,
-                "recent_mappings": recent_count
-            }
-    except Exception as e:
-        log_error(f"[message_map] Failed to get mapping stats: {e}")
-        return {"total_mappings": 0, "recent_mappings": 0}
-    finally:
-        conn.close()
+    async with get_conn_ctx() as conn:
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT COUNT(*) FROM message_map")
+                total_count = (await cur.fetchone())[0]
+                
+                # Count mappings from last 24 hours
+                cutoff_time = time.time() - (24 * 3600)
+                await cur.execute(
+                    "SELECT COUNT(*) FROM message_map WHERE timestamp > %s",
+                    (cutoff_time,)
+                )
+                recent_count = (await cur.fetchone())[0]
+                
+                return {
+                    "total_mappings": total_count,
+                    "recent_mappings": recent_count
+                }
+        except Exception as e:
+            log_error(f"[message_map] Failed to get mapping stats: {e}")
+            return {"total_mappings": 0, "recent_mappings": 0}
 
 
 class MessageMapPlugin:

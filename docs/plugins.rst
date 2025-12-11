@@ -27,6 +27,168 @@ Available Action Plugins
 
 * ``ai_diary`` – Personal memory system for synth. Records conversations, thoughts, and emotions. See :doc:`ai_diary_personal_memory` for details.
 * ``bio_manager`` – Manage persistent user biographies. Uses database settings ``DB_HOST``, ``DB_USER``, ``DB_PASS`` and ``DB_NAME``.
+
+Bio Manager Plugin
+------------------
+
+The ``bio_manager`` plugin provides persistent storage and retrieval of user biographical information. It automatically injects participant context into LLM prompts, including:
+
+- **User profiles**: Nicknames, short bio, current feelings
+- **Chat history**: Recent messages from each participant
+- **Last accessed**: Automatic timestamp updates
+
+**Database Schema**:
+
+.. code-block:: sql
+
+    CREATE TABLE bio (
+        id VARCHAR(255) PRIMARY KEY,
+        known_as TEXT DEFAULT '[]',
+        likes TEXT DEFAULT '[]',
+        not_likes TEXT DEFAULT '[]',
+        information TEXT DEFAULT '',
+        past_events TEXT DEFAULT '[]',
+        feelings TEXT DEFAULT '[]',
+        contacts TEXT DEFAULT '{}',
+        social_accounts TEXT DEFAULT '[]',
+        privacy VARCHAR(50) DEFAULT 'default',
+        created_at TEXT DEFAULT '',
+        last_accessed TEXT DEFAULT '',
+        last_update TEXT DEFAULT '',
+        update_count INT DEFAULT 0
+    );
+
+**Performance Optimizations**:
+
+- **Table Initialization Cache**: Prevents repeated ``_ensure_table()`` calls that caused timeouts
+- **Async Operations**: ``get_static_injection()`` is fully async to prevent deadlock with the event loop
+- **Connection Pool Tuning**: Reduced pool size to 5 connections to ensure availability
+
+**API Methods**:
+
+- ``get_bio_light(user_id)``: Retrieve lightweight bio for prompt injection
+- ``get_bio_full(user_id)``: Retrieve complete user profile
+- ``update_bio_fields_auto(user_id, updates)``: Update fields without rate limiting
+- ``get_static_injection(message, context_memory)``: Async method for prompt context injection
+
+Emotion Manager Plugin
+----------------------
+
+.. versionadded:: 1.0
+   Centralized emotional state management with decay, balancing, and persistence.
+
+The ``emotion_manager`` plugin manages SyntH's emotional state with sophisticated psychological modeling. It provides persistent emotional state storage, exponential decay over time, and Plutchik's wheel-based emotion balancing for realistic emotional behavior.
+
+**Key Features:**
+
+- **Persistent Storage**: Emotions stored in database with timestamps
+- **Exponential Decay**: Emotions naturally fade over time
+- **Emotion Balancing**: Plutchik's wheel opposites reduce conflicting emotions
+- **LLM Integration**: Automatic emotion extraction from message tags
+- **Global State**: Readable emotional state for WebUI, animations, and plugins
+
+**Architecture:**
+
+The emotion engine consists of three main components:
+
+1. **EmotionState Class**: Represents individual emotions with intensity and decay
+2. **EmotionManager Plugin**: Core plugin handling all emotion operations
+3. **Database Layer**: Persistent storage with automatic cleanup
+
+**Emotion State Model:**
+
+.. code-block:: python
+
+   @dataclass
+   class EmotionState:
+       emotion_name: str      # Emotion identifier
+       intensity: float       # 0.0-10.0 scale
+       timestamp: datetime    # Creation/update time
+
+**Decay Calculation:**
+
+Emotions decay exponentially over time using the formula:
+
+.. math::
+
+   I(t) = I_0 \cdot e^{-\frac{t}{\tau}}
+
+Where:
+- :math:`I(t)` = Current intensity
+- :math:`I_0` = Initial intensity
+- :math:`t` = Time elapsed (seconds)
+- :math:`\tau` = Decay half-life (configurable, default 3600s = 1 hour)
+
+**Configuration:**
+
+- ``EMOTION_DECAY_TAU``: Decay half-life in seconds (default: 3600)
+- ``EMOTION_DECAY_THRESHOLD``: Minimum intensity before removal (default: 0.1)
+
+**Plutchik's Wheel Balancing:**
+
+The engine implements Plutchik's circumplex model of emotion, where opposite emotions on the wheel naturally suppress each other:
+
+.. code-block:: python
+
+   PLUTCHIK_OPPOSITES = {
+       'joy': 'sadness',
+       'trust': 'disgust',
+       'fear': 'anger',
+       'anticipation': 'surprise',
+       'happiness': 'sadness',
+       'excitement': 'calm',
+       # ... extended opposites
+   }
+
+**Supported Emotions:**
+
+The engine supports a comprehensive whitelist including Ekman's basic emotions (anger, disgust, fear, happiness, sadness, surprise), Plutchik's complex emotions (joy, trust, anticipation, etc.), and common states (anxiety, calm, confusion, etc.).
+
+**Database Schema:**
+
+.. code-block:: sql
+
+   CREATE TABLE emotion_state (
+       id INT AUTO_INCREMENT PRIMARY KEY,
+       emotion_name VARCHAR(100) NOT NULL,
+       intensity FLOAT NOT NULL DEFAULT 5.0,
+       timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+       INDEX idx_emotion_name (emotion_name),
+       INDEX idx_timestamp (timestamp)
+   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+**API Actions:**
+
+- ``static_inject``: Inject current emotional state into LLM context
+- ``get_emotion_state``: Get current emotional state with decay applied
+- ``update_emotion_from_tags``: Extract and apply emotions from LLM message tags like ``{emotion intensity}``
+- ``set_emotion``: Set a single emotion intensity directly
+- ``decay_emotions``: Apply decay to all emotions and remove low-intensity ones
+- ``sync_emotions_from_all_sources``: Synchronize emotions from ai_diary, message tags, and emotion_state DB
+
+**LLM Integration:**
+
+Emotions can be specified in LLM responses using the format ``{emotion intensity}``:
+
+.. code-block:: none
+
+   I'm so excited about this project! {excitement 8.5} {curiosity 7.2}
+
+The engine automatically scans LLM messages for emotion tags and applies them to the emotional state with balancing.
+
+**WebUI Integration:**
+
+The emotional state is exposed to the WebUI for real-time visualization and can trigger animations and visual feedback.
+
+**Troubleshooting:**
+
+- Check ``EMOTION_DECAY_TAU`` configuration for decay issues
+- Verify emotion names against ``VALID_EMOTIONS`` whitelist
+- Ensure DB credentials are configured correctly
+- Check that ``decay_emotions`` is called periodically
+
+* ``emotion_manager`` – Centralized emotional state management with decay and balancing.
 * ``blocklist`` – User blocking/unblocking functionality (no configuration).
 * ``chat_link`` – Cross-platform chat linking and message forwarding.
 * ``message_map`` – Message threading and conversation tracking.
@@ -35,11 +197,66 @@ Available Action Plugins
 * ``time_plugin`` – Inject current time and location (no configuration).
 * ``weather_plugin`` – Provide weather info as static context. Optional ``WEATHER_FETCH_TIME`` sets refresh interval.
 
+Recent Chats Plugin
+-------------------
+
+.. versionchanged:: 1.0
+   ``update_chat_activity`` is now automatic and no longer exposed to LLM actions.
+
+The ``recent_chats`` plugin manages conversation activity tracking and provides access to recently active chats. Unlike other plugins, this plugin focuses on mechanical operations that don't require LLM reasoning.
+
+**Key Changes in v1.0:**
+
+- **Automatic Activity Tracking**: Chat activity is now tracked automatically when messages are received, eliminating the need for LLM-requested ``update_chat_activity`` actions
+- **Centralized Implementation**: Activity tracking is handled in ``core/chat_context_manager.py`` instead of being duplicated across interfaces
+- **Reduced Prompt Size**: One less action for the LLM to consider
+
+**Available Actions:**
+
+- ``get_recent_chats``: Retrieve the most recently active chats
+- ``cleanup_old_chats``: Remove chat records older than specified days
+
+**Database Schema:**
+
+.. code-block:: sql
+
+   CREATE TABLE recent_chats (
+       chat_id VARCHAR(255) PRIMARY KEY,
+       last_active DOUBLE NOT NULL,
+       metadata TEXT,
+       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+       INDEX idx_last_active (last_active)
+   );
+
+**Automatic Activity Tracking:**
+
+Chat activity is now tracked automatically whenever ``add_message_to_context()`` is called:
+
+.. code-block:: python
+
+   # Automatic - no LLM intervention required
+   asyncio.create_task(update_chat_activity(
+       chat_id=extracted_chat_id,
+       metadata={
+           'username': sender_name,
+           'user_id': sender_id,
+           'interface_path': interface_path
+       }
+   ))
+
+**Benefits:**
+
+- **Performance**: Eliminates unnecessary LLM decision-making for basic tracking
+- **Consistency**: All interfaces track activity the same way
+- **Maintenance**: Single implementation point for activity tracking logic
+
 **Development Plugins** (in ``plugins_dev/`` directory):
 
 * ``event`` – Schedule and deliver reminders. Requires ``DB_HOST``, ``DB_PORT``, ``DB_USER``, ``DB_PASS``, ``DB_NAME`` and optional ``CORRECTOR_RETRIES``.
 * ``reddit_plugin`` – Submit posts and comments to Reddit. Requires ``REDDIT_CLIENT_ID``, ``REDDIT_CLIENT_SECRET``, ``REDDIT_USERNAME``, ``REDDIT_PASSWORD`` and ``REDDIT_USER_AGENT``.
 * ``selenium_elevenlabs`` – Generate speech audio with ElevenLabs. Set ``ELEVENLABS_EMAIL`` and ``ELEVENLABS_PASSWORD`` (``synth_SELENIUM_HEADLESS`` controls headless mode).
+* ``selenium_ttsfree`` – Generate speech audio by automating https://ttsfree.com. No credentials required; set ``synth_SELENIUM_HEADLESS`` to control headless mode. Use action ``voice_message_ttsfree`` with payload: ``{message, language, voice, interface_path}``.
+    - Exposed variable: ``Free_TTS_VOICES`` (mapping language -> voice definition). Configure this in the Web UI under Settings → Plugins to map language keys to voice options used by the plugin.
 * ``terminal`` – Run shell commands or interactive sessions. Uses ``TELEGRAM_TRAINER_ID`` to authorize access.
 
 Terminal Plugin
@@ -104,7 +321,7 @@ Creating a new plugin is straightforward. All plugins should extend ``AIPluginBa
 Action Plugin
 ~~~~~~~~~~~~~
 
-Action plugins provide executable actions that can be called via JSON:
+Action plugins provide executable actions that can be called via JSON. Actions are defined using a structured schema format that optimizes prompt size while maintaining full functionality.
 
 .. code-block:: python
 
@@ -123,26 +340,43 @@ Action plugins provide executable actions that can be called via JSON:
            return ["my_action"]
 
        def get_supported_actions(self) -> dict:
-           """Return schema for all supported actions."""
+           """Return schema for all supported actions using the new optimized format."""
            return {
                "my_action": {
-                   "description": "Perform a custom action",
-                   "required_fields": ["value"],
-                   "optional_fields": ["option"],
-               }
-           }
-
-       def get_prompt_instructions(self, action_name: str) -> dict:
-           """Provide LLM instructions for using this action."""
-           if action_name == "my_action":
-               return {
-                   "description": "Execute my custom action with a value.",
-                   "payload": {
-                       "value": {"type": "string", "description": "The value to process"},
-                       "option": {"type": "boolean", "description": "Optional flag"}
+                   "schema": {
+                       "type": "object",
+                       "properties": {
+                           "value": {
+                               "type": "string",
+                               "description": "The value to process"
+                           },
+                           "option": {
+                               "type": "boolean",
+                               "description": "Optional flag"
+                           }
+                       },
+                       "required": ["value"]
+                   },
+                   "brief": "Execute my custom action with a value",
+                   "examples": {
+                       "description": "Execute my custom action with a value. The option flag controls additional behavior.",
+                       "instructions": {
+                           "when_to_use": "Use this action when you need to process a value with optional configuration",
+                           "common_pitfalls": ["Ensure value is not empty", "Boolean option defaults to false"]
+                       },
+                       "examples": [
+                           {
+                               "scenario": "Basic value processing",
+                               "payload": {"value": "hello world"}
+                           },
+                           {
+                               "scenario": "Processing with option enabled",
+                               "payload": {"value": "hello world", "option": true}
+                           }
+                       ]
                    }
                }
-           return {}
+           }
 
        def validate_payload(self, action_type: str, payload: dict) -> list[str]:
            """Validate action payload before execution."""
@@ -160,6 +394,80 @@ Action plugins provide executable actions that can be called via JSON:
 
    # Required: Export the plugin class
    PLUGIN_CLASS = MyActionPlugin
+
+Action Schema Format
+~~~~~~~~~~~~~~~~~~~~
+
+.. versionadded:: 1.0
+   New optimized action schema format for reduced prompt sizes.
+
+Actions are defined using a structured three-tier format that optimizes LLM prompt size while maintaining full functionality:
+
+**Schema Tier** (JSON Schema)
+    Defines the structure, field types, and required fields. Used for validation and LLM prompt generation.
+
+**Brief Tier** (One-line description)
+    Concise description of what the action does. Included in LLM prompts for context.
+
+**Examples Tier** (Detailed documentation)
+    Comprehensive descriptions, usage instructions, and examples. Used only by the corrector when LLM makes mistakes.
+
+.. code-block:: python
+
+   {
+       "my_action": {
+           "schema": {
+               "type": "object",
+               "properties": {
+                   "field_name": {
+                       "type": "string",  # or "number", "boolean", "array", "object"
+                       "description": "What this field does",
+                       "enum": ["option1", "option2"]  # optional: restrict to specific values
+                   }
+               },
+               "required": ["field_name"]  # array of required field names
+           },
+           "brief": "One-line description of what the action does",
+           "examples": {
+               "description": "Detailed description with usage context and edge cases",
+               "instructions": {
+                   "when_to_use": "When to use this action",
+                   "common_pitfalls": ["Common mistakes to avoid"],
+                   "notes": ["Additional important information"]
+               },
+               "examples": [
+                   {
+                       "scenario": "Description of use case",
+                       "payload": {"field_name": "example_value"}
+                   }
+               ]
+           }
+       }
+   }
+
+**Field Types Supported:**
+
+- ``"string"`` - Text values
+- ``"number"`` - Numeric values (integers/floats)
+- ``"boolean"`` - True/false values
+- ``"array"`` - Lists of values
+- ``"object"`` - Nested objects
+
+**Schema Validation:**
+
+The schema follows JSON Schema standards and is automatically validated. Use ``enum`` to restrict values to specific options:
+
+.. code-block:: python
+
+   "priority": {
+       "type": "string",
+       "enum": ["low", "medium", "high"],
+       "description": "Message priority level"
+   }
+
+**Backward Compatibility:**
+
+The old format (``description``, ``required_fields``, ``optional_fields``) is automatically converted to the new format. Existing plugins continue to work without changes.
 
 Plugin Flow
 -----------
@@ -193,6 +501,18 @@ The plugin system integrates seamlessly with the message chain:
 Best Practices
 --------------
 
+**Action Schema Design**
+    Use the new three-tier action format for optimal prompt efficiency. Keep ``brief`` descriptions under 100 characters.
+
+**Schema Validation**
+    Define comprehensive JSON schemas with proper types and constraints. Use ``enum`` for restricted values.
+
+**Brief Descriptions**
+    Write concise, actionable descriptions for the ``brief`` field. Focus on what the action does, not how.
+
+**Examples Documentation**
+    Provide comprehensive examples in the ``examples`` tier. Include common use cases, edge cases, and error scenarios.
+
 **Security First**
     Always validate inputs and restrict access to authorized users only.
 
@@ -200,7 +520,7 @@ Best Practices
     Provide meaningful error messages and handle edge cases gracefully.
 
 **Documentation**
-    Include clear descriptions and examples in ``get_prompt_instructions()``.
+    Include clear descriptions and examples in the ``examples`` tier for corrector assistance.
 
 **Testing**
     Test plugins independently before integration with the full system.
@@ -208,4 +528,4 @@ Best Practices
 **Performance**
     Consider async operations for I/O-bound tasks to maintain responsiveness.
 
-For examples, examine existing plugins like ``plugins/terminal.py`` or ``plugins/event.py`` in the repository.
+For examples, examine existing plugins like ``plugins/ai_diary.py`` (new format) or ``plugins/terminal.py`` (legacy format) in the repository.

@@ -21,6 +21,10 @@ _BOT_NONE_LOG_THROTTLE_SEC = 5  # Log at most once every 5 seconds
 _CHAT_COOLDOWNS: dict = {}
 DEFAULT_COOLDOWN_SECONDS = 30
 
+# Queue for messages waiting for cooldown to expire
+_PENDING_MESSAGES: dict = {}  # {chat_id: [(bot, text, kwargs, timestamp), ...]}
+_COOLDOWN_PROCESSOR_RUNNING = False
+
 # Maximum preview length for logging failed messages
 max_message_preview_len = 100
 
@@ -34,6 +38,57 @@ def truncate_message(text: Optional[str], limit: int = 4000) -> str:
     return text
 
 
+async def _process_pending_messages():
+    """Process queued messages when cooldown expires."""
+    global _COOLDOWN_PROCESSOR_RUNNING, _PENDING_MESSAGES, _CHAT_COOLDOWNS
+    _COOLDOWN_PROCESSOR_RUNNING = True
+    
+    try:
+        while True:
+            await asyncio.sleep(5)  # Check every 5 seconds
+            
+            current_time = time.time()
+            chats_to_process = []
+            
+            # Find chats whose cooldown has expired
+            for chat_id in list(_PENDING_MESSAGES.keys()):
+                cd_until = _CHAT_COOLDOWNS.get(chat_id)
+                if not cd_until or current_time >= cd_until:
+                    chats_to_process.append(chat_id)
+            
+            # Process pending messages for expired cooldowns
+            for chat_id in chats_to_process:
+                messages = _PENDING_MESSAGES.pop(chat_id, [])
+                if not messages:
+                    continue
+                    
+                log_info(f"[telegram_utils] Processing {len(messages)} queued message(s) for chat {chat_id}")
+                
+                for bot, text, kwargs, queued_at in messages:
+                    try:
+                        # Remove cooldown temporarily to allow send
+                        _CHAT_COOLDOWNS.pop(chat_id, None)
+                        
+                        wait_time = int(current_time - queued_at)
+                        log_debug(f"[telegram_utils] Sending queued message (waited {wait_time}s)")
+                        
+                        # Recursively call _send_with_retry (cooldown is cleared)
+                        await _send_with_retry(bot, chat_id, text, **kwargs)
+                        
+                    except Exception as e:
+                        log_error(f"[telegram_utils] Failed to send queued message to {chat_id}: {e}")
+            
+            # Stop processor if no more pending messages
+            if not _PENDING_MESSAGES:
+                log_debug("[telegram_utils] No more pending messages, stopping processor")
+                break
+                
+    except Exception as e:
+        log_error(f"[telegram_utils] Pending message processor error: {e}")
+    finally:
+        _COOLDOWN_PROCESSOR_RUNNING = False
+
+
 async def _send_with_retry(
     bot,
     chat_id: int,
@@ -43,14 +98,23 @@ async def _send_with_retry(
     **kwargs,
 ):
     """Send a single message with retry support."""
-    global _BOT_NONE_WARNED
-    # Cooldown check: avoid sending repeatedly to a chat under cooldown
+    global _BOT_NONE_WARNED, _PENDING_MESSAGES, _COOLDOWN_PROCESSOR_RUNNING
+    # Cooldown check: queue message instead of skipping
     try:
         cd_until = _CHAT_COOLDOWNS.get(chat_id)
         if cd_until and time.time() < cd_until:
-            log_debug(f"[telegram_utils] Chat {chat_id} is in cooldown until {cd_until}; skipping send")
+            wait_seconds = int(cd_until - time.time())
+            log_warning(f"[telegram_utils] Chat {chat_id} is in cooldown for {wait_seconds}s; queueing message for later delivery")
+            # Add to pending queue
+            if chat_id not in _PENDING_MESSAGES:
+                _PENDING_MESSAGES[chat_id] = []
+            _PENDING_MESSAGES[chat_id].append((bot, text, kwargs, time.time()))
+            # Start processor if not running
+            if not _COOLDOWN_PROCESSOR_RUNNING:
+                asyncio.create_task(_process_pending_messages())
             return None
-    except Exception:
+    except Exception as ex:
+        log_error(f"[telegram_utils] Error checking cooldown: {ex}")
         pass
     if bot is None:
         # Log a single diagnostic warning with stacktrace to find the caller, then suppress repeats
@@ -208,7 +272,7 @@ async def safe_send(bot, chat_id: int, text: str, chunk_size: int = 4000, retrie
     # Diagnostic: log safe_send entry and kwargs
     log_debug(f"[telegram_utils] safe_send called: chat_id={chat_id} type={type(chat_id)} kwargs_keys={list(kwargs.keys())} chunk_size={chunk_size} retries={retries} delay={delay}")
 
-    result = await telegram_safe_send(bot, chat_id, text, chunk_size, retries, delay, **kwargs)
+    result = await llm_response_send(bot, chat_id, text, chunk_size, retries, delay, **kwargs)
 
     # Diagnostic: log return value
     log_debug(f"[telegram_utils] safe_send result for chat_id={chat_id}: {repr(result)}")
@@ -287,11 +351,27 @@ async def send_with_thread_fallback(
                 _LAST_BOT_NONE_LOG_TIME = current_time
         return
 
-    # Respect per-chat cooldowns to avoid retry storms
+    # Respect per-chat cooldowns to avoid retry storms - queue message instead of skipping
     try:
         cd = _CHAT_COOLDOWNS.get(chat_id)
         if cd and time.time() < cd:
-            log_debug(f"[telegram_utils] send_with_thread_fallback: chat {chat_id} in cooldown until {cd}; skipping")
+            wait_seconds = int(cd - time.time())
+            log_warning(f"[telegram_utils] send_with_thread_fallback: chat {chat_id} in cooldown for {wait_seconds}s; queueing message")
+            # Add to pending queue
+            global _PENDING_MESSAGES, _COOLDOWN_PROCESSOR_RUNNING
+            if chat_id not in _PENDING_MESSAGES:
+                _PENDING_MESSAGES[chat_id] = []
+            send_kwargs = {**kwargs}
+            if thread_id is not None:
+                if isinstance(thread_id, str) and thread_id.isdigit():
+                    thread_id = int(thread_id)
+                send_kwargs["message_thread_id"] = thread_id
+            if reply_to_message_id is not None:
+                send_kwargs["reply_to_message_id"] = reply_to_message_id
+            _PENDING_MESSAGES[chat_id].append((bot, text, send_kwargs, time.time()))
+            # Start processor if not running
+            if not _COOLDOWN_PROCESSOR_RUNNING:
+                asyncio.create_task(_process_pending_messages())
             return None
     except Exception:
         pass
@@ -310,18 +390,24 @@ async def send_with_thread_fallback(
         send_kwargs["reply_to_message_id"] = reply_to_message_id
 
     try:
-        log_debug(f"[telegram_utils] send_with_thread_fallback calling telegram_safe_send chat_id={chat_id} send_kwargs={send_kwargs}")
-        message = await telegram_safe_send(
+        log_debug(f"[telegram_utils] send_with_thread_fallback calling llm_response_send chat_id={chat_id} send_kwargs={send_kwargs}")
+        message = await llm_response_send(
             bot,
             chat_id,
             text,
             **send_kwargs,
         )
-        log_info(
-            f"[telegram_utils] Message sent to {chat_id}"
-            f" (thread: {thread_id}, reply_message_id: {reply_to_message_id})"
-        )
-        log_debug(f"[telegram_utils] telegram_safe_send returned: {repr(message)}")
+        if message is not None:
+            log_info(
+                f"[telegram_utils] Message sent to {chat_id}"
+                f" (thread: {thread_id}, reply_message_id: {reply_to_message_id})"
+            )
+        else:
+            log_warning(
+                f"[telegram_utils] Message to {chat_id} queued/skipped due to cooldown or error"
+                f" (thread: {thread_id}, reply_message_id: {reply_to_message_id})"
+            )
+        log_debug(f"[telegram_utils] llm_response_send returned: {repr(message)}")
         return message
     except Exception as e:
         # On network/flood errors, set a cooldown for this chat
@@ -349,10 +435,15 @@ async def send_with_thread_fallback(
                 f"[telegram_utils] Thread {thread_id} not found; retrying without thread"
             )
             send_kwargs.pop("message_thread_id", None)
-            message = await telegram_safe_send(bot, chat_id, text, **send_kwargs)
-            log_info(
-                f"[telegram_utils] Message sent to {chat_id} without thread"
-            )
+            message = await llm_response_send(bot, chat_id, text, **send_kwargs)
+            if message is not None:
+                log_info(
+                    f"[telegram_utils] Message sent to {chat_id} without thread"
+                )
+            else:
+                log_warning(
+                    f"[telegram_utils] Message to {chat_id} queued/failed (cooldown or other error)"
+                )
             return message
 
         # Log as error for all other cases  
@@ -375,10 +466,15 @@ async def send_with_thread_fallback(
             f"[telegram_utils] Retrying in fallback chat {fallback_chat_id}"
         )
         try:
-            message = await telegram_safe_send(bot, fallback_chat_id, text, **fallback_kwargs)
-            log_info(
-                f"[telegram_utils] Message sent to fallback chat {fallback_chat_id}"
-            )
+            message = await llm_response_send(bot, fallback_chat_id, text, **fallback_kwargs)
+            if message is not None:
+                log_info(
+                    f"[telegram_utils] Message sent to fallback chat {fallback_chat_id}"
+                )
+            else:
+                log_warning(
+                    f"[telegram_utils] Message to fallback chat {fallback_chat_id} queued/failed"
+                )
             return message
         except Exception as fallback_error:
             log_error(
@@ -387,11 +483,12 @@ async def send_with_thread_fallback(
     return None
 
 
-async def telegram_safe_send(bot, chat_id: int, text: str, chunk_size: int = 4000, retries: int = 3, delay: int = 2, **kwargs):
-    """Telegram-specific wrapper with chunking and retry support.
+async def llm_response_send(bot, chat_id: int, text: str, chunk_size: int = 4000, retries: int = 3, delay: int = 2, **kwargs):
+    """Universal LLM response sender with chunking, retry support, and action processing.
     
-    This function provides:
-    1. Automatic chunking for long messages (4000 chars)
+    This function is used by all interfaces (Telegram, WebUI, Matrix, etc.) to send
+    LLM-generated responses safely. It provides:
+    1. Automatic chunking for long messages (4000 chars default)
     2. Built-in retry logic with delays
     3. Telegram-specific error handling
     4. Direct bot instance access
@@ -419,21 +516,25 @@ async def telegram_safe_send(bot, chat_id: int, text: str, chunk_size: int = 400
                 if len(token) > 4:
                     masked_token = '*' * (len(token) - 4) + token[-4:]
                     bot_repr = bot_repr.replace(token, masked_token)
-        log_debug(f"[telegram_safe_send] Called with bot={bot_repr}, chat_id={chat_id}, kwargs={kwargs}")
+        log_debug(f"[llm_response_send] Called with bot={bot_repr}, chat_id={chat_id}, kwargs={kwargs}")
     except Exception:
-        log_debug(f"[telegram_safe_send] Called with chat_id={chat_id}, kwargs_keys={list(kwargs.keys())}")
+        log_debug(f"[llm_response_send] Called with chat_id={chat_id}, kwargs_keys={list(kwargs.keys())}")
 
     # Log text content for debugging
     if text:
-        log_debug(f"[telegram_safe_send] Text ({len(text)} chars): {text}")
+        # For JSON content, always log fully without truncation for debugging
+        if text.strip().startswith(('{', '[')):
+            log_debug(f"[llm_response_send] JSON content ({len(text)} chars, full dump below):\n{text}")
+        else:
+            log_debug(f"[llm_response_send] Text ({len(text)} chars): {text}")
 
     if 'reply_to_message_id' in kwargs and not kwargs['reply_to_message_id']:
-        log_warning("[telegram_safe_send] reply_to_message_id not found. Sending without replying.")
+        log_warning("[llm_response_send] reply_to_message_id not found. Sending without replying.")
         kwargs.pop('reply_to_message_id')
 
     # Validate chat_id
     if chat_id is None or not isinstance(chat_id, (int, str)):
-        log_error(f"[telegram_safe_send] Invalid chat_id provided: {chat_id}")
+        log_error(f"[llm_response_send] Invalid chat_id provided: {chat_id}")
         return None
 
     # Convert string chat_id to int if possible
@@ -450,9 +551,9 @@ async def telegram_safe_send(bot, chat_id: int, text: str, chunk_size: int = 400
     if not is_system_message:
         json_data = extract_json_from_text(text)
         if json_data:
-            log_debug(f"[telegram_safe_send] JSON parsed successfully: {json_data}")
+            log_debug(f"[llm_response_send] JSON parsed successfully: {json_data}")
         elif ('{' in text and '}' in text) or ('[' in text and ']' in text):
-            log_debug(f"[telegram_safe_send] Text contains JSON-like content but failed to parse: {text[:200]}...")
+            log_debug(f"[llm_response_send] Text contains JSON-like content but failed to parse: {text[:200]}...")
             # Try to process with action parser if available
             try:
                 from types import SimpleNamespace
@@ -477,19 +578,19 @@ async def telegram_safe_send(bot, chat_id: int, text: str, chunk_size: int = 400
                 orchestrator_result = await action_parser.corrector_orchestrator(text, corrector_context, bot, message)
 
                 if orchestrator_result is True:
-                    log_debug("[telegram_safe_send] corrector_orchestrator executed actions; not forwarding text")
+                    log_debug("[llm_response_send] corrector_orchestrator executed actions; not forwarding text")
                     return
                 elif orchestrator_result is False:
-                    log_warning("[telegram_safe_send] corrector_orchestrator blocked message")
+                    log_warning("[llm_response_send] corrector_orchestrator blocked message")
                     return None
                 else:
-                    log_debug("[telegram_safe_send] corrector_orchestrator returned None -> forwarding as normal text")
+                    log_debug("[llm_response_send] corrector_orchestrator returned None -> forwarding as normal text")
 
             except Exception as e:
-                log_debug(f"[telegram_safe_send] corrector_orchestrator failed: {e}")
+                log_debug(f"[llm_response_send] corrector_orchestrator failed: {e}")
                 return None
         else:
-            log_debug("[telegram_safe_send] No JSON-like content detected, sending as normal text")
+            log_debug("[llm_response_send] No JSON-like content detected, sending as normal text")
 
     if json_data:
         try:
@@ -499,14 +600,14 @@ async def telegram_safe_send(bot, chat_id: int, text: str, chunk_size: int = 400
             if isinstance(json_data, dict) and "actions" in json_data:
                 actions = json_data["actions"]
                 if not isinstance(actions, list):
-                    log_warning("[telegram_safe_send] actions field must be a list")
+                    log_warning("[llm_response_send] actions field must be a list")
                     actions = []
             elif isinstance(json_data, list):
                 actions = json_data
             elif isinstance(json_data, dict) and "type" in json_data:
                 actions = [json_data]
             else:
-                log_warning(f"[telegram_safe_send] Unrecognized JSON structure: {json_data}")
+                log_warning(f"[llm_response_send] Unrecognized JSON structure: {json_data}")
                 actions = []
             
             if actions:
@@ -561,13 +662,17 @@ async def telegram_safe_send(bot, chat_id: int, text: str, chunk_size: int = 400
     try:
         for i in range(0, len(text), chunk_size):
             chunk = text[i : i + chunk_size]
-            log_debug(f"[telegram_safe_send] Sending chunk {i//chunk_size + 1} (len={len(chunk)}) to chat_id={chat_id}")
+            log_debug(f"[llm_response_send] Sending chunk {i//chunk_size + 1} (len={len(chunk)}) to chat_id={chat_id}")
             await _send_with_retry(bot, chat_id, chunk, retries, delay, **kwargs)
     except Exception as e:
         # Log as WARNING if it's a thread error (will be handled by fallback), ERROR otherwise
         error_msg = str(e).lower()
         if "thread not found" in error_msg or "message thread not found" in error_msg:
-            log_warning(f"[telegram_safe_send] Thread error (will retry without thread): {repr(e)}")
+            log_warning(f"[llm_response_send] Thread error (will retry without thread): {repr(e)}")
         else:
-            log_error(f"[telegram_safe_send] Failed to send text chunks: {repr(e)}")
+            log_error(f"[llm_response_send] Failed to send text chunks: {repr(e)}")
         raise
+
+
+# Backward compatibility alias (deprecated, use llm_response_send instead)
+telegram_safe_send = llm_response_send

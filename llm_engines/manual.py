@@ -8,13 +8,15 @@ from core.ai_plugin_base import AIPluginBase
 import json
 from telegram.constants import ParseMode
 from core.logging_utils import log_debug, log_info, log_warning, log_error
-from interface.telegram_utils import safe_send
+from interface.message_send_utils import safe_send
 import time
 
 # Manual AI-specific configuration
+# Note: max_prompt_chars will be read from the active LLM engine at runtime
+# This is just a safe fallback if the active LLM isn't available
 MANUAL_CONFIG = {
-    "max_prompt_chars": 8000,   # Manual input, keep it short
-    "max_response_chars": 2000,
+    "max_prompt_chars": 128000,   # Fallback - will be overridden by active LLM engine limits
+    "max_response_chars": 4000,
     "supports_images": False,
     "supports_functions": False,
     "model_name": "manual",
@@ -44,10 +46,24 @@ def supports_functions() -> bool:
     return MANUAL_CONFIG["supports_functions"]
 
 def get_interface_limits() -> dict:
-    """Get the limits and capabilities for Manual LLM interface."""
-    log_info(f"[manual] Interface limits: max_prompt_chars={MANUAL_CONFIG['max_prompt_chars']}, supports_images={MANUAL_CONFIG['supports_images']}")
+    """Get the limits and capabilities for Manual LLM interface.
+    
+    Reads from the active Selenium LLM engine if available,
+    falls back to default if no Selenium engine is active.
+    """
+    # Try to get limits from active Selenium LLM engine
+    try:
+        from core.selenium_llm_base import get_active_selenium_limits
+        selenium_limits = get_active_selenium_limits()
+        max_prompt_chars = selenium_limits.get("max_prompt_chars", 128000)
+        llm_name = selenium_limits.get("llm_name", "unknown")
+        log_info(f"[manual] Interface limits from active Selenium engine ({llm_name}): max_prompt_chars={max_prompt_chars}")
+    except Exception as e:
+        log_debug(f"[manual] Could not get Selenium limits, using fallback: {e}")
+        max_prompt_chars = MANUAL_CONFIG["max_prompt_chars"]
+    
     return {
-        "max_prompt_chars": MANUAL_CONFIG["max_prompt_chars"],
+        "max_prompt_chars": max_prompt_chars,
         "max_response_chars": MANUAL_CONFIG["max_response_chars"],
         "supports_images": MANUAL_CONFIG["supports_images"],
         "supports_functions": MANUAL_CONFIG["supports_functions"],
@@ -83,10 +99,24 @@ class ManualAIPlugin(AIPluginBase):
             set_notifier(lambda chat_id, message: log_info(f"[NOTIFY fallback] {message}"))
 
     def get_interface_limits(self):
-        """Get the limits and capabilities for Manual LLM interface."""
-        log_info(f"[manual] Interface limits: max_prompt_chars={MANUAL_CONFIG['max_prompt_chars']}, supports_images={MANUAL_CONFIG['supports_images']}")
+        """Get the limits and capabilities for Manual LLM interface.
+        
+        Reads from the active Selenium LLM engine if available,
+        falls back to default if no Selenium engine is active.
+        """
+        # Try to get limits from active Selenium LLM engine
+        try:
+            from core.selenium_llm_base import get_active_selenium_limits
+            selenium_limits = get_active_selenium_limits()
+            max_prompt_chars = selenium_limits.get("max_prompt_chars", 128000)
+            llm_name = selenium_limits.get("llm_name", "unknown")
+            log_info(f"[manual] Interface limits from active Selenium engine ({llm_name}): max_prompt_chars={max_prompt_chars}")
+        except Exception as e:
+            log_debug(f"[manual] Could not get Selenium limits, using fallback: {e}")
+            max_prompt_chars = MANUAL_CONFIG["max_prompt_chars"]
+        
         return {
-            "max_prompt_chars": MANUAL_CONFIG["max_prompt_chars"],
+            "max_prompt_chars": max_prompt_chars,
             "max_response_chars": MANUAL_CONFIG["max_response_chars"],
             "supports_images": MANUAL_CONFIG["supports_images"],
             "supports_functions": MANUAL_CONFIG["supports_functions"],

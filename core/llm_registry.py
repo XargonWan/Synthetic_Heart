@@ -35,11 +35,30 @@ class LLMRegistry:
         return list(self._engine_modules.keys())
     
     def load_engine(self, name: str, notify_fn=None) -> Any:
-        """Load an LLM engine by name."""
-        if name not in self._engine_modules:
-            raise ValueError(f"Unknown LLM engine: {name}")
+        """Load an LLM engine by name.
         
-        module_path = self._engine_modules[name]
+        If the engine is not yet registered, attempts to load it directly
+        from the llm_engines module to support dynamic loading.
+        """
+        # Validate that name is not None or empty
+        if not name or not isinstance(name, str):
+            error_msg = f"Invalid engine name: {repr(name)}. Engine name must be a non-empty string."
+            log_error(f"[llm_registry] ❌ {error_msg}")
+            raise ValueError(error_msg)
+        
+        module_path = None
+        
+        # Check if registered
+        if name in self._engine_modules:
+            module_path = self._engine_modules[name]
+        else:
+            # Try dynamic loading: assume module path follows convention
+            # (this allows plugins to work without being pre-registered)
+            module_path = f"llm_engines.{name}"
+            log_debug(f"[llm_registry] Engine '{name}' not registered, attempting dynamic load from {module_path}")
+        
+        if not module_path:
+            raise ValueError(f"Unknown LLM engine: {name}")
         
         try:
             module = importlib.import_module(module_path)
@@ -101,33 +120,50 @@ def get_llm_registry() -> LLMRegistry:
     return _llm_registry
 
 def register_default_engines():
-    """Auto-discover and register all LLM engines from llm_engines directory."""
+    """Auto-discover and register all LLM engines from llm_engines directory.
+    
+    NOTE: This is OPTIONAL. Plugins can also be loaded dynamically without
+    pre-registration. This function is called during initialization for convenience,
+    but the system will also attempt dynamic loading if a plugin isn't registered.
+    """
     import os
     import pkgutil
-    import llm_engines
+    
+    try:
+        import llm_engines
+    except ImportError as e:
+        log_warning(f"[llm_registry] Could not import llm_engines package: {e}")
+        return
     
     registry = get_llm_registry()
     
     # Auto-discover all modules in llm_engines package
-    llm_engines_path = os.path.dirname(llm_engines.__file__)
-    
-    for importer, module_name, is_pkg in pkgutil.iter_modules([llm_engines_path]):
-        if not is_pkg and not module_name.startswith('_'):
-            module_path = f"llm_engines.{module_name}"
-            try:
-                # Try to import the module to check if it has PLUGIN_CLASS
-                import importlib
-                module = importlib.import_module(module_path)
-                
-                # Check if module has PLUGIN_CLASS defined
-                if hasattr(module, 'PLUGIN_CLASS'):
-                    registry.register_engine_module(module_name, module_path)
-                    log_debug(f"[llm_registry] Auto-registered engine: {module_name}")
-                else:
-                    log_debug(f"[llm_registry] Skipping {module_name} (no PLUGIN_CLASS)")
-            except Exception as e:
-                log_warning(f"[llm_registry] Failed to auto-register {module_name}: {e}")
-    
-    available_engines = registry.get_available_engines()
-    log_info(f"[llm_registry] Auto-discovery complete: {len(available_engines)} engines registered: {', '.join(available_engines)}")
+    try:
+        llm_engines_path = os.path.dirname(llm_engines.__file__)
+        log_debug(f"[llm_registry] Discovering LLM engines in: {llm_engines_path}")
+        
+        discovered_count = 0
+        for importer, module_name, is_pkg in pkgutil.iter_modules([llm_engines_path]):
+            if not is_pkg and not module_name.startswith('_'):
+                module_path = f"llm_engines.{module_name}"
+                try:
+                    # Try to import the module to check if it has PLUGIN_CLASS
+                    import importlib
+                    module = importlib.import_module(module_path)
+                    
+                    # Check if module has PLUGIN_CLASS defined
+                    if hasattr(module, 'PLUGIN_CLASS'):
+                        registry.register_engine_module(module_name, module_path)
+                        log_debug(f"[llm_registry] Auto-registered engine: {module_name}")
+                        discovered_count += 1
+                    else:
+                        log_debug(f"[llm_registry] Skipping {module_name} (no PLUGIN_CLASS)")
+                except Exception as e:
+                    log_warning(f"[llm_registry] Failed to auto-register {module_name}: {e}")
+        
+        available_engines = registry.get_available_engines()
+        log_info(f"[llm_registry] Auto-discovery complete: {discovered_count} engines registered: {', '.join(available_engines)}")
+    except Exception as e:
+        log_warning(f"[llm_registry] LLM auto-discovery failed: {e}")
+        log_info(f"[llm_registry] Continuing without pre-registration - plugins will load dynamically on demand")
 

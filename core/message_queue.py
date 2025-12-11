@@ -11,16 +11,19 @@ from core.mention_utils import is_message_for_bot
 from core.reaction_handler import react_when_mentioned, get_reaction_emoji
 from core.core_initializer import INTERFACE_REGISTRY
 from core.interfaces_registry import get_interface_registry
+from core.chat_context_manager import get_context_memory
 from plugins.blocklist import is_user_blocked
 from plugins.chat_link import ChatLinkStore
 
 # Use a priority queue so events can be processed before regular messages
 HIGH_PRIORITY = 0
 NORMAL_PRIORITY = 1
+LOW_PRIORITY = 2  # For autonomous beats (G.R.I.L.L.O.) - processed only when queue is idle
 
 _queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
 _lock = asyncio.Lock()
 _consumer_task: asyncio.Task | None = None
+_counter = 0  # Monotonic counter to prevent dict comparison when priorities are equal
 
 
 class MessageQueue:
@@ -37,23 +40,28 @@ class MessageQueue:
 
 
 async def _delayed_put(item: dict, delay: float) -> None:
+    global _counter
     await asyncio.sleep(delay)
     priority = HIGH_PRIORITY if item.get("priority") else NORMAL_PRIORITY
-    await _queue.put((priority, item))
+    _counter += 1
+    await _queue.put((priority, _counter, item))
 
 
-async def enqueue(bot, message, context_memory, priority: bool = False, interface_id: str = None, skip_mention_check: bool = False, original_message=None) -> None:
+async def enqueue(bot, message, context_memory=None, priority: bool = False, interface_id: str = None, skip_mention_check: bool = False, original_message=None) -> None:
     """Enqueue a message for serialized processing with rate limiting.
 
     Args:
         bot: The bot instance
         message: The message to process
-        context_memory: Message context
+        context_memory: (Deprecated) Message context dict. If not provided, uses centralized context manager.
         priority: If True, message is added to front of queue (for events)
         interface_id: The interface identifier (e.g., 'webui', 'interface_name')
         skip_mention_check: If True, skip is_message_for_bot check (for 1:1 interfaces like ollama, webui)
         original_message: The original message object from the interface (for reactions)
     """
+    # Use centralized context manager if context_memory not provided
+    if context_memory is None:
+        context_memory = get_context_memory()
     message_text = getattr(message, 'text', '')
     user_id = getattr(message.from_user, 'id', 'unknown') if message.from_user else 'unknown'
     chat_id = getattr(message, 'chat_id', 'unknown')
@@ -169,16 +177,24 @@ async def enqueue(bot, message, context_memory, priority: bool = False, interfac
     log_debug(f"[QUEUE] Rate limit check passed - continuing to enqueue message")
 
     meta = message.chat.title or message.chat.username or message.chat.first_name
-    await recent_chats.track_chat(chat_id, meta)
+    # Persist last-active chat, but don't let DB failures abort enqueueing
+    try:
+        await recent_chats.track_chat(chat_id, meta)
+    except Exception as e:
+        log_warning(f"[QUEUE] recent_chats.track_chat failed but continuing: {e}")
 
     # Extract thread_id - unified field name, check both Telegram and generic names
     # DEBUG: let's see what telegram message actually contains
     thread_attrs = [attr for attr in dir(message) if 'thread' in attr.lower()]
     log_debug(f"[QUEUE] Available thread attributes in message: {thread_attrs}")
     
-    # Use only thread_id, message_thread_id is legacy and deprecated
+    # Check for thread_id, but also check message_thread_id (Telegram's native field)
+    # Note: DO NOT set message.thread_id - Message objects are immutable
     thread_id_val = getattr(message, "thread_id", None)
-    log_debug(f"[QUEUE] message.thread_id = {thread_id_val}")
+    if thread_id_val is None:
+        thread_id_val = getattr(message, "message_thread_id", None)
+    
+    log_debug(f"[QUEUE] thread_id extracted: {thread_id_val}")
     
     thread_id = thread_id_val
     interface = interface_id if interface_id else (
@@ -220,8 +236,10 @@ async def enqueue(bot, message, context_memory, priority: bool = False, interfac
         "priority": priority,
     }
 
+    global _counter
     priority_val = HIGH_PRIORITY if priority else NORMAL_PRIORITY
-    await _queue.put((priority_val, item))
+    _counter += 1
+    await _queue.put((priority_val, _counter, item))
     log_debug(f"[QUEUE] Message successfully put in queue with priority {priority_val}")
     
     if priority:
@@ -270,9 +288,9 @@ async def _consumer_loop() -> None:
     log_info("[QUEUE] Consumer loop started")
     while True:
         try:
-            priority, item = await _queue.get()
+            priority, counter, item = await _queue.get()
             log_debug(
-                f"[QUEUE] Dequeued message from chat {item.get('chat_id')} (priority={priority})"
+                f"[QUEUE] Dequeued message from chat {item.get('chat_id')} (priority={priority}, counter={counter})"
             )
 
             async with _lock:
@@ -367,6 +385,10 @@ async def _consumer_loop() -> None:
                 continue
 
             try:
+                # Get timeout configuration from message_chain module
+                from core.message_chain import RESPONSE_TIMEOUT
+                timeout_seconds = int(RESPONSE_TIMEOUT) if RESPONSE_TIMEOUT else 240
+                
                 # Check if this is an event prompt
                 if "event_prompt" in final:
                     # Create a mock message object with event_id for events
@@ -375,14 +397,45 @@ async def _consumer_loop() -> None:
                     mock_message.chat_id = "TARDIS/system/events"  
                     mock_message.message_id = f"event_{mock_message.event_id}"
                     
-                    # Deliver the structured event prompt using the standard pipeline
-                    await plugin_instance.handle_incoming_message(
-                        final["bot"], mock_message, final["event_prompt"], final.get("interface")
-                    )
+                    # Deliver the structured event prompt using the standard pipeline with timeout
+                    try:
+                        await asyncio.wait_for(
+                            plugin_instance.handle_incoming_message(
+                                final["bot"], mock_message, final["event_prompt"], final.get("interface")
+                            ),
+                            timeout=timeout_seconds
+                        )
+                    except asyncio.TimeoutError:
+                        log_error(f"[QUEUE] Event processing timed out after {timeout_seconds}s for event {mock_message.event_id}")
+                        # Event timeout - message_chain will have already sent fallback if needed
                 else:
-                    await plugin_instance.handle_incoming_message(
-                        final["bot"], final["message"], final["context"], final.get("interface")
-                    )
+                    # Build interface_path and add to context for prompt_engine to use
+                    chat_id = final.get("chat_id")
+                    thread_id = final.get("thread_id")
+                    interface_id = final.get("interface", "unknown")
+                    
+                    # Create interface_path and add to context
+                    from core.interface_path_utils import build_interface_path
+                    interface_path = build_interface_path(interface_id, str(chat_id), str(thread_id) if thread_id else None)
+                    
+                    # Add interface_path to context dict so prompt_engine can access it
+                    context = final.get("context", {})
+                    if isinstance(context, dict):
+                        context["interface_path"] = interface_path
+                        log_debug(f"[QUEUE] Added interface_path to context: {interface_path}")
+                    else:
+                        log_warning(f"[QUEUE] Context is not a dict, cannot add interface_path")
+                    
+                    try:
+                        await asyncio.wait_for(
+                            plugin_instance.handle_incoming_message(
+                                final["bot"], final["message"], context, final.get("interface")
+                            ),
+                            timeout=timeout_seconds
+                        )
+                    except asyncio.TimeoutError:
+                        log_error(f"[QUEUE] Message processing timed out after {timeout_seconds}s for chat {chat_id}")
+                        # Timeout - message_chain will have already sent fallback if needed
             except Exception as e:  # pragma: no cover - plugin may misbehave
                 log_error(
                     f"[ERROR] Failed to process message from chat {final['chat_id']}: {e}\n{traceback.format_exc()}",
@@ -443,12 +496,14 @@ async def enqueue_event(bot, prompt_data, event_id: int = None) -> None:
     }
 
     # Check to avoid duplicates in the queue
-    for prio, queued_item in list(_queue._queue):
+    for prio, cnt, queued_item in list(_queue._queue):
         if queued_item.get("event_prompt") == prompt_data:
             log_warning("[QUEUE] Duplicate event detected, not added to the queue")
             return
 
-    await _queue.put((HIGH_PRIORITY, item))
+    global _counter
+    _counter += 1
+    await _queue.put((HIGH_PRIORITY, _counter, item))
     log_debug(f"[QUEUE] Event added to the queue with priority: {prompt_data}")
     log_debug(f"[QUEUE] Current queue state: {list(_queue._queue)}")
 

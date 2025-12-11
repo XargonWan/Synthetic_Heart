@@ -74,8 +74,37 @@ async def load_plugin(name: str, notify_fn=None):
         registry = get_llm_registry()
         plugin_instance = registry.load_engine(name, notify_fn)
     except Exception as e:
-        log_error(f"[plugin] ❌ Failed to load plugin {name}: {e}", e)
-        raise
+        # Fallback: try to load the plugin directly from llm_engines module
+        # This allows plugins to work even if they weren't registered during auto-discovery
+        log_warning(f"[plugin] Registry load failed ({e}), attempting direct module load for {name}")
+        try:
+            import importlib
+            module_path = f"llm_engines.{name}"
+            module = importlib.import_module(module_path)
+            
+            if not hasattr(module, "PLUGIN_CLASS"):
+                log_error(f"[plugin] ❌ Module {module_path} does not define PLUGIN_CLASS")
+                raise ValueError(f"Plugin `{name}` does not define `PLUGIN_CLASS`")
+            
+            plugin_class = getattr(module, "PLUGIN_CLASS")
+            
+            # Verify display_name
+            if not hasattr(plugin_class, "display_name"):
+                error_msg = f"Plugin `{name}` does not define `display_name`"
+                log_error(f"[plugin] ❌ {error_msg}")
+                raise ValueError(error_msg)
+            
+            # Create instance with or without notify_fn
+            plugin_args = plugin_class.__init__.__code__.co_varnames
+            if "notify_fn" in plugin_args:
+                plugin_instance = plugin_class(notify_fn=notify_fn)
+            else:
+                plugin_instance = plugin_class()
+            
+            log_info(f"[plugin] ✅ Plugin loaded directly from module: {name}")
+        except Exception as fallback_e:
+            log_error(f"[plugin] ❌ Direct module load also failed for {name}: {fallback_e}", fallback_e)
+            raise
 
     plugin = plugin_instance
     log_debug(f"[plugin] Plugin initialized: {plugin.__class__.__name__}")
@@ -114,7 +143,9 @@ async def load_plugin(name: str, notify_fn=None):
         except Exception as e:
             log_warning(f"[plugin] Error during model setup: {e}")
 
-    await set_active_llm(name)
+    # NOTE: Do NOT call set_active_llm() here - it overwrites the DB value during startup
+    # The active LLM is already persisted when changed via WebUI/commands, and should be
+    # loaded from DB during initialization, not overwritten with the current plugin name
 
 async def handle_incoming_message(bot, message, context_memory_or_prompt, interface: str = None):
     """Process incoming messages or pre-built prompts."""
@@ -234,20 +265,89 @@ async def handle_incoming_message(bot, message, context_memory_or_prompt, interf
                 prompt = json.loads(context_memory_or_prompt)
             except Exception as e:
                 log_warning(f"[plugin_instance] Failed to parse direct prompt: {e}")
-                prompt = await build_json_prompt(message, {}, interface_name, image_data=processed_image_data)
+                # Get model's max chars limit - try plugin, then fallback to DEFAULT
+                max_chars = None
+                try:
+                    if plugin and hasattr(plugin, 'model_limits_map'):
+                        current_model = await plugin.get_current_model() if hasattr(plugin, 'get_current_model') else None
+                        if current_model and current_model in plugin.model_limits_map:
+                            max_chars = plugin.model_limits_map[current_model]
+                except Exception:
+                    pass
+                
+                # Fallback: get from plugin's default model or use engine limits
+                if not max_chars:
+                    try:
+                        if plugin and hasattr(plugin, 'model_limits_map') and 'default' in plugin.model_limits_map:
+                            max_chars = plugin.model_limits_map['default']
+                            log_debug(f"[plugin_instance] Using default max_chars from plugin: {max_chars}")
+                    except Exception as e:
+                        log_warning(f"[plugin_instance] Failed to get default max_chars: {e}")
+                
+                log_debug(f"[plugin_instance] Exception path - max_chars={max_chars}")
+                prompt = await build_json_prompt(message, {}, interface_name, image_data=processed_image_data, max_chars=max_chars)
         else:
-            prompt = await build_json_prompt(message, context_memory_or_prompt, interface_name, image_data=processed_image_data)
+            # Get model's max chars limit - try plugin, then fallback to DEFAULT
+            max_chars = None
+            
+            # Try plugin's model_limits_map
+            try:
+                if plugin and hasattr(plugin, 'model_limits_map'):
+                    current_model = None
+                    if hasattr(plugin, 'get_current_model'):
+                        try:
+                            current_model = await plugin.get_current_model()
+                        except Exception:
+                            pass
+                    
+                    if current_model and current_model in plugin.model_limits_map:
+                        max_chars = plugin.model_limits_map[current_model]
+            except Exception:
+                pass
+            
+            # Fallback: get from plugin's default model
+            if not max_chars:
+                try:
+                    if plugin and hasattr(plugin, 'model_limits_map') and 'default' in plugin.model_limits_map:
+                        max_chars = plugin.model_limits_map['default']
+                        log_debug(f"[plugin_instance] Using default max_chars from plugin: {max_chars}")
+                except Exception as e:
+                    log_warning(f"[plugin_instance] Failed to get default max_chars: {e}")
+            
+            if max_chars is None:
+                log_error(f"[plugin_instance] max_chars is STILL None! plugin={plugin}, has model_limits_map={hasattr(plugin, 'model_limits_map') if plugin else False}")
+            
+            log_debug(f"[plugin_instance] Passing max_chars={max_chars} to build_json_prompt()")
+            prompt = await build_json_prompt(message, context_memory_or_prompt, interface_name, image_data=processed_image_data, max_chars=max_chars)
 
     prompt = sanitize_for_json(prompt)
     log_debug("🌐 JSON PROMPT built for the plugin:")
     try:
-        log_debug(json_dumps(prompt))
+        prompt_json = json_dumps(prompt)
+        # Log in full without truncation for debugging
+        log_debug(prompt_json)
     except Exception as e:
         log_error(f"Failed to serialize prompt: {e}")
 
     # Trace handoff to LLM plugin
     try:
-        log_info(f"[flow] -> LLM plugin: handing off chat_id={getattr(message, 'chat_id', None)} interface={interface} prompt_len={len(json_dumps(prompt)) if isinstance(prompt, (dict, list)) else len(str(prompt))}")
+        # If prompt contains pre-reduction size metadata, include it in logs for debugging
+        pre_size = None
+        try:
+            if isinstance(prompt, dict):
+                # Prefer explicit pre_reduction_size if provided by build_json_prompt
+                pre_size = prompt.get('__pre_reduction_size', None)
+                # If not present, compute a fallback (note: this is post-reduction size)
+                if pre_size is None:
+                    try:
+                        pre_size = len(json_dumps(prompt))
+                        log_debug(f"[flow] pre_reduction_size missing, using computed size={pre_size} (post-reduction)")
+                    except Exception:
+                        pre_size = None
+        except Exception:
+            pre_size = None
+
+        log_info(f"[flow] -> LLM plugin: handing off chat_id={getattr(message, 'chat_id', None)} interface={interface} prompt_len={len(json_dumps(prompt)) if isinstance(prompt, (dict, list)) else len(str(prompt))} pre_reduction_size={pre_size}")
     except Exception:
         log_info(f"[flow] -> LLM plugin: handing off chat_id={getattr(message, 'chat_id', None)} interface={interface}")
 
@@ -262,6 +362,52 @@ async def handle_incoming_message(bot, message, context_memory_or_prompt, interf
             log_info(f"[flow] <- LLM plugin: completed for chat_id={getattr(message, 'chat_id', None)} result_type={type(result)}")
         except Exception:
             log_info(f"[flow] <- LLM plugin: completed for chat_id={getattr(message, 'chat_id', None)}")
+        
+        # If the LLM plugin returned a response, pass it through the message chain for validation/correction
+        # This ensures ALL LLM responses go through proper JSON validation before being sent to interfaces
+        if result:
+            log_info(f"[plugin_instance] 📥 LLM→INTERFACE: LLM returned response ({len(str(result)) if result else 0} chars), passing to message chain for llm_to_interface validation/correction")
+            log_info(f"[plugin_instance] 🔄 BEFORE IMPORT: about to import message_chain_handle")
+            from core.message_chain import handle_incoming_message as message_chain_handle
+            log_info(f"[plugin_instance] ✓ AFTER IMPORT: message_chain_handle imported successfully")
+            
+            # Build context from the original message if available
+            llm_context = {}
+            if hasattr(message, 'chat_id'):
+                llm_context['chat_id'] = message.chat_id
+            if hasattr(message, 'interface_path'):
+                llm_context['interface_path'] = message.interface_path
+            if isinstance(context_memory_or_prompt, dict):
+                llm_context.update(context_memory_or_prompt)
+            
+            # Pass to message chain with source="llm" to mark it as LLM-origin
+            # The message chain will validate JSON, auto-correct if needed, and execute actions
+            # This implements the llm_to_interface transport layer standard with corrector middleware
+            log_info(f"[plugin_instance] 📥 LLM→INTERFACE: Entering message_chain with source=llm (will use llm_to_interface transport)")
+            log_info(f"[plugin_instance] ⏳ About to await message_chain_handle (this may freeze)")
+            try:
+                chain_result = await message_chain_handle(
+                    bot=bot,
+                    message=message,
+                    text=result,
+                    source="llm",  # Mark as LLM-origin so corrector can intervene (llm_to_interface standard)
+                    context=llm_context
+                )
+                log_info(f"[plugin_instance] ✅ message_chain_handle completed")
+            except asyncio.TimeoutError:
+                log_error(f"[plugin_instance] ❌ message_chain_handle TIMEOUT (deadlock suspected)")
+                raise
+            except Exception as e:
+                log_error(f"[plugin_instance] ❌ message_chain_handle raised exception: {e}")
+                raise
+            
+            log_debug(f"[plugin_instance] Message chain processed LLM response: {chain_result}")
+            log_info(f"[plugin_instance] ✅ LLM→INTERFACE: message_chain completed, result={chain_result}")
+            # Don't return ACTIONS_EXECUTED as a message to the webui
+            if chain_result == "ACTIONS_EXECUTED":
+                return None
+            return chain_result
+        
         return result
     except Exception as e:
         log_error(f"[plugin_instance] LLM plugin raised an exception: {e}")

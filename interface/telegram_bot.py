@@ -27,7 +27,7 @@ from core.mention_utils import is_message_for_bot
 from collections import deque
 import json
 from core.logging_utils import log_debug, log_info, log_warning, log_error
-from interface.telegram_utils import (
+from interface.message_send_utils import (
     safe_send,
     send_with_thread_fallback,
 )
@@ -59,12 +59,27 @@ from typing import Any
 from types import SimpleNamespace
 from core.interfaces_registry import get_interface_registry
 from core.config_manager import config_registry
+from core.variables_engine import register_exposed_var
 
 # Get interface registry for trainer verification
 _interface_registry = get_interface_registry()
 
 # Load environment variables
 load_dotenv()
+
+# Register exposed variable for WebUI
+register_exposed_var(
+    "BOTFATHER_TOKEN",
+    label="Telegram Bot Token",
+    default=None,
+    value_type=str,
+    ui_type="string",
+    description="Bot token provided by BotFather on Telegram.",
+    scope="interface",
+    tags=["sensitive"],
+    needs_component_reload=True,
+    component="telegram_bot",
+)
 
 # Read Telegram-specific configuration using config_registry
 # This supports: env override -> database -> default (None)
@@ -335,25 +350,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     log_info(f"[telegram_bot] Processing message from {username} ({user_id}){content_description}")
 
-    # Track context
-    log_debug(f"[telegram_bot] Tracking context for chat {message.chat_id}")
-    if message.chat_id not in context_memory:
-        context_memory[message.chat_id] = deque(maxlen=10)
-    context_memory[message.chat_id].append({
-        "message_id": message.message_id,
-        "user_id": user_id,
-        "username": username,
-        "usertag": usertag,
-        "text": text,
-        "timestamp": message.date.isoformat()
-    })
-    log_debug(f"[telegram_bot] Context added to memory")
-    log_debug(f"context_memory[{message.chat_id}] = {list(context_memory[message.chat_id])}")
+    # Build interface_path for this message
+    from core.interface_path_utils import build_interface_path
+    thread_id = getattr(message, 'message_thread_id', None) or getattr(message, 'thread_id', None)
+    interface_path = build_interface_path('telegram_bot', str(message.chat_id), str(thread_id) if thread_id else None)
+    log_debug(f"[telegram_bot] Generated interface_path: {interface_path}")
+
+    # Track context - using centralized context manager
+    # NOTE: chat activity tracking is now centralized in chat_context_manager.add_message_to_context
+    log_debug(f"[telegram_bot] Tracking message for interface_path {interface_path}")
+    from core.chat_context_manager import add_message_to_context
+    try:
+        await add_message_to_context(
+            interface_path=interface_path,
+            message_text=text,
+            sender_name=username,
+            sender_id=str(user_id),
+            message_id=message.message_id,
+            timestamp=message.date.isoformat() if hasattr(message, 'date') else None
+        )
+    except Exception as e:
+        log_warning(f"[telegram_bot] Failed to add message to context: {e}")
+        # Continue processing even if context tracking fails
 
     # === PRIORITY 1: Handle /say step (chat selection) ===
-    log_debug(f"Checking say_step conditions - chat_type: {message.chat.type}, user_id: {user_id}, trainer_id: {get_trainer_id()}, say_choices: {context.user_data.get('say_choices') is not None}")
+    log_debug(f"🟡 [PRIORITY 1 CHECK] Checking say_step conditions - chat_type: {message.chat.type}, user_id: {user_id}, trainer_id: {get_trainer_id()}, say_choices: {context.user_data.get('say_choices') is not None}")
     if message.chat.type == "private" and user_id == get_trainer_id() and context.user_data.get("say_choices"):
-        log_debug(f"Message intercepted by say_step handler")
+        log_debug(f"🟡 [PRIORITY 1 ACTIVE] Message intercepted by say_step handler")
         target_chat = say_proxy.get_target(user_id)
         
         if target_chat == "EXPIRED":
@@ -396,9 +419,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
     
     # === PRIORITY 2: Handle trainer incoming responses (stickers, media with target) ===
+    log_debug(f"🟠 [PRIORITY 2 CHECK] is_trainer({user_id})={is_trainer(user_id)}, chat_type={message.chat.type}")
     if message.chat.type == "private" and is_trainer(user_id):
         media_type = detect_media_type(message)
-        log_debug(f"Trainer message detected: media_type={media_type}")
+        log_debug(f"🟠 [PRIORITY 2 ACTIVE] Trainer message detected: media_type={media_type}")
         
         # Check if there's a target set (from /say or reply)
         target = response_proxy.get_target(get_trainer_id())
@@ -476,6 +500,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         log_debug(f"Could not get bot username: {e}")
     
+    # If human_count is still None for group/supergroup chats, calculate it
+    if human_count is None and message.chat.type in ["group", "supergroup"]:
+        try:
+            member_count = await context.bot.get_chat_member_count(message.chat.id)
+            # Subtract 1 for the bot itself (assuming bot is a member)
+            human_count = max(0, member_count - 1)
+            log_debug(f"[telegram_bot] Calculated human_count={human_count} for group chat {message.chat.id}")
+        except Exception as e:
+            log_debug(f"[telegram_bot] Could not calculate human_count: {e}")
+            # Keep human_count as None; is_message_for_bot will handle it
+    
     directed, reason = await is_message_for_bot(message, context.bot, bot_username=bot_username, human_count=human_count)
     log_debug(f"is_message_for_bot returned directed={directed}, reason='{reason}'")
     
@@ -495,9 +530,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # === PRIORITY 3: Trainer reply to forwarded message ===
     trainer_id = get_trainer_id()
-    log_debug(f"Checking trainer reply conditions - chat_type: {message.chat.type}, user_id: {user_id}, trainer_id: {trainer_id}, has_reply: {bool(message.reply_to_message)}")
+    log_debug(f"🟣 [PRIORITY 3 CHECK] Checking trainer reply conditions - chat_type: {message.chat.type}, user_id: {user_id}, trainer_id: {trainer_id}, has_reply: {bool(message.reply_to_message)}")
     if message.chat.type == "private" and user_id == trainer_id and message.reply_to_message:
-        log_debug(f"Processing trainer reply to forwarded message")
+        log_debug(f"🟣 [PRIORITY 3 ACTIVE] Processing trainer reply to forwarded message")
         reply_msg_id = message.reply_to_message.message_id
         log_debug(f"Reply to trainer_message_id={reply_msg_id}")
         original = plugin_instance.get_target(reply_msg_id)
@@ -518,20 +553,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_debug(f"Not a trainer reply - continuing to queue forwarding")
 
     # === PRIORITY 4: Forward to centralized queue (default behavior) ===
-    log_debug(f"About to forward message to queue: '{text}' from user {user_id}")
-    log_debug(f"Checking message_queue module availability")
+    log_debug(f"🔴 [PRIORITY 4 START] About to forward message to queue: '{text}' from user {user_id}")
+    log_debug(f"🔴 [PRIORITY 4] Checking message_queue module availability")
     
+    # NOTE: Do NOT modify message.thread_id - Message objects are immutable in python-telegram-bot
+    # The message_queue.enqueue() function will extract message_thread_id directly
+    log_debug(f"🔴 [PRIORITY 4] Message has message_thread_id={getattr(message, 'message_thread_id', None)}")
+    
+    log_debug(f"🔴 [PRIORITY 4] About to call message_queue.enqueue()...")
     try:
-        log_debug(f"Calling message_queue.enqueue...")
-        log_debug(f"Parameters: bot={type(context.bot)}, message={type(message)}, context_memory={type(context_memory)}, interface_id='telegram_bot'")
+        log_debug(f"🔴 [PRIORITY 4] Calling message_queue.enqueue now...")
         
-        await message_queue.enqueue(context.bot, message, context_memory, interface_id="telegram_bot", original_message=message)
+        await message_queue.enqueue(context.bot, message, interface_id="telegram_bot", original_message=message)
         
-        log_debug(f"Message successfully enqueued - processing should continue in queue")
+        log_debug(f"🔴 [PRIORITY 4 SUCCESS] Message successfully enqueued - processing should continue in queue")
         
     except Exception as e:
-        log_error(f"message_queue enqueue failed: {repr(e)}", e)
-        log_error(f"Exception type: {type(e)}", e)
+        log_error(f"🔴 [PRIORITY 4 ERROR] message_queue enqueue failed: {repr(e)}", e)
+        log_error(f"🔴 [PRIORITY 4 ERROR] Exception type: {type(e)}", e)
+        import traceback
+        log_error(f"🔴 [PRIORITY 4 ERROR] Traceback: {traceback.format_exc()}", e)
         await message.reply_text("⚠️ Error processing message.")
         
 
@@ -721,14 +762,12 @@ async def llm_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        from core.config import set_active_llm
-        await set_active_llm(choice)
-        
-        # Reload system with new LLM
-        from core.core_initializer import core_initializer
-        await core_initializer.initialize_all(notify_fn=telegram_notify)
-        
+        from core.config import switch_active_llm
+        # Use the centralized switch function with full reinitialization for Telegram
+        await switch_active_llm(choice, use_hot_swap=False)
         await update.message.reply_text(f"✅ LLM mode dynamically updated to `{choice}`.")
+    except ValueError as e:
+        await update.message.reply_text(f"❌ LLM not available: {e}")
     except Exception as e:
         await update.message.reply_text(f"❌ Error loading plugin: {e}")
 
@@ -844,6 +883,10 @@ async def plugin_startup_callback(application):
     application.create_task(message_queue.run())
 
 
+# Global variable to track the telegram polling task
+_polling_task = None
+
+
 async def start_bot():
     """Start the Telegram bot application.
     
@@ -946,6 +989,32 @@ async def start_bot():
     # Plugin startup is handled by plugin_startup_callback
     # No need for fallback as the callback ensures proper async startup
 
+    async def _run_polling_loop():
+        """Run the polling loop in a separate background task.
+        
+        This function will run indefinitely until cancelled or until an error occurs.
+        It's executed in a background task created by asyncio.create_task() to avoid
+        blocking the main application startup.
+        """
+        try:
+            log_info("[telegram_bot] Polling loop task started")
+            log_info("[telegram_bot] Starting Telegram polling...")
+            await app.updater.start_polling()
+            log_info("[telegram_bot] Polling started successfully")
+            
+            # Keep the polling running until cancelled
+            log_info("[telegram_bot] Bot is now running and listening for messages...")
+            # Wait indefinitely - this will be interrupted when the app shuts down
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            log_info("[telegram_bot] Polling task was cancelled")
+            raise
+        except Exception as e:
+            log_error(f"[telegram_bot] Error in polling loop: {repr(e)}")
+            raise
+        finally:
+            log_info("[telegram_bot] Polling loop task ending...")
+    
     try:
         log_info("[telegram_bot] Starting Telegram application initialization...")
         # Use async initialization instead of run_polling to avoid event loop conflicts
@@ -959,7 +1028,7 @@ async def start_bot():
             log_info("[telegram_bot] Existing updater stopped")
 
         # Update the global interface instance with the bot
-        global telegram_interface
+        global telegram_interface, _polling_task
         telegram_interface.bot = app.bot
         telegram_interface.is_enabled = True
         telegram_interface.disabled_reason = None
@@ -973,22 +1042,20 @@ async def start_bot():
         await app.start()
         log_info("[telegram_bot] Telegram application started")
         
-        # Keep running until interrupted
-        log_info("[telegram_bot] Starting polling...")
-        await app.updater.start_polling()
-        log_info("[telegram_bot] Polling started successfully")
+        # Create a background task for polling that doesn't block start_bot() from returning
+        log_info("[telegram_bot] Creating background polling task...")
+        _polling_task = asyncio.create_task(_run_polling_loop())
+        _polling_task.set_name("telegram_polling")
+        log_info("[telegram_bot] Background polling task created and scheduled")
+        log_info("[telegram_bot] start_bot() completed successfully - polling running in background")
         
-        # This keeps the application running
-        log_info("[telegram_bot] Bot is now running and listening for messages...")
-        await asyncio.Event().wait()  # Wait forever until interrupted
     except Exception as e:
-        log_error(f"[telegram_bot] Error in bot polling: {repr(e)}")
+        log_error(f"[telegram_bot] Error during Telegram bot startup: {repr(e)}")
         raise
     finally:
-        log_info("[telegram_bot] Shutting down Telegram application...")
-        await app.stop()
-        await app.shutdown()
-        log_info("[telegram_bot] Telegram application shutdown completed")
+        # Note: We don't stop/shutdown the app here because the polling task runs in background
+        # The proper shutdown will be handled by the application lifecycle when signals are received
+        log_debug("[telegram_bot] start_bot() finally block completed")
 
 class TelegramInterface:
     """Interface wrapper providing a standard send_message method for Telegram."""
@@ -1048,6 +1115,10 @@ class TelegramInterface:
             return {"chat_name": chat_name, "message_thread_name": thread_name}
 
         ChatLinkStore.set_name_resolver("telegram", _resolver)
+        
+        # Register validation rules with the validation registry
+        self._register_custom_validation()
+        
         log_debug("[telegram_interface] TelegramInterface instance initialized")
 
     async def start(self):
@@ -1101,22 +1172,17 @@ class TelegramInterface:
         """Return schema information for supported actions."""
         return {
             "message_telegram_bot": {
-                "required_fields": ["text"],
+                "required_fields": ["text", "interface_path"],
                 "optional_fields": [
-                    "target",
                     "chat_name",
-                    "thread_id",
-                    "message_thread_name",
+                    "reply_to_message_id",
                 ],
                 "description": "Send a text message via Telegram",
             },
             "audio_telegram_bot": {
-                "required_fields": ["audio"],
+                "required_fields": ["audio", "interface_path"],
                 "optional_fields": [
-                    "target",
                     "chat_name",
-                    "thread_id",
-                    "message_thread_name",
                 ],
                 "description": "Send a voice message via Telegram",
             },
@@ -1130,28 +1196,15 @@ class TelegramInterface:
                 "description": "Send a message via Telegram bot",
                 "payload": {
                     "text": {"type": "string", "example": "Hello!", "description": "The message text to send"},
-                    "target": {
+                    "interface_path": {
                         "type": "string",
-                        "example": "-123456789",
-                        "description": "Numeric chat_id or chat_name of the recipient. Use input.payload.source.chat_id to reply in the same chat.",
-                        "optional": True,
+                        "example": "telegram_bot/123456789/456",
+                        "description": "REQUIRED. Interface path in format 'telegram_bot/chat_id' or 'telegram_bot/chat_id/thread_id'. Use input.payload.source.interface_path to reply in same context.",
                     },
                     "chat_name": {
                         "type": "string",
                         "example": "Il covo di Rekku",
-                        "description": "Alternative to target for specifying the chat by name",
-                        "optional": True,
-                    },
-                    "thread_id": {
-                        "type": "integer",
-                        "example": 456,
-                        "description": "Thread ID when replying in a topic/thread. OMIT this field for main chat replies (interface will use default). Only include when replying IN a specific thread!",
-                        "optional": True,
-                    },
-                    "message_thread_name": {
-                        "type": "string",
-                        "example": "Generale",
-                        "description": "Alternative to thread_id to specify the thread by name",
+                        "description": "Alternative to interface_path for specifying the chat by name (will be resolved to interface_path)",
                         "optional": True,
                     },
                     "reply_to_message_id": {
@@ -1162,10 +1215,10 @@ class TelegramInterface:
                     },
                 },
                 "important_notes": [
-                    "ALWAYS specify target field - use input.payload.source.chat_id to reply in the same chat",
-                    "When replying to a message that was in a thread/topic, ALWAYS include thread_id to ensure the reply appears in the correct thread",
-                    "If you omit thread_id when it should be included, the message may appear in the main chat instead of the thread",
-                    "For group chats with topics enabled, check if the original message has a thread_id and include it in your response"
+                    "CRITICAL: ALWAYS use interface_path from input.payload.source.interface_path to reply in same conversation!",
+                    "Format: 'telegram_bot/chat_id' for regular chats or 'telegram_bot/chat_id/thread_id' for topics/threads",
+                    "Example: if input shows 'telegram_bot/-1003098886330/789', use EXACTLY that as interface_path in your payload",
+                    "Never use just chat_id or target - always use the complete interface_path format"
                 ]
             }
         if action_name == "audio_telegram_bot":
@@ -1173,22 +1226,15 @@ class TelegramInterface:
                 "description": "Send a voice message via Telegram bot",
                 "payload": {
                     "audio": {"type": "string", "example": "/path/to/file.ogg", "description": "Path to the voice file"},
-                    "target": {
+                    "interface_path": {
                         "type": "string",
-                        "example": "-123456789",
-                        "description": "Numeric chat_id or chat_name of the recipient",
-                        "optional": True,
+                        "example": "telegram_bot/123456789/456",
+                        "description": "REQUIRED. Complete interface path. Use input.payload.source.interface_path to reply in same context.",
                     },
                     "chat_name": {
                         "type": "string",
                         "example": "Il covo di Rekku",
-                        "description": "Alternative to target for specifying the chat by name",
-                        "optional": True,
-                    },
-                    "thread_id": {
-                        "type": "integer",
-                        "example": 456,
-                        "description": "Optional thread ID for group chats",
+                        "description": "Alternative to interface_path for specifying the chat by name",
                         "optional": True,
                     },
                 },
@@ -1212,31 +1258,104 @@ class TelegramInterface:
         else:
             return []
 
-        target = payload.get("target")
+        interface_path = payload.get("interface_path")
         chat_name = payload.get("chat_name")
-        if target is None and chat_name is None:
-            errors.append("payload.target or payload.chat_name is required")
+        
+        if interface_path is None and chat_name is None:
+            errors.append("payload.interface_path or payload.chat_name is required")
         else:
-            if target is not None:
-                if isinstance(target, dict):
-                    chat_id = target.get("chat_id")
-                    thread_id = target.get("thread_id")
-                    if chat_id is not None and not isinstance(chat_id, (int, str)):
-                        errors.append("payload.target.chat_id must be an int or string")
-                    if thread_id is not None and not isinstance(thread_id, int):
-                        errors.append("payload.target.thread_id must be an int")
-                elif not isinstance(target, (int, str)):
-                    errors.append("payload.target must be an int, string or dict")
-
-        thread_id = payload.get("thread_id")
-        if thread_id is not None and not isinstance(thread_id, int):
-            errors.append("payload.thread_id must be an int")
-
-        thread_name = payload.get("message_thread_name")
-        if thread_name is not None and not isinstance(thread_name, str):
-            errors.append("payload.message_thread_name must be a string")
+            if interface_path is not None and not isinstance(interface_path, str):
+                errors.append("payload.interface_path must be a string")
+            if chat_name is not None and not isinstance(chat_name, str):
+                errors.append("payload.chat_name must be a string")
 
         return errors
+
+    def _register_custom_validation(self):
+        """Register custom validation rules with the validation registry."""
+        try:
+            from core.validation_registry import ValidationRule, get_validation_registry
+            
+            def validate_telegram_message(payload):
+                """Enhanced validation for Telegram message actions."""
+                errors = []
+                
+                # Validate text content
+                text = payload.get("text")
+                if text is None or (isinstance(text, str) and not text.strip()):
+                    errors.append("Message text cannot be empty")
+                elif not isinstance(text, str):
+                    errors.append("Message text must be a string")
+                
+                # Validate interface_path or chat_name
+                interface_path = payload.get("interface_path")
+                chat_name = payload.get("chat_name")
+                
+                if interface_path is None and chat_name is None:
+                    errors.append("Either interface_path or chat_name must be provided")
+                
+                if interface_path is not None and not isinstance(interface_path, str):
+                    errors.append("interface_path must be a string")
+                elif interface_path is not None and not interface_path.strip():
+                    errors.append("interface_path cannot be empty")
+                
+                if chat_name is not None and not isinstance(chat_name, str):
+                    errors.append("chat_name must be a string")
+                
+                return errors
+            
+            def validate_telegram_audio(payload):
+                """Enhanced validation for Telegram audio actions."""
+                errors = []
+                
+                # Validate audio path
+                audio = payload.get("audio")
+                if audio is None or (isinstance(audio, str) and not audio.strip()):
+                    errors.append("Audio path cannot be empty")
+                elif not isinstance(audio, str):
+                    errors.append("Audio path must be a string")
+                
+                # Validate interface_path or chat_name
+                interface_path = payload.get("interface_path")
+                chat_name = payload.get("chat_name")
+                
+                if interface_path is None and chat_name is None:
+                    errors.append("Either interface_path or chat_name must be provided")
+                
+                if interface_path is not None and not isinstance(interface_path, str):
+                    errors.append("interface_path must be a string")
+                elif interface_path is not None and not interface_path.strip():
+                    errors.append("interface_path cannot be empty")
+                
+                if chat_name is not None and not isinstance(chat_name, str):
+                    errors.append("chat_name must be a string")
+                
+                return errors
+            
+            # Create validation rules for message_telegram_bot
+            message_rule = ValidationRule(
+                action_type="message_telegram_bot",
+                required_fields=["text"],
+                custom_validator=validate_telegram_message,
+                component_name="telegram_bot"
+            )
+            
+            # Create validation rules for audio_telegram_bot
+            audio_rule = ValidationRule(
+                action_type="audio_telegram_bot",
+                required_fields=["audio"],
+                custom_validator=validate_telegram_audio,
+                component_name="telegram_bot"
+            )
+            
+            # Register with validation registry
+            registry = get_validation_registry()
+            registry.register_component_rules("telegram_bot", [message_rule, audio_rule])
+            
+            log_debug("[telegram_bot] Registered custom validation rules with validation registry")
+            
+        except Exception as e:
+            log_warning(f"[telegram_bot] Failed to register custom validation: {e}")
 
     async def _emit_system_error(
         self,
@@ -1297,47 +1416,43 @@ class TelegramInterface:
             return
 
         text = payload.get("text", "")
-        target = payload.get("target")
+        interface_path = payload.get("interface_path")
         chat_name = payload.get("chat_name")
-        thread_id = payload.get("thread_id")
-        thread_name = payload.get("message_thread_name")
-
-        # LLM must explicitly specify target - no auto-injection
-        # Auto-inject thread_id if missing and available (thread_id auto-inject is still useful)
-        if original_message is not None and thread_id is None and hasattr(original_message, "thread_id"):
-            thread_id = original_message.thread_id
-            log_debug(f"[telegram_interface] Auto-injected thread_id from original message: {thread_id}")
+        
+        # If no interface_path and no chat_name, silently ignore (likely from synthetic event message)
+        if not interface_path and not chat_name:
+            log_debug(
+                f"[telegram_interface] Skipping send: no interface_path or chat_name provided (likely synthetic event message)"
+            )
+            return
+        
+        # Extract chat_id and thread_id from interface_path if provided
+        thread_id = None
+        target = None
+        if interface_path:
+            from core.interface_path_utils import extract_legacy_ids
+            legacy_ids = extract_legacy_ids(interface_path)
+            target = legacy_ids.get('chat_id')
+            thread_id = legacy_ids.get('thread_id')
+            log_debug(f"[telegram_interface] Extracted from interface_path: chat_id={target}, thread_id={thread_id}")
 
         log_debug(
-            f"[telegram_interface] Sending to target={target} chat_name={chat_name} thread_id={thread_id} thread_name={thread_name}"
+            f"[telegram_interface] Sending to interface_path={interface_path} chat_name={chat_name} extracted: chat_id={target} thread_id={thread_id}"
         )
 
         if not text or (target is None and chat_name is None):
             log_warning("[telegram_interface] Missing text or destination, aborting")
             return
 
-        chat_id = None
+        chat_id = target
 
-        if isinstance(target, dict):
-            chat_id = target.get("chat_id")
-            thread_id = target.get("thread_id", thread_id)
-            thread_name = target.get("message_thread_name", thread_name)
-        elif target is not None:
-            if isinstance(target, str) and not target.lstrip("-").isdigit():
-                chat_name = target
-            else:
-                try:
-                    chat_id = int(target)
-                except Exception:
-                    chat_name = target
-
-        if chat_id is None or (thread_id is None and thread_name is not None):
+        if chat_id is None:
             try:
                 row = await chat_link_store.resolve(
                     chat_id=chat_id,
                     thread_id=thread_id,
                     chat_name=chat_name,
-                    message_thread_name=thread_name,
+                    message_thread_name=None,
                 )
             except ChatLinkMultipleMatches:
                 # Use orchestrator instead of legacy corrector
@@ -1470,6 +1585,16 @@ class TelegramInterface:
                 fallback_thread_id=fallback_thread_id,
                 fallback_reply_to_message_id=fallback_reply_to,
             )
+            
+            # Save SyntH's response via core chat_context_manager
+            try:
+                from core.chat_context_manager import save_response_message
+                from core.interface_path_utils import build_interface_path
+                msg_interface_path = build_interface_path('telegram_bot', str(chat_id), str(thread_id) if thread_id else None)
+                await save_response_message(msg_interface_path, text)
+            except Exception as e:
+                log_debug(f"[telegram_interface] Failed to save response via context_manager: {e}")
+                
         except BadRequest as e:
             if "chat not found" in str(e).lower():
                 # Use orchestrator instead of legacy corrector
@@ -1609,7 +1734,7 @@ def shutdown_interface():
     
     Called before reload or shutdown to properly cleanup resources.
     """
-    global telegram_interface
+    global telegram_interface, _polling_task
     
     if telegram_interface is None:
         log_debug("[telegram_bot] No interface to shutdown")
@@ -1618,6 +1743,19 @@ def shutdown_interface():
     log_info("[telegram_bot] Shutting down Telegram interface...")
     
     try:
+        # Cancel the polling task if it's running
+        if _polling_task is not None:
+            if not _polling_task.done():
+                log_info("[telegram_bot] Cancelling polling task...")
+                _polling_task.cancel()
+                try:
+                    import asyncio
+                    # Give it a moment to cancel gracefully
+                    asyncio.get_event_loop().run_until_complete(asyncio.sleep(0.5))
+                except Exception:
+                    pass
+            _polling_task = None
+        
         # Stop the bot if it's running
         if telegram_interface.bot is not None:
             # The actual bot shutdown is handled by the application lifecycle

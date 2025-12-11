@@ -5,122 +5,112 @@ from __future__ import annotations
 from typing import List, Optional, Dict, Any
 import aiomysql
 
-from core.db import get_conn
+from core.db import get_conn_ctx
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.core_initializer import core_initializer, register_plugin
 
 
 async def init_blocklist_table():
     """Initialize the blocklist table if it doesn't exist."""
-    conn = await get_conn()
-    try:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS blocklist (
-                    user_id BIGINT PRIMARY KEY,
-                    reason TEXT,
-                    blocked_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    async with get_conn_ctx() as conn:
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS blocklist (
+                        user_id BIGINT PRIMARY KEY,
+                        reason TEXT,
+                        blocked_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """
                 )
-                """
-            )
-            await conn.commit()
-    except Exception as e:
-        log_error(f"[blocklist] Failed to initialize table: {e}")
-        raise
-    finally:
-        conn.close()
+                await conn.commit()
+        except Exception as e:
+            log_error(f"[blocklist] Failed to initialize table: {e}")
+            raise
 
 
 async def block_user(user_id: int, reason: str = None):
     """Block a user with optional reason."""
     await init_blocklist_table()
-    conn = await get_conn()
-    try:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                REPLACE INTO blocklist (user_id, reason, blocked_at)
-                VALUES (%s, %s, NOW())
-                """,
-                (user_id, reason)
-            )
-            await conn.commit()
-            log_info(f"[blocklist] Blocked user {user_id}: {reason}")
-    except Exception as e:
-        log_error(f"[blocklist] Failed to block user {user_id}: {e}")
-        raise
-    finally:
-        conn.close()
+    async with get_conn_ctx() as conn:
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    REPLACE INTO blocklist (user_id, reason, blocked_at)
+                    VALUES (%s, %s, NOW())
+                    """,
+                    (user_id, reason)
+                )
+                await conn.commit()
+                log_info(f"[blocklist] Blocked user {user_id}: {reason}")
+        except Exception as e:
+            log_error(f"[blocklist] Failed to block user {user_id}: {e}")
+            raise
 
 
 async def unblock_user(user_id: int):
     """Unblock a user."""
     await init_blocklist_table()
-    conn = await get_conn()
-    try:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                DELETE FROM blocklist WHERE user_id = %s
-                """,
-                (user_id,)
-            )
-            deleted = cur.rowcount
-            await conn.commit()
-            if deleted > 0:
-                log_info(f"[blocklist] Unblocked user {user_id}")
-                return True
-            else:
-                log_warning(f"[blocklist] User {user_id} was not blocked")
-                return False
-    except Exception as e:
-        log_error(f"[blocklist] Failed to unblock user {user_id}: {e}")
-        raise
-    finally:
-        conn.close()
+    async with get_conn_ctx() as conn:
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    DELETE FROM blocklist WHERE user_id = %s
+                    """,
+                    (user_id,)
+                )
+                deleted = cur.rowcount
+                await conn.commit()
+                if deleted > 0:
+                    log_info(f"[blocklist] Unblocked user {user_id}")
+                    return True
+                else:
+                    log_warning(f"[blocklist] User {user_id} was not blocked")
+                    return False
+        except Exception as e:
+            log_error(f"[blocklist] Failed to unblock user {user_id}: {e}")
+            raise
 
 
 async def is_user_blocked(user_id: int) -> bool:
     """Check if a user is blocked."""
     await init_blocklist_table()
-    conn = await get_conn()
-    try:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                SELECT 1 FROM blocklist WHERE user_id = %s
-                """,
-                (user_id,)
-            )
-            result = await cur.fetchone()
-            return result is not None
-    except Exception as e:
-        log_error(f"[blocklist] Failed to check if user {user_id} is blocked: {e}")
-        return False
-    finally:
-        conn.close()
+    async with get_conn_ctx() as conn:
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    SELECT 1 FROM blocklist WHERE user_id = %s
+                    """,
+                    (user_id,)
+                )
+                result = await cur.fetchone()
+                return result is not None
+        except Exception as e:
+            log_error(f"[blocklist] Failed to check if user {user_id} is blocked: {e}")
+            return False
 
 
 async def get_blocked_users() -> List[Dict]:
     """Get list of all blocked users."""
     await init_blocklist_table()
-    conn = await get_conn()
-    try:
-        async with conn.cursor(aiomysql.DictCursor) as cur:
-            await cur.execute(
-                """
-                SELECT user_id, reason, blocked_at
-                FROM blocklist
-                ORDER BY blocked_at DESC
-                """
-            )
-            return await cur.fetchall()
-    except Exception as e:
-        log_error(f"[blocklist] Failed to get blocked users: {e}")
-        return []
-    finally:
-        conn.close()
+    async with get_conn_ctx() as conn:
+        try:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    """
+                    SELECT user_id, reason, blocked_at
+                    FROM blocklist
+                    ORDER BY blocked_at DESC
+                    """
+                )
+                return await cur.fetchall()
+        except Exception as e:
+            log_error(f"[blocklist] Failed to get blocked users: {e}")
+            return []
 
 
 class BlocklistPlugin:

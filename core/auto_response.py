@@ -10,7 +10,7 @@ import os
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from typing import Dict, Any, Optional, List
 from datetime import datetime
-from core.prompt_engine import build_full_json_instructions
+from core.prompt_engine import build_full_json_instructions, build_minified_json_instructions
 
 CORRECTOR_RETRIES = int(os.getenv("CORRECTOR_RETRIES", "2"))
 
@@ -44,6 +44,8 @@ class AutoResponseSystem:
             from core.message_queue import enqueue
             
             # Build context for LLM
+            # Support both new interface_path and legacy chat_id
+            interface_path = original_context.get('interface_path')
             chat_id = original_context.get('chat_id')
             message_id = original_context.get('message_id')
             interface_name = original_context.get('interface_name')
@@ -57,6 +59,7 @@ class AutoResponseSystem:
             mock_message = SimpleNamespace()
             # Basic identifiers
             mock_message.chat_id = chat_id
+            mock_message.interface_path = interface_path
             mock_message.message_id = message_id or 0
             if action_outputs is not None:
                 mock_message.text = json.dumps(
@@ -78,9 +81,6 @@ class AutoResponseSystem:
             # Message metadata expected by downstream handlers
             mock_message.date = datetime.utcnow()
             mock_message.reply_to_message = None
-            mock_message.thread_id = original_context.get(
-                "thread_id"
-            )
 
             # Provide chat structure expected by message_queue.enqueue
             mock_message.chat = SimpleNamespace()
@@ -90,7 +90,8 @@ class AutoResponseSystem:
             mock_message.chat.first_name = "AutoResponse"
             mock_message.chat.type = "private"
             
-            full_json = build_full_json_instructions()
+            # Use minified version to reduce token usage in auto_response scenarios
+            full_json = build_minified_json_instructions()
             if action_outputs is not None:
                 message_block = {"action_outputs": action_outputs}
             else:
@@ -175,11 +176,11 @@ async def request_llm_delivery(
     
     # Handle new calling pattern (interface style)
     if message is not None or interface is not None:
-        log_info(f"[auto_response] Processing {reason or 'autonomous'} request")
+        log_info(f"[auto_response] 📤 INTERFACE_TO_LLM: Processing {reason or 'autonomous'} request via interface")
         try:
             full_json = build_full_json_instructions()
             if isinstance(context, dict) and context.get("input", {}).get("type") in {"event", "event_reminder"}:
-                log_debug("[auto_response] Routing event reminder to LLM")
+                log_info("[auto_response] 📬 EVENT REMINDER: Routing event reminder to LLM via interface_to_llm pattern")
                 system_payload = {
                     "system_message": {
                         "type": "event_reminder",
@@ -188,6 +189,7 @@ async def request_llm_delivery(
                     }
                 }
             else:
+                log_debug("[auto_response] Routing output message to LLM")
                 system_payload = {
                     "system_message": {
                         "type": "output",
@@ -197,6 +199,7 @@ async def request_llm_delivery(
                 }
 
             payload_json = json.dumps(system_payload, ensure_ascii=False)
+            log_debug(f"[auto_response] Payload prepared ({len(payload_json)} bytes) for transmission via interface_to_llm")
         except Exception as e:
             log_error(f"[auto_response] Failed to build payload for {reason}: {e}")
             return False
@@ -220,15 +223,18 @@ async def request_llm_delivery(
                     bot = getattr(interface, "bot", None)
                     if bot is None:
                         log_error(
-                            f"[auto_response] Interface '{interface_name}' has no bot instance or send_message method"
+                            f"[auto_response] Interface has no bot instance or send_message method"
                         )
                         return
 
+                # Log the direction of the message flow
                 if message is not None:
+                    log_info(f"[auto_response] 📤 INTERFACE→LLM transmission: sending message via interface_to_llm transport layer (attempt {attempt}/{CORRECTOR_RETRIES})")
                     await plugin_instance.handle_incoming_message(
                         interface, message, payload_json, interface.get_interface_id()
                     )
                 else:
+                    log_debug("[auto_response] Creating synthetic message for autonomous delivery")
                     from types import SimpleNamespace
 
                     mock_message = SimpleNamespace()
@@ -240,10 +246,12 @@ async def request_llm_delivery(
                     )
                     mock_message.chat = SimpleNamespace(id=-1, type="private")
 
+                    log_info(f"[auto_response] 📤 INTERFACE→LLM transmission: sending synthetic message via interface_to_llm transport layer (attempt {attempt}/{CORRECTOR_RETRIES})")
                     await plugin_instance.handle_incoming_message(
                         interface, mock_message, payload_json, interface.get_interface_id()
                     )
 
+                log_info("[auto_response] ✅ LLM delivery via interface_to_llm completed successfully")
                 return True
             except Exception as e:
                 log_error(

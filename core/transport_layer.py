@@ -97,13 +97,17 @@ def extract_json_from_text(text: str, return_metadata: bool = False) -> Optional
         - 'unparsed_content': str - Content that couldn't be parsed (if any)
         - 'recovered': bool - True if JSON was recovered after errors
         - 'had_extra_text': bool - True if text was found before or after JSON
+        - 'prefix': str - Text before JSON (if any)
+        - 'suffix': str - Text after JSON (if any)
     """
     metadata = {
         'had_errors': False,
         'error_count': 0,
         'unparsed_content': '',
         'recovered': False,
-        'had_extra_text': False
+        'had_extra_text': False,
+        'prefix': '',
+        'suffix': ''
     }
     
     if not text:
@@ -169,11 +173,26 @@ def extract_json_from_text(text: str, return_metadata: bool = False) -> Optional
                     best_extra_chars = extra_chars
                     found_json = obj
                     metadata['had_extra_text'] = True
+                    metadata['prefix'] = prefix
+                    metadata['suffix'] = suffix
                     metadata['prefix_length'] = len(prefix)
                     metadata['suffix_length'] = len(suffix)
                     log_debug(f"[extract_json_from_text] Found JSON with {extra_chars} extra chars (best so far)")
 
             except json.JSONDecodeError as e:
+                # Save helpful error info (used by the corrector middleware)
+                try:
+                    err_msg = _format_json_error(text_variant, e)
+                except Exception:
+                    err_msg = str(e)
+
+                try:
+                    global LAST_JSON_ERROR_INFO
+                    LAST_JSON_ERROR_INFO = err_msg
+                except Exception:
+                    pass
+
+                metadata.setdefault('error_messages', []).append(err_msg)
                 log_debug(f"[extract_json_from_text] JSON decode error at position {start}: {e}")
                 metadata['had_errors'] = True
                 metadata['error_count'] += 1
@@ -204,7 +223,165 @@ def extract_json_from_text(text: str, return_metadata: bool = False) -> Optional
         metadata['recovered'] = True
         log_warning(f"[extract_json_from_text] ⚠️ JSON recovered after {metadata['error_count']} parsing errors - may be incomplete")
 
+        # Attempt to recover missing/partially-corrupted actions that the
+        # JSON decoder couldn't parse due to poor quoting inside string values
+        try:
+            # Normalize: if the decoder returned a single action dict instead of
+            # a top-level object containing 'actions', convert it into an actions list
+            if isinstance(found_json, dict) and 'actions' not in found_json and 'type' in found_json:
+                # Make top-level actions list containing the single decoded action
+                found_json = {'actions': [found_json]}
+
+            # Only attempt targeted recovery when we have an actions array
+            if isinstance(found_json, dict) and 'actions' in found_json and isinstance(found_json['actions'], list):
+                _attempt_recover_actions_from_text(text, found_json, metadata)
+        except Exception as e:
+            log_debug(f"[extract_json_from_text] Action recovery failed: {e}")
+
     return (found_json, metadata) if return_metadata else found_json
+
+
+def _attempt_recover_actions_from_text(original_text: str, found_json: dict, metadata: dict):
+    """Targeted recovery for common LLM output corruption patterns.
+
+    Current heuristic:
+      - If the recovered JSON has an 'actions' list but some action types are
+        missing (commonly message_telegram_bot), try to find those action
+        blocks in the raw original_text and reconstruct a safe action dict
+        by extracting the 'text' value and escaping internal quotes.
+
+    This is intentionally conservative (only reconstructs small, well-known
+    message actions) to avoid introducing invalid actions from garbage.
+
+    Mutates found_json in-place when successful and updates metadata.
+    """
+    try:
+        text = original_text or ''
+        # Collect types already present
+        existing = set()
+        try:
+            for a in found_json.get('actions', []):
+                if isinstance(a, dict) and 'type' in a:
+                    existing.add(a['type'])
+        except Exception:
+            existing = set()
+
+        # Candidate action types we try to recover if missing
+        candidates = ['message_telegram_bot', 'message_synth_webui', 'message_ollama_serve', 'message_discord_bot']
+
+        for candidate in candidates:
+            if candidate in existing:
+                continue
+
+            # Find occurrences of the candidate type in the original text
+            for m in re.finditer(rf'"type"\s*:\s*"{re.escape(candidate)}"', text):
+                # Locate the payload region after this occurrence
+                start_pos = m.start()
+                payload_idx = text.find('"payload"', start_pos)
+                if payload_idx == -1:
+                    continue
+
+                # Find where payload object starts
+                brace_idx = text.find('{', payload_idx)
+                if brace_idx == -1:
+                    continue
+
+                # Try to extract a reasonable slice for the payload by searching
+                # for the next '}' that likely terminates the payload object.
+                # Use a conservative search window to avoid expensive scans.
+                window = text[brace_idx:brace_idx + 8000]  # a large but bounded window
+
+                # Attempt to find the closing brace for this payload using simple balance
+                depth = 0
+                end_idx = None
+                for i, ch in enumerate(window):
+                    if ch == '{':
+                        depth += 1
+                    elif ch == '}':
+                        depth -= 1
+                        if depth == 0:
+                            end_idx = brace_idx + i + 1
+                            break
+
+                if end_idx is None:
+                    # fallback: try to locate a following known key which likely marks end
+                    next_key_pos = len(text)
+                    for k in ('"type"', '"actions"', '\n\n'):
+                        kp = text.find(k, brace_idx + 1)
+                        if kp != -1:
+                            next_key_pos = min(next_key_pos, kp)
+                    end_idx = next_key_pos
+
+                payload_text = text[brace_idx:end_idx]
+
+                # Attempt to extract 'text' field from payload_text using a heuristic
+                text_field_match = re.search(r'"text"\s*:\s*"', payload_text)
+                if not text_field_match:
+                    # Nothing to recover here
+                    continue
+
+                # position of actual text value start
+                val_start = text_field_match.end()
+
+                # Find a conservative marker to end the text value: look for common next keys
+                markers = ['"interface_path"', '"reply_to_message_id"', '"chat_name"', '"reply_to_message_id"', '"send_in"', '"send_at"']
+                marker_pos = None
+                search_base = brace_idx + val_start
+                for mk in markers:
+                    pos = text.find(mk, search_base)
+                    if pos != -1:
+                        marker_pos = pos
+                        break
+
+                if marker_pos is None:
+                    # fallback: look for the end of payload object
+                    marker_pos = end_idx
+
+                raw_value = text[brace_idx + val_start:marker_pos]
+
+                # Trim trailing characters that may belong to JSON punctuation (like ",)
+                raw_value = raw_value.rstrip(' ,\n\r\t}')
+
+                # Remove a possible leading quote or stray characters
+                if raw_value.startswith('"'):
+                    raw_value = raw_value[1:]
+                if raw_value.endswith('"'):
+                    raw_value = raw_value[:-1]
+
+                recovered_text = raw_value.strip()
+
+                if not recovered_text:
+                    continue
+
+                # Escape double quotes inside recovered_text to make it safe for JSON
+                safe_text = recovered_text.replace('"', '\\"')
+
+                # Try to extract interface_path similarly (optional)
+                interface_path = None
+                ip_match = re.search(r'"interface_path"\s*:\s*"([^"]*)"', payload_text)
+                if ip_match:
+                    interface_path = ip_match.group(1)
+
+                # Build recovered action and append
+                recovered_action = {
+                    'type': candidate,
+                    'payload': {
+                        'text': safe_text
+                    }
+                }
+                if interface_path:
+                    recovered_action['payload']['interface_path'] = interface_path
+
+                # Append recovered action only if not present already
+                found_json.setdefault('actions', [])
+                found_json['actions'].append(recovered_action)
+                metadata['recovered'] = True
+                metadata['recovery_attempts'] = metadata.get('recovery_attempts', 0) + 1
+                log_info(f"[extract_json_from_text] Recovered missing action {candidate} (heuristic)")
+                # Break after first recovery for this candidate to avoid duplicates
+                break
+    except Exception as e:
+        log_debug(f"[attempt_recover] Recovery routine error: {e}")
 
 
 
@@ -237,8 +414,57 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
             thread_id = int(thread_id)
         kwargs['message_thread_id'] = thread_id
 
+    # Save LLM response to chat history (before JSON parsing)
+    # Extract interface_path for saving to chat history
+    interface_path = kwargs.get('interface_path')
+    log_debug(f"[transport] Checking for chat history save: interface_path={interface_path}, text_len={len(text) if text else 0}")
+    
+    if interface_path and text:
+        try:
+            from core.chat_context_manager import add_message_to_context
+            from datetime import datetime
+
+            # Extract JSON and metadata to decide what (if any) human-readable
+            # companion text should be saved alongside LLM-originated JSON.
+            json_payload, json_meta = extract_json_from_text(text, return_metadata=True)
+            log_debug(f"[transport] JSON data extracted: {json_payload is not None} metadata: {bool(json_meta)}")
+
+            # If JSON present and metadata indicates extra text (prefix/suffix), use those.
+            if json_payload is None:
+                text_content = text
+            else:
+                if json_meta and (json_meta.get('prefix') or json_meta.get('suffix')):
+                    # Compose companion text from prefix+suffix
+                    parts = []
+                    if json_meta.get('prefix'):
+                        parts.append(json_meta.get('prefix').strip())
+                    if json_meta.get('suffix'):
+                        parts.append(json_meta.get('suffix').strip())
+                    text_content = "\n".join(parts).strip()
+                else:
+                    # Pure JSON only — nothing to save as user-visible content
+                    text_content = ""
+            log_debug(f"[transport] Text content for history: {len(text_content)} chars (was {len(text)})")
+            
+            if text_content:  # Only save if there's actual message content
+                log_info(f"[transport] 📝 Saving LLM response to chat history: {interface_path}")
+                await add_message_to_context(
+                    interface_path=interface_path,
+                    message_text=text_content,
+                    sender_name="self",
+                    sender_id="synth",
+                    timestamp=datetime.now().isoformat()
+                )
+                log_info(f"[transport] ✅ LLM response saved to chat history for {interface_path}")
+            else:
+                log_debug(f"[transport] No text content to save (only JSON)")
+        except Exception as e:
+            log_error(f"[transport] ❌ Failed to save LLM response to chat history: {e}")
+            import traceback
+            log_debug(f"[transport] Traceback: {traceback.format_exc()}")
+
     # Filter out internal parameters that should not be passed to interface send functions
-    excluded_params = {'event_id', 'interface', 'is_llm_response', 'context', 'error_retry_policy'}
+    excluded_params = {'event_id', 'interface', 'is_llm_response', 'context', 'error_retry_policy', 'interface_path'}
     for param in excluded_params:
         kwargs.pop(param, None)
 
@@ -363,6 +589,27 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
                 log_info(
                     f"[transport] Processed {len(processed_actions)} unique JSON actions via plugin system"
                 )
+                
+                # After processing actions, check if there's text outside the JSON that should be sent
+                if json_metadata and (json_metadata.get('prefix') or json_metadata.get('suffix')):
+                    companion_text = ""
+                    
+                    # Combine prefix and suffix, removing duplicate content
+                    if json_metadata.get('prefix'):
+                        companion_text = json_metadata.get('prefix', '').strip()
+                    
+                    if json_metadata.get('suffix'):
+                        suffix_text = json_metadata.get('suffix', '').strip()
+                        if companion_text:
+                            companion_text += "\n" + suffix_text
+                        else:
+                            companion_text = suffix_text
+                    
+                    if companion_text:
+                        log_info(f"[transport] Sending companion text alongside JSON actions: {len(companion_text)} chars")
+                        # Send the companion text as a separate message after the actions
+                        await interface_send_func(*args, text=companion_text, **kwargs)
+                
                 return
             else:
                 # No actions for current interface, send as plain text
@@ -373,8 +620,12 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
             log_warning(f"[transport] Failed to process JSON actions: {e}")
 
     # Non-JSON plain text — forward directly. Corrector is only run in llm_to_interface.
+    # NOTE: If LLM output contains no JSON and no actions, it will be forwarded as plain text.
+    # The LLM instructions are clear that ANY TEXT OUTSIDE JSON WILL BE DISCARDED,
+    # so LLMs should only output JSON. If they output plain text anyway, it still gets sent,
+    # but companion text from JSON extraction does NOT get sent in this path.
     if text and not text.startswith(("[ERROR]", "[WARNING]", "[INFO]", "[DEBUG]")):
-        log_debug(f"[flow] transport.non_json -> forwarding plain text (no in-line corrector) chat_id={kwargs.get('chat_id')}")
+        log_debug(f"[flow] transport.non_json -> forwarding plain text (no JSON detected, no corrector triggered) chat_id={kwargs.get('chat_id')}")
         return await interface_send_func(*args, text=text, **kwargs)
 
     # Send as normal text
@@ -384,7 +635,65 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
 
 # Re-entry guard removed: rely solely on the corrector retry counter to avoid loops
 
-async def run_corrector_middleware(text: str, bot=None, context: dict = None, chat_id=None) -> str:
+def _get_attempted_action_full_description(error_text: str) -> Optional[Dict[str, Any]]:
+    """Extract which action was attempted and return its FULL description.
+    
+    When the corrector is triggered due to JSON parsing errors, this function:
+    1. Tries to parse the partial/corrupted JSON to identify the action type attempted
+    2. Looks up the FULL (non-minified) action description from the core_initializer
+    3. Returns the full description so the corrector can provide complete details
+    
+    Args:
+        error_text: The malformed JSON text that the LLM tried to produce
+        
+    Returns:
+        Dict with keys:
+            - 'action_type': str - The action type that was attempted (e.g., 'message_telegram_bot')
+            - 'full_description': dict - The complete, non-minified action schema with all details
+        Or None if we can't identify an action
+    """
+    try:
+        # Try to extract partial JSON to find action type
+        import re
+        
+        # Look for "type": "..." or "action": "..." patterns
+        type_match = re.search(r'"type"\s*:\s*"([^"]+)"', error_text)
+        if not type_match:
+            type_match = re.search(r'"action"\s*:\s*"([^"]+)"', error_text)
+        
+        if not type_match:
+            log_debug("[_get_attempted_action] Could not extract action type from error text")
+            return None
+        
+        action_type = type_match.group(1)
+        log_debug(f"[_get_attempted_action] Identified attempted action type: {action_type}")
+        
+        # Now get the FULL description from core_initializer (not minified)
+        try:
+            from core.core_initializer import core_initializer
+            
+            full_actions = core_initializer.actions_block.get("available_actions", {})
+            
+            if action_type in full_actions:
+                full_description = full_actions[action_type]
+                log_debug(f"[_get_attempted_action] Found full description for {action_type}")
+                return {
+                    'action_type': action_type,
+                    'full_description': full_description
+                }
+            else:
+                log_debug(f"[_get_attempted_action] Action type '{action_type}' not found in available actions")
+                return None
+        except Exception as e:
+            log_debug(f"[_get_attempted_action] Could not load full action description: {e}")
+            return None
+            
+    except Exception as e:
+        log_debug(f"[_get_attempted_action] Error analyzing attempted action: {e}")
+        return None
+
+
+async def run_corrector_middleware(text: str, bot=None, context: dict = None, chat_id=None, thread_id=None) -> str:
     """Attempt to obtain a corrected LLM output that contains valid JSON actions.
 
     Strategy:
@@ -395,6 +704,13 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
 
     This function is intentionally best-effort and non-blocking for the system: if no
     active LLM plugin is available it will log and return None.
+    
+    Args:
+        text: The text to correct
+        bot: The bot instance
+        context: Context dictionary
+        chat_id: The chat ID for the correction
+        thread_id: The thread ID to maintain conversation continuity (optional)
     """
     try:
         # Avoid circular imports at module import time
@@ -413,14 +729,18 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
 
     # Extract message from context if available
     message = context.get('message') if context else None
-
-    # If already valid JSON, nothing to do
+    
+    # Check if we have selective correction context (some actions succeeded, some failed)
+    correction_context = getattr(message, 'correction_context', None) if message else None
+    
+    # If already valid JSON WITHOUT errors, nothing to do
     try:
-        if extract_json_from_text(text):
-            log_debug = globals().get('log_debug')
-            if log_debug:
-                log_debug("[corrector_middleware] Input already contains JSON; skipping correction")
+        json_obj, metadata = extract_json_from_text(text, return_metadata=True)
+        if json_obj and not metadata.get('had_errors', False) and not correction_context:
+            log_debug("[corrector_middleware] Input contains clean JSON; skipping correction")
             return text
+        elif json_obj and metadata.get('had_errors', False):
+            log_debug(f"[corrector_middleware] JSON recovered with {metadata.get('error_count', 0)} errors; proceeding with correction")
     except Exception:
         pass
 
@@ -464,51 +784,135 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
                 return None
 
             # Build a correction payload similar to action_parser.corrector
-            full_json = ""
+            # NOTE: We do NOT include full_json_instructions here because:
+            # 1. It's HUGE (all available actions with full descriptions)
+            # 2. Corrector only needs the format template, not all actions
+            # 3. LLM just needs to fix the JSON structure, not learn new actions
+            attempted_action_info = None
+            
+            # Try to identify which action was attempted and include its full description
             try:
-                full_json = build_full_json_instructions()
-            except Exception:
-                full_json = {}
+                attempted_action_info = _get_attempted_action_full_description(text)
+                if attempted_action_info:
+                    log_info(f"[corrector_middleware] Including full description for attempted action: {attempted_action_info['action_type']}")
+            except Exception as e:
+                log_debug(f"[corrector_middleware] Could not extract attempted action info: {e}")
 
+            # Use the thread_id from the original conversation if available
+            # Avoid defaulting to 0. If there's no thread_id, leave it as None so
+            # downstream code doesn't accidentally route to thread 0.
+            payload_thread_id = thread_id if thread_id is not None else None
+            log_debug(f"[corrector_middleware] Using payload_thread_id={payload_thread_id} for corrector request")
+
+            # Extract the original user message text from context if available
+            # This is CRUCIAL: when the corrector retries, the LLM needs to know what the
+            # original user question was, not just that "your JSON was invalid". Without this,
+            # the LLM might respond to the correction instructions themselves instead of
+            # answering the user's original question.
+            # Example: User asks "Rekku ci sei?" -> LLM fails -> Corrector sends correction
+            #          With original_user_message, LLM knows to respond "Sì, ci sono ♡"
+            #          Without it, LLM might respond "Acknowledged, JSON was valid"
+            original_user_message = ""
+            if message:
+                original_user_message = getattr(message, 'text', "")
+            
+            # Build correction message based on whether we have selective correction context
+            if correction_context:
+                # Selective correction: tell LLM what succeeded and what needs fixing
+                successful = correction_context.get('successful_actions', [])
+                failed = correction_context.get('failed_actions', [])
+                errors = correction_context.get('errors', [])
+                
+                correction_message_text = (
+                    f"PARTIAL SUCCESS - Some actions completed, others failed.\n\n"
+                    f"✅ Successfully executed {len(successful)} action(s):\n"
+                )
+                for action in successful:
+                    action_type = action.get('type', 'unknown')
+                    correction_message_text += f"  - {action_type}\n"
+                
+                correction_message_text += (
+                    f"\n❌ Failed {len(failed)} action(s) that need correction:\n"
+                )
+                for failed_item in failed:
+                    action = failed_item.get('action', {})
+                    action_errors = failed_item.get('errors', [])
+                    action_type = action.get('type', 'unknown')
+                    correction_message_text += f"  - {action_type}: {', '.join(action_errors)}\n"
+                
+                correction_message_text += (
+                    f"\nRequirements:\n"
+                    f"1. Respond with ONLY valid JSON\n"
+                    f"2. Include ONLY the missing/failed actions - do NOT repeat successful ones\n"
+                    f"3. Fix validation errors in the failed actions\n"
+                    f"4. Ensure you've created ALL actions from the user's original request\n"
+                )
+            else:
+                # Full correction: complete JSON failure
+                correction_message_text = (
+                    f"CRITICAL ERROR: Your previous response was not valid JSON or incomplete. "
+                    f"Requirements:\n"
+                    f"1. Respond with ONLY valid JSON (no explanations)\n"
+                    f"2. Complete ALL actions requested by the user in their original message\n"
+                    f"3. Fix any JSON syntax errors\n"
+                    f"Error details: {last_error_hint}"
+                )
+            
             correction_payload = {
                 "system_message": {
                     "type": "error",
-                    "message": f"CRITICAL ERROR: Your previous response was not valid JSON. You MUST respond with ONLY valid JSON. {last_error_hint}",
+                    "message": correction_message_text,
                     "your_reply": text,
-                    "full_json_instructions": full_json,
-                    "required_format": {
-                        "actions": [
-                            {
-                                "type": "message_telegram_bot",
-                                "payload": {
-                                    "text": "Your message content here",
-                                    "target": "-1003098886330",
-                                    "thread_id": 2
-                                }
-                            }
-                        ]
-                    },
-                    "strict_requirements": [
-                        "MUST start with { and end with }",
-                        "MUST contain 'actions' array",
-                        "NO text outside JSON structure",
-                        "NO markdown formatting",
-                        "NO explanations outside JSON"
-                    ]
+                    "original_user_message": original_user_message,
+                    "chat_id": chat_id,
+                    "thread_id": payload_thread_id,
                 }
             }
+            
+            # If we identified an action attempt, include its complete (non-minified) description
+            if attempted_action_info:
+                correction_payload["system_message"]["attempted_action"] = attempted_action_info["action_type"]
+                correction_payload["system_message"]["action_full_schema"] = attempted_action_info["full_description"]
+                log_debug(f"[corrector_middleware] Added full action schema for {attempted_action_info['action_type']}")
+            
+            # Add required format examples
+            correction_payload["system_message"]["required_format"] = {
+                "actions": [
+                    {
+                        "type": "message_telegram_bot",
+                        "payload": {
+                            "text": "Your message content here (optional - only if you want to reply to user)",
+                            "interface_path": f"telegram_bot/{chat_id or '-1003098886330'}/{payload_thread_id if payload_thread_id is not None else ''}"
+                        }
+                    }
+                ]
+            }
+            correction_payload["system_message"]["strict_requirements"] = [
+                "MUST start with { and end with }",
+                "MUST contain 'actions' array",
+                "NO text outside JSON structure",
+                "NO markdown formatting",
+                "NO explanations outside JSON"
+            ]
             correction_prompt = json.dumps(correction_payload, ensure_ascii=False)
 
             # Construct a lightweight message object expected by plugins
+            # CRITICAL: Preserve interface_path from original message/context so error messages route correctly
             correction_message = SimpleNamespace()
             correction_message.chat_id = chat_id or getattr(bot, 'chat_id', None) or -1
             correction_message.text = correction_prompt
-            correction_message.thread_id = None
+            correction_message.thread_id = payload_thread_id  # Use thread_id from original conversation
             correction_message.date = None
             correction_message.from_user = None
             correction_message.chat = SimpleNamespace(id=correction_message.chat_id, type='private')
+            # Extract interface_path from original message or context
+            correction_message.interface_path = None
+            if message and hasattr(message, 'interface_path'):
+                correction_message.interface_path = message.interface_path
+            elif context and 'interface_path' in context:
+                correction_message.interface_path = context['interface_path']
 
-            log_debug(f"[corrector_middleware] Requesting correction from LLM (attempt {attempt}/{max_retries})")
+            log_debug(f"[corrector_middleware] Requesting correction from LLM (attempt {attempt}/{max_retries}) - chat_id={correction_message.chat_id}, thread_id={correction_message.thread_id}")
 
             # Mark that we are expecting a system reply for this chat_id so llm_to_interface can
             # consume it without forwarding and avoid re-entry loops.
@@ -650,8 +1054,13 @@ async def llm_to_interface(interface_send_func, *args, text: str = None, **kwarg
             log_warning(f"[llm_to_interface] 🔧 Corrupted JSON detected - activating corrector to regenerate damaged actions")
             log_debug(f"[llm_to_interface] Unparsed content ({len(json_metadata.get('unparsed_content', ''))} chars): {json_metadata.get('unparsed_content', '')[:200]}...")
         
-        # Detect correction/system payloads (top-level "system_message") OR corrupted JSON
-        if (isinstance(json_payload, dict) and 'system_message' in json_payload) or is_corrupted:
+        # Check if LLM returned plain text with NO JSON at all (violates LLM instructions)
+        is_plain_text_only = (not json_payload and text and text.strip())
+        if is_plain_text_only:
+            log_warning(f"[llm_to_interface] ⚠️ LLM returned plain text with NO JSON - violates instructions! Activating corrector to request JSON format")
+        
+        # Detect correction/system payloads (top-level "system_message") OR corrupted JSON OR plain text only
+        if (isinstance(json_payload, dict) and 'system_message' in json_payload) or is_corrupted or is_plain_text_only:
             try:
                 # Determine bot instance from args if present
                 bot = args[0] if args and len(args) > 0 else None
@@ -703,7 +1112,8 @@ async def llm_to_interface(interface_send_func, *args, text: str = None, **kwarg
                     corrector_context, 
                     bot, 
                     message,
-                    completed_actions=completed_actions if is_corrupted else None
+                    completed_actions=completed_actions if is_corrupted else None,
+                    force_correction=is_plain_text_only  # Force corrector to run for plain text
                 )
 
                 if orchestrator_result is True:

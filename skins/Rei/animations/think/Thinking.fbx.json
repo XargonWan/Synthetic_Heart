@@ -1,0 +1,12 @@
+{
+  "intro": {
+    "end_frame": 37
+  },
+  "loop": {
+    "start_frame": 38,
+    "end_frame": 77
+  },
+  "outro": {
+    "start_frame": 78
+  }
+}

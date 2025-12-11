@@ -38,6 +38,41 @@ def _extract_json_local(text: str):
     return extract_json_from_text(text, return_metadata=False)
 
 
+def _maybe_unescape_text_in_payload(payload: dict) -> None:
+    """Detect and unescape common double-escaped sequences in payload['text'].
+
+    Many LLMs or intermediate handlers sometimes produce double-escaped JSON
+    strings (e.g. "\\u2728" or "\\n\\n" inside the value). This helper
+    safely attempts to decode those sequences into proper unicode / newlines
+    so interfaces receive human-readable text.
+
+    The function mutates payload in-place and is intentionally conservative
+    (swallows exceptions) to avoid breaking other flows.
+    """
+    if not isinstance(payload, dict):
+        return
+
+    text = payload.get("text")
+    if not text or not isinstance(text, str):
+        return
+
+    # Quick heuristic — only attempt to decode when we see backslash escapes
+    if "\\n" not in text and "\\u" not in text and "\\t" not in text and "\\r" not in text and "\\x" not in text:
+        return
+
+    try:
+        # unicode_escape converts sequences like \uXXXX, \n, \t into their
+        # actual characters. Use a bytes->unicode roundtrip for robustness.
+        unescaped = bytes(text, "utf-8").decode("unicode_escape")
+
+        # Only replace when the result is different (avoid accidental transformations)
+        if unescaped != text:
+            payload["text"] = unescaped
+    except Exception:
+        # Non-fatal — leave payload untouched on error
+        return
+
+
 ERROR_RETRY_POLICY = {
     "description": (
         "If you receive a system_message of type 'error' with the phrase 'Please repeat your "
@@ -55,22 +90,18 @@ ERROR_RETRY_POLICY = {
 
 
 def _get_retry_key(message):
-    """Generate a unique key for tracking retries based on chat/thread.
+    """Generate a unique key for tracking retries based on interface_path.
 
-    Preserve chat_id and thread_id as strings (no numeric coercion),
-    since external interfaces may represent identifiers as strings. This
-    ensures consistent retry keys without changing original identifier types.
+    Uses interface_path to uniquely identify conversation context.
     """
-    chat_id = getattr(message, "chat_id", None)
-    thread_id = getattr(message, "thread_id", None)
+    interface_path = getattr(message, "interface_path", None)
 
     def _norm(value):
         if value is None:
             return "none"
-        # Keep original representation as string (don't coerce to int)
         return str(value)
 
-    return f"{_norm(chat_id)}_{_norm(thread_id)}"
+    return _norm(interface_path)
 
 
 def _should_retry(message, max_retries: int = CORRECTOR_RETRIES) -> bool:
@@ -183,6 +214,50 @@ def get_supported_action_types() -> set[str]:
         log_debug(f"[action_parser] Error loading interface actions: {e}")
 
     return supported_types
+
+
+def _normalize_payload(action_type: str, payload: dict) -> None:
+    """Normalize payload by converting string numbers to int for numeric fields.
+    
+    This makes the system more flexible by accepting both "2" and 2 for numeric IDs.
+    Modifies the payload dict in-place.
+    
+    Fields that should be integers:
+    - chat_id: Chat identifier
+    - user_id: User identifier
+    - Any field ending with _id
+    """
+    # Fields that should always be integers
+    int_fields = {"chat_id", "user_id", "message_id", "animation_state"}
+    
+    # Also handle fields ending with _id
+    for key in payload.keys():
+        if key.endswith("_id") and key not in int_fields:
+            int_fields.add(key)
+    
+    # Normalize top-level fields
+    for field in int_fields:
+        if field in payload:
+            value = payload[field]
+            if isinstance(value, str) and value.isdigit():
+                try:
+                    payload[field] = int(value)
+                    log_debug(f"[action_parser] Normalized {action_type}.payload.{field}: '{value}' -> {int(value)}")
+                except (ValueError, TypeError):
+                    pass
+    
+    # Normalize nested dict fields (like target: {chat_id: ...})
+    for key, value in payload.items():
+        if isinstance(value, dict):
+            for nested_field in int_fields:
+                if nested_field in value:
+                    nested_value = value[nested_field]
+                    if isinstance(nested_value, str) and nested_value.isdigit():
+                        try:
+                            value[nested_field] = int(nested_value)
+                            log_debug(f"[action_parser] Normalized {action_type}.payload.{key}.{nested_field}: '{nested_value}' -> {int(nested_value)}")
+                        except (ValueError, TypeError):
+                            pass
 
 
 def _validate_payload(action_type: str, payload: dict, errors: List[str]) -> None:
@@ -328,6 +403,8 @@ def validate_action(action: dict, context: dict = None, original_message=None) -
 
     # Dynamic validation - delegate to plugins or interfaces that support this action type
     if (isinstance(payload, dict) or action_type in actions_with_flexible_payload) and action_type in supported_types:
+        # Normalize payload before validation (convert string numbers to int)
+        _normalize_payload(action_type, payload or {})
         _validate_payload(action_type, payload or {}, errors)
 
         if _is_restricted_action(action_type):
@@ -378,8 +455,8 @@ def _load_action_plugins() -> List[Any]:
 def _plugins_for(action_type: str) -> List[Any]:
     plugins = []
     loaded_plugins = _load_action_plugins()
-    log_debug(
-        f"[action_parser] _plugins_for({action_type}): Checking {len(loaded_plugins)} loaded plugins"
+    log_info(
+        f"[action_parser] _plugins_for({action_type}): Searching in {len(loaded_plugins)} loaded plugins"
     )
 
     for plugin in loaded_plugins:
@@ -468,8 +545,8 @@ def _plugins_for(action_type: str) -> List[Any]:
         except Exception as e:
             log_error(f"[action_parser] Error querying interface {name}: {repr(e)}")
 
-    log_debug(
-        f"[action_parser] _plugins_for({action_type}): Found {len(plugins)} supporting plugins"
+    log_info(
+        f"[action_parser] _plugins_for({action_type}): Found {len(plugins)} supporting plugins: {[p.__class__.__name__ for p in plugins]}"
     )
     return plugins
 
@@ -528,6 +605,11 @@ async def _handle_plugin_action(
             interface = INTERFACE_REGISTRY.get(iface_name) if iface_name else None
             if interface and action_type.startswith("message") and hasattr(interface, "send_message"):
                 payload = action.get("payload", {})
+                # Normalize text payloads to recover double-escaped sequences
+                try:
+                    _maybe_unescape_text_in_payload(payload)
+                except Exception:
+                    log_debug("[action_parser] Text unescape normalization failed (non-fatal)")
                 log_info(
                     f"[action_parser] ✉️ Dispatching message action to interface '{iface_name}'"
                 )
@@ -569,6 +651,11 @@ async def _handle_plugin_action(
         if hasattr(plugin, "send_message") and action_type.startswith("message"):
             try:
                 payload = action.get("payload", {})
+                # Normalize text payload content produced by LLMs (double-escaped unicode/newlines)
+                try:
+                    _maybe_unescape_text_in_payload(payload)
+                except Exception:
+                    log_debug("[action_parser] Text unescape normalization failed for plugin send_message (non-fatal)")
                 log_info(
                     f"[action_parser] ✉️ Dispatching message action to interface '{plugin_iface}' via send_message"
                 )
@@ -590,6 +677,11 @@ async def _handle_plugin_action(
                 payload = action.get("payload", {})
                 if not isinstance(payload, dict):
                     payload = vars(payload)
+                # Normalize payload.text for execute_action consumers too
+                try:
+                    _maybe_unescape_text_in_payload(payload)
+                except Exception:
+                    log_debug("[action_parser] Text unescape normalization failed for plugin execute_action (non-fatal)")
                 new_action = {**action, "payload": payload}
                 log_info(
                     f"[action_parser] 🚀 Delegating action to {plugin.__class__.__name__}: type={action_type} interface={plugin_iface}"
@@ -632,13 +724,15 @@ async def run_action(action: Any, context: Dict[str, Any], bot, original_message
         log_info(f"[action_parser] 📋 Processing action list with {len(action)} items")
         return await run_actions(action, context, bot, original_message)
 
+    action_type = action.get("type")
+    log_info(f"[action_parser] 🔍 Action type detected: {action_type}")
+    
     valid, errors = validate_action(action, context, original_message)
     if not valid:
         error_msg = f"Invalid action: {errors}"
         log_error(f"[action_parser] ❌ {error_msg}")
         return {"error": error_msg}
 
-    action_type = action.get("type")
     action_interface = action.get("interface")
     log_info(f"[action_parser] 🚀 Executing action: type={action_type}, interface={action_interface}")
 
@@ -650,6 +744,8 @@ async def run_action(action: Any, context: Dict[str, Any], bot, original_message
 async def _request_selective_correction(failed_actions, successful_actions, bot, context, original_message):
     """Request LLM to fix only the failed actions, while preserving successful ones."""
     from core.transport_layer import run_corrector_middleware
+    from core.action_parser import _load_action_plugins
+    from core.core_initializer import INTERFACE_REGISTRY
     
     # Build clear correction prompt
     successful_count = len(successful_actions)
@@ -658,16 +754,58 @@ async def _request_selective_correction(failed_actions, successful_actions, bot,
     # Extract successful action types for context
     successful_types = [action.get("type", "unknown") for action in successful_actions]
     
-    # Build detailed error descriptions
+    # Load plugin and interface schemas for detailed descriptions
+    action_schemas = {}
+    
+    # Get schemas from plugins
+    try:
+        for plugin in _load_action_plugins():
+            if hasattr(plugin, 'get_supported_actions'):
+                actions = plugin.get_supported_actions()
+                for action_type, action_info in actions.items():
+                    action_schemas[action_type] = action_info
+            if hasattr(plugin, 'get_prompt_instructions'):
+                # Store verbose descriptions
+                for action_type in (plugin.get_supported_actions() or {}).keys():
+                    if hasattr(plugin, 'get_prompt_instructions'):
+                        instructions = plugin.get_prompt_instructions(action_type)
+                        if instructions and action_type in action_schemas:
+                            action_schemas[action_type]['_verbose_instructions'] = instructions
+    except Exception as e:
+        log_warning(f"[action_parser] Error loading plugin schemas: {e}")
+    
+    # Get schemas from interfaces
+    try:
+        for iface_name, interface in INTERFACE_REGISTRY.items():
+            if hasattr(interface, 'get_supported_actions'):
+                actions = interface.get_supported_actions()
+                for action_type, action_info in actions.items():
+                    action_schemas[action_type] = action_info
+    except Exception as e:
+        log_warning(f"[action_parser] Error loading interface schemas: {e}")
+    
+    # Build detailed error descriptions with schemas
     error_details = []
     for failed in failed_actions:
         action = failed["action"]
         errors = failed["errors"]
-        error_details.append({
-            "action_type": action.get("type", "unknown"),
+        action_type = action.get("type", "unknown")
+        schema = action_schemas.get(action_type, {})
+        
+        detail = {
+            "action_type": action_type,
             "errors": errors,
-            "original_action": action
-        })
+            "original_action": action,
+            "description": schema.get("description", "Unknown action"),
+            "required_fields": schema.get("required_fields", []),
+            "optional_fields": schema.get("optional_fields", []),
+        }
+        
+        # Add verbose instructions if available
+        if '_verbose_instructions' in schema:
+            detail['verbose_instructions'] = schema['_verbose_instructions']
+        
+        error_details.append(detail)
     
     # Create a specialized correction prompt that only asks for failed actions
     correction_context = {
@@ -683,14 +821,28 @@ Your previous response was partially successful:
 
 Please provide ONLY the corrected versions of the failed actions. Do not repeat the {successful_count} successful actions.
 
-Failed actions with errors:
+FAILED ACTIONS REQUIRING CORRECTION:
 """
     }
     
     for i, detail in enumerate(error_details, 1):
-        correction_context["instruction"] += f"\n{i}. Action '{detail['action_type']}' failed:\n"
+        correction_context["instruction"] += f"\n{i}. ACTION: '{detail['action_type']}'\n"
+        correction_context["instruction"] += f"   DESCRIPTION: {detail['description']}\n"
+        
+        # Add schema information
+        if detail['required_fields']:
+            correction_context["instruction"] += f"   REQUIRED FIELDS: {', '.join(detail['required_fields'])}\n"
+        if detail['optional_fields']:
+            correction_context["instruction"] += f"   OPTIONAL FIELDS: {', '.join(detail['optional_fields'])}\n"
+        
+        # Add verbose instructions if available
+        if 'verbose_instructions' in detail:
+            correction_context["instruction"] += f"   EXAMPLE: {detail['verbose_instructions'].get('payload', {})}\n"
+        
+        # Add specific errors
+        correction_context["instruction"] += f"   ERRORS FOUND:\n"
         for error in detail['errors']:
-            correction_context["instruction"] += f"   - {error}\n"
+            correction_context["instruction"] += f"      ❌ {error}\n"
     
     correction_context["instruction"] += f"""
 Respond with JSON containing only the corrected actions (not the successful ones):
@@ -720,7 +872,8 @@ IMPORTANT: Do not include the {successful_count} actions that were already execu
             text=correction_context["instruction"],
             bot=bot,
             context={**context, "selective_correction": True, "correction_context": correction_context},
-            chat_id=getattr(original_message, 'chat_id', None)
+            chat_id=getattr(original_message, 'chat_id', None),
+            thread_id=getattr(original_message, 'thread_id', None)
         )
     except Exception as e:
         log_error(f"[action_parser] Failed to request selective correction: {e}")
@@ -831,7 +984,7 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
             "chat_id": getattr(original_message, "chat_id", None),
             "message_id": getattr(original_message, "message_id", None),
             "interface_name": interface_name,
-            "thread_id": getattr(original_message, "thread_id", None),
+            "interface_path": getattr(original_message, "interface_path", None),
         }
 
         try:
@@ -849,7 +1002,10 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
 
     if collected_errors and failed_actions:
         # New selective corrector: only ask LLM to fix failed actions, not successful ones
-        if hasattr(original_message, 'from_llm') and original_message.from_llm:
+        # Check both message object AND context for from_llm flag
+        is_from_llm = (hasattr(original_message, 'from_llm') and original_message.from_llm) or context.get('from_llm', False)
+        
+        if is_from_llm:
             try:
                 await _request_selective_correction(
                     failed_actions=failed_actions,
@@ -889,7 +1045,7 @@ async def _create_diary_entry_for_actions(processed_actions, context, original_m
         # Extract relevant information
         interface_name = context.get("interface", "unknown")
         chat_id = getattr(original_message, "chat_id", None)
-        thread_id = getattr(original_message, "thread_id", None)
+        interface_path = getattr(original_message, "interface_path", None)
         
         # Get user message from context or original_message
         user_message = ""
@@ -972,8 +1128,7 @@ async def _create_diary_entry_for_actions(processed_actions, context, original_m
             context_tags=context_tags,
             involved_users=involved_list,
             interface=interface_name,
-            chat_id=str(chat_id) if chat_id else None,
-            thread_id=str(thread_id) if thread_id else None
+            chat_id=str(chat_id) if chat_id else None
         )
         
         log_debug(f"[action_parser] Created personal diary entry: {synth_response}")
@@ -1178,8 +1333,13 @@ async def gather_static_injections(message=None, context_memory=None) -> dict:
     """
 
     injections: dict = {}
+    log_info(f"[action_parser] 🔍 gather_static_injections() CALLED")
     try:
-        for plugin in _load_action_plugins():
+        plugins_list = _load_action_plugins()
+        log_info(f"[action_parser] Found {len(list(plugins_list))} plugins to check for static_inject")
+        plugins_list = _load_action_plugins()  # Reload since we consumed it in len()
+        
+        for plugin in plugins_list:
             try:
                 supported = False
                 if hasattr(plugin, "get_supported_action_types"):
@@ -1192,9 +1352,15 @@ async def gather_static_injections(message=None, context_memory=None) -> dict:
                         supported = "static_inject" in acts
                     elif isinstance(acts, (list, set, tuple)):
                         supported = "static_inject" in acts
-                if not supported or not hasattr(plugin, "get_static_injection"):
+                
+                has_method = hasattr(plugin, "get_static_injection")
+                log_debug(f"[action_parser] Plugin {plugin.__class__.__name__}: supported={supported}, has_method={has_method}")
+                
+                if not supported or not has_method:
                     continue
 
+                log_info(f"[action_parser] 🎯 Calling get_static_injection() on {plugin.__class__.__name__}")
+                
                 # Pass message and context_memory if the plugin expects them
                 try:
                     result = plugin.get_static_injection(message, context_memory)
@@ -1207,6 +1373,9 @@ async def gather_static_injections(message=None, context_memory=None) -> dict:
 
                 if inspect.iscoroutine(result):
                     result = await result
+                    
+                log_info(f"[action_parser] ✅ Got result from {plugin.__class__.__name__}: {list(result.keys()) if isinstance(result, dict) else type(result)}")
+                
                 if isinstance(result, dict):
                     injections.update(result)
             except Exception as e:
@@ -1215,6 +1384,8 @@ async def gather_static_injections(message=None, context_memory=None) -> dict:
                 )
     except Exception as e:
         log_error(f"[action_parser] Error collecting static injections: {e}")
+    
+    log_info(f"[action_parser] 📊 gather_static_injections() returning {len(injections)} keys: {list(injections.keys())}")
     return injections
 
 
@@ -1256,7 +1427,7 @@ __all__ = [
 ]
 
 
-async def corrector_orchestrator(text: str, context: dict, bot, message, max_retries: int | None = None, completed_actions: list = None):
+async def corrector_orchestrator(text: str, context: dict, bot, message, max_retries: int | None = None, completed_actions: list = None, force_correction: bool = False):
     """Process model text: parse JSON actions or run the corrector loop.
     
     Args:
@@ -1267,6 +1438,8 @@ async def corrector_orchestrator(text: str, context: dict, bot, message, max_ret
         max_retries: Maximum number of correction attempts
         completed_actions: List of action types that were already successfully executed
                           (so the corrector knows not to regenerate them)
+        force_correction: If True, force the corrector to run even for non-JSON-like text
+                         (used when LLM returns plain text that violates JSON-only instructions)
 
     Returns:
         True  -> actions parsed and executed
@@ -1339,11 +1512,17 @@ async def corrector_orchestrator(text: str, context: dict, bot, message, max_ret
             log_warning(f"[corrector_orchestrator] Failed to run actions: {e}")
             return False
 
-    # Not parsed initially. If not JSON-like, indicate to caller to forward as plain text
+    # Not parsed initially. If not JSON-like, check if we should force correction
     if '{' not in (text or '') and '[' not in (text or ''):
-        return None
+        if not force_correction:
+            # Not JSON-like and not forced -> indicate to caller to forward as plain text
+            return None
+        else:
+            # force_correction=True: LLM returned plain text violating JSON-only rule
+            # Fall through to run corrector loop
+            log_info("[corrector_orchestrator] Plain text detected with force_correction=True - running corrector loop to request JSON format")
 
-    # JSON-like but not valid -> run corrector loop here
+    # JSON-like but not valid (or forced correction for plain text) -> run corrector loop here
     # Build context for corrector, including completed actions
     if completed_actions:
         log_info(f"[corrector_orchestrator] Starting correction loop - actions already completed: {completed_actions}")
@@ -1371,7 +1550,9 @@ async def corrector_orchestrator(text: str, context: dict, bot, message, max_ret
             # Add message to context for error handling
             context = dict(context) if context else {}
             context['message'] = message
-            corrected = await transport.run_corrector_middleware(text, bot=bot, context=context, chat_id=getattr(message, 'chat_id', None))
+            # Pass interface_path from original message to maintain conversation continuity
+            interface_path = getattr(message, 'interface_path', None)
+            corrected = await transport.run_corrector_middleware(text, bot=bot, context=context, chat_id=getattr(message, 'chat_id', None), interface_path=interface_path)
         except Exception as e:
             log_warning(f"[corrector_orchestrator] Corrector invocation failed: {e}")
             return False

@@ -30,15 +30,20 @@ getting started.
    event_id_flow
    auto_response
    chat_links
+   chat_context
+   chat_history
+   emotion_engine
    persona_manager
    persona_configuration
    llm_engines
    plugins
+   action_schema_format
    validation_system
    ai_diary_personal_memory
    vrm_animations
    animation_system
    interfaces
+   interface_path
    matrix_interface
    config_management
    dev_components

@@ -49,8 +49,9 @@ dist/
 build/
 site/
 logs/
-!res/synth_webui/avatars/SyntH.vrm
-avatars/
+skins/Rekku
+skins/temp
+!skins/temp/README.md
 persona*/
 docker-compose-*.yml
 backups/

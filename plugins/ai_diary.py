@@ -17,7 +17,7 @@ import aiomysql
 import threading
 from contextlib import asynccontextmanager
 
-from core.db import get_conn
+from core.db import get_conn_ctx
 from core.logging_utils import log_error, log_info, log_debug, log_warning
 
 # Injection priority for diary entries
@@ -86,8 +86,14 @@ def normalize_interface_name(interface: str) -> str:
     normalized = interface_mapping.get(interface.lower(), interface.lower())
     return normalized
 
-def get_max_diary_chars(interface_name: str = None, current_prompt_length: int = 0) -> int:
-    """Calculate how many characters can be allocated to diary injection based on active LLM interface limits."""
+def get_max_diary_chars(interface_name: str = None, current_prompt_length: int = 0, context_memory: dict = None) -> int:
+    """Calculate how many characters can be allocated to diary injection based on active LLM interface limits.
+    
+    Args:
+        interface_name: Name of the interface
+        current_prompt_length: Current length of the prompt
+        context_memory: Context dictionary that may contain maximize_diary flag for memory-focused operations
+    """
     try:
         # Get limits directly from the active LLM engine
         from core.config import get_active_llm
@@ -118,8 +124,15 @@ def get_max_diary_chars(interface_name: str = None, current_prompt_length: int =
             active_llm = "manual"  # Safe fallback
         
         if not active_llm or active_llm == "manual":
-            log_debug("[ai_diary] Using manual fallback limits")
-            return 8000
+            log_debug("[ai_diary] Using manual fallback limits from Selenium engine if available")
+            # Try to get limits from active Selenium LLM engine first
+            try:
+                from core.selenium_llm_base import get_active_selenium_limits
+                selenium_limits = get_active_selenium_limits()
+                max_selenium_chars = selenium_limits.get("max_prompt_chars", 128000)
+                return max_selenium_chars
+            except Exception:
+                return 128000  # Safe fallback
         
         registry = get_llm_registry()
         engine = registry.get_engine(active_llm)
@@ -127,58 +140,59 @@ def get_max_diary_chars(interface_name: str = None, current_prompt_length: int =
         if not engine:
             engine = registry.load_engine(active_llm)
         
-        max_prompt_chars = 8000  # Default fallback
-        if engine and hasattr(engine, 'get_interface_limits'):
-            limits = engine.get_interface_limits()
-            max_prompt_chars = limits.get("max_prompt_chars", 8000)
+        # Try to get limits from active Selenium LLM engine first
+        max_prompt_chars = 128000  # Safe fallback default
+        try:
+            from core.selenium_llm_base import get_active_selenium_limits
+            selenium_limits = get_active_selenium_limits()
+            max_prompt_chars = selenium_limits.get("max_prompt_chars", 128000)
+        except Exception:
+            # If not a Selenium engine, try to get from the engine itself
+            if engine and hasattr(engine, 'get_interface_limits'):
+                limits = engine.get_interface_limits()
+                max_prompt_chars = limits.get("max_prompt_chars", 128000)
         
-        # Use 30% of available prompt space for diary, with fallback
-        diary_limit = int(max_prompt_chars * 0.30)
+        # Check if this is a memory-focused operation (e.g., Grillo memory consolidation beat)
+        maximize_diary = False
+        if context_memory and isinstance(context_memory, dict):
+            maximize_diary = context_memory.get("maximize_diary", False)
+        
+        # Use 80% for memory consolidation, 30% for normal operations
+        diary_percentage = 0.80 if maximize_diary else 0.30
+        diary_limit = int(max_prompt_chars * diary_percentage)
         
         # Consider current prompt length
         available_space = max_prompt_chars - current_prompt_length
-        diary_allocation = min(diary_limit, max(available_space * 0.5, 5000))  # At least 5k if space allows
+        diary_allocation = min(diary_limit, max(available_space * (0.9 if maximize_diary else 0.5), 5000))  # Higher % when maximizing
         
-        log_debug(f"[ai_diary] Diary allocation: {diary_allocation} chars (max: {max_prompt_chars}, used: {current_prompt_length})")
+        mode = "MAXIMIZED (80%)" if maximize_diary else "standard (30%)"
+        log_info(f"[ai_diary] Diary allocation {mode}: {diary_allocation} chars (max: {max_prompt_chars}, used: {current_prompt_length})")
         return max(diary_allocation, 5000)  # Minimum 5k chars
     except Exception as e:
         log_warning(f"[ai_diary] Error calculating diary limit: {e}")
         return 8000  # Fallback
 
 
+async def _run_sync_async(coro):
+    """Run async function, handling all cases without creating new event loops."""
+    try:
+        # Get current running loop if available
+        loop = asyncio.get_running_loop()
+        # Just run the coroutine directly - we have a running loop
+        return await coro
+    except RuntimeError:
+        # No running loop, just run the coroutine directly
+        return await coro
+
 def _run_sync(coro):
     """Helper to run async functions in sync context with better error handling."""
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            # We're already in an async context, use threading
-            result = None
-            exception = None
-            
-            def run_in_thread():
-                nonlocal result, exception
-                try:
-                    new_loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(new_loop)
-                    try:
-                        result = new_loop.run_until_complete(coro)
-                    finally:
-                        new_loop.close()
-                except Exception as e:
-                    exception = e
-            
-            thread = threading.Thread(target=run_in_thread)
-            thread.start()
-            thread.join(timeout=5.0)  # Add timeout to prevent hanging
-            
-            if thread.is_alive():
-                log_warning("[ai_diary] Thread timeout in _run_sync")
-                return None
-            
-            if exception:
-                log_debug(f"[ai_diary] Exception in _run_sync: {exception}")
-                return None
-            return result
+            # We're in an async context, schedule coroutine on the running loop from this thread
+            # This avoids creating a new event loop
+            import concurrent.futures
+            return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=5.0)
         else:
             return loop.run_until_complete(coro)
     except RuntimeError:
@@ -198,6 +212,11 @@ def should_include_diary(interface_name: str, current_prompt_length: int = 0, ma
     if max_prompt_chars <= 0:
         try:
             active_llm = _run_sync(get_active_llm())
+            # Check that active_llm is not None before proceeding
+            if not active_llm:
+                log_debug(f"[ai_diary] Active LLM is None, skipping LLM limits lookup")
+                return True  # Conservative: include diary if we can't determine LLM
+            
             registry = get_llm_registry()
             engine = registry.get_engine(active_llm)
             
@@ -226,18 +245,13 @@ def should_include_diary(interface_name: str, current_prompt_length: int = 0, ma
 @asynccontextmanager
 async def get_db():
     """Context manager for MariaDB database connections."""
-    conn = None
-    try:
-        conn = await get_conn()
-        log_debug("[ai_diary] Opened database connection")
-        yield conn
-    except Exception as e:
-        log_error(f"[ai_diary] Database error: {e}")
-        raise
-    finally:
-        if conn:
-            conn.close()
-            log_debug("[ai_diary] Connection closed")
+    async with get_conn_ctx() as conn:
+        try:
+            log_debug("[ai_diary] Opened database connection")
+            yield conn
+        except Exception as e:
+            log_error(f"[ai_diary] Database error: {e}")
+            raise
 
 
 async def init_diary_table():
@@ -259,10 +273,22 @@ async def init_diary_table():
                 thread_id VARCHAR(255),
                 user_message TEXT COMMENT 'What the user said that triggered this response',
                 context_tags TEXT DEFAULT '[]' COMMENT 'Tags about the context/topic',
+                involved_users TEXT DEFAULT '[]' COMMENT 'JSON list of users involved in the interaction',
                 INDEX idx_timestamp (timestamp),
                 INDEX idx_interface_chat (interface, chat_id)
             )
         ''')
+        
+        # Ensure involved_users column exists (migration for existing tables)
+        try:
+            await cursor.execute('''
+                ALTER TABLE ai_diary ADD COLUMN involved_users TEXT DEFAULT '[]' COMMENT 'JSON list of users involved in the interaction'
+            ''')
+            log_info("[ai_diary] Added missing involved_users column to ai_diary table")
+        except Exception as e:
+            # Column might already exist, that's fine
+            if "Duplicate column name" not in str(e):
+                log_debug(f"[ai_diary] Column migration check: {e}")
         
         # Legacy memories table (moved from core)
         await cursor.execute('''
@@ -309,6 +335,7 @@ async def init_diary_table():
                 thread_id VARCHAR(255),
                 user_message TEXT COMMENT 'What the user said that triggered this response',
                 context_tags TEXT DEFAULT '[]' COMMENT 'Tags about the context/topic',
+                involved_users TEXT DEFAULT '[]' COMMENT 'JSON list of users involved in the interaction',
                 INDEX idx_timestamp (timestamp),
                 INDEX idx_interface_chat (interface, chat_id)
             )
@@ -354,24 +381,22 @@ async def recreate_diary_table():
 def _run(coro):
     """Run a coroutine safely even if an event loop is already running."""
     try:
-        return asyncio.run(coro)
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # We're in async context, use executor to avoid creating new loop
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(asyncio.run, coro)
+                return future.result(timeout=10.0)
+        else:
+            # Event loop exists but not running, use run_until_complete
+            return loop.run_until_complete(coro)
     except RuntimeError:
-        result: Any = None
-        exc: Exception | None = None
-
-        def runner() -> None:
-            nonlocal result, exc
-            try:
-                result = asyncio.run(coro)
-            except Exception as e:
-                exc = e
-
-        thread = threading.Thread(target=runner)
-        thread.start()
-        thread.join()
-        if exc:
-            raise exc
-        return result
+        # No event loop at all - this is the only safe place to use asyncio.run()
+        return asyncio.run(coro)
+    except Exception as e:
+        log_debug(f"[ai_diary] Error in _run: {e}")
+        return None
 
 
 async def _execute(query: str, params: tuple = ()) -> None:
@@ -400,7 +425,8 @@ def add_diary_entry(
     involved_users: List[str] = None,
     interface: str = None,
     chat_id: str = None,
-    thread_id: str = None
+    thread_id: str = None,
+    grillo_activity_log_id: int = None
 ) -> None:
     """Add a new personal diary entry where synth records what he said and how he feels.
     
@@ -417,6 +443,39 @@ def add_diary_entry(
         thread_id: Thread identifier
     """
     global PLUGIN_ENABLED
+    
+    # Attempt lazy initialization if plugin was disabled at startup
+    if not PLUGIN_ENABLED:
+        try:
+            log_debug("[ai_diary] Attempting lazy initialization of plugin (sync)...")
+            _run(_execute("SELECT 1 FROM ai_diary LIMIT 1"))
+            PLUGIN_ENABLED = True
+            log_info("[ai_diary] Plugin lazy-initialized successfully (sync)")
+        except Exception as init_error:
+            log_debug(f"[ai_diary] Lazy initialization failed (sync): {init_error}, attempting table creation...")
+            try:
+                _run(_execute("""
+                    CREATE TABLE IF NOT EXISTS ai_diary (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        content LONGTEXT,
+                        personal_thought TEXT,
+                        emotions JSON,
+                        interaction_summary TEXT,
+                        user_message TEXT,
+                        context_tags JSON,
+                        involved_users JSON,
+                        interface VARCHAR(50),
+                        chat_id VARCHAR(100),
+                        thread_id VARCHAR(100)
+                    )
+                """))
+                PLUGIN_ENABLED = True
+                log_info("[ai_diary] Plugin table created and enabled successfully via lazy init (sync)")
+            except Exception as create_error:
+                log_error(f"[ai_diary] Failed to create table during lazy init (sync): {create_error}")
+                return
+    
     if not PLUGIN_ENABLED:
         return
         
@@ -437,7 +496,7 @@ def add_diary_entry(
             continue
     
     try:
-        _run(_execute(
+        cursor = _run(_execute(
             """
             INSERT INTO ai_diary (content, personal_thought, emotions, 
                                 interaction_summary, user_message, context_tags, involved_users, interface, chat_id, thread_id)
@@ -456,9 +515,21 @@ def add_diary_entry(
                 thread_id
             )
         ))
+        diary_entry_id = cursor.lastrowid if hasattr(cursor, 'lastrowid') else None
+        
         log_debug(f"[ai_diary] Added personal diary entry: {content[:50]}...")
         if personal_thought:
             log_debug(f"[ai_diary] Personal thought: {personal_thought[:50]}...")
+        
+        # Link to grillo activity log if this entry was created from a grillo beat
+        if grillo_activity_log_id and diary_entry_id:
+            try:
+                import asyncio
+                from plugins.grillo_plugin import GrilloPlugin
+                asyncio.create_task(GrilloPlugin.link_diary_entry_to_activity(grillo_activity_log_id, diary_entry_id))
+                log_debug(f"[ai_diary] Scheduled grillo activity link: activity_log={grillo_activity_log_id}, diary={diary_entry_id}")
+            except Exception as link_error:
+                log_warning(f"[ai_diary] Failed to link grillo activity: {link_error}")
     except Exception as e:
         log_error(f"[ai_diary] Failed to add diary entry: {e}")
         # Disable plugin if database is unavailable
@@ -475,10 +546,44 @@ async def add_diary_entry_async(
     involved_users: List[str] = None,
     interface: str = None,
     chat_id: str = None,
-    thread_id: str = None
+    thread_id: str = None,
+    grillo_activity_log_id: int = None
 ) -> None:
     """Add a new personal diary entry (async version). Safe to call even if plugin is disabled."""
     global PLUGIN_ENABLED
+    
+    # Attempt lazy initialization if plugin was disabled at startup
+    if not PLUGIN_ENABLED:
+        try:
+            log_debug("[ai_diary] Attempting lazy initialization of plugin...")
+            await _execute("SELECT 1 FROM ai_diary LIMIT 1")
+            PLUGIN_ENABLED = True
+            log_info("[ai_diary] Plugin lazy-initialized successfully")
+        except Exception as init_error:
+            log_debug(f"[ai_diary] Lazy initialization failed: {init_error}, attempting table creation...")
+            try:
+                await _execute("""
+                    CREATE TABLE IF NOT EXISTS ai_diary (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        content LONGTEXT,
+                        personal_thought TEXT,
+                        emotions JSON,
+                        interaction_summary TEXT,
+                        user_message TEXT,
+                        context_tags JSON,
+                        involved_users JSON,
+                        interface VARCHAR(50),
+                        chat_id VARCHAR(100),
+                        thread_id VARCHAR(100)
+                    )
+                """)
+                PLUGIN_ENABLED = True
+                log_info("[ai_diary] Plugin table created and enabled successfully via lazy init")
+            except Exception as create_error:
+                log_error(f"[ai_diary] Failed to create table during lazy init: {create_error}")
+                return
+    
     if not PLUGIN_ENABLED:
         return
         
@@ -499,28 +604,42 @@ async def add_diary_entry_async(
             continue
     
     try:
-        await _execute(
-            """
-            INSERT INTO ai_diary (content, personal_thought, emotions, 
-                                interaction_summary, user_message, context_tags, involved_users, interface, chat_id, thread_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
-            (
-                content,
-                personal_thought,
-                json.dumps(emotions),
-                interaction_summary,
-                user_message,
-                json.dumps(context_tags),
-                json.dumps(involved_users),
-                interface,
-                chat_id,
-                thread_id
+        conn = await get_conn()
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                INSERT INTO ai_diary (content, personal_thought, emotions, 
+                                    interaction_summary, user_message, context_tags, involved_users, interface, chat_id, thread_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    content,
+                    personal_thought,
+                    json.dumps(emotions),
+                    interaction_summary,
+                    user_message,
+                    json.dumps(context_tags),
+                    json.dumps(involved_users),
+                    interface,
+                    chat_id,
+                    thread_id
+                )
             )
-        )
+            diary_entry_id = cur.lastrowid
+        conn.close()
+        
         log_debug(f"[ai_diary] Added personal diary entry: {content[:50]}...")
         if personal_thought:
             log_debug(f"[ai_diary] Personal thought: {personal_thought[:50]}...")
+        
+        # Link to grillo activity log if this entry was created from a grillo beat
+        if grillo_activity_log_id and diary_entry_id:
+            try:
+                from plugins.grillo_plugin import GrilloPlugin
+                await GrilloPlugin.link_diary_entry_to_activity(grillo_activity_log_id, diary_entry_id)
+                log_debug(f"[ai_diary] Linked grillo activity: activity_log={grillo_activity_log_id}, diary={diary_entry_id}")
+            except Exception as link_error:
+                log_warning(f"[ai_diary] Failed to link grillo activity: {link_error}")
     except Exception as e:
         log_error(f"[ai_diary] Failed to add diary entry: {e}")
         # Disable plugin if database is unavailable
@@ -535,6 +654,18 @@ def get_recent_entries(days: int = 2, max_chars: int = None) -> List[Dict[str, A
     global PLUGIN_ENABLED
     
     log_debug(f"[ai_diary] get_recent_entries called with days={days}, max_chars={max_chars}, PLUGIN_ENABLED={PLUGIN_ENABLED}")
+    
+    # Attempt lazy initialization if plugin was disabled at startup
+    if not PLUGIN_ENABLED:
+        try:
+            log_debug("[ai_diary] Attempting lazy initialization for get_recent_entries...")
+            _run(_execute("SELECT 1 FROM ai_diary LIMIT 1"))
+            PLUGIN_ENABLED = True
+            log_info("[ai_diary] Plugin lazy-initialized successfully in get_recent_entries")
+        except Exception as init_error:
+            log_debug(f"[ai_diary] Lazy initialization failed in get_recent_entries: {init_error}")
+            log_debug("[ai_diary] Plugin disabled, returning empty list")
+            return []
     
     if not PLUGIN_ENABLED:
         log_debug("[ai_diary] Plugin disabled, returning empty list")
@@ -1001,8 +1132,10 @@ def disable_plugin() -> None:
 try:
     _run(init_diary_table())
     log_info("[ai_diary] Plugin initialized successfully")
+    PLUGIN_ENABLED = True
 except Exception as e:
-    log_warning(f"[ai_diary] Plugin initialization failed, disabling: {e}")
+    log_warning(f"[ai_diary] Plugin initialization failed at startup (DB may not be ready yet): {e}")
+    # Don't disable immediately - allow lazy initialization
     PLUGIN_ENABLED = False
 
 class DiaryPlugin:
@@ -1019,16 +1152,59 @@ class DiaryPlugin:
     def get_supported_actions(self):
         return {
             "static_inject": {
-                "description": "Inject recent diary entries into the prompt context",
-                "required_fields": [],
-                "optional_fields": [],
+                "schema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                },
+                "brief": "Inject recent diary entries into the prompt context",
+                "examples": {
+                    "description": "This action injects synth's recent diary entries to maintain memory and continuity",
+                    "instructions": {},
+                    "examples": []
+                }
             },
             "create_personal_diary_entry": {
-                "description": "Create a personal diary entry for synth's memory - REQUIRED in every response",
-                "required_fields": ["interaction_summary"],
-                "optional_fields": ["content", "personal_thought", "emotions", "context_tags", "involved_users"],
-                "instructions": {
-                    "description": "Create a diary entry recording what happened in this interaction. This action MUST be included in EVERY response.",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "interaction_summary": {
+                            "type": "string",
+                            "description": "Summary of what happened in this interaction"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "The response content (optional, auto-captured)"
+                        },
+                        "personal_thought": {
+                            "type": "string",
+                            "description": "Personal reflection on the interaction (optional)"
+                        },
+                        "emotions": {
+                            "type": "array",
+                            "description": "Array of emotions with type and intensity (1-10). Format: [{\"type\": \"emotion_name\", \"intensity\": 7}]",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "type": {"type": "string", "example": "joy"},
+                                    "intensity": {"type": "number", "example": 7, "minimum": 1, "maximum": 10}
+                                }
+                            }
+                        },
+                        "context_tags": {
+                            "type": "array",
+                            "description": "Tags for topics discussed (optional)"
+                        },
+                        "involved_users": {
+                            "type": "array",
+                            "description": "Users involved in the interaction (optional)"
+                        }
+                    },
+                    "required": ["interaction_summary"]
+                },
+                "brief": "Add a new diary entry to synth's memory - REQUIRED in every response",
+                "examples": {
+                    "description": "Create a diary entry recording what happened in this interaction. This action MUST be included in EVERY response to maintain synth's persistent memory.",
                     "when_to_use": "Use this action in every single response to record the interaction in synth's personal memory",
                     "examples": [
                         {
@@ -1062,7 +1238,12 @@ class DiaryPlugin:
         }
 
     def get_static_injection(self, message=None, context_memory=None) -> dict:
-        """Get recent diary entries for static injection. Returns empty dict if plugin disabled."""
+        """Get recent diary entries for static injection. Returns empty dict if plugin disabled.
+        
+        NOTE: This method now returns the RAW diary entries. The decision of whether to include
+        them in the prompt is made by prompt_engine.py based on available space. This method
+        just provides the data.
+        """
         global PLUGIN_ENABLED
         
         log_debug(f"[ai_diary] get_static_injection called, PLUGIN_ENABLED: {PLUGIN_ENABLED}")
@@ -1070,88 +1251,42 @@ class DiaryPlugin:
         if not PLUGIN_ENABLED:
             log_debug("[ai_diary] Plugin is disabled, returning empty entries")
             return {"latest_diary_entries": []}
-            
-        # Get interface name from message if available
-        interface_name = "manual"  # Default fallback
-        if message and hasattr(message, 'interface'):
-            interface_name = message.interface
-        elif message and isinstance(message, dict):
-            interface_name = message.get('interface', 'manual')
         
-        log_debug(f"[ai_diary] Interface name: {interface_name}")
-        
-        # Get current prompt length estimate (if available)
-        current_prompt_length = 0
-        max_prompt_chars = 0
-        
-        # Try to get prompt length from context_memory or message
-        if context_memory:
-            # Estimate based on context memory size
-            current_prompt_length = len(str(context_memory)) * 2  # Rough estimate
-        
-        # Get max prompt chars from active LLM
         try:
-            active_llm = _run_sync(get_active_llm())
-            registry = get_llm_registry()
-            engine = registry.get_engine(active_llm)
-            
-            if not engine:
-                engine = registry.load_engine(active_llm)
-            
-            if engine and hasattr(engine, 'get_interface_limits'):
-                limits = engine.get_interface_limits()
-                # Prefer an engine-provided limit, fall back to core default
-                try:
-                    from core.prompt_engine import DEFAULT_MAX_PROMPT_CHARS
-                    fallback_limit = DEFAULT_MAX_PROMPT_CHARS
-                except Exception:
-                    fallback_limit = 128000
-                max_prompt_chars = limits.get("max_prompt_chars", fallback_limit)
-                log_debug(f"[ai_diary] Active LLM {active_llm} max_prompt_chars: {max_prompt_chars}")
-            else:
-                try:
-                    from core.prompt_engine import DEFAULT_MAX_PROMPT_CHARS
-                    max_prompt_chars = DEFAULT_MAX_PROMPT_CHARS
-                except Exception:
-                    max_prompt_chars = 128000
-        except Exception as e:
-            log_debug(f"[ai_diary] Could not get active LLM limits: {e}")
+            # Get diary history days from config_registry
             try:
-                from core.prompt_engine import DEFAULT_MAX_PROMPT_CHARS
-                max_prompt_chars = DEFAULT_MAX_PROMPT_CHARS
-            except Exception:
-                max_prompt_chars = 128000
+                from core.config_manager import config_registry
+                diary_days = int(config_registry.get_value('DIARY_HISTORY_DAYS', 2, value_type=int))
+            except Exception as e:
+                log_debug(f"[ai_diary] Could not get DIARY_HISTORY_DAYS from config: {e}, using default 2")
+                diary_days = 2
+            
+            # Get recent entries with generous limit - prompt_engine will trim if needed
+            log_debug(f"[ai_diary] Getting recent entries for {diary_days} days")
+            
+            # Don't limit characters here - let prompt_engine.py decide based on actual prompt size
+            recent_entries = get_recent_entries(days=diary_days, max_chars=None)
+            
+            log_debug(f"[ai_diary] Retrieved {len(recent_entries)} diary entries for injection")
+            
+            if recent_entries:
+                # Log first few entries for debugging
+                for i, entry in enumerate(recent_entries[:3]):
+                    if isinstance(entry, dict):
+                        log_debug(f"[ai_diary] Entry {i+1}: content='{entry.get('content', '')[:50]}...', involved_users={entry.get('involved_users', [])}, interaction_summary='{entry.get('interaction_summary', '')}'")
+                    else:
+                        log_debug(f"[ai_diary] Entry {i+1}: WARNING - not a dict, type={type(entry)}")
+                log_info(f"[ai_diary] Returning {len(recent_entries)} diary entries for injection")
+            else:
+                log_debug("[ai_diary] No recent entries found")
+            
+            # ALWAYS return latest_diary_entries key, even if empty
+            return {"latest_diary_entries": recent_entries}
         
-        log_debug(f"[ai_diary] Prompt stats - current: {current_prompt_length}, max: {max_prompt_chars}")
-        
-        # Check if we should include diary based on available space
-        should_include = should_include_diary(interface_name, current_prompt_length, max_prompt_chars)
-        max_chars = get_max_diary_chars(interface_name, current_prompt_length)
-        
-        log_debug(f"[ai_diary] Should include diary: {should_include}, max_chars: {max_chars}")
-        
-        if not should_include:
-            log_debug("[ai_diary] Diary not included due to space constraints")
+        except Exception as e:
+            log_error(f"[ai_diary] Error in get_static_injection: {e}")
+            # Return empty list, not empty dict - so the key is present
             return {"latest_diary_entries": []}
-        
-        # Get recent entries with character limit
-        log_debug(f"[ai_diary] Getting recent entries for {DIARY_CONFIG['default_days']} days with max {max_chars} chars")
-        recent_entries = get_recent_entries(days=DIARY_CONFIG["default_days"], max_chars=max_chars)
-        
-        log_debug(f"[ai_diary] Retrieved {len(recent_entries)} diary entries")
-        
-        if not recent_entries:
-            log_debug("[ai_diary] No recent entries found, returning empty")
-            return {"latest_diary_entries": []}
-        
-        # Return raw entries as JSON instead of formatted text
-        log_info(f"[ai_diary] Returning {len(recent_entries)} diary entries for injection")
-        
-        # Log first few entries for debugging
-        for i, entry in enumerate(recent_entries[:3]):
-            log_debug(f"[ai_diary] Entry {i+1}: content='{entry.get('content', '')[:50]}...', involved_users={entry.get('involved_users', [])}, interaction_summary='{entry.get('interaction_summary', '')}'")
-        
-        return {"latest_diary_entries": recent_entries}
 
     def execute_action(self, action: dict, context: dict, bot, original_message):
         """Execute diary-related actions."""
@@ -1206,6 +1341,9 @@ class DiaryPlugin:
                 if payload_involved_users:
                     involved_users = payload_involved_users
                 
+                # Check if this diary entry is from a grillo beat
+                grillo_activity_log_id = context.get("activity_log_id") if context else None
+                
                 # If no content provided, extract from recent actions in context
                 if not content:
                     # This will be handled by the automatic diary creation in action_parser
@@ -1224,7 +1362,8 @@ class DiaryPlugin:
                     involved_users=involved_users,
                     interface=interface_name,
                     chat_id=str(chat_id) if chat_id else None,
-                    thread_id=str(thread_id) if thread_id else None
+                    thread_id=str(thread_id) if thread_id else None,
+                    grillo_activity_log_id=grillo_activity_log_id
                 )
                 
                 log_debug(f"[ai_diary] Created diary entry via action: '{interaction_summary}'")
@@ -1398,5 +1537,11 @@ def get_all_diary_entries(include_archived: bool = False) -> List[Dict[str, Any]
         return []
 
 
-# Instantiate the plugin to register it
+# Instantiate the plugin to register it with the core
+try:
+    _diary_plugin_instance = DiaryPlugin()
+    log_info("[ai_diary] Plugin instance created and registered with core")
+except Exception as e:
+    log_error(f"[ai_diary] Failed to instantiate DiaryPlugin: {e}")
+
 PLUGIN_CLASS = DiaryPlugin

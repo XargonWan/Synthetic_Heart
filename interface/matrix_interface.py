@@ -25,6 +25,7 @@ from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.config_manager import config_registry
 from core.config import get_trainer_id as core_get_trainer_id
 from plugins.chat_link import ChatLinkStore
+from core.variables_engine import register_exposed_var
 
 load_dotenv()
 
@@ -368,12 +369,32 @@ class MatrixInterface:
         else:
             date = datetime.now(tz=timezone.utc)
 
-        history = context_memory.setdefault(room_identifier, deque(maxlen=50))
-        history.append(text)
-
+        # Build interface_path for Matrix
+        from core.interface_path_utils import build_interface_path
         source = getattr(event, "source", {}) or {}
         content = source.get("content", {})
         relates_to = content.get("m.relates_to", {}) if isinstance(content, dict) else {}
+        thread_event_id = relates_to.get("event_id") if isinstance(relates_to, dict) else None
+        
+        # Matrix: matrix/room_id/event_id (if threaded)
+        interface_path = build_interface_path('matrix', room_identifier, thread_event_id if thread_event_id else None)
+        log_debug(f"[matrix_interface] Generated interface_path: {interface_path}")
+
+        # Track context using centralized manager
+        # NOTE: chat activity tracking is now centralized in chat_context_manager.add_message_to_context
+        from core.chat_context_manager import add_message_to_context
+        try:
+            await add_message_to_context(
+                interface_path=interface_path,
+                message_text=text,
+                sender_name=_extract_username(getattr(event, "sender", "")),
+                sender_id=getattr(event, "sender", "unknown"),
+                message_id=getattr(event, "event_id", None),
+                timestamp=date.isoformat() if date else None
+            )
+        except Exception as e:
+            log_warning(f"[matrix_interface] Failed to add message to context: {e}")
+
         reply_payload = relates_to.get("m.in_reply_to", {}) if isinstance(relates_to, dict) else {}
         reply_event_id = reply_payload.get("event_id")
 
@@ -392,10 +413,11 @@ class MatrixInterface:
         wrapped = SimpleNamespace(
             message_id=getattr(event, "event_id", None),
             chat_id=room_identifier,
+            interface_path=interface_path,  # Add interface_path to message
             text=text,
             caption=None,
             date=date,
-            thread_id=relates_to.get("event_id") if isinstance(relates_to, dict) else None,
+            thread_id=thread_event_id,
             from_user=SimpleNamespace(
                 id=getattr(event, "sender", None),
                 username=_extract_username(getattr(event, "sender", "")),
@@ -435,7 +457,7 @@ class MatrixInterface:
                     log_error(f"[matrix_interface] Command {command} failed: {exc}")
             return
 
-        await message_queue.enqueue(self, wrapped, context_memory, interface_id=INTERFACE_NAME)
+        await message_queue.enqueue(self, wrapped, interface_id=INTERFACE_NAME)
 
     # ------------------------------------------------------------------
     # Messaging helpers
@@ -481,6 +503,15 @@ class MatrixInterface:
             reply_to_event_id=reply_to_event_id,
             thread_event_id=thread_event_id,
         )
+        
+        # Save SyntH's response via core chat_context_manager
+        try:
+            from core.chat_context_manager import save_response_message
+            from core.interface_path_utils import build_interface_path
+            interface_path = build_interface_path('matrix', str(room_id), str(thread_event_id) if thread_event_id else None)
+            await save_response_message(interface_path, text)
+        except Exception as e:
+            log_debug(f"[matrix_interface] Failed to save response via context_manager: {e}")
 
     async def _send_matrix_message(
         self,
@@ -528,6 +559,101 @@ class MatrixInterface:
 
 # ----------------------------------------------------------------------
 # Configuration via registry
+
+# Register exposed variables for WebUI
+register_exposed_var(
+    "MATRIX_HOMESERVER",
+    label="Matrix Homeserver",
+    default="https://matrix.org/homeserver",
+    value_type=str,
+    ui_type="string",
+    description="Base URL of the Matrix homeserver (e.g. https://matrix.org/homeserver)",
+    scope="interface",
+    component="matrix_chat",
+)
+
+register_exposed_var(
+    "MATRIX_USER",
+    label="Matrix User ID",
+    default="",
+    value_type=str,
+    ui_type="string",
+    description="Matrix MXID used by the bot (e.g. @yoursynth:matrix.org).",
+    scope="interface",
+    component="matrix_chat",
+)
+
+register_exposed_var(
+    "MATRIX_PASSWORD",
+    label="Matrix Password",
+    default=None,
+    value_type=str,
+    ui_type="password",
+    description="Password used when logging into the homeserver (ignored if access token is provided).",
+    scope="interface",
+    tags=["sensitive"],
+    needs_component_reload=True,
+    component="matrix_bot",
+)
+
+register_exposed_var(
+    "MATRIX_ACCESS_TOKEN",
+    label="Matrix Access Token",
+    default=None,
+    value_type=str,
+    ui_type="password",
+    description="Optional long-lived access token used instead of password-based login.",
+    scope="interface",
+    tags=["sensitive"],
+    needs_component_reload=True,
+    component="matrix_bot",
+)
+
+register_exposed_var(
+    "MATRIX_DEVICE_ID",
+    label="Matrix Device ID",
+    default=None,
+    value_type=str,
+    ui_type="string",
+    description="Device identifier to reuse when establishing a session.",
+    scope="interface",
+    component="matrix_chat",
+)
+
+register_exposed_var(
+    "MATRIX_DEVICE_NAME",
+    label="Matrix Device Name",
+    default="SyntH",
+    value_type=str,
+    ui_type="string",
+    description="Human readable name for the device registered on the homeserver.",
+    scope="interface",
+    component="matrix_chat",
+)
+
+register_exposed_var(
+    "MATRIX_STORE_PATH",
+    label="Matrix Store Path",
+    default=None,
+    value_type=str,
+    ui_type="string",
+    description="Filesystem path where the Matrix client should store sync data.",
+    scope="interface",
+    tags=["bootstrap"],
+    hidden=True,
+    component="matrix_chat",
+)
+
+register_exposed_var(
+    "MATRIX_ALLOWED_ROOMS",
+    label="Matrix Allowed Rooms",
+    default="",
+    value_type=str,
+    ui_type="string",
+    description="Comma separated list of room IDs the bot is allowed to respond in. Leave empty to allow all rooms.",
+    scope="interface",
+    component="matrix_chat",
+)
 
 MATRIX_HOMESERVER = config_registry.get_var(
     "MATRIX_HOMESERVER",

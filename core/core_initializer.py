@@ -13,6 +13,13 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any
 from enum import Enum
 
+# Import exposed variables EARLY to ensure correct type registrations
+# before any circular import chains can cause persona_manager to load prematurely
+try:
+    import core.variables_engine  # noqa: F401
+except Exception as e:
+    log_warning(f"[core_initializer] Failed to import variables_engine at module level: {e}")
+
 
 class ComponentStatus(Enum):
     """Status of a system component."""
@@ -82,8 +89,40 @@ class CoreInitializer:
             # 0. Initialize registries
             await self._initialize_registries()
 
+            # 0.5. Pre-load ACTIVE_LLM from database before loading the LLM engine
+            # This ensures we load the correct LLM that was saved by the user
+            log_debug("[core_initializer] Pre-loading ACTIVE_LLM from database...")
+            try:
+                from core.config_manager import config_registry
+                # Force load ACTIVE_LLM from DB if it exists
+                definition = config_registry._definitions.get("ACTIVE_LLM")
+                if definition:
+                    from core.db import ensure_core_tables
+                    await ensure_core_tables()
+                    raw_value = await config_registry._load_from_db("ACTIVE_LLM")
+                    if raw_value:
+                        definition.raw_value = raw_value
+                        definition.value = config_registry._convert_value(definition, raw_value)
+                        definition.loaded = True
+                        log_info(f"[core_initializer] ✅ Pre-loaded ACTIVE_LLM from DB: {raw_value}")
+                    else:
+                        log_debug("[core_initializer] ACTIVE_LLM not found in DB, using default")
+                else:
+                    log_debug("[core_initializer] ACTIVE_LLM definition not found in registry")
+            except Exception as preload_exc:
+                log_warning(f"[core_initializer] Failed to pre-load ACTIVE_LLM: {preload_exc}")
+
             # 1. Load LLM engine
             await self._load_llm_engine(notify_fn)
+
+            # 1.5. Flush env overrides to DB now that LLM is loaded (avoids connection deadlocks)
+            try:
+                log_debug("[core_initializer] About to flush env overrides to database")
+                from core.config_manager import config_registry
+                await config_registry.flush_env_overrides_to_db()
+                log_debug("[core_initializer] Env overrides flushed to database successfully")
+            except Exception as flush_exc:
+                log_warning(f"[core_initializer] Failed to flush env overrides: {flush_exc}")
 
             # 2. Load generic plugins (this may load additional plugins)
             self._load_plugins()
@@ -98,10 +137,67 @@ class CoreInitializer:
             self._ensure_core_actions()
             log_debug("[core_initializer] ✅ _ensure_core_actions() completed")
             
-            # 4. Initialize core persona manager
+            # 4. Initialize core persona manager BEFORE loading DB configs
+            # This ensures persona variables (SYNTH_NAME, SYNTH_PROFILE, SYNTH_ALIASES) are registered first
+            # Ensure core DB tables exist before attempting to load persona
+            from core.db import ensure_core_tables
+            try:
+                await ensure_core_tables()
+                log_debug("[core_initializer] ensure_core_tables() completed before persona init")
+            except Exception as _e:
+                log_warning(f"[core_initializer] ensure_core_tables() failed: {_e}")
+
+            # 4.1. Initialize centralized chat context manager
+            log_debug("[core_initializer] Initializing centralized chat context manager...")
+            try:
+                from core.chat_context_manager import initialize_context_manager
+                await initialize_context_manager()
+                log_info("[core_initializer] ✅ Chat context manager initialized")
+            except Exception as e:
+                log_warning(f"[core_initializer] Failed to initialize chat context manager: {e}")
+
             log_debug("[core_initializer] 🔍 About to call _initialize_persona_manager()")
-            self._initialize_persona_manager()
-            log_debug("[core_initializer] ✅ _initialize_persona_manager() completed")
+            try:
+                await self._initialize_persona_manager()
+                log_debug("[core_initializer] ✅ _initialize_persona_manager() completed")
+            except Exception as e:
+                log_warning(f"[core_initializer] Persona manager async init failed: {e}")
+            
+            # 3.5. Load all configurations from DB AFTER persona manager initialization
+            # This ensures SYNTH_NAME, SYNTH_PROFILE, SYNTH_ALIASES have been registered and can be loaded from DB
+            log_info("[core_initializer] Loading all configurations from database...")
+            try:
+                from core.config_manager import config_registry
+                
+                # Reset loaded flag for persona configs so they're reloaded from DB
+                for persona_key in ['SYNTH_NAME', 'SYNTH_PROFILE', 'SYNTH_ALIASES']:
+                    if persona_key in config_registry._definitions:
+                        config_registry._definitions[persona_key].loaded = False
+                        log_debug(f"[core_initializer] Reset loaded flag for {persona_key}")
+                
+                await config_registry.load_all_from_db()
+                log_info("[core_initializer] ✅ All configurations loaded from database")
+                
+                # Notify all listeners so components can update their global variables
+                log_info("[core_initializer] Notifying all config listeners...")
+                config_registry.notify_all_listeners()
+                log_info("[core_initializer] ✅ All config listeners notified")
+                
+                # CRITICAL: Reload persona after config values are updated from DB
+                # This ensures SYNTH_NAME, SYNTH_PROFILE, etc. are correct in the persona object
+                log_info("[core_initializer] Reloading persona with updated config values...")
+                try:
+                    from core.persona_manager import get_persona_manager
+                    persona_mgr = get_persona_manager()
+                    if persona_mgr:
+                        await persona_mgr.reload_persona_from_config()
+                        log_info("[core_initializer] ✅ Persona reloaded with updated config values")
+                    else:
+                        log_warning("[core_initializer] Persona manager not available for reload")
+                except Exception as persona_reload_exc:
+                    log_warning(f"[core_initializer] Failed to reload persona from config: {persona_reload_exc}")
+            except Exception as load_exc:
+                log_warning(f"[core_initializer] Failed to load configurations from DB: {load_exc}")
         
             log_debug("[core_initializer] About to call _build_actions_block()")
             try:
@@ -124,25 +220,16 @@ class CoreInitializer:
             except Exception as e:
                 log_error(f"[core_initializer] Error in _discover_interfaces: {e}")
                 self.startup_errors.append(f"Interface discovery failed: {e}")
-
-            # 5. NOW load all configurations from DB (after all components have registered their variables)
-            log_info("[core_initializer] Loading all configurations from database...")
-            try:
-                from core.config_manager import config_registry
-                await config_registry.load_all_from_db()
-                log_info("[core_initializer] ✅ All configurations loaded from database")
-                
-                # Notify all listeners so components can update their global variables
-                log_info("[core_initializer] Notifying all config listeners...")
-                config_registry.notify_all_listeners()
-                log_info("[core_initializer] ✅ All config listeners notified")
-            except Exception as load_exc:
-                log_warning(f"[core_initializer] Failed to load configurations from DB: {load_exc}")
             
             # 6. Initialize interface instances now that config is loaded
             log_info("[core_initializer] Initializing interface instances...")
             self._initialize_interface_instances()
             log_info("[core_initializer] ✅ Interface instances initialized")
+
+            # 6.5. Register reload handlers for interfaces
+            log_info("[core_initializer] Registering automatic reload handlers...")
+            self._register_reload_handlers()
+            log_info("[core_initializer] ✅ Reload handlers registered")
 
             # Note: Startup summary will be displayed by main.py after all interfaces are started
             log_info("[core_initializer] Core initialization completed successfully")
@@ -152,6 +239,13 @@ class CoreInitializer:
             log_debug("[core_initializer] Set _initial_initialization=False - auto-refresh now allowed")
             self.initialization_completed = True
             log_info("[core_initializer] ✅ All core components initialized successfully")
+            
+            # Start database pool cleanup monitor to prevent exhaustion under load
+            try:
+                from core.db import start_pool_cleanup_task
+                await start_pool_cleanup_task()
+            except Exception as e:
+                log_warning(f"[core_initializer] Failed to start pool cleanup task: {e}")
             
             # Start all registered interfaces
             await self._start_interfaces()
@@ -267,18 +361,19 @@ class CoreInitializer:
             # The interfaces registry is initialized by each interface when it starts
             log_debug("[core_initializer] Registries initialized successfully")
             
-            # Flush env overrides to DB now that it should be ready
+            # NOTE: flush_env_overrides_to_db() will be called AFTER LLM engine is loaded
+            # to avoid connection pool deadlocks during initialization
+            # After registries are in place, migrate any existing config_registry
+            # definitions into the new Exposed Variables registry so metadata/UI
+            # info is centralized. This is a best-effort, idempotent migration.
             try:
-                from core.config_manager import config_registry
-                # Flush ENV overrides to DB immediately
-                await config_registry.flush_env_overrides_to_db()
-                log_debug("[core_initializer] Env overrides flushed to database")
-                
-                # NOTE: load_all_from_db() will be called AFTER all components have registered their variables
-                # This ensures variables from plugins, persona_manager, and interfaces are also loaded from DB
-            except Exception as flush_exc:
-                log_warning(f"[core_initializer] Failed to flush env overrides: {flush_exc}")
-                
+                # Note: variables_engine is already imported earlier (step 3.5),
+                # so exposed variables are already registered at this point.
+                from core.exposed_migration import migrate_all_registered_configs
+                migrate_all_registered_configs()
+                log_debug("[core_initializer] Exposed variables migration completed")
+            except Exception as _e:
+                log_warning(f"[core_initializer] Exposed variables migration failed: {_e}")
         except Exception as e:
             log_error(f"[core_initializer] Failed to initialize registries: {e}", e)
             self.startup_errors.append(f"Registry initialization failed: {e}")
@@ -395,6 +490,11 @@ class CoreInitializer:
 
                     instance = plugin_class()
 
+                    # Register the plugin immediately after instantiation so it's available for action discovery
+                    plugin_short_name = module_name.split(".")[-1]
+                    PLUGIN_REGISTRY[plugin_short_name] = instance
+                    log_debug(f"[core_initializer] Plugin {module_name} registered in PLUGIN_REGISTRY as '{plugin_short_name}'")
+
                     if hasattr(instance, "start"):
                         try:
                             if asyncio.iscoroutinefunction(instance.start):
@@ -443,12 +543,17 @@ class CoreInitializer:
                     )
                     self.startup_errors.append(f"Plugin {module_name}: {e}")
     
-    def _initialize_persona_manager(self):
-        """Initialize the core persona manager."""
+    async def _initialize_persona_manager(self):
+        """Initialize the core persona manager and await async init."""
         try:
             import importlib
             importlib.import_module("core.persona_manager")
-            log_debug("[core_initializer] Persona manager initialized")
+            # Ensure the PersonaManager instance exists and run its async_init
+            from core.persona_manager import get_persona_manager
+            manager = get_persona_manager()
+            if manager and hasattr(manager, 'async_init'):
+                await manager.async_init()
+            log_debug("[core_initializer] Persona manager initialized and async_init awaited")
         except Exception as e:
             log_error(f"[core_initializer] Failed to initialize persona manager: {e}")
             self.startup_errors.append(f"Persona manager: {e}")
@@ -470,8 +575,27 @@ class CoreInitializer:
             importlib.import_module("core.webui")
             log_debug("[core_initializer] Core WebUI loaded successfully")
         except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
             log_warning(f"[core_initializer] Failed to import core WebUI: {e}")
-            self.startup_errors.append(f"Core WebUI: {e}")
+            log_error(f"[core_initializer] Traceback while importing core.webui:\n{tb}")
+            # Record the error with some traceback so we can diagnose import-time failures
+            self.startup_errors.append(f"Core WebUI: {e} -- {tb}")
+        finally:
+            # Diagnostic dump: record whether core.webui is present in sys.modules
+            try:
+                import sys
+                present = 'core.webui' in sys.modules
+                log_debug(f"[core_initializer] Diagnostic: 'core.webui' in sys.modules = {present}")
+                if present:
+                    mod = sys.modules.get('core.webui')
+                    try:
+                        has_init = hasattr(mod, 'initialize_interface')
+                        log_debug(f"[core_initializer] core.webui module loaded: initialize_interface present={has_init}")
+                    except Exception:
+                        log_debug(f"[core_initializer] core.webui module loaded but unable to inspect initialize_interface")
+            except Exception:
+                pass
         
         # Discover interfaces from interface/ directory
         directories_to_scan = ["interface"]
@@ -497,13 +621,20 @@ class CoreInitializer:
                             importlib.import_module(full_module_path)
                             log_debug(f"[core_initializer] Successfully imported: {module_name}")
                         except Exception as e:
+                            import traceback
+                            tb = traceback.format_exc()
                             log_warning(f"[core_initializer] Failed to import interface {module_name}: {e}")
+                            log_error(f"[core_initializer] Traceback while importing {full_module_path}:\n{tb}")
+                            self.startup_errors.append(f"Interface {full_module_path}: {e} -- {tb}")
                 
                 log_debug(f"[core_initializer] {dir_name} auto-discovery complete")
                 
             except Exception as e:
+                import traceback
+                tb = traceback.format_exc()
                 log_error(f"[core_initializer] Error during {dir_name} discovery: {e}")
-                self.startup_errors.append(f"{dir_name} discovery failed: {e}")
+                log_error(f"[core_initializer] Traceback during discovery of {dir_name}:\n{tb}")
+                self.startup_errors.append(f"{dir_name} discovery failed: {e} -- {tb}")
     
     def _initialize_interface_instances(self):
         """Initialize interface instances after config has been loaded from DB.
@@ -519,7 +650,14 @@ class CoreInitializer:
         interface_modules = [name for name in sys.modules.keys() 
                            if name.startswith('interface.') or name.startswith('interface_dev.') or name == 'core.webui']
         
-        log_debug(f"[core_initializer] Found {len(interface_modules)} interface modules to initialize")
+        import sys as _sys
+        log_debug(f"[core_initializer] Found {len(interface_modules)} interface modules to initialize: {interface_modules}")
+        # Diagnostic: check if core.webui is in sys.modules
+        try:
+            present = 'core.webui' in _sys.modules
+            log_debug(f"[core_initializer] Diagnostic: 'core.webui' in sys.modules = {present}")
+        except Exception:
+            pass
         
         for module_name in interface_modules:
             try:
@@ -535,8 +673,68 @@ class CoreInitializer:
                     log_debug(f"[core_initializer] Module {module_name} has no initialize_interface function")
                     
             except Exception as e:
+                import traceback
+                tb = traceback.format_exc()
                 log_warning(f"[core_initializer] Failed to initialize interface {module_name}: {e}")
-                self.startup_errors.append(f"Interface initialization {module_name}: {e}")
+                log_error(f"[core_initializer] Traceback while initializing {module_name}:\n{tb}")
+                self.startup_errors.append(f"Interface initialization {module_name}: {e} -- {tb}")
+
+        # After attempting initialization, dump registry and startup errors for diagnostics
+        try:
+            from core.core_initializer import INTERFACE_REGISTRY as _ir
+            log_info(f"[core_initializer] Diagnostic: INTERFACE_REGISTRY keys after initialization: {list(_ir.keys())}")
+        except Exception:
+            pass
+        try:
+            log_info(f"[core_initializer] Diagnostic: startup_errors: {self.startup_errors}")
+        except Exception:
+            pass
+
+    def _register_reload_handlers(self):
+        """Register automatic reload handlers for components that need them.
+        
+        This ensures that when a configuration variable with needs_component_reload=True
+        is changed, the corresponding component's reload handler is triggered automatically.
+        """
+        from core.config_manager import config_registry
+        
+        # Define reload handlers for each interface
+        reload_handlers = {}
+        
+        # Telegram interface reload handler
+        try:
+            from interface import telegram_bot
+            if hasattr(telegram_bot, 'reload_interface'):
+                reload_handlers['telegram_bot'] = telegram_bot.reload_interface
+                log_debug("[core_initializer] Registered reload handler for telegram_bot")
+        except Exception as e:
+            log_debug(f"[core_initializer] Failed to register telegram_bot reload handler: {e}")
+        
+        # Discord interface reload handler
+        try:
+            from interface import discord_bot
+            if hasattr(discord_bot, 'reload_interface'):
+                reload_handlers['discord_bot'] = discord_bot.reload_interface
+                log_debug("[core_initializer] Registered reload handler for discord_bot")
+        except Exception as e:
+            log_debug(f"[core_initializer] Failed to register discord_bot reload handler: {e}")
+        
+        # Matrix interface reload handler
+        try:
+            from interface import matrix_bot
+            if hasattr(matrix_bot, 'reload_interface'):
+                reload_handlers['matrix_bot'] = matrix_bot.reload_interface
+                log_debug("[core_initializer] Registered reload handler for matrix_bot")
+        except Exception as e:
+            log_debug(f"[core_initializer] Failed to register matrix_bot reload handler: {e}")
+        
+        # Register all handlers with config registry
+        for component_name, handler in reload_handlers.items():
+            try:
+                config_registry.register_reload_handler(component_name, handler)
+                log_info(f"[core_initializer] ✅ Reload handler registered for component: {component_name}")
+            except Exception as e:
+                log_error(f"[core_initializer] Failed to register reload handler for {component_name}: {e}")
     
     def register_interface(self, interface_name: str):
         """Register an active interface."""
@@ -639,8 +837,15 @@ class CoreInitializer:
         log_debug("[core_initializer] Initialized available_actions dict")
 
         def _register(action_type: str, owner: str, schema: dict, instr_fn):
-            required = schema.get("required_fields", [])
-            optional = schema.get("optional_fields", [])
+            from core.action_schema_converter import normalize_action_schema
+            
+            # Normalize schema to new format (handles both old and new formats)
+            normalized = normalize_action_schema(action_type, schema)
+            
+            # Extract required/optional fields from normalized schema
+            required = list(normalized.get("schema", {}).get("required", []))
+            optional = list(set(normalized.get("schema", {}).get("properties", {}).keys()) - set(required))
+            
             if not isinstance(required, list) or not isinstance(optional, list):
                 raise ValueError(f"Invalid schema for {action_type} in {owner}")
 
@@ -652,35 +857,41 @@ class CoreInitializer:
                 log_debug(f"[core_initializer] Updating existing declaration for {action_type}")
                 # Merge required_fields and optional_fields
                 existing = available_actions[action_type]
-                existing_required = set(existing.get("required_fields", []))
-                existing_optional = set(existing.get("optional_fields", []))
+                
+                # Get existing schema info (for backward compat)
+                existing_required = set(existing.get("schema", {}).get("required", []))
+                existing_optional = set(existing.get("schema", {}).get("properties", {}).keys()) - existing_required
+                
                 new_required = set(required)
                 new_optional = set(optional)
                 
                 # Merge fields, giving priority to required over optional
                 merged_required = list(existing_required.union(new_required))
-                merged_optional = list((existing_optional.union(new_optional)) - set(merged_required))                # Keep track of original source, append new sources
+                merged_optional = list((existing_optional.union(new_optional)) - set(merged_required))
+                
+                # Keep track of original source, append new sources
                 existing_source = existing.get("source", "")
                 new_source = f"{existing_source}, {owner}" if existing_source else owner
                 
-                available_actions[action_type] = {
-                    "description": schema.get("description", ""),
-                    "required_fields": merged_required,
-                    "optional_fields": merged_optional,
-                    "source": new_source,
-                }
+                # Update schema with merged properties
+                merged_properties = {}
+                for field in merged_required + merged_optional:
+                    merged_properties[field] = {"type": "string", "description": f"Field: {field}"}
+                
+                normalized["schema"]["properties"] = merged_properties
+                normalized["schema"]["required"] = merged_required
+                normalized["source"] = new_source
+                
+                available_actions[action_type] = normalized
                 log_info(
                     f"[core_initializer] Merged {action_type} fields: required={merged_required}, optional={merged_optional}, source={new_source}"
                 )
             else:
-                available_actions[action_type] = {
-                    "description": schema.get("description", ""),
-                    "required_fields": required,
-                    "optional_fields": optional,
-                    "source": owner,
-                }
+                # Add source to normalized schema
+                normalized["source"] = owner
+                available_actions[action_type] = normalized
 
-            # Get and add instructions
+            # Get and add instructions (from plugin's get_prompt_instructions method)
             instr = instr_fn(action_type) if instr_fn else None
             if instr is None:
                 log_debug(f"Missing prompt instructions for {action_type}")
@@ -689,8 +900,12 @@ class CoreInitializer:
                 log_warning(f"Prompt instructions for {action_type} must be a dict, got {type(instr)}")
                 instr = {}
             
-            # Add instructions directly to the action
-            available_actions[action_type]["instructions"] = instr
+            # Add instructions to examples section if not already present
+            if "examples" not in available_actions[action_type]:
+                available_actions[action_type]["examples"] = {}
+            
+            if instr:
+                available_actions[action_type]["examples"]["instructions"] = instr
 
         # --- Load action plugins from registry ---
         log_debug(f"[core_initializer] Loading actions from {len(PLUGIN_REGISTRY)} plugins: {list(PLUGIN_REGISTRY.keys())}")
@@ -1193,5 +1408,25 @@ def _schedule_rebuild_actions(core_init_instance):
     global _action_rebuild_timer
     if _action_rebuild_timer:
         _action_rebuild_timer.cancel()
-    _action_rebuild_timer = threading.Timer(_ACTION_REBUILD_DEBOUNCE_SEC, lambda: asyncio.run(core_init_instance._build_actions_block()))
+    
+    def rebuild_with_main_loop():
+        """Run rebuild on main event loop to avoid creating new event loops."""
+        try:
+            # Try to get the main event loop
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # Schedule as a task on the running loop
+                asyncio.create_task(core_init_instance._build_actions_block())
+            else:
+                # If loop exists but not running, run until complete
+                loop.run_until_complete(core_init_instance._build_actions_block())
+        except RuntimeError:
+            # No event loop at all - this is a fallback but shouldn't happen
+            try:
+                asyncio.run(core_init_instance._build_actions_block())
+            except Exception as e:
+                from core.logging_utils import log_debug
+                log_debug(f"[core_initializer] Error rebuilding actions: {e}")
+    
+    _action_rebuild_timer = threading.Timer(_ACTION_REBUILD_DEBOUNCE_SEC, rebuild_with_main_loop)
     _action_rebuild_timer.start()

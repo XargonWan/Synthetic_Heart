@@ -19,6 +19,34 @@ _last_notify_messages = {}  # chat_id -> (last_time, message)
 _NOTIFY_CAP_PER_SEC = 5
 _NOTIFY_IDENTICAL_BLOCK_SEC = 300  # 5 minutes
 
+# Store main event loop to avoid creating new ones
+_main_loop = None
+
+def _set_main_loop(loop):
+    """Store reference to main event loop."""
+    global _main_loop
+    _main_loop = loop
+
+def _safe_schedule_async(coro):
+    """Schedule coroutine safely without creating new event loops."""
+    try:
+        loop = asyncio.get_running_loop()
+        if loop.is_running():
+            return loop.create_task(coro)
+    except RuntimeError:
+        # No running loop
+        pass
+    
+    # Fallback: use stored main loop if available
+    if _main_loop and not _main_loop.is_closed():
+        try:
+            return _main_loop.create_task(coro)
+        except Exception as e:
+            log_debug(f"[notifier] Failed to schedule on main loop: {e}")
+    
+    # Last resort: this shouldn't happen in normal operation
+    log_warning(f"[notifier] Could not schedule async task - no event loop available")
+
 
 def _default_notify(chat_id: int, message: str):
     """Fallback when no real notifier is configured: queue the message."""
@@ -41,15 +69,7 @@ def _maybe_call_notify_fn(fn: Callable[[int, str], None], chat_id: int, chunk: s
         result = fn(chat_id, chunk)
         # If the notifier returned a coroutine, schedule or run it
         if asyncio.iscoroutine(result):
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-            if loop and loop.is_running():
-                loop.create_task(result)
-            else:
-                # Running outside of an event loop: run synchronously
-                asyncio.run(result)
+            _safe_schedule_async(result)
     except Exception as e:  # pragma: no cover - best effort
         log_warning(f"[notifier] Notifier function raised while sending: {repr(e)}")
 
@@ -150,9 +170,9 @@ def notifier(message: str) -> None:
                 if loop and loop.is_running():
                     loop.create_task(send_to_logchat())
                 else:
-                    asyncio.run(send_to_logchat())
+                    _safe_schedule_async(send_to_logchat())
             except RuntimeError:
-                asyncio.run(send_to_logchat())
+                _safe_schedule_async(send_to_logchat())
             return
     
     # Fallback to trainer
@@ -196,9 +216,9 @@ def notify_intelligent(message: str) -> None:
                 if loop and loop.is_running():
                     loop.create_task(send_to_logchat())
                 else:
-                    asyncio.run(send_to_logchat())
+                    _safe_schedule_async(send_to_logchat())
             except RuntimeError:
-                asyncio.run(send_to_logchat())
+                _safe_schedule_async(send_to_logchat())
             return
     
     # Fallback to trainer
@@ -233,9 +253,9 @@ def _fallback_to_trainer(message: str) -> None:
                     if loop and loop.is_running():
                         loop.create_task(send_to_trainer())
                     else:
-                        asyncio.run(send_to_trainer())
+                        _safe_schedule_async(send_to_trainer())
                 except RuntimeError:
-                    asyncio.run(send_to_trainer())
+                    _safe_schedule_async(send_to_trainer())
                 return
     
     # No fallback available
@@ -324,7 +344,7 @@ def notify_trainer(message: str) -> None:
             if loop and loop.is_running():
                 loop.create_task(send(tgt))
             else:
-                asyncio.run(send(tgt))
+                _safe_schedule_async(send(tgt))
 
 
 def flush_pending_for_interface(interface_name: str) -> None:
@@ -356,7 +376,7 @@ def flush_pending_for_interface(interface_name: str) -> None:
         if loop and loop.is_running():
             loop.create_task(send())
         else:
-            asyncio.run(send())
+            _safe_schedule_async(send())
 
     _pending_interface_msgs[:] = remaining
 

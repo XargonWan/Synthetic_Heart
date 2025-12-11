@@ -12,6 +12,7 @@ from core.core_initializer import core_initializer, register_plugin
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.time_zone_utils import get_local_location
 from core.config_manager import config_registry
+from core.variables_engine import register_exposed_var
 
 # Injection priority for weather information
 INJECTION_PRIORITY = 2  # High priority - weather is contextually important
@@ -25,6 +26,19 @@ def register_injection_priority():
 
 # Register priority when module is loaded
 register_injection_priority()
+
+# Register exposed variable for WebUI
+register_exposed_var(
+    "WEATHER_FETCH_TIME",
+    label="Weather Fetch Interval",
+    default=60,
+    value_type=int,
+    ui_type="number",
+    description="Minutes between weather data fetches",
+    scope="plugins",
+    component="weather_plugin",
+    tags=["plugin"],
+)
 
 
 class WeatherPlugin:
@@ -64,6 +78,9 @@ class WeatherPlugin:
         # Use a dedicated executor so we don't depend on the event loop's default executor
         # which may be shut down during interpreter shutdown.
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+        # Background scheduler task (managed as singleton per process)
+        self._scheduler_task = None
+        self._scheduler_running = False
 
     # Plugin action registration
     def get_supported_action_types(self):
@@ -163,6 +180,57 @@ class WeatherPlugin:
             log_warning(f"[weather_plugin] Failed to fetch weather: {e}")
             log_error("[weather_plugin] Weather update error", e)
             self._cached_weather = f"{location}: ⚠️ Weather service error (please try again later)"
+
+    async def start(self):
+        """Start background scheduler to periodically refresh weather cache."""
+        if self._scheduler_task and not self._scheduler_task.done():
+            log_info("[weather_plugin] Scheduler already running, skipping start")
+            return
+
+        self._scheduler_running = True
+        # Ensure immediate fetch on start
+        loop = None
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            self._scheduler_task = loop.create_task(self._weather_loop())
+            log_info("[weather_plugin] Scheduler task started")
+        else:
+            # If no running loop, schedule task later when start() is invoked in that context
+            log_debug("[weather_plugin] No running loop to start scheduler; will start when event loop is available")
+
+    async def stop(self):
+        """Stop background scheduler and cancel task."""
+        self._scheduler_running = False
+        if self._scheduler_task and not self._scheduler_task.done():
+            self._scheduler_task.cancel()
+            try:
+                await self._scheduler_task
+            except asyncio.CancelledError:
+                pass
+        self._scheduler_task = None
+        log_info("[weather_plugin] Scheduler stopped")
+
+    async def _weather_loop(self):
+        """Background loop that updates weather periodically based on fetch_minutes."""
+        log_info("[weather_plugin] Weather background loop started")
+        try:
+            while self._scheduler_running:
+                try:
+                    await self._update_weather()
+                except Exception as e:
+                    log_warning(f"[weather_plugin] Error during scheduled update: {e}")
+                # Sleep for configured minutes (fallback to 60 if invalid)
+                try:
+                    interval = int(self.fetch_minutes) if self.fetch_minutes and int(self.fetch_minutes) > 0 else 60
+                except Exception:
+                    interval = 60
+                await asyncio.sleep(interval * 60)
+        finally:
+            log_info("[weather_plugin] Weather background loop exiting")
 
     @staticmethod
     def _choose_emoji(description: str) -> str:

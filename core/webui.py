@@ -40,15 +40,16 @@ from core.logging_utils import _LOG_FILE, log_debug, log_error, log_info, log_wa
 from core.config_manager import config_registry
 from core.message_chain import get_failed_message_text, RESPONSE_TIMEOUT, FAILED_MESSAGE_TEXT
 import core.plugin_instance as plugin_instance
-from core.animation_handler import get_animation_handler, AnimationState
-from core.persona_manager import get_persona_manager
+from core import db as core_db
 from core.action_state_manager import get_action_state_manager, AnimationPhase
+from core.animation_handler import AnimationState
 import mimetypes
 
 
 BRAND_NAME = "SyntH Web UI"
 INTERFACE_NAME = "synth_webui"
 LOG_PREFIX = "[synth_webui]"
+WEBUI_LOG = "webui"  # Log file name for WebUI (logs/webui.log)
 _LEGACY_AUTOSTART_ENV = "WEBWAIFU_AUTOSTART"
 _AUTOSTART_ENV = "SYNTH_WEBUI_AUTOSTART"
 _LEGACY_VRM_DIR_ENV = "WEBWAIFU_VRM_DIR"
@@ -73,210 +74,87 @@ class SynthWebUIInterface:
         self.connections: Dict[str, WebSocket] = {}
         self.message_history: Dict[str, Deque[dict]] = {}
         self.max_history = 100
-
-        self.host = config_registry.get_value(
-            "WEBUI_HOST",
-            "0.0.0.0",
-            label="Web UI Host",
-            description="Address the Web UI server binds to.",
-            group="core",
-            component=INTERFACE_NAME,
-            advanced=True,
-            tags=["bootstrap"],
-        )
-
-        def _update_host(value: str | None) -> None:
-            self.host = (value or "0.0.0.0").strip() or "0.0.0.0"
-
-        config_registry.add_listener("WEBUI_HOST", _update_host)
-
-        self.port = config_registry.get_value(
-            "WEBUI_PORT",
-            8000,
-            label="Web UI Port",
-            description="Port used by the Web UI server.",
-            value_type=int,
-            group="core",
-            component=INTERFACE_NAME,
-            advanced=True,
-            tags=["bootstrap"],
-        )
-
-        def _update_port(value) -> None:
-            try:
-                self.port = int(value)
-            except Exception:
-                log_warning(f"{LOG_PREFIX} Ignoring invalid WEBUI_PORT value: {value}")
-
-        config_registry.add_listener("WEBUI_PORT", _update_port)
-
-        autostart_flag = config_registry.get_value(
-            _AUTOSTART_ENV,
-            True,
-            label="Autostart Web UI",
-            description="Automatically start the Web UI background server when synth boots.",
-            value_type=bool,
-            group="core",
-            component=INTERFACE_NAME,
-            tags=["bootstrap"],  # Hidden from UI
-        )
-        legacy_autostart = os.getenv(_LEGACY_AUTOSTART_ENV)
-        if legacy_autostart is not None:
-            autostart_flag = str(legacy_autostart).strip().lower() not in {"0", "false", "False"}
-        self.autostart = bool(autostart_flag)
-
-        def _update_autostart(value) -> None:
-            if isinstance(value, bool):
-                self.autostart = value
-            else:
-                self.autostart = str(value).strip().lower() not in {"0", "false", "False"}
-
-        config_registry.add_listener(_AUTOSTART_ENV, _update_autostart)
-
-        self._server_thread: Optional[threading.Thread] = None
-        self._server: Optional[object] = None  # uvicorn.Server set when started
+        # Runtime/configurable attributes with sensible defaults
+        # The Web UI must always autostart; do not allow runtime toggle.
+        self.autostart = True
+        self.host = os.getenv('SYNTH_WEBUI_HOST', '0.0.0.0')
+        try:
+            self.port = int(os.getenv('SYNTH_WEBUI_PORT', os.getenv('PORT', '8080')))
+        except Exception:
+            self.port = 8080
+        self.log_level = os.getenv('SYNTH_WEBUI_LOG_LEVEL', 'info')
+        # Selkies desktop ports used for UI hints
+        try:
+            self.selkies_https_port = int(os.getenv('SELKIES_HTTPS_PORT', '3000'))
+        except Exception:
+            self.selkies_https_port = 3000
+        try:
+            self.selkies_http_port = int(os.getenv('SELKIES_HTTP_PORT', '3001'))
+        except Exception:
+            self.selkies_http_port = 3001
+        # Log streaming options
+        self.log_source_path = None
+        self.log_wait_seconds = 20
+        # Server control placeholders
         self._server_lock = threading.Lock()
+        self._server = None
+        self._server_thread = None
+        self._server_task = None
 
-        default_vrm_dir = Path(__file__).resolve().parent.parent / "res" / "synth_webui" / "avatars"
-        vrm_dir_setting = config_registry.get_value(
-            _VRM_DIR_ENV,
-            str(default_vrm_dir),
-            label="VRM Storage Directory",
-            description="Directory where uploaded VRM avatars are stored.",
-            group="core",
-            component=INTERFACE_NAME,
-            tags=["bootstrap"],  # Hidden from UI - managed via docker volume
-        )
-        legacy_vrm_dir = os.getenv(_LEGACY_VRM_DIR_ENV)
-        if legacy_vrm_dir:
-            vrm_dir_setting = legacy_vrm_dir
-        self.vrm_dir = Path(vrm_dir_setting).expanduser()
+        # Static and VRM directories used by the Web UI. These are calculated
+        # relative to the repository layout and can be overridden using the
+        # SYNTH_WEBUI_VRM_DIR environment variable for deployments.
+        base_res = Path(__file__).resolve().parent.parent / "res" / "synth_webui"
+        static_dir = base_res / "static"
 
-        def _update_vrm_dir(value: str | None) -> None:
-            try:
-                new_dir = Path(value or str(default_vrm_dir)).expanduser()
-                new_dir.mkdir(parents=True, exist_ok=True)
-                self.vrm_dir = new_dir
-                log_info(f"{LOG_PREFIX} VRM directory updated to {new_dir}")
-            except Exception as exc:
-                log_warning(f"{LOG_PREFIX} Failed to update VRM directory: {exc}")
-
-        config_registry.add_listener(_VRM_DIR_ENV, _update_vrm_dir)
-
+        # VRM directory: default to skins/temp (deterministic upload location)
+        env_vrm = os.getenv(_VRM_DIR_ENV) or os.getenv(_LEGACY_VRM_DIR_ENV)
+        if env_vrm:
+            self.vrm_dir = Path(env_vrm).expanduser()
+        else:
+            # store uploaded VRMs in skins/temp to be deterministic
+            self.vrm_dir = Path('skins/temp')
+        # Ensure parent exists
         try:
             self.vrm_dir.mkdir(parents=True, exist_ok=True)
-        except Exception as exc:  # pragma: no cover - runtime issues
-            log_warning(f"{LOG_PREFIX} Failed to ensure VRM directory {self.vrm_dir}: {exc}")
+        except Exception:
+            # Non-fatal; operations will check existence before use
+            pass
 
+        # Active VRM marker file path
         self.active_vrm_marker = self.vrm_dir / ".active"
+        # Load active VRM from marker or default
         self.active_vrm = self._load_active_vrm()
 
-        self.log_source_path = config_registry.get_value(
-            "SYNTH_LOG_PATH",
-            "",
-            label="Log File Override",
-            description="Optional absolute path to the log file streamed to the browser.",
-            group="core",
-            component=INTERFACE_NAME,
-            tags=["bootstrap"],  # Hidden from UI
-        )
-        self.log_wait_seconds = config_registry.get_value(
-            "SYNTH_LOG_WAIT",
-            20,
-            label="Log Stream Wait",
-            description="Seconds to wait for the log file to appear before aborting.",
-            value_type=int,
-            group="core",
-            component=INTERFACE_NAME,
-            advanced=True,
-        )
-        
-        # Use system-wide LOG_LEVEL
-        from core.logging_utils import _LOGGING_LEVEL
-        self.log_level = _LOGGING_LEVEL.lower()  # Follow global logging level
-        
-        def _update_log_level(value: str | None) -> None:
-            self.log_level = (value or "error").lower()
-        
-        config_registry.add_listener("LOGGING_LEVEL", _update_log_level)
-
-        # Selkies (desktop) ports
-        self.selkies_https_port = config_registry.get_value(
-            "SELKIES_HTTPS_PORT",
-            "3000",
-            label="Selkies HTTPS Port",
-            description="HTTPS port for Selkies desktop access.",
-            group="core",
-            component=INTERFACE_NAME,
-            advanced=True,
-        )
-        
-        self.selkies_http_port = config_registry.get_value(
-            "SELKIES_HTTP_PORT",
-            "3001",
-            label="Selkies HTTP Port",
-            description="HTTP port for Selkies desktop access.",
-            group="core",
-            component=INTERFACE_NAME,
-            advanced=True,
-        )
-
-        config_registry.add_listener("SYNTH_LOG_PATH", lambda value: setattr(self, "log_source_path", value or ""))
-
-        def _update_log_wait(value) -> None:
-            try:
-                parsed = int(value)
-                self.log_wait_seconds = parsed if parsed > 0 else 20
-            except Exception:
-                log_warning(f"{LOG_PREFIX} Invalid SYNTH_LOG_WAIT value: {value}")
-
-        config_registry.add_listener("SYNTH_LOG_WAIT", _update_log_wait)
-        
-        def _update_selkies_https_port(value) -> None:
-            self.selkies_https_port = value or "3000"
-        
-        config_registry.add_listener("SELKIES_HTTPS_PORT", _update_selkies_https_port)
-        
-        def _update_selkies_http_port(value) -> None:
-            self.selkies_http_port = value or "3001"
-        
-        config_registry.add_listener("SELKIES_HTTP_PORT", _update_selkies_http_port)
-
-        # Allow the UI to be embedded if desired (same-origin by default)
-        self.app.add_middleware(
-            CORSMiddleware,
-            allow_origins=["*"],
-            allow_credentials=True,
-            allow_methods=["*"],
-            allow_headers=["*"],
-        )
-
-        static_dir = Path(__file__).resolve().parent.parent / "docs" / "res"
         if static_dir.exists():
             self.app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
         else:
-            log_warning(f"{LOG_PREFIX} static directory not found: {static_dir}")
+            log_warning(f"{LOG_PREFIX} static directory not found: {static_dir}", log_file=WEBUI_LOG)
         
         # Mount JS directory for Mixamo animations (separate mount to avoid path conflicts)
         js_dir = Path(__file__).resolve().parent.parent / "res" / "synth_webui" / "js"
         if js_dir.exists():
             self.app.mount("/js", StaticFiles(directory=str(js_dir)), name="synth-webui-js")
-            log_info(f"{LOG_PREFIX} Mounted /js to {js_dir}")
+            log_info(f"{LOG_PREFIX} Mounted /js to {js_dir}", log_file=WEBUI_LOG)
         else:
-            log_warning(f"{LOG_PREFIX} JS directory not found: {js_dir}")
-        
-        # Mount animations directory for VRM animations
-        animations_dir = Path(__file__).resolve().parent.parent / "res" / "synth_webui" / "animations"
-        if animations_dir.exists():
-            self.app.mount("/animations", StaticFiles(directory=str(animations_dir)), name="synth-webui-animations")
-            log_info(f"{LOG_PREFIX} Mounted /animations to {animations_dir}")
-        else:
-            log_warning(f"{LOG_PREFIX} Animations directory not found: {animations_dir}")
+            log_warning(f"{LOG_PREFIX} JS directory not found: {js_dir}", log_file=WEBUI_LOG)
 
-        log_info(f"{LOG_PREFIX} ========== VRM DIRECTORY MOUNT ==========")
-        log_info(f"{LOG_PREFIX} VRM directory path: {self.vrm_dir}")
-        log_info(f"{LOG_PREFIX} VRM directory exists: {self.vrm_dir.exists()}")
+        # Use the bundled static logo path. The image is expected to be present
+        # in the image under /app/res/synth_webui/static/synth_logo_bg.png.
+        self.logo_url = '/static/synth_logo_bg.png'
         
+        # No global animations directory: animations live inside each skin under /skins/<skin>/animations
+
+        # Mount skins directory (contains per-skin assets: preview, animations, md)
+        skins_dir = Path(__file__).resolve().parent.parent / "skins"
+        if skins_dir.exists():
+            try:
+                self.app.mount("/skins", StaticFiles(directory=str(skins_dir)), name="synth-webui-skins")
+                log_info(f"{LOG_PREFIX} Mounted /skins to {skins_dir}")
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to mount /skins: {exc}")
+        else:
+            log_warning(f"{LOG_PREFIX} Skins directory not found: {skins_dir}")
         if self.vrm_dir.exists():
             log_debug(f"{LOG_PREFIX} VRM directory is_dir: {self.vrm_dir.is_dir()}")
             log_debug(f"{LOG_PREFIX} VRM directory is readable: {os.access(self.vrm_dir, os.R_OK)}")
@@ -290,15 +168,6 @@ class SynthWebUIInterface:
                     log_info(f"{LOG_PREFIX}   - {item.name} ({file_type}, {size} bytes)")
             except Exception as list_exc:
                 log_warning(f"{LOG_PREFIX} Unable to list VRM directory contents: {list_exc}")
-            
-            try:
-                log_info(f"{LOG_PREFIX} Mounting /avatars to {self.vrm_dir}...")
-                self.app.mount("/avatars", StaticFiles(directory=str(self.vrm_dir)), name="synth-webui-avatars")
-                log_info(f"{LOG_PREFIX} ✓ Successfully mounted /avatars endpoint")
-            except Exception as exc:  # pragma: no cover - runtime
-                log_error(f"{LOG_PREFIX} ⚠️ Unable to mount VRM directory {self.vrm_dir}: {exc}")
-                import traceback
-                log_error(f"{LOG_PREFIX} Traceback: {traceback.format_exc()}")
         else:
             log_warning(f"{LOG_PREFIX} VRM directory does not exist, /avatars endpoint NOT mounted")
         
@@ -308,9 +177,11 @@ class SynthWebUIInterface:
         self.app.get("/")(self.index)
         self.app.get("/health")(self.health)
         self.app.get("/api/action-state")(self.get_action_state_endpoint)
+        self.app.get("/api/emotion-state")(self.get_emotion_state_endpoint)
         self.app.get("/stats")(self.stats)
         self.app.get("/logs")(self.logs_page)
         self.app.get("/diary")(self.diary_page)
+        self.app.post("/api/log-console")(self.log_console_endpoint)
         self.app.websocket("/ws")(self.websocket_endpoint)
         self.app.websocket("/logs")(self.logs_ws_endpoint)
         self.app.get("/api/vrm")(self.list_vrm_models)
@@ -318,11 +189,19 @@ class SynthWebUIInterface:
         self.app.post("/api/vrm")(self.upload_vrm_model)
         self.app.post("/api/vrm/active")(self.set_active_vrm_endpoint)
         self.app.delete("/api/vrm/{model_name}")(self.delete_vrm_model)
+
+        self.app.post("/api/persona")(self.upload_persona_pack)
+        # Skins management endpoints
+        self.app.get("/api/skins")(self.list_skins)
+        self.app.post("/api/skins/{skin_name}/activate")(self.activate_skin)
+        self.app.post("/api/skins/uploaded/clear")(self.clear_uploaded_vrm)
         self.app.get("/api/components")(self.components_summary)
         self.app.post("/api/components/reload")(self.reload_component)
         self.app.post("/api/components/dev/toggle")(self.toggle_dev_components)
         self.app.post("/api/system/restart")(self.restart_system)
         self.app.get("/api/config")(self.config_summary)
+        # Debug endpoints (only enabled when WEB_DEBUG=1)
+        self.app.get("/api/debug/db_pool")(self.db_pool_debug)
         self.app.post("/api/config")(self.update_config_entry)
         self.app.post("/api/components/llm")(self.set_llm_engine)
         self.app.get("/api/logchat/info")(self.get_logchat_info)
@@ -330,33 +209,42 @@ class SynthWebUIInterface:
         self.app.post("/api/diary/archive")(self.archive_diary_entries)
         self.app.post("/api/diary/unarchive")(self.unarchive_diary_entries)
         self.app.delete("/api/diary/archive")(self.delete_archived_entries)
+        # History API endpoints (unified diary, grillo, chat history)
+        self.app.get("/api/history/diary")(self.history_diary)
+        self.app.get("/api/history/grillo")(self.history_grillo)
+        self.app.get("/api/history/chat")(self.history_chat)
         self.app.get("/api/selkies")(self.get_selkies_config)
+        self.app.get("/api/animations/{skin}/{animation_type}")(self.get_animations_for_type)
+        self.app.get("/api/locations")(self.get_suggested_locations)
 
         # Template sections route for modular loading
         self.app.get("/templates/{section}.html")(self.serve_template_section)
 
         register_interface(INTERFACE_NAME, self)
-        log_info(f"{LOG_PREFIX} Interface registered")
+        log_info(f"{LOG_PREFIX} Interface registered", log_file=WEBUI_LOG)
         
         # Initialize animation handler
+        from core.animation_handler import get_animation_handler
         self.animation_handler = get_animation_handler()
         self.animation_handler.set_webui(self)
-        log_info(f"{LOG_PREFIX} Animation handler initialized")
+        # Register callback to broadcast animation state changes to all WebSocket clients
+        self.animation_handler.register_animation_state_changed_callback(self._broadcast_animation_state)
+        log_info(f"{LOG_PREFIX} Animation handler initialized with WebSocket broadcast", log_file=WEBUI_LOG)
         
         # Initialize global action state manager
         self.action_state_manager = get_action_state_manager()
         # Register callback to broadcast state changes to all WebSocket clients
         self.action_state_manager.register_state_changed_callback(self._broadcast_action_state)
-        log_info(f"{LOG_PREFIX} Action state manager initialized with WebSocket broadcast")
+        log_info(f"{LOG_PREFIX} Action state manager initialized with WebSocket broadcast", log_file=WEBUI_LOG)
         
         # Persona manager will be initialized in start() method after core initialization
         self.persona_manager = None
         
         if self.autostart:
-            log_info(f"{LOG_PREFIX} Autostart enabled - will start server when event loop is available")
+            log_info(f"{LOG_PREFIX} Autostart enabled - will start server when event loop is available", log_file=WEBUI_LOG)
             # Don't start server here - it will be started by the main application
         else:
-            log_info(f"{LOG_PREFIX} Autostart disabled - {BRAND_NAME} will not start automatically")
+            log_info(f"{LOG_PREFIX} Autostart disabled - {BRAND_NAME} will not start automatically", log_file=WEBUI_LOG)
 
     # ------------------------------------------------------------------
     # Interface metadata
@@ -369,7 +257,7 @@ class SynthWebUIInterface:
     def get_supported_actions() -> dict:
         return {
             "message_synth_webui": {
-                "required_fields": ["text", "target"],
+                "required_fields": ["text", "interface_path"],
                 "optional_fields": [],
                 "description": f"Send a text message to a {BRAND_NAME} session.",
             }
@@ -419,7 +307,7 @@ class SynthWebUIInterface:
             
             replacements = {
                 '%%BRAND_NAME%%': BRAND_NAME,
-                '%%LOGO_URL%%': '/static/synth_logo.png',  # Default logo path
+                '%%LOGO_URL%%': str(getattr(self, 'logo_url', '/static/synth_logo_bg.png')),
                 '%%RESPONSE_TIMEOUT%%': str(int(RESPONSE_TIMEOUT)),
                 '%%FAILED_MESSAGE_TEXT%%': str(get_failed_message_text()),
                 # Expose WEB_DEBUG flag to the template (default false)
@@ -472,9 +360,98 @@ class SynthWebUIInterface:
                 "started_at": None
             })
 
+    async def get_emotion_state_endpoint(self):
+        """Get the current emotional state for animation/face expressions.
+        
+        Returns JSON with emotion state for dynamic facial expression updates.
+        This endpoint is used by the WebUI to fetch emotion data periodically
+        for updating the 3D model's facial expressions and animations.
+        
+        Example response:
+        {
+            "emotions": {
+                "happy": 7.5,
+                "calm": 5.2,
+                "curious": 4.0
+            },
+            "dominant_emotion": "happy"
+        }
+        """
+        try:
+            from plugins.emotion_manager import EmotionManager
+            emotion_mgr = EmotionManager()
+            
+            # Get current emotion state with decay applied
+            emotions = await emotion_mgr.get_emotion_state()
+            
+            # Find dominant emotion (highest intensity)
+            dominant = None
+            if emotions:
+                dominant = max(emotions.items(), key=lambda x: x[1])[0]
+            
+            return JSONResponse({
+                "emotions": emotions,
+                "dominant_emotion": dominant,
+                "timestamp": datetime.utcnow().isoformat(),
+            })
+            
+        except Exception as e:
+            log_warning(f"{LOG_PREFIX} Failed to get emotion state: {e}")
+            # Return neutral state if emotion manager unavailable
+            return JSONResponse({
+                "emotions": {},
+                "dominant_emotion": None,
+                "timestamp": datetime.utcnow().isoformat(),
+                "error": str(e),
+            })
+
+    async def log_console_endpoint(self, request: Request):
+        """Receive console logs from the WebUI frontend and write them to webui.log.
+        
+        This endpoint allows the JavaScript console logs (log, error, warn, info)
+        to be captured and written to the webui.log file for persistence and debugging.
+        """
+        try:
+            data = await request.json()
+            level = data.get('level', 'info').upper()
+            message = data.get('message', '')
+            
+            if message:
+                # Log to webui.log with appropriate level
+                if level == 'ERROR':
+                    log_error(f"[console] {message}", log_file=WEBUI_LOG)
+                elif level == 'WARNING':
+                    log_warning(f"[console] {message}", log_file=WEBUI_LOG)
+                elif level == 'DEBUG':
+                    log_debug(f"[console] {message}", log_file=WEBUI_LOG)
+                else:  # info
+                    log_info(f"[console] {message}", log_file=WEBUI_LOG)
+            
+            return JSONResponse({"status": "logged"})
+        except Exception as e:
+            log_error(f"{LOG_PREFIX} Failed to log console message: {e}")
+            return JSONResponse({"status": "error", "error": str(e)}, status_code=500)
+
     async def stats(self):
         uptime = int((datetime.utcnow() - self.start_time).total_seconds())
         return JSONResponse({"uptime": uptime, "sessions": len(self.connections)})
+
+    async def db_pool_debug(self, request: Request):
+        """Return debug information about the DB connection pool.
+
+        This endpoint is intentionally gated by the WEB_DEBUG environment
+        variable to avoid exposing internals in production by accident.
+        """
+        web_debug = os.getenv('WEB_DEBUG', '0').lower()
+        if web_debug not in ('1', 'true', 'yes'):
+            raise HTTPException(status_code=403, detail="Debug endpoints disabled")
+
+        try:
+            info = core_db.get_pool_debug_info()
+            return JSONResponse(info)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to get DB pool debug info: {exc}")
+            raise HTTPException(status_code=500, detail="Unable to retrieve DB debug info")
 
     async def logs_page(self):
         html = self._render_logs()
@@ -526,6 +503,28 @@ class SynthWebUIInterface:
         self.message_history.setdefault(session_id, deque(maxlen=self.max_history))
         await websocket.send_json({"type": "session", "session_id": session_id})
         await self._replay_history(session_id)
+        
+        # Send current centralized animation state to new client
+        try:
+            if self.animation_handler:
+                current_anim_state = self.animation_handler.get_current_animation_state()
+                if current_anim_state["animation_file"]:
+                    # Resolve the animation path
+                    resolved_path, _ = self.animation_handler._resolve_animation_descriptor(
+                        current_anim_state["animation_file"]
+                    )
+                    message = {
+                        "type": "animation",
+                        "state": current_anim_state["state"],
+                        "animation": resolved_path,
+                        "loop": current_anim_state["descriptor"].get("play_once", False) is False 
+                                if current_anim_state["descriptor"] else True,
+                        "descriptor": current_anim_state["descriptor"]
+                    }
+                    await websocket.send_json(message)
+                    log_debug(f"{LOG_PREFIX} Sent current animation state to new session {session_id}: {current_anim_state['state']}")
+        except Exception as anim_exc:
+            log_warning(f"{LOG_PREFIX} Failed to send animation state to new session {session_id}: {anim_exc}")
         
         # Set initial idle animation for new session
         try:
@@ -700,20 +699,72 @@ class SynthWebUIInterface:
             except Exception as exc:
                 log_warning(f"{LOG_PREFIX} Failed to broadcast action state to session {session_id}: {exc}")
 
+    async def _broadcast_animation_state(
+        self,
+        state: AnimationState,
+        animation_file: str,
+        descriptor: Optional[Dict[str, Any]]
+    ) -> None:
+        """
+        Broadcast the current animation state to all connected WebSocket clients.
+        
+        Called whenever the animation changes (from AnimationHandler callback).
+        This ensures all clients see the same animation on the 3D model.
+        
+        Args:
+            state: The animation state enum
+            animation_file: The animation file name
+            descriptor: The animation descriptor (may be None)
+        """
+        log_debug(f"{LOG_PREFIX} [_broadcast_animation_state] CALLED: state={state}, animation={animation_file}, has_descriptor={descriptor is not None}")
+        
+        # Resolve the animation path
+        if self.animation_handler:
+            resolved_path, _ = self.animation_handler._resolve_animation_descriptor(animation_file)
+        else:
+            resolved_path = f"animations/{animation_file}"
+        
+        message = {
+            "type": "animation",
+            "state": state.value,
+            "animation": resolved_path,
+            "loop": descriptor.get("play_once", False) is False if descriptor else True,
+            "descriptor": descriptor
+        }
+        
+        client_count = len(self.connections)
+        log_info(f"{LOG_PREFIX} Broadcasting animation state to {client_count} clients: {state.value}/{animation_file}", log_file=WEBUI_LOG)
+        
+        # Send to all connected clients
+        for session_id, websocket in self.connections.items():
+            try:
+                await websocket.send_json(message)
+                log_debug(f"{LOG_PREFIX} ✓ Sent animation state to session {session_id}: {state.value}")
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to broadcast animation state to session {session_id}: {exc}")
+
     async def _handle_user_message(self, session_id: str, text: str) -> None:
         from types import SimpleNamespace
+        from core.config import TRAINER_NAME
+        from core import message_queue
 
+        log_info(f"{LOG_PREFIX} [_handle_user_message] START: session_id={session_id}, text_len={len(text)}, text={text[:100]}")
+
+        # Get trainer name for the user
+        trainer_name = str(TRAINER_NAME) if TRAINER_NAME and TRAINER_NAME != "Trainer" else "Trainer"
+        
         message = SimpleNamespace(
             chat_id=session_id,
+            interface_path=f"{INTERFACE_NAME}/{session_id}",  # Add interface_path for proper routing
             message_id=int(datetime.utcnow().timestamp() * 1000) % 1_000_000,
             text=text,
             date=datetime.utcnow(),
             from_user=SimpleNamespace(
                 id=session_id,
-                username=f"synth_{session_id[:8]}",
-                first_name="SyntH",
+                username=trainer_name,
+                first_name=trainer_name,
                 last_name="",
-                full_name="SyntH User",
+                full_name=trainer_name,
             ),
             chat=SimpleNamespace(
                 id=session_id,
@@ -729,14 +780,25 @@ class SynthWebUIInterface:
         # Global action ID for this message
         action_id = f"webui_msg_{session_id}_{message.message_id}"
         
+        thinking_pushed = False
         try:
             # Push THINKING action to global state
             log_info(f"{LOG_PREFIX} Pushing THINKING action: {action_id}")
-            await self.action_state_manager.push_action(
+            thinking_pushed = await self.action_state_manager.push_action(
                 action_id=action_id,
                 phase=AnimationPhase.THINKING,
                 component="webui"
             )
+            if not thinking_pushed:
+                log_warning(f"{LOG_PREFIX} THINKING action was rejected (lower priority than current action)")
+            
+            # Set avatar animation to 'think'
+            if self.persona_manager:
+                try:
+                    await self.persona_manager.set_animation_state("think", session_id=session_id)
+                    log_debug(f"{LOG_PREFIX} Set avatar animation to 'think' for session {session_id}")
+                except Exception as anim_exc:
+                    log_warning(f"{LOG_PREFIX} Failed to set 'think' animation: {anim_exc}")
         except Exception as exc:
             log_warning(f"{LOG_PREFIX} Failed to push action state: {exc}")
         
@@ -745,29 +807,99 @@ class SynthWebUIInterface:
         timeout_seconds = int(RESPONSE_TIMEOUT)
         
         try:
-            # Call plugin to handle message
-            response = await asyncio.wait_for(
-                plugin_instance.handle_incoming_message(
-                    self, message, {}, INTERFACE_NAME
-                ),
-                timeout=timeout_seconds
+            # Enqueue message in the priority queue instead of processing directly
+            # The message_queue consumer will handle it and send response via the interface
+            log_info(f"{LOG_PREFIX} Enqueueing message to priority queue (skip_mention_check=True for WebUI)")
+            
+            # Send immediate acknowledgement to client that message was received
+            try:
+                websocket = self.connections.get(session_id)
+                if websocket:
+                    ack_message = {
+                        "type": "message_ack",
+                        "message_id": message.message_id,
+                        "status": "received",
+                        "text": "📝 Ricevuto il tuo messaggio, sto elaborando..."
+                    }
+                    await websocket.send_json(ack_message)
+                    log_info(f"{LOG_PREFIX} Sent immediate ACK to session {session_id}")
+            except Exception as ack_exc:
+                log_warning(f"{LOG_PREFIX} Failed to send ACK message: {ack_exc}")
+            
+            await message_queue.enqueue(
+                bot=self,
+                message=message,
+                context_memory={},
+                priority=False,  # Normal priority for user messages
+                interface_id=INTERFACE_NAME,
+                skip_mention_check=True,  # WebUI is 1:1 interface, skip mention check
+                original_message=message
             )
+            log_info(f"{LOG_PREFIX} Message successfully enqueued for session {session_id}")
+            
+            # For WebUI, we don't wait for a direct response here.
+            # The response will be sent via WebSocket by the message_queue consumer.
+            # Set response to None to indicate the message was enqueued
+            response = None
+            
         except asyncio.TimeoutError:
-            log_error(f"{LOG_PREFIX} Message handling timed out after {timeout_seconds}s for session {session_id}")
+            log_error(f"{LOG_PREFIX} Message enqueueing timed out after {timeout_seconds}s for session {session_id}")
             response = str(get_failed_message_text())
         except Exception as exc:  # pragma: no cover - runtime issues
-            log_error(f"{LOG_PREFIX} error handling message: {exc}")
+            log_error(f"{LOG_PREFIX} error enqueueing message: {exc}")
             response = str(get_failed_message_text())
-        finally:
-            # Pop action and return to IDLE
-            try:
-                await self.action_state_manager.pop_action(action_id)
-                log_info(f"{LOG_PREFIX} Popped action: {action_id} - returning to IDLE")
-            except Exception as exc:
-                log_warning(f"{LOG_PREFIX} Failed to pop action state: {exc}")
 
+        # Handle LLM_FAILED responses - use fallback message text
+        # LLM_FAILED means the message_chain already sent fallback to other interfaces,
+        # but for WebUI we need to send it here
+        if response == "LLM_FAILED":
+            response = str(get_failed_message_text())
+
+        # Ensure we keep the THINKING action active until we've delivered the response
         if response:
-            await self.send_message(session_id, text=response)
+            # Push WRITING so clients can display write animation while we deliver the message
+            writing_action_id = f"webui_write_{session_id}_{int(datetime.utcnow().timestamp() * 1000) % 1_000_000}"
+            writing_pushed = False
+            try:
+                writing_pushed = await self.action_state_manager.push_action(
+                    action_id=writing_action_id,
+                    phase=AnimationPhase.WRITING,
+                    component="webui"
+                )
+                if not writing_pushed:
+                    log_debug(f"{LOG_PREFIX} WRITING action was rejected (lower priority than THINKING)")
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to push WRITING action state: {exc}")
+
+            try:
+                await self.send_message(session_id, text=response)
+            except Exception as send_exc:
+                log_warning(f"{LOG_PREFIX} Failed to send response to session {session_id}: {send_exc}")
+            finally:
+                # Pop WRITING first (if it was pushed), then THINKING. Do not force any
+                # artificial timing here; the client will handle smoothing and priority.
+                if writing_pushed:
+                    try:
+                        await self.action_state_manager.pop_action(writing_action_id)
+                    except Exception as exc:
+                        log_warning(f"{LOG_PREFIX} Failed to pop WRITING action state: {exc}")
+                if thinking_pushed:
+                    try:
+                        await self.action_state_manager.pop_action(action_id)
+                        log_info(f"{LOG_PREFIX} Popped action: {action_id} - returning to IDLE")
+                    except Exception as exc:
+                        log_warning(f"{LOG_PREFIX} Failed to pop THINKING action state: {exc}")
+        else:
+            # Some LLM engines return None but process asynchronously; keep THINKING for a short grace period
+            # If no immediate response (response is falsy), just pop THINKING without
+            # introducing a forced artificial delay; let the client decide how to
+            # visually smooth very-short transitions.
+            try:
+                if thinking_pushed:
+                    await self.action_state_manager.pop_action(action_id)
+                    log_info(f"{LOG_PREFIX} Popped action: {action_id} after no-response branch")
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to pop action state in no-response branch: {exc}")
 
     async def _replay_history(self, session_id: str) -> None:
         history = self.message_history.get(session_id)
@@ -797,7 +929,7 @@ class SynthWebUIInterface:
         if isinstance(payload_or_chat_id, dict):
             payload = payload_or_chat_id
             text = payload.get("text", text)
-            chat_id = payload.get("target") or payload.get("chat_id")
+            chat_id = payload.get("interface_path") or payload.get("target") or payload.get("chat_id")
         else:
             chat_id = payload_or_chat_id or kwargs.get("chat_id")
             if text is None:
@@ -807,17 +939,59 @@ class SynthWebUIInterface:
             log_warning(f"{LOG_PREFIX} send_message missing text or chat_id")
             return
 
+        # Handle interface_path format: extract session_id from "synth_webui/session_id"
+        if "/" in str(chat_id):
+            parts = str(chat_id).split("/")
+            if len(parts) >= 2 and parts[0] == INTERFACE_NAME:
+                session_id = parts[1]
+                log_debug(f"{LOG_PREFIX} Extracted session {session_id} from interface_path {chat_id}")
+                chat_id = session_id
+
         websocket = self.connections.get(str(chat_id))
         if not websocket:
-            log_warning(f"{LOG_PREFIX} no active websocket for session {chat_id}")
+            # Improved debug information: list active sessions to help debug target mismatches
+            active_sessions = list(self.connections.keys())
+            log_warning(f"{LOG_PREFIX} no active websocket for session {chat_id}. Active sessions: {active_sessions}")
+            log_debug(f"{LOG_PREFIX} send_message payload target: {chat_id}, text length: {len(text) if text else 0}")
             return
 
         await websocket.send_json({"type": "message", "sender": "synth", "text": text})
         await self._append_history(str(chat_id), "synth", text)
+        
+        # Save SyntH's response via core chat_context_manager
+        try:
+            from core.chat_context_manager import save_response_message
+            msg_interface_path = f"{INTERFACE_NAME}/{chat_id}"
+            await save_response_message(msg_interface_path, text)
+        except Exception as e:
+            log_debug(f"{LOG_PREFIX} Failed to save response via context_manager: {e}")
+        
+        log_info(f"{LOG_PREFIX} Sent message to session {chat_id}: {text[:80]}{'...' if len(text)>80 else ''}")
 
     async def execute_action(self, action: dict, context: dict, bot, original_message):
         if action.get("type") == "message_synth_webui":
             payload = action.get("payload", {})
+            # Try to get session_id from context (chat_id or interface_path)
+            session_id = context.get("chat_id")
+            if not session_id and "interface_path" in context:
+                # Extract session_id from interface_path format: "synth_webui/session_id"
+                interface_path = context.get("interface_path")
+                if interface_path and "/" in interface_path:
+                    parts = interface_path.split("/")
+                    if len(parts) >= 2:
+                        session_id = parts[1]
+            
+            # Set animation to 'write' before sending message
+            if self.persona_manager and session_id:
+                try:
+                    await self.persona_manager.set_animation_state("write", session_id=session_id)
+                    log_debug(f"{LOG_PREFIX} Set avatar animation to 'write' for session {session_id}")
+                except Exception as anim_exc:
+                    log_debug(f"{LOG_PREFIX} Failed to set 'write' animation: {anim_exc}")
+            
+            # Ensure the payload has the correct interface_path for sending
+            if session_id:
+                payload["interface_path"] = f"{INTERFACE_NAME}/{session_id}"
             await self.send_message(payload, original_message=original_message)
 
     # ------------------------------------------------------------------
@@ -847,7 +1021,7 @@ class SynthWebUIInterface:
         
         # Fallback to first available model, preferring SynTh.vrm as default
         available_vrms = list(sorted(self.vrm_dir.glob("*.vrm")))
-        log_debug(f"{LOG_PREFIX} Available VRM files: {[v.name for v in available_vrms]}")
+        log_debug(f"{LOG_PREFIX} Available VRM files in temp dir: {[v.name for v in available_vrms]}")
         
         # Prefer SyntH.vrm as the default model
         synth_vrm = self.vrm_dir / "SyntH.vrm"
@@ -856,12 +1030,39 @@ class SynthWebUIInterface:
             self._set_active_vrm(synth_vrm.name)
             return synth_vrm.name
         
-        # Otherwise use first available
+        # Otherwise use first available from temp
         for candidate in available_vrms:
-            log_info(f"{LOG_PREFIX} Using first available VRM: {candidate.name}")
+            log_info(f"{LOG_PREFIX} Using first available VRM from temp: {candidate.name}")
             return candidate.name
         
-        log_warning(f"{LOG_PREFIX} No VRM models found in directory")
+        # Fallback: try to find a model in the current persona's folder
+        try:
+            from core.persona_manager import get_persona_manager
+            persona_mgr = get_persona_manager()
+            current_persona = persona_mgr.get_current_persona()
+            if current_persona and current_persona.name:
+                persona_folder = Path(__file__).resolve().parent.parent / "skins" / current_persona.name
+                persona_vrm = persona_folder / "model.vrm"
+                if persona_vrm.exists():
+                    log_info(f"{LOG_PREFIX} Using VRM from current persona folder: {persona_vrm}")
+                    # Return as relative URL from web root
+                    try:
+                        web_path = persona_vrm.relative_to(Path(__file__).resolve().parent.parent)
+                        return f"/{web_path}"
+                    except ValueError:
+                        return f"/skins/{current_persona.name}/model.vrm"
+        except Exception as exc:
+            log_debug(f"{LOG_PREFIX} Failed to find VRM from persona manager: {exc}")
+        
+        # Last resort: try common persona folders
+        skins_dir = Path(__file__).resolve().parent.parent / "skins"
+        for persona_folder in ["Rei", "Rekku", "Zero"]:
+            persona_vrm = skins_dir / persona_folder / "model.vrm"
+            if persona_vrm.exists():
+                log_info(f"{LOG_PREFIX} Using fallback VRM from {persona_folder}: {persona_vrm}")
+                return f"/skins/{persona_folder}/model.vrm"
+        
+        log_warning(f"{LOG_PREFIX} No VRM models found in any location")
         return None
 
     def _set_active_vrm(self, model_name: Optional[str]) -> None:
@@ -978,6 +1179,13 @@ class SynthWebUIInterface:
             if "bootstrap" in entry.get("tags", []):
                 continue
             component_label = self._get_display_name(entry["component"], None)
+            
+            # Get exposed variable definition to extract ui_type and options
+            from core.variables_engine import exposed_vars
+            exposed_def = exposed_vars.get_definition(entry["key"])
+            ui_type = exposed_def.ui_type if exposed_def else entry.get("ui_type", "string")
+            options = exposed_def.options if exposed_def else []
+            
             items.append(
                 {
                     "key": entry["key"],
@@ -992,8 +1200,11 @@ class SynthWebUIInterface:
                     "sensitive": entry["sensitive"],
                     "env_override": entry["env_override"],
                     "value_type": entry["value_type"],
-                    "editable": not entry["env_override"],
+                    # A variable is editable only if it's not overridden by env AND not explicitly readonly
+                    "editable": (not entry["env_override"]) and (not entry.get("readonly", False)),
                     "constraints": entry.get("constraints"),
+                    "ui_type": ui_type,
+                    "options": options,
                 }
             )
 
@@ -1013,6 +1224,35 @@ class SynthWebUIInterface:
             "https_port": self.selkies_https_port,
             "http_port": self.selkies_http_port
         })
+
+    async def get_animations_for_type(self, skin: str, animation_type: str):
+        """Return list of animation files for a specific skin and animation type.
+        
+        Example: GET /api/animations/Rei/idle
+        Returns: {"animations": ["Idle.fbx", "Idle2.fbx", "Look Around.fbx"]}
+        """
+        try:
+            # Validate skin and animation_type to prevent directory traversal
+            if ".." in skin or ".." in animation_type:
+                raise HTTPException(status_code=400, detail="Invalid skin or animation type")
+            
+            anim_dir = Path(__file__).parent.parent / "skins" / skin / "animations" / animation_type
+            
+            if not anim_dir.exists():
+                log_debug(f"{LOG_PREFIX} Animation directory not found: {anim_dir}")
+                return JSONResponse({"animations": []})
+            
+            # Get all .fbx files in the directory (non-recursive, ignore subdirectories)
+            fbx_files = sorted([
+                f.name for f in anim_dir.iterdir() 
+                if f.is_file() and f.suffix.lower() == '.fbx'
+            ])
+            
+            log_debug(f"{LOG_PREFIX} Found {len(fbx_files)} animations in {skin}/{animation_type}: {fbx_files}")
+            return JSONResponse({"animations": fbx_files})
+        except Exception as e:
+            log_error(f"{LOG_PREFIX} Error listing animations for {skin}/{animation_type}: {e}")
+            return JSONResponse({"animations": []}, status_code=500)
 
     async def diary_summary(self, request: Request):
         """Return persona snapshot and recent diary entries for the Diary tab."""
@@ -1037,9 +1277,10 @@ class SynthWebUIInterface:
         # Pagination parameters
         page = _bounded_int(params.get("page"), default=1, minimum=1, maximum=1000)
         per_page = _bounded_int(params.get("per_page"), default=10, minimum=1, maximum=1000)
+        search = params.get("search", "").strip()
 
         persona_snapshot = await self._fetch_persona_snapshot()
-        diary_payload = await self._fetch_diary_entries(days=days, limit=limit, max_chars=max_chars, include_archived=include_archived, page=page, per_page=per_page)
+        diary_payload = await self._fetch_diary_entries(days=days, limit=limit, max_chars=max_chars, include_archived=include_archived, page=page, per_page=per_page, search=search)
 
         if not persona_snapshot.get("created_at") and diary_payload.get("earliest_timestamp"):
             persona_snapshot["created_at"] = diary_payload["earliest_timestamp"]
@@ -1064,7 +1305,25 @@ class SynthWebUIInterface:
                 "error": diary_payload.get("error"),
             },
         }
+        # Clean ConfigVar proxies from response before JSON serialization
+        response = self._clean_for_json(response)
         return JSONResponse(response)
+
+    def _clean_for_json(self, obj: Any) -> Any:
+        """Recursively convert ConfigVar proxies and other non-JSON-serializable objects to JSON-safe types."""
+        if isinstance(obj, dict):
+            return {k: self._clean_for_json(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [self._clean_for_json(item) for item in obj]
+        elif hasattr(obj, '__class__') and obj.__class__.__name__ == 'ConfigVar':
+            # ConfigVar proxy - convert to string
+            return str(obj)
+        elif isinstance(obj, (str, int, float, bool, type(None))):
+            # Already JSON-serializable
+            return obj
+        else:
+            # Fallback for unknown types
+            return str(obj)
 
     async def _fetch_persona_snapshot(self) -> Dict[str, Any]:
         """Load core persona information for display."""
@@ -1083,17 +1342,11 @@ class SynthWebUIInterface:
         try:
             from core.persona_manager import (  # type: ignore
                 get_persona_manager,
-                init_persona_table,
             )
         except Exception as exc:  # pragma: no cover - defensive import
             log_debug(f"{LOG_PREFIX} Persona manager unavailable: {exc}")
             snapshot["error"] = str(exc)
             return snapshot
-
-        try:
-            await init_persona_table()
-        except Exception as exc:
-            log_warning(f"{LOG_PREFIX} Unable to ensure persona table: {exc}")
 
         persona = None
         try:
@@ -1118,6 +1371,52 @@ class SynthWebUIInterface:
             log_warning(f"{LOG_PREFIX} Unable to load persona: {exc}")
 
         if not persona:
+            # Fallback: try to populate snapshot from exposed config values
+            try:
+                from core.config_manager import config_registry
+                name = config_registry.get_value("SYNTH_NAME", None)
+                aliases_raw = config_registry.get_value("SYNTH_ALIASES", None, value_type="json")
+                profile = config_registry.get_value("SYNTH_PROFILE", None)
+
+                # Convert ConfigVar proxies to actual values
+                if hasattr(name, '__str__'):
+                    name = str(name) if name else None
+                if hasattr(profile, '__str__'):
+                    profile = str(profile) if profile else None
+                
+                aliases = []
+                if aliases_raw:
+                    # Convert ConfigVar if needed
+                    if hasattr(aliases_raw, '__str__'):
+                        aliases_raw = str(aliases_raw)
+                    
+                    # aliases_raw may be a JSON string or a list
+                    if isinstance(aliases_raw, str):
+                        import json
+                        try:
+                            parsed = json.loads(aliases_raw)
+                            if isinstance(parsed, list):
+                                aliases = parsed
+                        except Exception:
+                            # not JSON - try splitting
+                            aliases = [a.strip() for a in aliases_raw.split(',') if a.strip()]
+                    elif isinstance(aliases_raw, list):
+                        aliases = aliases_raw
+
+                if name or aliases or profile:
+                    snapshot.update(
+                        {
+                            "available": True,
+                            "id": "default",
+                            "name": name or None,
+                            "aliases": aliases,
+                            "profile": profile or None,
+                        }
+                    )
+                    return snapshot
+            except Exception as exc:
+                log_debug(f"{LOG_PREFIX} Persona fallback from config failed: {exc}")
+
             return snapshot
 
         def _format_emotions(emotions: Optional[List[Any]]) -> List[Dict[str, Any]]:
@@ -1162,7 +1461,7 @@ class SynthWebUIInterface:
         )
         return snapshot
 
-    async def _fetch_diary_entries(self, *, days: int, limit: int, max_chars: int, include_archived: bool = False, page: int = 1, per_page: int = 10) -> Dict[str, Any]:
+    async def _fetch_diary_entries(self, *, days: int, limit: int, max_chars: int, include_archived: bool = False, page: int = 1, per_page: int = 10, search: str = "") -> Dict[str, Any]:
         """Retrieve diary entries via the AI diary plugin when available."""
         payload: Dict[str, Any] = {
             "available": False,
@@ -1191,10 +1490,9 @@ class SynthWebUIInterface:
 
         try:
             # Get total count first
-            from core.db import get_conn
+            from core.db import get_conn_ctx
             
-            conn = await get_conn()
-            try:
+            async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     if include_archived:
                         await cur.execute("SELECT COUNT(*) FROM ai_diary")
@@ -1206,8 +1504,6 @@ class SynthWebUIInterface:
                         await cur.execute("SELECT COUNT(*) FROM ai_diary")
                         result = await cur.fetchone()
                         total_count = result[0] if result else 0
-            finally:
-                conn.close()
             
             payload["total_count"] = total_count
             payload["total_pages"] = (total_count + per_page - 1) // per_page if per_page != 'unlimited' else 1
@@ -1221,37 +1517,90 @@ class SynthWebUIInterface:
                 limit = per_page
             
             # Fetch paginated entries
-            conn = await get_conn()
-            try:
+            async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
+                    # Build search condition
+                    search_condition = ""
+                    search_params = []
+                    if search:
+                        search_condition = """
+                            AND (content LIKE %s OR personal_thought LIKE %s OR 
+                                 interaction_summary LIKE %s OR user_message LIKE %s OR
+                                 JSON_EXTRACT(emotions, '$[*].type') LIKE %s)
+                        """
+                        search_term = f"%{search}%"
+                        search_params = [search_term, search_term, search_term, search_term, search_term]
+                    
                     if include_archived:
                         # Get entries from both tables, ordered by timestamp DESC
-                        await cur.execute("""
-                            (SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
-                                   emotions, interface, chat_id, thread_id, interaction_summary, user_message,
-                                   FALSE as archived
-                            FROM ai_diary)
-                            UNION ALL
-                            (SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
-                                   emotions, interface, chat_id, thread_id, interaction_summary, user_message,
-                                   TRUE as archived
-                            FROM ai_diary_archive)
-                            ORDER BY timestamp DESC
-                            LIMIT %s OFFSET %s
-                        """, (limit, offset))
+                        # Note: try to include involved_users if column exists
+                        try:
+                            query = f"""
+                                (SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
+                                       emotions, interface, chat_id, thread_id, interaction_summary, user_message,
+                                       FALSE as archived
+                                FROM ai_diary
+                                WHERE 1=1 {search_condition})
+                                UNION ALL
+                                (SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
+                                       emotions, interface, chat_id, thread_id, interaction_summary, user_message,
+                                       TRUE as archived
+                                FROM ai_diary_archive
+                                WHERE 1=1 {search_condition})
+                                ORDER BY timestamp DESC
+                                LIMIT %s OFFSET %s
+                            """
+                            await cur.execute(query, search_params + [limit, offset])
+                        except Exception as e:
+                            # If involved_users column doesn't exist, fallback to query without it
+                            if "Unknown column" in str(e):
+                                query = f"""
+                                    (SELECT id, content, personal_thought, timestamp, context_tags, '[]' as involved_users, 
+                                           emotions, interface, chat_id, thread_id, interaction_summary, user_message,
+                                           FALSE as archived
+                                    FROM ai_diary
+                                    WHERE 1=1 {search_condition})
+                                    UNION ALL
+                                    (SELECT id, content, personal_thought, timestamp, context_tags, '[]' as involved_users, 
+                                           emotions, interface, chat_id, thread_id, interaction_summary, user_message,
+                                           TRUE as archived
+                                    FROM ai_diary_archive
+                                    WHERE 1=1 {search_condition})
+                                    ORDER BY timestamp DESC
+                                    LIMIT %s OFFSET %s
+                                """
+                                await cur.execute(query, search_params + [limit, offset])
+                            else:
+                                raise
                     else:
-                        await cur.execute("""
-                            SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
-                                   emotions, interface, chat_id, thread_id, interaction_summary, user_message,
-                                   FALSE as archived
-                            FROM ai_diary
-                            ORDER BY timestamp DESC
-                            LIMIT %s OFFSET %s
-                        """, (limit, offset))
+                        try:
+                            query = f"""
+                                SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
+                                       emotions, interface, chat_id, thread_id, interaction_summary, user_message,
+                                       FALSE as archived
+                                FROM ai_diary
+                                WHERE 1=1 {search_condition}
+                                ORDER BY timestamp DESC
+                                LIMIT %s OFFSET %s
+                            """
+                            await cur.execute(query, search_params + [limit, offset])
+                        except Exception as e:
+                            # If involved_users column doesn't exist, fallback
+                            if "Unknown column" in str(e):
+                                query = f"""
+                                    SELECT id, content, personal_thought, timestamp, context_tags, '[]' as involved_users, 
+                                           emotions, interface, chat_id, thread_id, interaction_summary, user_message,
+                                           FALSE as archived
+                                    FROM ai_diary
+                                    WHERE 1=1 {search_condition}
+                                    ORDER BY timestamp DESC
+                                    LIMIT %s OFFSET %s
+                                """
+                                await cur.execute(query, search_params + [limit, offset])
+                            else:
+                                raise
                     
                     rows = await cur.fetchall()
-            finally:
-                conn.close()
             
             # Convert rows to entries format
             entries = []
@@ -1353,20 +1702,377 @@ class SynthWebUIInterface:
             log_error(f"{LOG_PREFIX} Failed to delete archived diary entries: {exc}")
             raise HTTPException(status_code=500, detail=str(exc))
 
+    async def history_diary(self, request: Request):
+        """Return diary entries for the History > Diary sub-tab - optimized for speed."""
+        params = request.query_params
+
+        def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return default
+            return max(minimum, min(maximum, parsed))
+
+        page = _bounded_int(params.get("page"), default=1, minimum=1, maximum=1000)
+        per_page = _bounded_int(params.get("per_page"), default=10, minimum=1, maximum=30)  # Ridotto a 10 per pagina, max 30
+        search = params.get("search", "").strip()
+        include_archived = params.get("include_archived", "false").lower() == "true"
+        sort = params.get("sort", "desc")
+
+        try:
+            from core.db import get_conn_ctx
+            from core.time_zone_utils import utc_to_local
+            from datetime import timezone
+            
+            offset = (page - 1) * per_page
+            order = "DESC" if sort == "desc" else "ASC"
+            
+            # Strategy: skip COUNT(*) for better performance, use approximate count
+            entries = []
+            total_count = 0
+            
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    # Build optimized query - load only essential fields
+                    if search:
+                        # Search only in indexed/important fields
+                        search_term = f"%{search}%"
+                        where_clause = "WHERE (content LIKE %s OR interaction_summary LIKE %s)"
+                        search_params = [search_term, search_term]
+                    else:
+                        where_clause = ""
+                        search_params = []
+                    
+                    # Simplified query without archived for speed (most common case)
+                    if not include_archived:
+                        # Get approximate count using LIMIT + 1 trick (faster than COUNT)
+                        query = f"""
+                            SELECT id, LEFT(content, 200) as content, LEFT(personal_thought, 100) as personal_thought, 
+                                   timestamp, interaction_summary, 
+                                   JSON_EXTRACT(emotions, '$[0].type') as primary_emotion,
+                                   JSON_LENGTH(involved_users) as user_count
+                            FROM ai_diary
+                            {where_clause}
+                            ORDER BY timestamp {order}
+                            LIMIT %s OFFSET %s
+                        """
+                        params_list = search_params + [per_page + 1, offset]
+                        
+                        await cur.execute(query, params_list)
+                        rows = await cur.fetchall()
+                        
+                        # Check if there are more results
+                        has_more = len(rows) > per_page
+                        if has_more:
+                            rows = rows[:per_page]
+                        
+                        # Estimate total count based on current page
+                        if page == 1 and not has_more:
+                            total_count = len(rows)
+                        else:
+                            # Approximate: if we have full page, estimate more pages exist
+                            total_count = offset + len(rows) + (per_page if has_more else 0)
+                    else:
+                        # With archived: use simpler UNION but with LIMIT push-down
+                        query = f"""
+                            SELECT * FROM (
+                                (SELECT id, LEFT(content, 200) as content, LEFT(personal_thought, 100) as personal_thought, 
+                                       timestamp, interaction_summary,
+                                       JSON_EXTRACT(emotions, '$[0].type') as primary_emotion,
+                                       JSON_LENGTH(involved_users) as user_count,
+                                       0 as archived
+                                FROM ai_diary
+                                {where_clause}
+                                ORDER BY timestamp {order}
+                                LIMIT {per_page * 2})
+                                UNION ALL
+                                (SELECT id, LEFT(content, 200), LEFT(personal_thought, 100), 
+                                       timestamp, interaction_summary,
+                                       JSON_EXTRACT(emotions, '$[0].type'),
+                                       JSON_LENGTH(involved_users),
+                                       1 as archived
+                                FROM ai_diary_archive
+                                {where_clause}
+                                ORDER BY timestamp {order}
+                                LIMIT {per_page * 2})
+                            ) AS combined
+                            ORDER BY timestamp {order}
+                            LIMIT %s OFFSET %s
+                        """
+                        params_list = search_params * 2 + [per_page + 1, offset] if search_params else [per_page + 1, offset]
+                        
+                        await cur.execute(query, params_list)
+                        rows = await cur.fetchall()
+                        
+                        has_more = len(rows) > per_page
+                        if has_more:
+                            rows = rows[:per_page]
+                        total_count = offset + len(rows) + (per_page if has_more else 0)
+                    
+                    # Build minimal response objects with timezone conversion
+                    for row in rows:
+                        # Convert timestamp to local timezone
+                        timestamp = row[3]
+                        if timestamp:
+                            # Database timestamp is assumed to be in server timezone
+                            # Convert to UTC-aware then to local
+                            if timestamp.tzinfo is None:
+                                # Assume UTC if no timezone info
+                                timestamp = timestamp.replace(tzinfo=timezone.utc)
+                            timestamp_local = utc_to_local(timestamp)
+                            timestamp_str = timestamp_local.isoformat()
+                        else:
+                            timestamp_str = None
+                        
+                        entries.append({
+                            "id": row[0],
+                            "content": row[1],  # Already truncated by LEFT()
+                            "personal_thought": row[2],  # Already truncated
+                            "timestamp": timestamp_str,
+                            "interaction_summary": row[4],
+                            "primary_emotion": row[5],  # Single emotion instead of array
+                            "user_count": row[6] or 0,  # Count instead of full array
+                            "archived": bool(row[7]) if len(row) > 7 else False
+                        })
+            
+            # Calculate total_pages from total_count
+            total_pages = (total_count + per_page - 1) // per_page if total_count > 0 else 1
+            
+            return JSONResponse({
+                "success": True,
+                "entries": entries,
+                "page": page,
+                "per_page": per_page,
+                "total_count": total_count,
+                "total_pages": total_pages
+            })
+            
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to fetch diary history: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def history_grillo(self, request: Request):
+        """Return grillo activity log for the History > Grillo sub-tab - optimized."""
+        params = request.query_params
+
+        def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return default
+            return max(minimum, min(maximum, parsed))
+
+        page = _bounded_int(params.get("page"), default=1, minimum=1, maximum=1000)
+        per_page = _bounded_int(params.get("per_page"), default=15, minimum=1, maximum=50)  # Ridotto
+        search = params.get("search", "").strip()
+        beat_type_filter = params.get("beat_type", "").strip()
+        sort = params.get("sort", "desc")
+
+        try:
+            from core.db import get_conn_ctx
+            from core.time_zone_utils import utc_to_local
+            from datetime import timezone
+            
+            offset = (page - 1) * per_page
+            order = "DESC" if sort == "desc" else "ASC"
+            
+            # Build WHERE clause
+            where_conditions = []
+            where_params = []
+            
+            if search:
+                where_conditions.append("beat_type LIKE %s")  # Removed prompt_text search for speed
+                where_params.append(f"%{search}%")
+            
+            if beat_type_filter:
+                where_conditions.append("beat_type = %s")
+                where_params.append(beat_type_filter)
+            
+            where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
+            
+            # Fetch entries WITHOUT expensive LEFT JOIN - load diary content on-demand if needed
+            entries = []
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    # Simplified query without JOIN
+                    query = f"""
+                        SELECT id, beat_type, LEFT(prompt_text, 300) as prompt_text, 
+                               LEFT(response_text, 500) as response_text,
+                               diary_entry_id, executed_at
+                        FROM grillo_activity_log
+                        WHERE {where_clause}
+                        ORDER BY executed_at {order}
+                        LIMIT %s OFFSET %s
+                    """
+                    
+                    await cur.execute(query, where_params + [per_page + 1, offset])
+                    rows = await cur.fetchall()
+                    
+                    has_more = len(rows) > per_page
+                    if has_more:
+                        rows = rows[:per_page]
+                    
+                    for row in rows:
+                        # Convert UTC timestamp to local timezone
+                        executed_at_utc = row[5]
+                        if executed_at_utc:
+                            # Ensure it has UTC timezone info
+                            if executed_at_utc.tzinfo is None:
+                                executed_at_utc = executed_at_utc.replace(tzinfo=timezone.utc)
+                            executed_at_local = utc_to_local(executed_at_utc)
+                            executed_at_str = executed_at_local.isoformat()
+                        else:
+                            executed_at_str = None
+                        
+                        entries.append({
+                            "id": row[0],
+                            "beat_type": row[1],
+                            "prompt_text": row[2],  # Truncated for speed
+                            "response_text": row[3],  # Truncated LLM response
+                            "diary_entry_id": row[4],
+                            "executed_at": executed_at_str,
+                            "has_diary": row[4] is not None  # Flag instead of content
+                        })
+            
+            # Estimate total
+            total_count = offset + len(rows) + (per_page if has_more else 0)
+            total_pages = (total_count + per_page - 1) // per_page
+            
+            return JSONResponse({
+                "success": True,
+                "entries": entries,
+                "page": page,
+                "per_page": per_page,
+                "total_count": total_count,
+                "total_pages": total_pages
+            })
+            
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to fetch grillo history: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def history_chat(self, request: Request):
+        """Return chat history for the History > Chat sub-tab - optimized."""
+        params = request.query_params
+
+        def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return default
+            return max(minimum, min(maximum, parsed))
+
+        page = _bounded_int(params.get("page"), default=1, minimum=1, maximum=1000)
+        per_page = _bounded_int(params.get("per_page"), default=30, minimum=1, maximum=100)  # Ridotto da 50->30, max da 200->100
+        interface_path = params.get("interface_path", "").strip()
+        search = params.get("search", "").strip()
+        sort = params.get("sort", "desc")
+
+        try:
+            from core.db import get_conn_ctx
+            from core.time_zone_utils import utc_to_local
+            from datetime import timezone
+            
+            offset = (page - 1) * per_page
+            order = "DESC" if sort == "desc" else "ASC"
+            
+            # Build WHERE clause
+            where_conditions = []
+            where_params = []
+            
+            if interface_path:
+                where_conditions.append("interface_path = %s")
+                where_params.append(interface_path)
+            
+            if search:
+                where_conditions.append("message_text LIKE %s")  # Removed sender_name for speed
+                where_params.append(f"%{search}%")
+            
+            where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
+            
+            # Fetch messages with LIMIT + 1 trick
+            messages = []
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    query = f"""
+                        SELECT interface_path, sender_name, LEFT(message_text, 500) as message_text, timestamp
+                        FROM chat_history_cache
+                        WHERE {where_clause}
+                        ORDER BY timestamp {order}
+                        LIMIT %s OFFSET %s
+                    """
+                    
+                    await cur.execute(query, where_params + [per_page + 1, offset])
+                    rows = await cur.fetchall()
+                    
+                    has_more = len(rows) > per_page
+                    if has_more:
+                        rows = rows[:per_page]
+                    
+                    for row in rows:
+                        # Convert timestamp from UTC to local timezone
+                        timestamp = row[3]
+                        if timestamp:
+                            if timestamp.tzinfo is None:
+                                timestamp = timestamp.replace(tzinfo=timezone.utc)
+                            timestamp_local = utc_to_local(timestamp)
+                            timestamp_str = timestamp_local.isoformat()
+                        else:
+                            timestamp_str = None
+                        
+                        messages.append({
+                            "interface_path": row[0],
+                            "sender_name": row[1],
+                            "message_text": row[2],  # Truncated
+                            "timestamp": timestamp_str
+                        })
+            
+            # Lazy load interface_paths only when needed (not on every request)
+            interface_paths = []
+            if page == 1 and not interface_path:  # Only on first load without filter
+                async with get_conn_ctx() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute("SELECT DISTINCT interface_path FROM chat_history_cache ORDER BY interface_path LIMIT 50")
+                        rows = await cur.fetchall()
+                        interface_paths = [row[0] for row in rows]
+            
+            # Estimate total (same approach as grillo)
+            total_count = offset + len(rows) + (per_page if has_more else 0)
+            total_pages = (total_count + per_page - 1) // per_page
+            
+            return JSONResponse({
+                "success": True,
+                "messages": messages,
+                "interface_paths": interface_paths,
+                "page": page,
+                "per_page": per_page,
+                "total_count": total_count,
+                "total_pages": total_pages
+            })
+            
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to fetch chat history: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
     async def update_config_entry(self, request: Request):
         try:
             payload = await request.json()
         except Exception as exc:
             raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
 
+        log_debug(f"{LOG_PREFIX} update_config_entry received payload: {payload}")
+        
         key = str(payload.get("key") or "").strip()
         if not key:
             raise HTTPException(status_code=400, detail="Missing configuration key")
 
         if "value" not in payload:
+            log_error(f"{LOG_PREFIX} 'value' not in payload. Keys: {list(payload.keys())}")
+            log_error(f"{LOG_PREFIX} Full payload: {payload}")
             raise HTTPException(status_code=400, detail="Missing configuration value")
 
         value = payload.get("value")
+        log_debug(f"{LOG_PREFIX} Updating config: key={key}, value_type={type(value)}, value_len={len(str(value)) if value else 0}")
         
         # Get component info before updating
         try:
@@ -1388,8 +2094,16 @@ class SynthWebUIInterface:
 
         response_data = {"status": "ok"}
         
-        # Check if component reload is needed
-        if component and component not in ["core", "webui"]:
+        # Check if component reload is needed. Prefer an explicit flag coming
+        # from the config definition (needs_component_reload). This avoids
+        # suggesting reloads for synthetic components like 'exposed' unless a
+        # variable explicitly declared that changing it requires a reload.
+        try:
+            needs_reload_flag = bool(config_def.get("needs_component_reload", False)) if config_def else False
+        except Exception:
+            needs_reload_flag = False
+
+        if component and component not in ["core", "webui"] and needs_reload_flag:
             response_data["requires_reload"] = True
             response_data["component"] = component
             response_data["message"] = f"Configuration updated. Component '{component}' should be reloaded for changes to take effect."
@@ -1418,7 +2132,22 @@ class SynthWebUIInterface:
     async def get_active_vrm_endpoint(self):
         log_debug(f"{LOG_PREFIX} Getting active VRM: {self.active_vrm}")
         if self.active_vrm:
-            result = {"name": self.active_vrm, "url": f"/avatars/{self.active_vrm}"}
+            # If active_vrm already starts with /, it's already a web URL
+            if self.active_vrm.startswith("/"):
+                result = {"name": self.active_vrm.split("/")[-1], "url": self.active_vrm}
+                log_debug(f"{LOG_PREFIX} Active VRM response (URL path): {result}")
+                return JSONResponse(result)
+            
+            # Otherwise, build URL from vrm_dir
+            vrm_path = self.vrm_dir / self.active_vrm
+            # Convert absolute path to web-accessible URL
+            try:
+                web_path = vrm_path.relative_to(Path(__file__).resolve().parent.parent)
+                url = f"/{web_path}"
+            except ValueError:
+                # Fallback if path is not relative
+                url = f"/{self.vrm_dir}/{self.active_vrm}"
+            result = {"name": self.active_vrm, "url": url}
             log_debug(f"{LOG_PREFIX} Active VRM response: {result}")
             return JSONResponse(result)
         log_debug(f"{LOG_PREFIX} No active VRM set")
@@ -1438,6 +2167,21 @@ class SynthWebUIInterface:
             raise HTTPException(status_code=404, detail="Model not found")
         self._set_active_vrm(candidate.name)
         log_info(f"{LOG_PREFIX} Active VRM set to: {candidate.name}")
+        # Preload the current idle animation to all connected clients so the newly-loaded
+        # VRM does not appear in a T-pose while the client initializes the model.
+        try:
+            if self.persona_manager:
+                for session in list(self.connections.keys()):
+                    try:
+                        # persona_manager.set_animation_state accepts the state name and session_id
+                        await self.persona_manager.set_animation_state("idle", session_id=session)
+                        log_debug(f"{LOG_PREFIX} Preloaded idle animation for session {session}")
+                    except Exception as anim_exc:
+                        log_warning(f"{LOG_PREFIX} Failed to preload idle for session {session}: {anim_exc}")
+            else:
+                log_debug(f"{LOG_PREFIX} Persona manager not available - skipping idle preload for connected clients")
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} Error while preloading idle animations: {exc}")
         return JSONResponse(
             {"status": "ok", "name": candidate.name, "url": f"/avatars/{candidate.name}"}
         )
@@ -1471,6 +2215,8 @@ class SynthWebUIInterface:
         
         try:
             log_debug(f"{LOG_PREFIX} Opening destination file for writing...")
+            # Per new behavior, always write to model.vrm inside the VRM dir (overwrite)
+            destination = self.vrm_dir / "model.vrm"
             with destination.open("wb") as buffer:
                 log_debug(f"{LOG_PREFIX} File opened successfully, starting to read chunks...")
                 bytes_written = 0
@@ -1507,11 +2253,15 @@ class SynthWebUIInterface:
             await file.close()
             log_debug(f"{LOG_PREFIX} File handle closed")
 
-        log_info(f"{LOG_PREFIX} Setting active VRM to: {filename}")
-        self._set_active_vrm(filename)
+        log_info(f"{LOG_PREFIX} Setting active VRM to: model.vrm")
+        # Persist marker pointing to model.vrm
+        try:
+            self._set_active_vrm("model.vrm")
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} Failed to persist active VRM marker: {exc}")
         log_info(f"{LOG_PREFIX} Active VRM set successfully")
         
-        response_data = {"status": "ok", "name": filename, "url": f"/avatars/{filename}"}
+        response_data = {"status": "ok", "name": "model.vrm", "url": f"/avatars/model.vrm"}
         log_info(f"{LOG_PREFIX} Returning response: {response_data}")
         log_info(f"{LOG_PREFIX} ========== VRM UPLOAD END ==========")
         
@@ -1535,6 +2285,127 @@ class SynthWebUIInterface:
                 break
             self._set_active_vrm(fallback)
         return JSONResponse(self._models_payload())
+
+    async def upload_persona_pack(self, file: UploadFile = File(None), folder_path: Optional[str] = None):
+        """Upload a persona pack (.zip or .shp) containing a VRM, animations, descriptor and preview image.
+
+        The pack will be extracted into res/synth_webui/personas/<name> and the VRM will be copied into /avatars.
+        """
+        import zipfile
+        personas_dir = Path(__file__).resolve().parent.parent / "res" / "synth_webui" / "personas"
+        personas_dir.mkdir(parents=True, exist_ok=True)
+
+        # Two supported modes:
+        #  - Uploaded archive (.zip or .shp) via `file`
+        #  - Server-side folder copy via `folder_path` (useful for local persona installs)
+        dest = None
+        temp_path = None
+        if folder_path:
+            # Treat folder_path as a server-local folder to copy into personas_dir
+            src = Path(folder_path).expanduser()
+            if not src.exists() or not src.is_dir():
+                raise HTTPException(status_code=400, detail="Provided folder_path does not exist or is not a directory")
+            # Create a unique dest folder name based on folder basename
+            root = src.name
+            dest = personas_dir / root
+            if dest.exists():
+                dest = personas_dir / f"{root}_{uuid.uuid4().hex[:6]}"
+            import shutil
+            try:
+                shutil.copytree(src, dest)
+            except Exception as exc:
+                log_error(f"{LOG_PREFIX} Failed to copy persona folder from {src} to {dest}: {exc}")
+                raise HTTPException(status_code=500, detail="Failed to copy persona folder")
+        else:
+            if not file or not file.filename:
+                raise HTTPException(status_code=400, detail="No file uploaded")
+
+            filename = Path(file.filename).name
+            lower = filename.lower()
+            if not (lower.endswith('.zip') or lower.endswith('.shp')):
+                raise HTTPException(status_code=400, detail="Only .zip or .shp persona packs are accepted")
+
+            # Save uploaded archive to a temp location
+            temp_path = personas_dir / f"upload_{uuid.uuid4().hex}.tmp"
+            try:
+                with temp_path.open('wb') as f:
+                    while True:
+                        chunk = await file.read(1 << 20)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+            finally:
+                await file.close()
+
+            # Extract
+            try:
+                with zipfile.ZipFile(temp_path, 'r') as zf:
+                    # Determine root folder name from archive (or use filename sans ext)
+                    root_candidates = [n.split('/')[0] for n in zf.namelist() if n and '/' in n]
+                    root = root_candidates[0] if root_candidates else Path(filename).stem
+                    dest = personas_dir / root
+                    if dest.exists():
+                        # create unique folder
+                        dest = personas_dir / f"{root}_{uuid.uuid4().hex[:6]}"
+                    dest.mkdir(parents=True, exist_ok=True)
+                    zf.extractall(dest)
+
+                # Find a .vrm file inside dest
+                vrm_file = None
+                for p in dest.rglob('*.vrm'):
+                    vrm_file = p
+                    break
+
+                if vrm_file:
+                    # Copy VRM to avatars dir
+                    avatars_dir = self.vrm_dir
+                    avatars_dir.mkdir(parents=True, exist_ok=True)
+                    safe_name = self._sanitize_vrm_filename(vrm_file.name)
+                    target = avatars_dir / safe_name
+                    import shutil
+                    shutil.copy2(vrm_file, target)
+                    # Optionally copy animations (we assume animations are relative paths under animations/ in the persona pack)
+                    animations_src = dest / 'animations'
+                    animations_dest = Path(__file__).resolve().parent.parent / 'res' / 'synth_webui' / 'animations'
+                    if animations_src.exists() and animations_src.is_dir():
+                        animations_dest.mkdir(parents=True, exist_ok=True)
+                        for anim in animations_src.iterdir():
+                            try:
+                                shutil.copy2(anim, animations_dest / anim.name)
+                            except Exception:
+                                pass
+
+                    # If there's a persona metadata file, try to read name/preview
+                    meta = None
+                    for m in dest.glob('*.md'):
+                        try:
+                            meta = m.read_text(encoding='utf-8')
+                            break
+                        except Exception:
+                            continue
+
+                    # Mark this VRM as active (optional - for now set as active)
+                    self._set_active_vrm(target.name)
+
+                    return JSONResponse({
+                        'status': 'ok',
+                        'name': target.name,
+                        'skin_folder': str(dest),
+                        'meta': meta,
+                    }, status_code=201)
+                else:
+                    return JSONResponse({'status': 'error', 'detail': 'No VRM found in persona pack'}, status_code=400)
+            except zipfile.BadZipFile:
+                raise HTTPException(status_code=400, detail='Invalid zip file')
+            except Exception as exc:
+                log_error(f"{LOG_PREFIX} Failed to process persona pack: {exc}")
+                raise HTTPException(status_code=500, detail='Failed to process persona pack')
+            finally:
+                try:
+                    if temp_path and temp_path.exists():
+                        temp_path.unlink()
+                except Exception:
+                    pass
 
     @staticmethod
     def _prettify_name(raw_name: str) -> str:
@@ -1870,19 +2741,18 @@ class SynthWebUIInterface:
             raise HTTPException(status_code=400, detail="Missing 'name'")
 
         try:
-            from core.config import list_available_llms, set_active_llm
-            from core.core_initializer import core_initializer
+            from core.config import switch_active_llm
         except Exception as exc:  # pragma: no cover - defensive
             log_error(f"{LOG_PREFIX} unable to import LLM configuration helpers: {exc}")
             raise HTTPException(status_code=500, detail="Unable to access LLM configuration") from exc
 
-        available = list_available_llms()
-        if name not in available:
-            raise HTTPException(status_code=404, detail=f"LLM '{name}' is not available")
-
         try:
-            await set_active_llm(name)
-            await core_initializer.initialize_all()
+            # Use the centralized switch function with hot-swap
+            await switch_active_llm(name, use_hot_swap=True)
+            log_info(f"{LOG_PREFIX} Successfully switched LLM to {name}")
+        except ValueError as exc:
+            log_warning(f"{LOG_PREFIX} LLM not available: {exc}")
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
         except Exception as exc:
             log_error(f"{LOG_PREFIX} failed to switch LLM to {name}: {exc}")
             raise HTTPException(status_code=500, detail=f"Failed to activate LLM '{name}'") from exc
@@ -2044,12 +2914,24 @@ class SynthWebUIInterface:
 
     def start_server_async(self) -> None:
         """Start the web server as an asyncio task. Call this from the main event loop."""
-        if not hasattr(self, '_server_task') or (hasattr(self, '_server_task') and (self._server_task is None or self._server_task.done())):
-            log_info(f"{LOG_PREFIX} Starting {BRAND_NAME} server as asyncio task on http://{self.host}:{self.port}")
-            import asyncio
-            self._server_task = asyncio.create_task(self._run_server())
-        else:
-            log_info(f"{LOG_PREFIX} Server task already running")
+        try:
+            if not hasattr(self, '_server_task') or (hasattr(self, '_server_task') and (self._server_task is None or self._server_task.done())):
+                log_info(f"{LOG_PREFIX} Starting {BRAND_NAME} server as asyncio task on http://{self.host}:{self.port}")
+                import asyncio
+                try:
+                    loop = asyncio.get_running_loop()
+                    self._server_task = loop.create_task(self._run_server())
+                    log_info(f"{LOG_PREFIX} Server task scheduled on running loop: {loop}")
+                except RuntimeError:
+                    # No running loop - fallback to create_task which may raise later
+                    log_warning(f"{LOG_PREFIX} No running event loop found when scheduling server task; attempting asyncio.create_task fallback")
+                    self._server_task = asyncio.create_task(self._run_server())
+            else:
+                log_info(f"{LOG_PREFIX} Server task already running")
+        except Exception as exc:
+            import traceback
+            log_error(f"{LOG_PREFIX} Exception while scheduling server task: {exc}")
+            log_error(f"{LOG_PREFIX} Traceback: {traceback.format_exc()}")
 
     async def _run_server(self) -> None:
         """Create and run the uvicorn server."""
@@ -2092,21 +2974,37 @@ class SynthWebUIInterface:
 
     async def start(self) -> None:
         """Start the web UI interface if autostart is enabled."""
-        # Initialize persona manager now that core initialization is complete
-        if self.persona_manager is None:
-            self.persona_manager = get_persona_manager()
-            if self.persona_manager:
-                self.persona_manager.set_webui(self)
-                self.persona_manager.set_animation_handler(self.animation_handler)
-                log_info(f"{LOG_PREFIX} Persona manager initialized")
+        try:
+            log_info(f"{LOG_PREFIX} start() called - initializing persona manager and starting server if enabled")
+            # Initialize persona manager now that core initialization is complete
+            if self.persona_manager is None:
+                from core.persona_manager import get_persona_manager
+                self.persona_manager = get_persona_manager()
+                if self.persona_manager:
+                    try:
+                        self.persona_manager.set_webui(self)
+                        self.persona_manager.set_animation_handler(self.animation_handler)
+                    except Exception as pm_exc:
+                        log_warning(f"{LOG_PREFIX} Persona manager set_* calls failed: {pm_exc}")
+                    log_info(f"{LOG_PREFIX} Persona manager initialized")
+                else:
+                    log_warning(f"{LOG_PREFIX} Failed to initialize persona manager")
+
+            if self.autostart:
+                log_info(f"{LOG_PREFIX} Autostart enabled, starting {BRAND_NAME} server")
+                try:
+                    self.start_server_async()
+                    log_info(f"{LOG_PREFIX} start() completed - server start scheduled")
+                except Exception as start_exc:
+                    import traceback
+                    log_error(f"{LOG_PREFIX} Exception while invoking start_server_async: {start_exc}")
+                    log_error(f"{LOG_PREFIX} Traceback: {traceback.format_exc()}")
             else:
-                log_warning(f"{LOG_PREFIX} Failed to initialize persona manager")
-        
-        if self.autostart:
-            log_info(f"{LOG_PREFIX} Autostart enabled, starting {BRAND_NAME} server")
-            self.start_server_async()
-        else:
-            log_info(f"{LOG_PREFIX} Autostart disabled, skipping server start")
+                log_info(f"{LOG_PREFIX} Autostart disabled, skipping server start")
+        except Exception as exc:
+            import traceback
+            log_error(f"{LOG_PREFIX} Exception in start(): {exc}")
+            log_error(f"{LOG_PREFIX} Traceback: {traceback.format_exc()}")
 
     # ------------------------------------------------------------------
     # HTML template
@@ -2302,120 +3200,186 @@ class SynthWebUIInterface:
                     <div class="diary-date-group">
                         <div class="diary-date-header" onclick="toggleDateGroup(this)">
                             <span>${{date}}</span>
-                            <span>(${entries.length} entries)</span>
                         </div>
                         <div class="diary-date-content">
-                            ${{entries.map(entry => renderDiaryEntry(entry)).join('')}}
+                            ${entries.map(e => renderDiaryEntry(e)).join('')}
                         </div>
                     </div>
                 `;
-            }}).join('');
-            
+            }).join('');
             container.innerHTML = html || '<div class="loading">No entries found</div>';
-        }}
-
-        function renderDiaryEntry(entry) {{
-            const isArchived = entry.archived || false;
-            const timestamp = new Date(entry.timestamp).toLocaleString();
-            return `
-                <div class="diary-entry ${{isArchived ? 'archived' : ''}}" data-id="${{entry.id}}">
-                    <input type="checkbox" class="diary-entry-checkbox" data-id="${{entry.id}}" onchange="toggleEntrySelection(${entry.id})" />
-                    <div class="diary-entry-content">
-                        <div class="diary-entry-meta">
-                            ${{timestamp}} - ${{entry.interface || 'unknown'}} ${{isArchived ? '(Archived)' : ''}}
-                        </div>
-                        <div class="diary-entry-text">${{entry.content || ''}}</div>
-                        ${{entry.personal_thought ? `<div class="diary-entry-text"><strong>Thoughts:</strong> ${{entry.personal_thought}}</div>` : ''}}
-                        ${{entry.interaction_summary ? `<div class="diary-entry-text"><strong>Summary:</strong> ${{entry.interaction_summary}}</div>` : ''}}
-                    </div>
-                </div>
-            `;
-        }}
-
-        function toggleDateGroup(header) {{
-            const content = header.nextElementSibling;
-            content.style.display = content.style.display === 'none' ? 'block' : 'none';
-        }}
-
-        function toggleEntrySelection(entryId) {{
-            if (selectedEntries.has(entryId)) {{
-                selectedEntries.delete(entryId);
-            }} else {{
-                selectedEntries.add(entryId);
-            }}
-            updateActionButtons();
-        }}
-
-        function updateActionButtons() {{
-            const hasSelection = selectedEntries.size > 0;
-            document.getElementById('archive-btn').style.display = hasSelection ? 'inline-block' : 'none';
-            document.getElementById('unarchive-btn').style.display = hasSelection ? 'inline-block' : 'none';
-            document.getElementById('delete-btn').style.display = hasSelection ? 'inline-block' : 'none';
-        }}
-
-        async function archiveSelected() {{
-            if (!confirm('Archive selected entries?')) return;
-            await performAction('archive');
-        }}
-
-        async function unarchiveSelected() {{
-            await performAction('unarchive');
-        }}
-
-        async function deleteSelected() {{
-            if (!confirm('Permanently delete selected archived entries? This cannot be undone!')) return;
-            await performAction('delete');
-        }}
-
-        async function performAction(action) {{
-            try {{
-                const response = await fetch(`/api/diary/${{action}}`, {{
-                    method: action === 'delete' ? 'DELETE' : 'POST',
-                    headers: {{ 'Content-Type': 'application/json' }},
-                    body: JSON.stringify({{ entry_ids: Array.from(selectedEntries) }})
-                }});
-                
-                if (response.ok) {{
-                    selectedEntries.clear();
-                    updateActionButtons();
-                    loadDiaryEntries();
-                }} else {{
-                    alert('Action failed');
-                }}
-            }} catch (error) {{
-                console.error('Action error:', error);
-                alert('Action failed');
-            }}
-        }}
-
-        // Event listeners
-        document.getElementById('diary-search').addEventListener('input', renderDiaryEntries);
-        document.getElementById('show-archived').addEventListener('change', loadDiaryEntries);
-        document.getElementById('group-by-date').addEventListener('change', renderDiaryEntries);
-        
-        document.getElementById('edit-mode-btn').addEventListener('click', () => {{
-            editMode = !editMode;
-            document.querySelectorAll('.diary-entry-checkbox').forEach(cb => {{
-                cb.style.display = editMode ? 'block' : 'none';
-            }});
-            document.getElementById('edit-mode-btn').textContent = editMode ? 'Done' : 'Edit';
-            if (!editMode) {{
-                selectedEntries.clear();
-                updateActionButtons();
-            }}
-        }});
-        
-        document.getElementById('archive-btn').addEventListener('click', archiveSelected);
-        document.getElementById('unarchive-btn').addEventListener('click', unarchiveSelected);
-        document.getElementById('delete-btn').addEventListener('click', deleteSelected);
-
-        // Initial load
-        loadDiaryEntries();
+        }
     </script>
 </body>
 </html>
 """
         return template.replace('{brand_name}', BRAND_NAME)
+
+    async def list_skins(self):
+        """List available skins (folders under skins).
+
+        Returns: JSON list with entries: name, version, author, description, preview_url, vrm_present
+        Reads metadata from persona.json if available.
+        """
+        skins_dir = Path(__file__).resolve().parent.parent / "skins"
+        result = []
+        if not skins_dir.exists():
+            return JSONResponse(result)
+
+        for entry in sorted(skins_dir.iterdir()):
+            if not entry.is_dir():
+                continue
+            name = entry.name
+            if name == 'temp':
+                continue
+            
+            preview = None
+            vrm_present = False
+            version = None
+            author = None
+            description = None
+            
+            try:
+                # Check for preview image
+                preview_path = entry / 'preview.png'
+                if preview_path.exists():
+                    preview = f"/skins/{name}/preview.png"
+                
+                # Try to load metadata from persona.json
+                persona_json_path = entry / 'persona.json'
+                if persona_json_path.exists():
+                    try:
+                        import json
+                        persona_data = json.loads(persona_json_path.read_text(encoding='utf-8'))
+                        # Extract metadata from persona.json
+                        version = persona_data.get("version")
+                        author = persona_data.get("author")
+                        description = persona_data.get("description")
+                        # Use name from JSON if available
+                        if not name or name == entry.name:
+                            name = persona_data.get("name", entry.name)
+                    except Exception as e:
+                        log_debug(f"[webui] Error reading persona.json for skin '{entry.name}': {e}")
+                
+                # check for vrm - only check in direct directory, not recursive, for speed
+                for v in entry.glob('*.vrm'):
+                    vrm_present = True
+                    break
+            except Exception as e:
+                log_warning(f"[webui] Error scanning skin '{name}': {e}")
+            
+            result.append({
+                'name': name,
+                'folder': entry.name,  # Keep original folder name for reference
+                'version': version,
+                'author': author,
+                'description': description,
+                'preview_url': preview,
+                'vrm_present': vrm_present,
+                'valid': vrm_present,
+            })
+
+        # Ensure Rei exists and is valid
+        rei = next((s for s in result if s['folder'] == 'Rei'), None)
+        if not rei:
+            raise HTTPException(status_code=500, detail="Default skin 'Rei' missing")
+        if not rei.get('valid'):
+            raise HTTPException(status_code=500, detail="Default skin 'Rei' invalid (missing VRM)")
+
+        return JSONResponse(result)
+
+    async def get_suggested_locations(self):
+        """Return a list of suggested locations derived from timezone database.
+        
+        Locations are formatted as "City,Country" pairs extracted from timezone names.
+        """
+        try:
+            from core.time_zone_utils import get_suggested_locations
+            locations = get_suggested_locations()
+            return JSONResponse({
+                "locations": locations,
+                "count": len(locations)
+            })
+        except Exception as e:
+            log_error(f"{LOG_PREFIX} Error getting suggested locations: {e}")
+            return JSONResponse({
+                "locations": [],
+                "count": 0,
+                "error": str(e)
+            }, status_code=500)
+
+    async def clear_uploaded_vrm(self):
+        """Clear any user-uploaded VRM in skins/temp/model.vrm and restore Rei's VRM.
+
+        This sets the active VRM to the restored model.
+        """
+        skins_dir = Path(__file__).resolve().parent.parent / "skins"
+        rei_dir = skins_dir / 'Rei'
+        if not rei_dir.exists() or not rei_dir.is_dir():
+            raise HTTPException(status_code=500, detail="Default skin 'Rei' missing")
+
+        # find VRM inside Rei
+        rei_vrm = None
+        for p in rei_dir.rglob('*.vrm'):
+            rei_vrm = p
+            break
+        if not rei_vrm:
+            raise HTTPException(status_code=500, detail="Default skin 'Rei' has no VRM to restore")
+
+        temp_dir = Path(__file__).resolve().parent.parent / "res" / "synth_webui" / "skins" / "temp"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        target = temp_dir / 'model.vrm'
+        import shutil
+        try:
+            shutil.copy2(rei_vrm, target)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to restore Rei VRM to temp: {exc}")
+            raise HTTPException(status_code=500, detail="Failed to restore default VRM")
+
+        try:
+            self._set_active_vrm('model.vrm')
+        except Exception:
+            pass
+
+        return JSONResponse({'status': 'ok', 'restored_from': str(rei_vrm)}, status_code=200)
+
+    async def activate_skin(self, skin_name: str):
+        """Activate a skin by copying its VRM into avatars and setting it active.
+
+        Returns 201 with name if activated, 404 if no VRM found.
+        """
+        skins_dir = Path(__file__).resolve().parent.parent / "skins"
+        target_skin = skins_dir / Path(skin_name).name
+        if not target_skin.exists() or not target_skin.is_dir():
+            raise HTTPException(status_code=404, detail="Skin not found")
+
+        # find a .vrm file inside skin
+        vrm_file = None
+        for p in target_skin.rglob('*.vrm'):
+            vrm_file = p
+            break
+        if not vrm_file:
+            raise HTTPException(status_code=404, detail="No VRM found in skin")
+
+        # copy to avatars and set active
+        avatars_dir = self.vrm_dir
+        avatars_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = self._sanitize_vrm_filename(vrm_file.name)
+        target = avatars_dir / safe_name
+        import shutil
+        try:
+            shutil.copy2(vrm_file, target)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to copy VRM when activating skin {skin_name}: {exc}")
+            raise HTTPException(status_code=500, detail="Failed to activate skin")
+
+        try:
+            self._set_active_vrm(target.name)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to set active VRM after activating skin {skin_name}: {exc}")
+            raise HTTPException(status_code=500, detail="Failed to activate skin")
+
+        return JSONResponse({'status': 'ok', 'name': target.name}, status_code=201)
 
     # ------------------------------------------------------------------
     # WebSocket logic

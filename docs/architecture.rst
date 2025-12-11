@@ -32,6 +32,7 @@ System Components
     - **Core Initializer** (``core_initializer.py``): Auto-discovers and loads all components from ``plugins/``, ``llm_engines/``, and ``interface/`` directories.
     - **Registries**: Centralized management for LLM engines, interfaces, plugins, and validation rules.
     - **Transport Layer**: Handles communication between components and interfaces.
+    - **Interface Path System**: Unified hierarchical addressing system using ``interface_path`` format (e.g., "telegram_bot/chat_id/thread_id") for consistent conversation identification across all platforms. See :doc:`interface_path` for detailed documentation.
 
 ``interface``
     Chat platform integrations (Telegram, Discord, Reddit, etc.). Each interface:
@@ -98,6 +99,53 @@ The following diagram shows the complete message processing pipeline:
        
        Corrector [label="Corrector Middleware\n(LLM-assisted)"];
    }
+
+Message Queue System
+--------------------
+
+The Synthetic Heart uses an **asyncio.PriorityQueue** for processing messages in the correct order. Messages are prioritized to ensure high-priority events (like scheduled messages) are processed before regular chat messages.
+
+**Priority Levels**:
+- **HIGH_PRIORITY (0)**: Scheduled events, urgent notifications
+- **NORMAL_PRIORITY (1)**: Regular chat messages
+
+**PriorityQueue Fix**: To prevent ``TypeError`` when comparing messages with identical priorities, the queue uses a **monotonic counter** as tiebreaker. Each message is stored as ``(priority, counter, item)`` instead of ``(priority, item)``, ensuring consistent ordering even when priorities are equal.
+
+**Consumer Loop**: A dedicated async task continuously processes queued messages, ensuring no message loss and proper serialization of operations.
+
+Database Connection Pool
+-------------------------
+
+The system maintains a **single aiomysql connection pool** with carefully tuned parameters:
+
+- **Max Size**: 5 connections (reduced from 8 to prevent bio_manager timeouts)
+- **Min Size**: 1 connection (keeps one connection alive)
+- **Timeout**: 10 seconds for connection acquisition
+
+**Bio Manager Optimization**: The bio_manager plugin caches table initialization and uses async database operations to prevent ``TimeoutError`` when retrieving user profiles during prompt injection.
+
+Recent Fixes
+------------
+
+**PriorityQueue TypeError Fix (November 2025)**:
+
+The message queue was experiencing ``TypeError: '<' not supported between instances of 'dict' and 'dict'`` when processing messages with identical priorities.
+
+**Root Cause**: Python's ``heapq`` compares tuple elements when priorities are equal, but dict objects cannot be compared with ``<``.
+
+**Solution**: Added monotonic counter as tiebreaker in queue tuples:
+.. code-block:: python
+
+    # Before: (priority, item) - fails when priority equal
+    # After: (priority, counter, item) - always comparable
+    
+    _counter += 1
+    await _queue.put((priority, _counter, item))
+
+**Files Modified**:
+- ``core/message_queue.py``: Added global counter and updated all ``put()`` calls
+
+**Impact**: Eliminates queue crashes and ensures consistent message processing order.
 
 **Detailed Flow:**
 

@@ -8,7 +8,7 @@ try:
 except Exception:  # pragma: no cover - fallback when dotenv not installed
     def load_dotenv(*args, **kwargs):
         return False
-from core.db import get_conn
+from core.db import get_conn_ctx
 import aiomysql
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.config_manager import config_registry
@@ -75,6 +75,16 @@ def get_trainer_id(interface_name: str) -> int | None:
 # get_trainer_ids() instead, but we keep this symbol to avoid import errors.
 TRAINER_IDS = get_trainer_ids()
 
+# Trainer Name configuration
+TRAINER_NAME = config_registry.get_var(
+    "TRAINER_NAME",
+    "Trainer",
+    label="Trainer Name",
+    description="The name of the trainer/mentor who has responsibility over this SyntH. This will appear in the bio.",
+    group="core",
+    component="core",
+)
+
 # LLM Configuration
 LLM_MODE = config_registry.get_var(
     "LLM_MODE",
@@ -88,48 +98,92 @@ LLM_MODE = config_registry.get_var(
 
 # === Persistent LLM mode ===
 
-_active_llm = None  # local global variable
+# Exposed configuration for active LLM (hidden from UI - set via Components tab)
+# NOTE: Do NOT use "bootstrap" tag - this config MUST be loaded from DB
+ACTIVE_LLM = config_registry.get_var(
+    "ACTIVE_LLM",
+    "selenium_chatgpt",
+    label="Active LLM",
+    description="The currently active LLM engine. Set via the Components tab in the Web UI.",
+    group="core",
+    component="core",
+    hidden=True,  # Hidden from UI config - only set via Components tab
+)
 
 async def get_active_llm():
-    global _active_llm
-    if _active_llm is None:
-        conn = await get_conn()
-        try:
-            async with conn.cursor(aiomysql.DictCursor) as cur:
-                await cur.execute("SELECT value FROM settings WHERE `setting_key` = 'active_llm'")
-                row = await cur.fetchone()
-                if row:
-                    _active_llm = row["value"]
-                    log_debug(f"[config] 🧠 Active LLM plugin loaded from DB: {_active_llm}")
-                else:
-                    _active_llm = "manual"
-        except Exception as e:
-            log_error(f"[config] ❌ Error in get_active_llm(): {repr(e)}")
-        finally:
-            conn.close()
-    return _active_llm
+    """Get the currently active LLM engine from config registry.
+    
+    This function ensures the value is loaded from the database if available,
+    not just the default value that was set during module import.
+    """
+    try:
+        # Force retrieval from config registry to get the most up-to-date value
+        # This ensures we load from DB even if called before load_all_from_db()
+        current_value = config_registry.get_value("ACTIVE_LLM", "selenium_chatgpt")
+        
+        # Check for None, empty string, or literal "None" string
+        if current_value and current_value != "" and current_value != "None":
+            log_debug(f"[config] 🧠 Active LLM: {current_value}")
+            return current_value
+    except Exception as e:
+        log_error(f"[config] ❌ Error reading ACTIVE_LLM: {repr(e)}")
+    
+    # Default fallback
+    return "selenium_chatgpt"
 
 async def set_active_llm(name: str):
-    global _active_llm
-    if name == _active_llm:
-        log_debug(f"[config] 🔄 LLM already set: {name}, no update needed.")
-        return
-    _active_llm = name
-    from core.db import ensure_core_tables
-    await ensure_core_tables()
-    conn = await get_conn()
+    """Save the active LLM engine to config registry and database."""
     try:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "REPLACE INTO settings (`setting_key`, value) VALUES (%s, %s)",
-                ("active_llm", name),
-            )
-            await conn.commit()
-            log_debug(f"[config] 💾 Saved active plugin in DB: {name}")
+        await config_registry.set_value("ACTIVE_LLM", name)
+        log_info(f"[config] 💾 Saved active LLM to database: {name}")
     except Exception as e:
-        log_error(f"[config] ❌ Error in set_active_llm(): {repr(e)}")
-    finally:
-        conn.close()
+        log_error(f"[config] ❌ Error saving ACTIVE_LLM to database: {repr(e)}")
+        raise
+
+async def switch_active_llm(name: str, use_hot_swap: bool = True):
+    """
+    Switch to a different active LLM engine.
+    
+    This is the centralized entry point for changing the active LLM, used by both
+    the WebUI and Telegram commands to ensure consistency.
+    
+    Args:
+        name: The name of the LLM engine to activate
+        use_hot_swap: If True, performs hot-swap (direct plugin reload without full reinitialization).
+                      If False, performs full reinitialization (useful for some edge cases).
+    
+    Raises:
+        ValueError: If the LLM name is not available
+    """
+    from core.config import list_available_llms
+    
+    available = list_available_llms()
+    if name not in available:
+        raise ValueError(f"LLM '{name}' is not available. Available: {', '.join(available)}")
+    
+    current = await get_active_llm()
+    if name == current:
+        log_debug(f"[config] 🔄 LLM already active: {name}, no switch needed.")
+        return
+    
+    # Persist the new LLM choice to config
+    await set_active_llm(name)
+    log_info(f"[config] 🔄 Switching LLM from {current} to {name}")
+    
+    try:
+        if use_hot_swap:
+            # Hot-swap: direct plugin reload
+            from core.plugin_instance import load_plugin
+            await load_plugin(name)
+            log_info(f"[config] ✅ LLM hot-swapped to {name}")
+        else:
+            # Full reinitialization
+            from core.core_initializer import core_initializer
+            await core_initializer.initialize_all()
+            log_info(f"[config] ✅ LLM switched to {name} (full reinitialization)")
+    except Exception as e:
+        log_error(f"[config] ❌ Failed to switch LLM to {name}: {e}")
+        raise
 
 _log_chat_id: int | None = None  # cached log chat ID
 _log_chat_thread_id: int | None = None  # cached log chat thread ID
@@ -139,25 +193,23 @@ async def get_log_chat_id() -> int | None:
     """Return the configured log chat ID, if any."""
     global _log_chat_id
     if _log_chat_id is None:
-        conn = await get_conn()
-        try:
-            async with conn.cursor(aiomysql.DictCursor) as cur:
-                await cur.execute(
-                    "SELECT value FROM settings WHERE `setting_key` = 'log_chat_id'"
-                )
-                row = await cur.fetchone()
-                if row:
-                    try:
-                        _log_chat_id = int(row["value"])
-                        log_debug(
-                            f"[config] 📥 Loaded log_chat_id from DB: {_log_chat_id}"
-                        )
-                    except (ValueError, TypeError):
-                        _log_chat_id = None
-        except Exception as e:
-            log_error(f"[config] ❌ Error in get_log_chat_id(): {repr(e)}")
-        finally:
-            conn.close()
+        async with get_conn_ctx() as conn:
+            try:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await cur.execute(
+                        "SELECT value FROM settings WHERE `setting_key` = 'log_chat_id'"
+                    )
+                    row = await cur.fetchone()
+                    if row:
+                        try:
+                            _log_chat_id = int(row["value"])
+                            log_debug(
+                                f"[config] 📥 Loaded log_chat_id from DB: {_log_chat_id}"
+                            )
+                        except (ValueError, TypeError):
+                            _log_chat_id = None
+            except Exception as e:
+                log_error(f"[config] ❌ Error in get_log_chat_id(): {repr(e)}")
     return _log_chat_id
 
 
@@ -165,22 +217,20 @@ async def get_log_chat_interface() -> str | None:
     """Return the configured log chat interface, if any."""
     global _log_chat_interface
     if _log_chat_interface is None:
-        conn = await get_conn()
-        try:
-            async with conn.cursor(aiomysql.DictCursor) as cur:
-                await cur.execute(
-                    "SELECT value FROM settings WHERE `setting_key` = 'log_chat_interface'"
-                )
-                row = await cur.fetchone()
-                if row:
-                    _log_chat_interface = row["value"]
-                    log_debug(
-                        f"[config] 📥 Loaded log_chat_interface from DB: {_log_chat_interface}"
+        async with get_conn_ctx() as conn:
+            try:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await cur.execute(
+                        "SELECT value FROM settings WHERE `setting_key` = 'log_chat_interface'"
                     )
-        except Exception as e:
-            log_error(f"[config] ❌ Error in get_log_chat_interface(): {repr(e)}")
-        finally:
-            conn.close()
+                    row = await cur.fetchone()
+                    if row:
+                        _log_chat_interface = row["value"]
+                        log_debug(
+                            f"[config] 📥 Loaded log_chat_interface from DB: {_log_chat_interface}"
+                        )
+            except Exception as e:
+                log_error(f"[config] ❌ Error in get_log_chat_interface(): {repr(e)}")
     return _log_chat_interface
 
 async def set_log_chat_id(chat_id: int) -> None:
@@ -189,45 +239,41 @@ async def set_log_chat_id(chat_id: int) -> None:
     _log_chat_id = chat_id
     from core.db import ensure_core_tables
     await ensure_core_tables()
-    conn = await get_conn()
-    try:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "REPLACE INTO settings (`setting_key`, `value`) VALUES (%s, %s)",
-                ("log_chat", str(chat_id)),
-            )
-            await conn.commit()
-            log_debug(
-                f"[config] 💾 Saved log_chat in DB: {chat_id}"
-            )
-    except Exception as e:
-        log_error(f"[config] ❌ Error in set_log_chat_id(): {repr(e)}")
-    finally:
-        conn.close()
+    async with get_conn_ctx() as conn:
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "REPLACE INTO settings (`setting_key`, `value`) VALUES (%s, %s)",
+                    ("log_chat", str(chat_id)),
+                )
+                await conn.commit()
+                log_debug(
+                    f"[config] 💾 Saved log_chat in DB: {chat_id}"
+                )
+        except Exception as e:
+            log_error(f"[config] ❌ Error in set_log_chat_id(): {repr(e)}")
 
 async def get_log_chat_thread_id() -> int | None:
     """Return the configured log chat thread ID, if any."""
     global _log_chat_thread_id
     if _log_chat_thread_id is None:
-        conn = await get_conn()
-        try:
-            async with conn.cursor(aiomysql.DictCursor) as cur:
-                await cur.execute(
-                    "SELECT value FROM settings WHERE `setting_key` = 'log_chat_thread_id'"
-                )
-                row = await cur.fetchone()
-                if row:
-                    try:
-                        _log_chat_thread_id = int(row["value"])
-                        log_debug(
-                            f"[config] 📥 Loaded log_chat_thread_id from DB: {_log_chat_thread_id}"
-                        )
-                    except (ValueError, TypeError):
-                        _log_chat_thread_id = None
-        except Exception as e:
-            log_error(f"[config] ❌ Error in get_log_chat_thread_id(): {repr(e)}")
-        finally:
-            conn.close()
+        async with get_conn_ctx() as conn:
+            try:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await cur.execute(
+                        "SELECT value FROM settings WHERE `setting_key` = 'log_chat_thread_id'"
+                    )
+                    row = await cur.fetchone()
+                    if row:
+                        try:
+                            _log_chat_thread_id = int(row["value"])
+                            log_debug(
+                                f"[config] 📥 Loaded log_chat_thread_id from DB: {_log_chat_thread_id}"
+                            )
+                        except (ValueError, TypeError):
+                            _log_chat_thread_id = None
+            except Exception as e:
+                log_error(f"[config] ❌ Error in get_log_chat_thread_id(): {repr(e)}")
     return _log_chat_thread_id
 
 async def set_log_chat_id_and_thread(chat_id: int, thread_id: int | None = None, interface: str = "webui") -> None:
@@ -238,35 +284,33 @@ async def set_log_chat_id_and_thread(chat_id: int, thread_id: int | None = None,
     _log_chat_interface = interface
     from core.db import ensure_core_tables
     await ensure_core_tables()
-    conn = await get_conn()
-    try:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "REPLACE INTO settings (`setting_key`, `value`) VALUES (%s, %s)",
-                ("log_chat_id", str(chat_id)),
-            )
-            await cur.execute(
-                "REPLACE INTO settings (`setting_key`, `value`) VALUES (%s, %s)",
-                ("log_chat_interface", interface),
-            )
-            if thread_id is not None:
+    async with get_conn_ctx() as conn:
+        try:
+            async with conn.cursor() as cur:
                 await cur.execute(
                     "REPLACE INTO settings (`setting_key`, `value`) VALUES (%s, %s)",
-                    ("log_chat_thread_id", str(thread_id)),
+                    ("log_chat_id", str(chat_id)),
                 )
-            else:
-                # Remove thread setting if None
                 await cur.execute(
-                    "DELETE FROM settings WHERE `setting_key` = 'log_chat_thread_id'"
+                    "REPLACE INTO settings (`setting_key`, `value`) VALUES (%s, %s)",
+                    ("log_chat_interface", interface),
                 )
-            await conn.commit()
-            log_debug(
-                f"[config] 💾 Saved log chat in DB: {chat_id}, thread: {thread_id}, interface: {interface}"
-            )
-    except Exception as e:
-        log_error(f"[config] ❌ Error in set_log_chat_id_and_thread(): {repr(e)}")
-    finally:
-        conn.close()
+                if thread_id is not None:
+                    await cur.execute(
+                        "REPLACE INTO settings (`setting_key`, `value`) VALUES (%s, %s)",
+                        ("log_chat_thread_id", str(thread_id)),
+                    )
+                else:
+                    # Remove thread setting if None
+                    await cur.execute(
+                        "DELETE FROM settings WHERE `setting_key` = 'log_chat_thread_id'"
+                    )
+                await conn.commit()
+                log_debug(
+                    f"[config] 💾 Saved log chat in DB: {chat_id}, thread: {thread_id}, interface: {interface}"
+                )
+        except Exception as e:
+            log_error(f"[config] ❌ Error in set_log_chat_id_and_thread(): {repr(e)}")
 
 def get_log_chat_id_sync() -> int | None:
     """Synchronous helper to fetch cached log chat ID, loading from DB if needed."""

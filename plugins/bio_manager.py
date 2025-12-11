@@ -8,13 +8,17 @@ import aiomysql
 import threading
 from contextlib import asynccontextmanager
 
-from core.db import get_conn
+from core.db import get_conn_ctx
 from core.logging_utils import log_error, log_info, log_debug, log_warning
 from core.core_initializer import core_initializer, register_plugin
 
 
 # Injection priority for participant bios
 INJECTION_PRIORITY = 5  # Medium priority - keep essential participant info
+
+# Global flag to track if table has been initialized
+_table_initialized = False
+_table_lock = threading.Lock()
 
 def register_injection_priority():
     """Register this component's injection priority."""
@@ -28,26 +32,23 @@ register_injection_priority()
 @asynccontextmanager
 async def get_db():
     """Context manager for MariaDB database connections."""
-    conn = None
-    try:
-        conn = await get_conn()
+    async with get_conn_ctx() as conn:
         log_debug("[bio_manager] Opened database connection")
-        yield conn
-    except Exception as e:
-        log_error(f"[bio_manager] Database error: {e}")
-        raise
-    finally:
-        if conn:
-            conn.close()
-            log_debug("[bio_manager] Connection closed")
+        try:
+            yield conn
+        except Exception as e:
+            log_error(f"[bio_manager] Database error: {e}")
+            raise
+        finally:
+            log_debug("[bio_manager] Connection released")
 
 
-JSON_LIST_FIELDS = {"known_as", "likes", "not_likes", "past_events", "feelings", "social_accounts"}
+JSON_LIST_FIELDS = {"known_as", "likes", "not_likes", "past_events", "social_accounts"}
 JSON_DICT_FIELDS = {"contacts"}
 
 VALID_BIO_FIELDS = {
     "known_as", "likes", "not_likes", "information", "past_events", 
-    "feelings", "contacts", "social_accounts", "privacy", "created_at", "last_accessed", "user_name"
+    "contacts", "social_accounts", "privacy", "created_at", "last_accessed", "user_name"
 }
 
 DEFAULTS = {
@@ -56,7 +57,6 @@ DEFAULTS = {
     "not_likes": [],
     "information": "",
     "past_events": [],
-    "feelings": [],
     "contacts": {},
     "social_accounts": [],  # Changed from {} to []
     "privacy": "default",
@@ -124,48 +124,60 @@ async def init_bio_table():
 def _run(coro):
     """Run a coroutine safely even if an event loop is already running."""
     try:
-        return asyncio.run(coro)
+        # Log the coroutine name for debugging timeouts
+        coro_name = coro.__name__ if hasattr(coro, '__name__') else str(coro)
+        log_debug(f"[bio_manager] _run called with: {coro_name}")
+        
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # We're in async context, use run_coroutine_threadsafe to avoid creating new loop
+            log_debug(f"[bio_manager] Using run_coroutine_threadsafe for: {coro_name}")
+            result = asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=30.0)
+            log_debug(f"[bio_manager] _run completed successfully for: {coro_name}")
+            return result
+        else:
+            # Event loop exists but not running, use run_until_complete
+            return loop.run_until_complete(coro)
     except RuntimeError:
-        result: Any = None
-        exc: Exception | None = None
-
-        def runner() -> None:
-            nonlocal result, exc
-            try:
-                result = asyncio.run(coro)
-            except Exception as e:  # pragma: no cover - defensive
-                exc = e
-
-        thread = threading.Thread(target=runner)
-        thread.start()
-        thread.join()
-        if exc:
-            raise exc
-        return result
+        # No event loop at all - this is the only safe place to use asyncio.run()
+        return asyncio.run(coro)
+    except Exception as e:
+        import traceback
+        log_error(f"[bio_manager] Error in _run: {e}")
+        log_debug(f"[bio_manager] Traceback: {traceback.format_exc()}")
+        return None
 
 
 async def _execute(query: str, params: tuple = ()) -> None:
-    conn = await get_conn()
-    try:
+    async with get_conn_ctx() as conn:
         async with conn.cursor() as cur:
             await cur.execute(query, params)
-    finally:
-        conn.close()
 
 
 async def _fetchone(query: str, params: tuple = ()):
-    conn = await get_conn()
-    try:
+    async with get_conn_ctx() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(query, params)
             return await cur.fetchone()
-    finally:
-        conn.close()
 
 
 def _ensure_table() -> None:
     """Create the bio table if it doesn't exist."""
-    _run(init_bio_table())
+    global _table_initialized
+    
+    # Fast path: if already initialized, skip DB call
+    if _table_initialized:
+        return
+    
+    # Slow path: check and initialize with lock
+    with _table_lock:
+        # Double-check after acquiring lock
+        if _table_initialized:
+            return
+        
+        _run(init_bio_table())
+        _table_initialized = True
+        log_debug("[bio_manager] Table initialization completed and cached")
 
 
 def _ensure_user_exists(user_id: str) -> None:
@@ -317,8 +329,44 @@ def _update_json_field(user_id: str, key: str, update_fn: Callable[[Any], Any]) 
         return
 
 
+async def _get_bio_light_async(user_id: str) -> dict:
+    """Async version of get_bio_light - returns a lightweight bio for the user."""
+    try:
+        row = await _fetchone(
+            "SELECT known_as, likes, not_likes, feelings, information FROM bio WHERE id=%s",
+            (user_id,),
+        )
+        if not row:
+            return {}
+        
+        result = {
+            "known_as": _load_json_field(row.get("known_as"), "known_as", DEFAULTS["known_as"]),
+            "likes": _load_json_field(row.get("likes"), "likes", DEFAULTS["likes"]),
+            "not_likes": _load_json_field(row.get("not_likes"), "not_likes", DEFAULTS["not_likes"]),
+            "feelings": _load_json_field(row.get("feelings"), "feelings", DEFAULTS["feelings"]),
+            "information": row.get("information") or "",
+        }
+        
+        # Ensure all expected fields exist and are of correct types
+        if not isinstance(result.get("known_as"), list):
+            result["known_as"] = DEFAULTS["known_as"]
+        if not isinstance(result.get("likes"), list):
+            result["likes"] = DEFAULTS["likes"]
+        if not isinstance(result.get("not_likes"), list):
+            result["not_likes"] = DEFAULTS["not_likes"]
+        if not isinstance(result.get("feelings"), list):
+            result["feelings"] = DEFAULTS["feelings"]
+        if not isinstance(result.get("information"), str):
+            result["information"] = ""
+            
+        return result
+    except Exception as e:
+        log_error(f"[bio_manager] Error in _get_bio_light_async for user {user_id}: {e}")
+        return {}
+
+
 def get_bio_light(user_id: str) -> dict:
-    """Return a lightweight bio for the user."""
+    """Return a lightweight bio for the user (sync wrapper)."""
     try:
         _ensure_table()
         row = _run(
@@ -565,6 +613,17 @@ def update_bio_fields(user_id: str, updates: dict) -> None:
                 ),
             )
         )
+
+
+async def _update_last_accessed_async(user_id: str, timestamp: str) -> None:
+    """Async version to update last_accessed field without blocking."""
+    try:
+        await _execute(
+            "UPDATE bio SET last_accessed = %s WHERE id = %s",
+            (timestamp, user_id)
+        )
+    except Exception as e:
+        log_warning(f"[bio_manager] Failed to update last_accessed for user {user_id}: {e}")
 
 
 def update_bio_fields_auto(user_id: str, updates: dict) -> None:
@@ -857,8 +916,8 @@ class BioPlugin:
             }
         return {}
 
-    def get_static_injection(self, message=None, context_memory=None) -> dict:
-        """Gather participants and inject short bios and feelings."""
+    async def get_static_injection(self, message=None, context_memory=None) -> dict:
+        """Gather participants and inject short bios and feelings (async version)."""
         if not message or context_memory is None:
             self._participants = []
             return {}
@@ -898,22 +957,35 @@ class BioPlugin:
         data = []
         now = datetime.utcnow().isoformat()
         for p in participants:
-            bio = get_bio_light(p["id"])
+            bio = await _get_bio_light_async(p["id"])  # Use async version
             # Ensure bio is always a dict to prevent 'str' object has no attribute 'get' error
             if not isinstance(bio, dict):
-                log_warning(f"[bio_manager] get_bio_light returned non-dict for user {p['id']}: {type(bio)} - {bio}")
+                log_warning(f"[bio_manager] _get_bio_light_async returned non-dict for user {p['id']}: {type(bio)} - {bio}")
                 bio = {}
             short_info = bio.get("information", "")[:200]
+            
+            # Build chat_history for this participant from context_memory
+            user_chat_history = []
+            if chat_msgs:
+                for msg in chat_msgs:
+                    if str(msg.get("user_id")) == p["id"]:
+                        user_chat_history.append({
+                            "text": msg.get("text", ""),
+                            "timestamp": msg.get("timestamp", ""),
+                            "username": msg.get("username", "")
+                        })
+            
             entry = {
                 "id": p["id"],
                 "usertag": p.get("usertag"),
+                "chat_history": user_chat_history,
                 "nicknames": bio.get("known_as", []),
                 "short_bio": short_info,
                 "feelings": bio.get("feelings", []),
             }
             data.append(entry)
             try:
-                update_bio_fields_auto(p["id"], {"last_accessed": now})
+                await _update_last_accessed_async(p["id"], now)
             except Exception as e:
                 log_warning(f"[bio_manager] Failed to update last_accessed for user {p['id']}: {e}")
                 # Continue without failing the entire injection
@@ -1044,7 +1116,7 @@ class BioPlugin:
         update_bio_fields(user_id, updates)
         log_info(f"[bio_manager] Updated user_name for {user_id}: '{new_name}' (moved '{current_name}' to known_as)")
 
-    def resolve_user_info(user_identifier: str) -> tuple[str, str] | None:
+    async def resolve_user_info(user_identifier: str) -> tuple[str, str] | None:
         """Resolve user identifier to (user_id, user_name) tuple.
         
         Args:
@@ -1064,28 +1136,28 @@ class BioPlugin:
         
         # Search through all users for a match in user_name or known_as
         try:
-            conn = get_conn()
-            cursor = conn.cursor()
-            
-            # Search by user_name
-            cursor.execute("SELECT id, user_name FROM bio WHERE user_name = %s", (user_identifier,))
-            result = cursor.fetchone()
-            if result:
-                return (result[0], result[1])
-            
-            # Search by known_as (more complex since it's JSON)
-            cursor.execute("SELECT id, user_name, known_as FROM bio")
-            for row in cursor.fetchall():
-                user_id, user_name, known_as_json = row
-                try:
-                    known_as = json.loads(known_as_json) if known_as_json else []
-                    if user_identifier in known_as:
-                        return (user_id, user_name or user_id)
-                except:
-                    continue
-                
-            conn.close()
-            return None
+            async with get_conn_ctx() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cursor:
+                    # Search by user_name
+                    await cursor.execute("SELECT id, user_name FROM bio WHERE user_name = %s", (user_identifier,))
+                    result = await cursor.fetchone()
+                    if result:
+                        return (str(result.get("id")), result.get("user_name", user_identifier))
+                    
+                    # Search by known_as (more complex since it's JSON)
+                    await cursor.execute("SELECT id, user_name, known_as FROM bio")
+                    for row in await cursor.fetchall():
+                        user_id = str(row.get("id"))
+                        user_name = row.get("user_name") or user_id
+                        known_as_json = row.get("known_as")
+                        try:
+                            known_as = json.loads(known_as_json) if known_as_json else []
+                            if user_identifier in known_as:
+                                return (user_id, user_name)
+                        except:
+                            continue
+                    
+                    return None
             
         except Exception as e:
             log_warning(f"[bio_manager] Error resolving user {user_identifier}: {e}")

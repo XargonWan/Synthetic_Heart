@@ -128,11 +128,20 @@ class GeminiCLIPlugin(AIPluginBase):
                 await interface_to_llm(bot.send_message, chat_id=message.chat_id, text="⚠️ No query provided.")
             return
         
+        # Include unminified chat instruction as a system message when present
+        system_messages = []
+        verbose = prompt.get("instructions_verbose")
+        if verbose:
+            system_messages.append({"role": "system", "content": verbose})
+
         # Include interface in the query for the LLM
         interface = prompt.get("input", {}).get("interface", "unknown")
         full_query = f"Message from {interface} interface: {query}"
-        
-        response = await self.generate_response([{"role": "user", "content": full_query}])
+
+        # Build messages list with optional system message
+        messages = system_messages + [{"role": "user", "content": full_query}]
+
+        response = await self.generate_response(messages)
         # Forward model output through the centralized LLM->interface path
         await llm_to_interface(
             bot.send_message,

@@ -208,6 +208,18 @@ class TerminalPlugin(AIPluginBase):
         # Default to persistent sessions so the LLM can interact like a user
         persistent_session = payload.get("persistent_session", True)
 
+        # Try to set animation to 'computer' if WebUI context is available
+        try:
+            from core.persona_manager import PersonaManager
+            webui_session_id = context.get("webui_session_id") or context.get("session_id")
+            if webui_session_id:
+                persona_manager = PersonaManager.get_instance()
+                if persona_manager:
+                    await persona_manager.set_animation_state("computer", session_id=webui_session_id)
+                    log_debug(f"[terminal] Set avatar animation to 'computer' for WebUI session {webui_session_id}")
+        except Exception as anim_exc:
+            log_debug(f"[terminal] Could not set animation: {anim_exc}")
+
         if not command:
             log_warning(f"[terminal] No command provided for {action_type} action")
             return

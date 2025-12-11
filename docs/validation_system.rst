@@ -259,3 +259,43 @@ Helper Functions
     def unregister_component_validation(component_name: str)
 
     def auto_register_all_components()
+
+Payload Normalization
+~~~~~~~~~~~~~~~~~~~~~
+
+Before validation, the action parser automatically normalizes payloads to make the system more flexible.
+
+**Normalization Rules** (``_normalize_payload`` in ``core/action_parser.py``):
+
+- String numbers are converted to integers for numeric ID fields
+- Supported fields: ``thread_id``, ``chat_id``, ``user_id``, ``message_id``, ``animation_state``, and any field ending with ``_id``
+- Applies to both top-level fields and nested dictionaries
+- Non-numeric strings are left unchanged
+- Already-integer values remain unchanged
+
+**Example:**
+
+.. code-block:: python
+
+    # Input (from LLM)
+    {
+        "type": "message_telegram_bot",
+        "payload": {
+            "text": "Hello",
+            "target": "-1003098886330",
+            "thread_id": "2"        # String!
+        }
+    }
+    
+    # After normalization
+    {
+        "type": "message_telegram_bot",
+        "payload": {
+            "text": "Hello",
+            "target": "-1003098886330",
+            "thread_id": 2          # Converted to int
+        }
+    }
+
+This eliminates trivial validation errors (like ``payload.thread_id must be an int``) without requiring LLM correction, keeping the system flexible and user-friendly.
+

@@ -433,7 +433,7 @@ class MatrixInterface:
                     log_error(f"[matrix_interface] Command {command} failed: {exc}")
             return
 
-        await message_queue.enqueue(self, wrapped, context_memory, interface_id=INTERFACE_NAME)
+        await message_queue.enqueue(self, wrapped, interface_id=INTERFACE_NAME)
 
     # ------------------------------------------------------------------
     # Messaging helpers
@@ -462,6 +462,18 @@ class MatrixInterface:
         if not text:
             log_warning("[matrix_interface] Cannot send message - text missing")
             return
+
+        # Try to set animation to 'write' if WebUI context is available
+        try:
+            from core.persona_manager import PersonaManager
+            webui_session_id = kwargs.get("webui_session_id") or kwargs.get("session_id")
+            if webui_session_id:
+                persona_manager = PersonaManager.get_instance()
+                if persona_manager:
+                    await persona_manager.set_animation_state("write", session_id=webui_session_id)
+                    log_debug(f"[matrix_interface] Set avatar animation to 'write' for WebUI session {webui_session_id}")
+        except Exception as anim_exc:
+            log_debug(f"[matrix_interface] Could not set animation: {anim_exc}")
 
         await self._ensure_login()
 

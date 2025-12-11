@@ -28,3 +28,6 @@ def test_build_json_prompt_reply_without_text(monkeypatch):
     assert (
         result["input"]["payload"]["reply_message_id"]["text"] == "[Non-text content]"
     )
+    # For chat-like interfaces we expect an unminified verbose instruction block
+    assert "instructions_verbose" in result, "Expected verbose chat instruction for chat interfaces"
+    assert "You are participating in a live chat conversation" in result["instructions_verbose"]
