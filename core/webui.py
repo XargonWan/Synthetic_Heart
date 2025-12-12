@@ -105,6 +105,13 @@ class SynthWebUIInterface:
         self._server = None
         self._server_thread = None
         self._server_task = None
+        # Persistent session id file (single session per deploy)
+        self.session_id_file = Path('backups') / 'webui_session_id.txt'
+        self.session_id = None
+        try:
+            self._ensure_persistent_session_id()
+        except Exception:
+            log_warning(f"{LOG_PREFIX} Unable to initialize persistent session id")
 
         # Static and VRM directories used by the Web UI. These are calculated
         # relative to the repository layout and can be overridden using the
@@ -214,6 +221,14 @@ class SynthWebUIInterface:
         self.app.post("/api/diary/archive")(self.archive_diary_entries)
         self.app.post("/api/diary/unarchive")(self.unarchive_diary_entries)
         self.app.delete("/api/diary/archive")(self.delete_archived_entries)
+        # Chat archive API (filesystem-backed)
+        self.app.post("/api/chat/archive")(self.archive_chat)
+        self.app.get("/api/chat/archives")(self.list_chat_archives)
+        self.app.post("/api/chat/restore")(self.restore_chat_archive)
+        self.app.delete("/api/chat/archives/{archive_id}")(self.delete_chat_archive)
+        self.app.post("/api/chat/archives/{archive_id}/rename")(self.rename_chat_archive)
+        self.app.post("/api/chat/session_meta")(self.set_session_meta)
+        self.app.get("/api/chat/session_meta")(self.get_session_meta)
         # History API endpoints (unified diary, grillo, chat history)
         self.app.get("/api/history/diary")(self.history_diary)
         self.app.get("/api/history/grillo")(self.history_grillo)
@@ -250,6 +265,22 @@ class SynthWebUIInterface:
             # Don't start server here - it will be started by the main application
         else:
             log_info(f"{LOG_PREFIX} Autostart disabled - {BRAND_NAME} will not start automatically", log_file=WEBUI_LOG)
+
+        # Attempt to initialize the chat_archives DB table in background (best-effort)
+        try:
+            import asyncio
+            from core.chat_archives_db import init_chat_archives_table
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(init_chat_archives_table())
+                else:
+                    loop.run_until_complete(init_chat_archives_table())
+            except Exception:
+                # Fallback: ignore - the endpoints will try initializing on demand
+                pass
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Interface metadata
@@ -503,10 +534,23 @@ class SynthWebUIInterface:
     # ------------------------------------------------------------------
     async def websocket_endpoint(self, websocket: WebSocket):
         await websocket.accept()
-        session_id = str(uuid.uuid4())
+        # Use persistent session id when available (single session per deploy)
+        session_id = self.session_id or str(uuid.uuid4())
+        # Ensure session id is persisted if it was generated now
+        if not self.session_id:
+            self.session_id = session_id
+            try:
+                self._ensure_persistent_session_id(force_write=True)
+            except Exception:
+                pass
         self.connections[session_id] = websocket
         self.message_history.setdefault(session_id, deque(maxlen=self.max_history))
         await websocket.send_json({"type": "session", "session_id": session_id})
+        # Ensure persisted history is loaded into memory and replayed
+        try:
+            await self._ensure_session_history_loaded(session_id)
+        except Exception as e:
+            log_debug(f"{LOG_PREFIX} Failed to load persisted history for {session_id}: {e}")
         await self._replay_history(session_id)
         
         # Send current centralized animation state to new client
@@ -909,18 +953,87 @@ class SynthWebUIInterface:
     async def _replay_history(self, session_id: str) -> None:
         history = self.message_history.get(session_id)
         if not history:
+            log_debug(f"{LOG_PREFIX} _replay_history: no history for session {session_id}")
             return
         websocket = self.connections.get(session_id)
         if not websocket:
+            log_debug(f"{LOG_PREFIX} _replay_history: no websocket for session {session_id}")
             return
         for item in history:
-            await websocket.send_json({"type": "message", **item})
+            # Normalize history item to expected format: {type:'message', sender:'synth'|'user', text: '...'}
+            try:
+                sender = item.get('sender') if isinstance(item, dict) else None
+            except Exception:
+                sender = None
+            if not sender:
+                # Try common keys from chat_history_cache / context_manager
+                if isinstance(item, dict):
+                    sname = item.get('sender_name') or item.get('username') or None
+                    if sname and str(sname).lower() == 'self':
+                        sender = 'synth'
+                    else:
+                        sender = 'user'
+                else:
+                    sender = 'synth'
+            text = item.get('text') if isinstance(item, dict) else str(item)
+            await websocket.send_json({"type": "message", "sender": sender, "text": text})
+        log_info(f"{LOG_PREFIX} _replay_history: sent {len(history)} messages to session {session_id}")
 
     async def _append_history(self, session_id: str, sender: str, text: str) -> None:
         history = self.message_history.setdefault(
             session_id, deque(maxlen=self.max_history)
         )
         history.append({"sender": sender, "text": text})
+        # Persist to chat_history_cache for long-term storage
+        try:
+            from datetime import datetime
+            from core.chat_history_cache import save_chat_message
+            interface_path = f"{INTERFACE_NAME}/{session_id}"
+            await save_chat_message(interface_path, text, sender_name=sender, sender_id=session_id, timestamp=datetime.utcnow().isoformat())
+        except Exception as e:
+            log_debug(f"{LOG_PREFIX} Failed to persist chat message for {session_id}: {e}")
+
+    def _ensure_persistent_session_id(self, force_write: bool = False) -> None:
+        """Ensure there's a persistent session id on disk for WebUI single-session deployments.
+
+        If a session id file exists, read it; otherwise generate one and persist it.
+        """
+        try:
+            if not self.session_id_file.parent.exists():
+                self.session_id_file.parent.mkdir(parents=True, exist_ok=True)
+            if self.session_id_file.exists() and not force_write:
+                try:
+                    sid = self.session_id_file.read_text(encoding='utf-8').strip()
+                    if sid:
+                        self.session_id = sid
+                        log_debug(f"{LOG_PREFIX} Loaded persistent session id: {sid}")
+                        return
+                except Exception:
+                    log_debug(f"{LOG_PREFIX} Failed to read session id file: {self.session_id_file}")
+            # Write a new session id
+            sid = str(uuid.uuid4())
+            self.session_id_file.write_text(sid, encoding='utf-8')
+            self.session_id = sid
+            log_info(f"{LOG_PREFIX} Created persistent session id: {sid}")
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} Failed to ensure persistent session id: {exc}")
+
+    async def _ensure_session_history_loaded(self, session_id: str) -> None:
+        """Load persisted chat history for the given session into self.message_history.
+
+        This uses core.chat_context_manager.load_chat_history to rehydrate memory
+        and then makes sure self.message_history references the same deque.
+        """
+        try:
+            from core.chat_context_manager import load_chat_history, get_or_create_chat_context
+            interface_path = f"{INTERFACE_NAME}/{session_id}"
+            await load_chat_history(interface_path)
+            ctx = get_or_create_chat_context(interface_path)
+            # Ensure local message_history points to the same deque
+            self.message_history[session_id] = ctx
+            log_debug(f"{LOG_PREFIX} Session history for {session_id} loaded, {len(ctx)} messages")
+        except Exception as e:
+            log_debug(f"{LOG_PREFIX} Unable to load session history for {session_id}: {e}")
 
     # ------------------------------------------------------------------
     # Methods used by actions / plugins
@@ -2057,6 +2170,205 @@ class SynthWebUIInterface:
             
         except Exception as exc:
             log_error(f"{LOG_PREFIX} Failed to fetch chat history: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    # ------------------------------------------------------------------
+    # Chat archive endpoints (filesystem-backed)
+    # ------------------------------------------------------------------
+    async def archive_chat(self, request: Request):
+        """Archive current chat messages for the persistent session and clear them.
+
+        Returns: { success, archive_id }
+        """
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        session_id = payload.get('session_id') or self.session_id
+        if not session_id:
+            raise HTTPException(status_code=400, detail='No session_id available')
+        try:
+            from core.chat_history_cache import load_chat_history, clear_chat_history
+            from core.chat_archives_db import create_archive, init_chat_archives_table
+            from core.session_meta import get_session_meta
+            from core.chat_context_manager import clear_chat_context
+
+            interface_path = f"{INTERFACE_NAME}/{session_id}"
+            messages_deque = await load_chat_history(interface_path)
+            # Convert deque to list
+            messages = list(messages_deque) if messages_deque else []
+            try:
+                # Ensure DB table exists
+                try:
+                    await init_chat_archives_table()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            # Fetch current session metadata (camera state, rect) to include with archive
+            try:
+                metadata = await get_session_meta(interface_path)
+            except Exception:
+                metadata = None
+            log_info(f"{LOG_PREFIX} Creating archive from {len(messages)} current messages for session {session_id}")
+            archive = await create_archive(session_id, messages, name=payload.get('name'), metadata=metadata)
+            # Clear DB cache and context
+            await clear_chat_history(interface_path)
+            clear_chat_context(interface_path)
+            # Clear in-memory message history
+            self.message_history.pop(session_id, None)
+            response = {"success": True, "archive_id": archive.get('id')}
+            if archive.get('path'):
+                response['path'] = archive.get('path')
+            return JSONResponse(response)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to archive chat: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def list_chat_archives(self, request: Request):
+        try:
+            from core.chat_archives_db import list_archives
+            archives = await list_archives()
+            return JSONResponse({"success": True, "archives": archives})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to list chat archives: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def restore_chat_archive(self, request: Request):
+        """Restore a previously-created chat archive to the current session.
+
+        This will first archive the current conversation, then restore the requested archive
+        by pushing messages into the chat_history_cache and memory, and replay them to client.
+        """
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        archive_id = payload.get('archive_id')
+        session_id = payload.get('session_id') or self.session_id
+        if not archive_id:
+            raise HTTPException(status_code=400, detail='Missing archive_id')
+        if not session_id:
+            raise HTTPException(status_code=400, detail="No session available to restore into")
+        try:
+            from core.chat_archives_db import load_archive, create_archive
+            from core.session_meta import set_session_meta
+            from core.chat_history_cache import save_chat_message, clear_chat_history, load_chat_history
+            from core.chat_context_manager import clear_chat_context, get_or_create_chat_context
+            # 1) Archive current chat
+            interface_path = f"{INTERFACE_NAME}/{session_id}"
+            current_msgs = await load_chat_history(interface_path)
+            if current_msgs:
+                _ = await create_archive(session_id, list(current_msgs))
+            await clear_chat_history(interface_path)
+            clear_chat_context(interface_path)
+            self.message_history.pop(session_id, None)
+            # 2) Load archive file
+            log_debug(f"{LOG_PREFIX} restore_chat_archive called with archive_id={archive_id} session_id={session_id}")
+            meta = await load_archive(archive_id)
+            log_info(f"{LOG_PREFIX} Loaded archive {archive_id}")
+            messages = meta.get('messages', [])
+            # Also restore session metadata if present
+            metadata = meta.get('metadata')
+            if metadata:
+                try:
+                    await set_session_meta(interface_path, metadata)
+                except Exception as e:
+                    log_debug(f"{LOG_PREFIX} Failed to restore session metadata: {e}")
+            else:
+                log_debug(f"{LOG_PREFIX} No session metadata in archive {archive_id}")
+            # 3) Save back to DB and memory
+            for i, msg in enumerate(messages):
+                text = msg.get('text') or msg.get('message_text') or ''
+                sender_name = msg.get('sender_name') or msg.get('username') or 'unknown'
+                sender_id = msg.get('sender_id') or msg.get('user_id') or 'unknown'
+                ts = msg.get('timestamp')
+                await save_chat_message(interface_path, text, sender_name=sender_name, sender_id=sender_id, timestamp=ts)
+                log_debug(f"{LOG_PREFIX} Saved restored message {i+1}/{len(messages)} for session {session_id}")
+            # ensure the in-memory context is repopulated
+            from core.chat_context_manager import load_chat_history as ctx_load
+            await ctx_load(interface_path)
+            ctx = get_or_create_chat_context(interface_path)
+            self.message_history[session_id] = ctx
+            # 4) Replay to connected websocket if present
+            try:
+                await self._replay_history(session_id)
+                log_info(f"{LOG_PREFIX} Replayed {len(messages)} messages for session {session_id}")
+            except Exception as e:
+                log_debug(f"{LOG_PREFIX} Failed to replay history after restore: {e}")
+
+            # Remove the archive after successful restore so it won't be re-archived as duplicate
+            try:
+                from core.chat_archives_db import delete_archive as db_delete_archive
+                await db_delete_archive(archive_id)
+                log_info(f"{LOG_PREFIX} Deleted archive {archive_id} after successful restore")
+            except Exception as e:
+                log_debug(f"{LOG_PREFIX} Failed to delete archive {archive_id} after restore: {e}")
+            return JSONResponse({"success": True, "restored": len(messages), "messages": messages, "deleted_archive_id": archive_id})
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="Archive not found")
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to restore chat archive: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def delete_chat_archive(self, archive_id: str):
+        try:
+            from core.chat_archives_db import delete_archive
+            await delete_archive(archive_id)
+            return JSONResponse({"success": True})
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="Archive not found")
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to delete chat archive {archive_id}: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def set_session_meta(self, request: Request):
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        session_id = payload.get('session_id') or self.session_id
+        meta = payload.get('meta')
+        if not session_id or not isinstance(meta, dict):
+            raise HTTPException(status_code=400, detail='Missing session_id or meta')
+        try:
+            from core.session_meta import set_session_meta as set_meta_fn
+            interface_path = f"{INTERFACE_NAME}/{session_id}"
+            await set_meta_fn(interface_path, meta)
+            return JSONResponse({"success": True})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to set session meta: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def get_session_meta(self, request: Request):
+        session_id = request.query_params.get('session_id') or self.session_id
+        if not session_id:
+            raise HTTPException(status_code=400, detail='Missing session_id')
+        try:
+            from core.session_meta import get_session_meta as get_meta_fn
+            interface_path = f"{INTERFACE_NAME}/{session_id}"
+            meta = await get_meta_fn(interface_path)
+            return JSONResponse({"success": True, "meta": meta or {}})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to get session meta: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def rename_chat_archive(self, archive_id: str, request: Request):
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        new_name = payload.get('name')
+        if not new_name:
+            raise HTTPException(status_code=400, detail='Missing name')
+        try:
+            from core.chat_archives_db import rename_archive
+            meta = await rename_archive(archive_id, new_name)
+            return JSONResponse({"success": True, "archive": {"id": meta.get('id'), 'name': meta.get('name'), 'created_at': meta.get('created_at')}})
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail='Archive not found')
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to rename chat archive {archive_id}: {exc}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
 
     async def update_config_entry(self, request: Request):

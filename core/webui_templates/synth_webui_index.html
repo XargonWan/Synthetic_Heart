@@ -227,7 +227,24 @@
             touch-action: none; /* Allow pointer events for dragging */
             /* Enable resize handles on all sides */
             overflow-clip-margin: 10px;
+
+            /* We'll also add custom resize handles to allow resizing from all edges */
+            position: fixed; /* ensure absolute position for handles */
         }
+
+                    const out = await apiPostJson('/api/chat/archive', { session_id: sessionId });
+        .chat-resize-handle { position: absolute; background: transparent; z-index: 99999; pointer-events: all; }
+        .chat-resize-handle.handle-top, .chat-resize-handle.handle-bottom { height: 8px; left: 8px; right: 8px; cursor: ns-resize; }
+        .chat-resize-handle.handle-left, .chat-resize-handle.handle-right { width: 8px; top: 8px; bottom: 8px; cursor: ew-resize; }
+        .chat-resize-handle.handle-top { top: -4px; }
+        .chat-resize-handle.handle-bottom { bottom: -4px; }
+        .chat-resize-handle.handle-left { left: -4px; }
+        .chat-resize-handle.handle-right { right: -4px; }
+        .chat-resize-handle.handle-tl, .chat-resize-handle.handle-tr, .chat-resize-handle.handle-bl, .chat-resize-handle.handle-br { width: 20px; height: 20px; }
+        .chat-resize-handle.handle-tl { top: -10px; left: -10px; cursor: nwse-resize; }
+        .chat-resize-handle.handle-tr { top: -10px; right: -10px; cursor: nesw-resize; }
+        .chat-resize-handle.handle-bl { bottom: -10px; left: -10px; cursor: nesw-resize; }
+        .chat-resize-handle.handle-br { bottom: -10px; right: -10px; cursor: nwse-resize; }
         /* Draggable title bar (drag handle) */
         #chat-title-bar {
             position: absolute;
@@ -247,17 +264,29 @@
             font-size: 0.95rem;
             color: var(--text-soft);
             font-weight: 500;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
         }
         #chat-title-bar:active {
             cursor: grabbing;
         }
+        #chat-title-bar .chat-title { display: flex; align-items: center; gap: 0.6rem; }
+        #chat-title-bar .chat-controls { display: flex; align-items: center; gap: 0.4rem; }
+        .pill.danger { border-color: var(--error); color: var(--error); }
+
+        /* Archive modal styling */
+        #archive-panel { font-family: inherit; color: var(--text); }
+        .archive-row { background: rgba(255,255,255,0.02); }
+        .archive-row.selected { outline: 2px solid rgba(255,255,255,0.06); background: rgba(255,255,255,0.03); }
+        #archive-list .pill { padding: 0.2rem 0.6rem; border-radius: 6px; }
         /* On mobile, chat is not resizable or draggable */
         @media (max-width: 768px) {
             #chat {
                 width: 85%;
                 max-width: 95%;
                 height: 50vh;
-                max-height: 60vh;
+                        const out = await apiPostJson('/api/chat/restore', { archive_id: aid, session_id: sessionId });
                 resize: none;
                 cursor: default;
             }
@@ -1301,6 +1330,20 @@
                 height: 75vh;
                 max-height: 700px;
             }
+            /* Maximized chat: full viewport and no border radius */
+            #chat.maximized {
+                left: 0 !important;
+                top: 0 !important;
+                right: 0 !important;
+                bottom: 0 !important;
+                width: 100% !important;
+                height: 100vh !important;
+                max-width: none !important;
+                max-height: none !important;
+                border-radius: 0 !important;
+                transform: none !important;
+                z-index: 9999 !important;
+            }
         }
         @media (min-width: 769px) {
             .hamburger {
@@ -1352,11 +1395,18 @@
         <section class="tab-panel active" id="tab-home" data-tab="home" role="tabpanel" aria-labelledby="home">
             <div class="home-stage">
                 <div class="home-content">
-                    <button id="chat-toggle" class="chat-toggle-btn" type="button" aria-label="Toggle chat visibility" title="Show/Hide Chat">
-                        💬
-                    </button>
+                    <!-- Floating restore button (hidden unless window is minimized) -->
+                    <button id="chat-toggle" class="chat-toggle-btn" type="button" aria-label="Restore chat" title="Restore Chat" style="display:none;">💬</button>
                     <section id="chat" aria-label="Chat panel">
-                        <div id="chat-title-bar">💬 Chat</div>
+                        <div id="chat-title-bar">
+                            <div class="chat-title">💬 Chat</div>
+                            <div class="chat-controls">
+                                    <button id="chat-minimize" title="Minimize chat" type="button" class="pill" style="margin-left:6px;">➖</button>
+                                    <button id="chat-maximize" title="Maximize chat" type="button" class="pill" style="margin-left:6px;">⤢</button>
+                                    <button id="chat-archive" title="Archive current chat" type="button" class="pill" style="margin-left:8px;">📦</button>
+                                    <button id="chat-restore" title="Open archives" type="button" class="pill" style="margin-left:6px;">🗂️</button>
+                                </div>
+                        </div>
                         <div id="messages" aria-live="polite"></div>
                         <form id="composer" autocomplete="off">
                             <textarea id="input" placeholder="Type a message…" rows="2"></textarea>
@@ -2408,7 +2458,10 @@
         const NOTIFY_KEY = 'synth-webui-notify';
         const HISTORY_KEY = 'synth-webui-history';
         const TAB_KEY = 'synth-webui-active-tab';
+        
+        const CHAT_WINDOW_STATE_KEY = 'synth-webui-window-state';
         const CHAT_MESSAGES_KEY = 'synth-webui-chat-messages';
+        const CHAT_RECT_KEY = 'synth-webui-chat-rect';
         const TYPING_INDICATOR_KEY = 'synth-webui-typing-indicator';
         const VRM_MODEL_KEY = 'synth-webui-vrm-model';
         const HISTORY_LIMIT = 200;
@@ -2707,10 +2760,7 @@
         // Chat state persistence functions
         function saveChatState() {
             try {
-                const chatMessages = document.getElementById('chat-messages');
-                if (chatMessages) {
-                    localStorage.setItem(CHAT_MESSAGES_KEY, chatMessages.innerHTML);
-                }
+                // Don't persist chat messages locally - persistence is handled on the server side.
                 
                 // Save typing indicator state
                 const typingIndicator = document.querySelector('.typing-indicator');
@@ -2723,19 +2773,57 @@
                 } else {
                     localStorage.removeItem(VRM_MODEL_KEY);
                 }
+                // Save chat panel rect (position and size) if available
+                try {
+                    const rect = document.getElementById('chat')?.getBoundingClientRect();
+                    if (rect && sessionId) {
+                        const rectPayload = { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+                        localStorage.setItem(`${CHAT_RECT_KEY}-${sessionId}`, JSON.stringify(rectPayload));
+                        // Persist to server as well for cross-device sync
+                        try { saveChatRectToServer(rectPayload); } catch (err) { console.debug('[synth_webui] saveChatRectToServer failed', err); }
+                    } else if (rect) {
+                        localStorage.setItem(CHAT_RECT_KEY, JSON.stringify({ left: rect.left, top: rect.top, width: rect.width, height: rect.height }));
+                    }
+                } catch (err) { /* noop */ }
+                // Save window state (minimized, maximized, expanded, normal)
+                try {
+                    if (chatPanel) {
+                        let state = 'normal';
+                        if (chatPanel.classList.contains('hidden')) state = 'minimized';
+                        else if (chatPanel.classList.contains('maximized')) state = 'maximized';
+                        else if (chatPanel.classList.contains('expanded')) state = 'expanded';
+                        // Save in localStorage for local persistence
+                        try { localStorage.setItem(`${CHAT_WINDOW_STATE_KEY}-${sessionId || 'local'}`, state); } catch (e) { /* ignore */ }
+                        // Persist to server as well
+                        try { saveWindowStateToServer({ window: 'chat', state }); } catch (err) { /* ignore */ }
+                    }
+                } catch (err) { /* ignore */ }
             } catch (error) {
                 console.debug('[synth_webui] Error saving chat state:', error);
             }
         }
 
+        async function saveChatRectToServer(rectPayload) {
+            if (!sessionId) return;
+            try {
+                await apiPostJson('/api/chat/session_meta', { session_id: sessionId, meta: { chat_rect: rectPayload } });
+            } catch (err) {
+                console.debug('[synth_webui] Failed to save chat rect to server:', err);
+            }
+        }
+
+        async function saveWindowStateToServer(statePayload) {
+            if (!sessionId) return;
+            try {
+                await apiPostJson('/api/chat/session_meta', { session_id: sessionId, meta: { window_state: statePayload } });
+            } catch (err) {
+                console.debug('[synth_webui] Failed to save window state to server:', err);
+            }
+        }
+
         function restoreChatState() {
             try {
-                // Restore chat messages
-                const chatMessages = document.getElementById('chat-messages');
-                const savedMessages = localStorage.getItem(CHAT_MESSAGES_KEY);
-                if (chatMessages && savedMessages) {
-                    chatMessages.innerHTML = savedMessages;
-                }
+                // Do not restore chat messages from localStorage; server will replay persisted history when session is established
                 
                 // DO NOT restore typing indicator on page load
                 // It should only be shown when Synth is actively responding
@@ -2744,6 +2832,41 @@
                 
                 // Note: VRM model should already be loaded, no need to refresh
                 console.log('[synth_webui] Chat state restored (VRM should persist)');
+                // Restore chat rectangle (position and size)
+                try {
+                    const chatEl = document.getElementById('chat');
+                    let rectKey = CHAT_RECT_KEY;
+                    if (sessionId) rectKey = `${CHAT_RECT_KEY}-${sessionId}`;
+                    const rectRaw = localStorage.getItem(rectKey) || localStorage.getItem(CHAT_RECT_KEY);
+                    if (rectRaw && chatEl) {
+                        const rect = JSON.parse(rectRaw);
+                        if (typeof rect.left === 'number') chatEl.style.left = rect.left + 'px';
+                        if (typeof rect.top === 'number') chatEl.style.top = rect.top + 'px';
+                        if (typeof rect.width === 'number') chatEl.style.width = rect.width + 'px';
+                        if (typeof rect.height === 'number') chatEl.style.height = rect.height + 'px';
+                        chatEl.style.right = 'auto';
+                        chatEl.style.bottom = 'auto';
+                    }
+                } catch (err) { console.debug('[synth_webui] Failed to restore chat rect:', err); }
+                // Restore local window state (fallback) if present
+                try {
+                    const chatEl = document.getElementById('chat');
+                    const localStateKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}` : CHAT_WINDOW_STATE_KEY;
+                    const localState = localStorage.getItem(localStateKey) || localStorage.getItem(CHAT_WINDOW_STATE_KEY);
+                    if (localState && chatEl) {
+                        if (localState === 'minimized') {
+                            chatEl.classList.add('hidden');
+                            if (chatToggleBtn) chatToggleBtn.style.display = 'flex';
+                        } else if (localState === 'maximized') {
+                            chatEl.classList.add('maximized');
+                        } else if (localState === 'expanded') {
+                            chatEl.classList.add('expanded');
+                        } else {
+                            chatEl.classList.remove('maximized', 'expanded', 'hidden');
+                            if (chatToggleBtn) chatToggleBtn.style.display = 'none';
+                        }
+                    }
+                } catch (err) { /* ignore */ }
             } catch (error) {
                 console.error('[synth_webui] Error in restoreChatState:', error);
             }
@@ -4429,32 +4552,51 @@
             openLogStream();
         });
 
-        // Chat toggle button handler
-        let chatState = 0; // 0: default (desktop left, mobile compact), 1: expanded, 2: hidden
-        chatToggleBtn?.addEventListener('click', () => {
-            chatState = (chatState + 1) % 3;
-            if (chatPanel) {
-            switch (chatState) {
-                case 0: // Default: desktop left visible, mobile compact
-                chatPanel.classList.remove('hidden', 'expanded');
-                chatToggleBtn.setAttribute('aria-label', 'Expand chat');
-                chatToggleBtn.setAttribute('title', 'Expand Chat');
-                break;
-                case 1: // Expanded: desktop full width + height, mobile 4/5 screen
-                chatPanel.classList.remove('hidden');
-                chatPanel.classList.add('expanded');
-                chatToggleBtn.setAttribute('aria-label', 'Hide chat');
-                chatToggleBtn.setAttribute('title', 'Hide Chat');
-                break;
-                case 2: // Hidden
-                chatPanel.classList.add('hidden');
-                chatPanel.classList.remove('expanded');
-                chatToggleBtn.setAttribute('aria-label', 'Show chat');
-                chatToggleBtn.setAttribute('title', 'Show Chat');
-                break;
-            }
-            }
-        });
+        // Generic floating window initializer (minimize/maximize/restore)
+        function setupFloatingWindow(windowName) {
+            const panel = document.getElementById(windowName);
+            if (!panel) return;
+            const minBtn = document.getElementById(`${windowName}-minimize`);
+            const maxBtn = document.getElementById(`${windowName}-maximize`);
+            // floating toggle button might not follow the same id; fallback to "chat-toggle"
+            const toggleBtn = document.getElementById(`${windowName}-toggle`) || document.getElementById('chat-toggle');
+            let prevState = 'normal';
+
+            minBtn?.addEventListener('click', () => {
+                // remember previous state first
+                if (panel.classList.contains('maximized')) prevState = 'maximized';
+                else if (panel.classList.contains('expanded')) prevState = 'expanded';
+                else prevState = 'normal';
+                panel.classList.add('hidden');
+                if (toggleBtn) toggleBtn.style.display = 'flex';
+                try { saveWindowStateToServer({ window: windowName, state: 'minimized' }); } catch (e) { /* ignore */ }
+                try { localStorage.setItem(`${CHAT_WINDOW_STATE_KEY}-${sessionId || 'local'}`, 'minimized'); } catch (e) { /* ignore */ }
+            });
+
+            maxBtn?.addEventListener('click', () => {
+                const isMax = panel.classList.toggle('maximized');
+                if (isMax) panel.classList.remove('expanded');
+                if (maxBtn) {
+                    if (isMax) { maxBtn.setAttribute('title', 'Restore'); maxBtn.innerText = '🗗'; }
+                    else { maxBtn.setAttribute('title', 'Maximize'); maxBtn.innerText = '⤢'; }
+                }
+                try { saveWindowStateToServer({ window: windowName, state: isMax ? 'maximized' : 'normal' }); } catch (e) { /* ignore */ }
+                try { localStorage.setItem(`${CHAT_WINDOW_STATE_KEY}-${sessionId || 'local'}`, isMax ? 'maximized' : 'normal'); } catch (e) { /* ignore */ }
+            });
+
+            toggleBtn?.addEventListener('click', () => {
+                panel.classList.remove('hidden');
+                if (toggleBtn) toggleBtn.style.display = 'none';
+                if (prevState === 'maximized') panel.classList.add('maximized');
+                else if (prevState === 'expanded') panel.classList.add('expanded');
+                else panel.classList.remove('maximized', 'expanded');
+                try { saveWindowStateToServer({ window: windowName, state: 'normal' }); } catch (e) { /* ignore */ }
+                try { localStorage.setItem(`${CHAT_WINDOW_STATE_KEY}-${sessionId || 'local'}`, 'normal'); } catch (e) { /* ignore */ }
+            });
+        }
+
+        // Initialize the chat window
+        setupFloatingWindow('chat');
 
         // Hamburger menu toggle
         const hamburgerBtn = document.querySelector('.hamburger');
@@ -4921,6 +5063,69 @@
                     sessionId = data.session_id;
                     console.log('[synth_webui] Session established:', sessionId);
                     refreshStats(true);
+                    try { restoreChatState(); } catch (e) { console.debug('[synth_webui] restoreChatState error:', e); }
+                    // Fetch server-side session meta (camera, rect) to restore cross-device
+                    (async () => {
+                        try {
+                            const res = await fetch('/api/chat/session_meta?session_id=' + encodeURIComponent(sessionId));
+                            if (!res.ok) return;
+                            const out = await res.json();
+                            if (!out || !out.success) return;
+                            const meta = out.meta || {};
+                            if (meta && meta.chat_rect) {
+                                try {
+                                    const rectPayload = meta.chat_rect;
+                                    const chatEl = document.getElementById('chat');
+                                    if (chatEl && rectPayload) {
+                                        chatEl.style.left = rectPayload.left + 'px';
+                                        chatEl.style.top = rectPayload.top + 'px';
+                                        chatEl.style.width = rectPayload.width + 'px';
+                                        chatEl.style.height = rectPayload.height + 'px';
+                                    }
+                                } catch (err) { console.debug('[synth_webui] Failed to apply chat_rect:', err); }
+                            }
+                            if (meta && meta.camera && typeof camera !== 'undefined' && camera) {
+                                try {
+                                    const c = meta.camera;
+                                    if (c.position && c.position.length === 3) {
+                                        camera.position.set(c.position[0], c.position[1], c.position[2]);
+                                    }
+                                    if (c.rotation && c.rotation.length === 3) {
+                                        camera.rotation.set(c.rotation[0], c.rotation[1], c.rotation[2]);
+                                    }
+                                    if (typeof c.fov === 'number') camera.fov = c.fov;
+                                    if (typeof c.zoom === 'number') camera.zoom = c.zoom;
+                                    camera.updateProjectionMatrix();
+                                    try { controls.update(); } catch (e) {}
+                                } catch (err) { console.debug('[synth_webui] Failed to apply camera state:', err); }
+                            }
+                            // Restore window state for chat if present
+                            if (meta && meta.window_state) {
+                                try {
+                                    const ws = meta.window_state;
+                                    // Support both { window: 'chat', state: 'minimized' } and { chat: 'minimized' }
+                                    let st = null;
+                                    if (ws && typeof ws === 'object') {
+                                        if (ws.window === 'chat') st = ws.state;
+                                        else if (typeof ws.chat !== 'undefined') st = ws.chat;
+                                    }
+                                    if (typeof st === 'string') {
+                                        if (st === 'minimized' && chatPanel) {
+                                            chatPanel.classList.add('hidden');
+                                            if (chatToggleBtn) chatToggleBtn.style.display = 'flex';
+                                        } else if (st === 'maximized' && chatPanel) {
+                                            chatPanel.classList.add('maximized');
+                                        } else if (st === 'expanded' && chatPanel) {
+                                            chatPanel.classList.add('expanded');
+                                        } else if (chatPanel) {
+                                            chatPanel.classList.remove('hidden', 'maximized', 'expanded');
+                                            if (chatToggleBtn) chatToggleBtn.style.display = 'none';
+                                        }
+                                    }
+                                } catch (err) { console.debug('[synth_webui] Failed to apply window_state:', err); }
+                            }
+                        } catch (err) { console.debug('[synth_webui] Failed to fetch session meta:', err); }
+                    })();
                     return;
                 }
                 if (data.type === 'action_state') {
@@ -5162,6 +5367,7 @@
 
         window.addEventListener('beforeunload', () => {
             try { if (ws) ws.close(); } catch (_) {}
+            try { saveChatState(); } catch (err) { /**/ }
             closeLogStream();
         });
 
@@ -5342,6 +5548,28 @@
             controls.zoomSpeed = 1.0;
             controls.minDistance = 0.5;  // Minimum zoom distance
             controls.maxDistance = 10;   // Maximum zoom distance
+
+            // Camera change debounce logic: wait 10s after the last change to save camera state
+            let cameraStateDebounce = null;
+            controls.addEventListener('change', () => {
+                if (!sessionId) return;
+                try {
+                    const camState = {
+                        position: camera.position ? [camera.position.x, camera.position.y, camera.position.z] : null,
+                        rotation: camera.rotation ? [camera.rotation.x, camera.rotation.y, camera.rotation.z] : null,
+                        fov: camera.fov || null,
+                        zoom: camera.zoom || null
+                    };
+                    if (cameraStateDebounce) clearTimeout(cameraStateDebounce);
+                    cameraStateDebounce = setTimeout(async () => {
+                        try {
+                            await apiPostJson('/api/chat/session_meta', { session_id: sessionId, meta: { camera: camState } });
+                        } catch (err) {
+                            console.debug('[synth_webui] Failed to save camera state:', err);
+                        }
+                    }, 10000);
+                } catch (err) { console.debug('[synth_webui] Camera change handler error:', err); }
+            });
             
             controls.target.set(0, 1.2, 0);
             controls.update();
@@ -7683,6 +7911,336 @@
         if (chatElement) {
             console.log('[chat-control] Chat initialized with drag + native resize');
         }
+
+        // Create resize handles to allow resizing from any edge (desktop only)
+        (function createChatResizeHandles() {
+            if (!chatElement || /Mobi|Android/i.test(navigator.userAgent)) return; // disable on mobile
+            try { chatElement.style.resize = 'none'; } catch (err) {}
+            const sides = ['top','right','bottom','left','tl','tr','bl','br'];
+            const handles = {};
+            for (const side of sides) {
+                const el = document.createElement('div');
+                el.className = 'chat-resize-handle handle-' + side;
+                chatElement.appendChild(el);
+                handles[side] = el;
+            }
+
+            let resizing = false;
+            let startX = 0, startY = 0;
+            let startRect = null;
+            const minWidth = 260, minHeight = 180;
+
+            function pointerDownHandler(side, ev) {
+                ev.preventDefault();
+                resizing = true;
+                startX = ev.clientX; startY = ev.clientY;
+                startRect = chatElement.getBoundingClientRect();
+                document.body.style.userSelect = 'none';
+            }
+
+            function pointerMoveHandler(ev) {
+                if (!resizing || !startRect) return;
+                const dx = ev.clientX - startX;
+                const dy = ev.clientY - startY;
+                const el = chatElement;
+                // copy values
+                let left = startRect.left; let top = startRect.top; let width = startRect.width; let height = startRect.height;
+                const side = currentResizeSide;
+                if (side === 'right') {
+                    width = Math.max(minWidth, startRect.width + dx);
+                } else if (side === 'left') {
+                    const newWidth = Math.max(minWidth, startRect.width - dx);
+                    left = startRect.left + (startRect.width - newWidth);
+                    width = newWidth;
+                } else if (side === 'bottom') {
+                    height = Math.max(minHeight, startRect.height + dy);
+                } else if (side === 'top') {
+                    const newHeight = Math.max(minHeight, startRect.height - dy);
+                    top = startRect.top + (startRect.height - newHeight);
+                    height = newHeight;
+                } else if (side === 'br') {
+                    width = Math.max(minWidth, startRect.width + dx);
+                    height = Math.max(minHeight, startRect.height + dy);
+                } else if (side === 'bl') {
+                    const newWidth = Math.max(minWidth, startRect.width - dx);
+                    left = startRect.left + (startRect.width - newWidth);
+                    width = newWidth;
+                    height = Math.max(minHeight, startRect.height + dy);
+                } else if (side === 'tr') {
+                    width = Math.max(minWidth, startRect.width + dx);
+                    const newHeight = Math.max(minHeight, startRect.height - dy);
+                    top = startRect.top + (startRect.height - newHeight);
+                    height = newHeight;
+                } else if (side === 'tl') {
+                    const newWidth = Math.max(minWidth, startRect.width - dx);
+                    left = startRect.left + (startRect.width - newWidth);
+                    width = newWidth;
+                    const newHeight2 = Math.max(minHeight, startRect.height - dy);
+                    top = startRect.top + (startRect.height - newHeight2);
+                    height = newHeight2;
+                }
+                // Apply styles
+                el.style.left = left + 'px';
+                el.style.top = top + 'px';
+                el.style.width = width + 'px';
+                el.style.height = height + 'px';
+                el.style.right = 'auto'; el.style.bottom = 'auto';
+            }
+
+            function pointerUpHandler() {
+                if (!resizing) return;
+                resizing = false;
+                startRect = null;
+                document.body.style.userSelect = '';
+                try { saveChatState(); } catch (e) { /* ignore */ }
+            }
+
+            let currentResizeSide = null;
+            for (const side of Object.keys(handles)) {
+                const h = handles[side];
+                h.addEventListener('pointerdown', (ev) => { currentResizeSide = side; pointerDownHandler(side, ev); });
+            }
+            window.addEventListener('pointermove', pointerMoveHandler);
+            window.addEventListener('pointerup', pointerUpHandler);
+        })();
+
+        // Archive / Restore / Delete UI handlers
+        const chatArchiveBtn = document.getElementById('chat-archive');
+        const chatRestoreBtn = document.getElementById('chat-restore');
+        // delete button removed from main titlebar (delete available in archive modal)
+
+        async function apiPostJson(url, payload) {
+            const res = await fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload || {})});
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            return await res.json();
+        }
+
+        // Modal archive manager
+        let archiveModal = null;
+        function createArchiveModal() {
+            if (archiveModal) return archiveModal;
+            const panel = document.createElement('div');
+            panel.id = 'archive-panel';
+            panel.style.cssText = `
+                position: fixed;
+                z-index: 10080;
+                right: 2rem;
+                bottom: 4rem;
+                width: 720px;
+                height: 520px;
+                background: rgba(14, 14, 20, 0.96);
+                border: 1px solid var(--border);
+                border-radius: 14px;
+                box-shadow: 0 40px 80px -40px rgba(0,0,0,0.95);
+                display: none; flex-direction: column; overflow: hidden;
+            `;
+            panel.innerHTML = `
+                <div id="archive-header" style="padding:10px 14px; display:flex; align-items:center; justify-content:space-between; cursor:grab;">
+                    <div style="font-weight:600">Archives</div>
+                    <div style="display:flex; gap:6px; align-items:center">
+                        <button id="archive-refresh" class="pill">Refresh</button>
+                        <button id="archive-close" class="pill">Close</button>
+                    </div>
+                </div>
+                <div id="archive-list" style="flex:1; overflow:auto; padding:12px; display:flex; flex-direction:column; gap:8px"></div>
+                <div style="padding:10px 12px; border-top:1px solid rgba(255,255,255,0.04); display:flex; gap:8px; justify-content:flex-end">
+                    <button id="archive-restore-btn" class="pill" disabled>Restore Selected</button>
+                </div>
+            `;
+            document.body.appendChild(panel);
+            // Dragging header
+            let dragging = false, startX=0, startY=0, startRight=18, startBottom=60;
+            const header = panel.querySelector('#archive-header');
+            header.addEventListener('pointerdown', (ev) => { dragging = true; startX = ev.clientX; startY = ev.clientY; startRight = parseFloat(getComputedStyle(panel).right); startBottom = parseFloat(getComputedStyle(panel).bottom); document.body.style.userSelect = 'none'; });
+            window.addEventListener('pointermove', (ev) => { if(!dragging) return; const dx = ev.clientX - startX; const dy = ev.clientY - startY; panel.style.right = (startRight - dx) + 'px'; panel.style.bottom = (startBottom - dy) + 'px'; });
+            window.addEventListener('pointerup', () => { dragging = false; document.body.style.userSelect = ''; });
+            archiveModal = panel;
+            return panel;
+        }
+
+        // Buttons and interactions in the modal
+        function bindArchiveModalButtons() {
+            const modal = archiveModal || createArchiveModal();
+            const btnClose = modal.querySelector('#archive-close');
+            const btnRefresh = modal.querySelector('#archive-refresh');
+            const btnRestore = modal.querySelector('#archive-restore-btn');
+            btnClose.addEventListener('click', () => { modal.style.display = 'none'; });
+            btnRefresh.addEventListener('click', async () => { await refreshArchiveList(); });
+            btnRestore.addEventListener('click', async () => {
+                try {
+                    const selected = modal.querySelector('.archive-row.selected');
+                    if (!selected) { showToast('Select an archive to restore', true); return; }
+                    const aid = selected.dataset.id;
+                    showToast('Restoring archive: ' + aid, false);
+                    const out = await apiPostJson('/api/chat/restore', { archive_id: aid, session_id: sessionId });
+                        if (out && out.success) {
+                        showToast('Archive restored (' + out.restored + ' messages)', false);
+                        // Render returned messages immediately
+                        if (Array.isArray(out.messages) && out.messages.length) {
+                            const messagesEl = document.getElementById('messages');
+                            if (messagesEl) {
+                                messagesEl.innerHTML = '';
+                                for (const msg of out.messages) {
+                                    const sender = (msg.sender_name || msg.username || 'unknown') === 'self' ? 'synth' : 'user';
+                                    addMessage(sender, msg.text || msg.message_text || '');
+                                }
+                                messagesEl.scrollTop = messagesEl.scrollHeight;
+                            }
+                        }
+                        modal.style.display = 'none';
+                        // Refresh archive list after successful restore
+                        try { await refreshArchiveList(); } catch (err) { console.debug('[synth_webui] Failed to refresh archive list after restore:', err); }
+                    } else {
+                        showToast('Restore failed', true);
+                    }
+                } catch (err) {
+                    console.error('[synth_webui] Restore failed', err);
+                    showToast('Restore error: ' + err.message, true);
+                }
+            });
+        }
+
+        async function refreshArchiveList() {
+            try {
+                const res = await fetch('/api/chat/archives');
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const payload = await res.json();
+                const list = payload.archives || [];
+                renderArchiveList(list);
+            } catch (err) {
+                console.error('[synth_webui] Failed to refresh archives:', err);
+                showToast('Failed to load archives: ' + err.message, true);
+            }
+        }
+
+        function renderArchiveList(list) {
+            const panel = archiveModal || createArchiveModal();
+            const container = panel.querySelector('#archive-list');
+            container.innerHTML = '';
+            if (!Array.isArray(list) || !list.length) {
+                const empty = document.createElement('div');
+                empty.className = 'empty-state';
+                empty.style.padding = '1rem';
+                empty.textContent = 'No archives found.';
+                container.appendChild(empty);
+                panel.querySelector('#archive-restore-btn').disabled = true;
+                return;
+            }
+            for (const arch of list) {
+                const row = document.createElement('div');
+                row.className = 'archive-row';
+                row.dataset.id = arch.id;
+                row.style.display = 'flex'; row.style.gap = '8px'; row.style.alignItems = 'center'; row.style.justifyContent = 'space-between'; row.style.padding = '8px'; row.style.borderRadius='8px';
+                // Left section: date/time + name
+                const left = document.createElement('div'); left.style.display='flex'; left.style.flexDirection='column';
+                const dt = document.createElement('div');
+                const d = arch.created_at ? new Date(arch.created_at) : new Date();
+                dt.textContent = d.toLocaleString();
+                dt.style.fontSize = '0.85rem'; dt.style.opacity = 0.85;
+                const nameDiv = document.createElement('div'); nameDiv.style.fontWeight='600'; nameDiv.style.cursor='pointer';
+                nameDiv.textContent = arch.name || 'Chat';
+                left.appendChild(dt); left.appendChild(nameDiv);
+
+                // Center: msg count
+                const center = document.createElement('div'); center.textContent = `${arch.message_count} msgs`;
+                center.style.fontSize='0.85rem'; center.style.opacity=0.8;
+
+                // Right: actions
+                const right = document.createElement('div'); right.style.display='flex'; right.style.gap='6px';
+                const renameBtn = document.createElement('button'); renameBtn.className = 'pill'; renameBtn.type='button'; renameBtn.textContent = '✏️';
+                const deleteBtn = document.createElement('button'); deleteBtn.className = 'pill danger'; deleteBtn.type='button'; deleteBtn.textContent = '🗑️';
+                right.appendChild(renameBtn); right.appendChild(deleteBtn);
+
+                row.appendChild(left); row.appendChild(center); row.appendChild(right);
+                container.appendChild(row);
+
+                // Selection handling
+                row.addEventListener('click', (ev) => {
+                    // ignore clicks on action buttons
+                    if (ev.target === deleteBtn || ev.target === renameBtn) return;
+                    container.querySelectorAll('.archive-row').forEach(r => r.classList.remove('selected'));
+                    row.classList.add('selected');
+                    panel.querySelector('#archive-restore-btn').disabled = false;
+                });
+
+                // Delete
+                deleteBtn.addEventListener('click', async (ev) => {
+                    ev.stopPropagation();
+                    if (!confirm('Delete this archive? This action cannot be undone.')) return;
+                    try {
+                        const res = await fetch('/api/chat/archives/' + arch.id, { method: 'DELETE' });
+                        if (!res.ok) throw new Error('HTTP ' + res.status);
+                        showToast('Archive deleted', false);
+                        // remove row and refresh list
+                        row.remove();
+                        await refreshArchiveList();
+                    } catch (err) { showToast('Delete archive error: ' + err.message, true); }
+                });
+
+                // Rename
+                renameBtn.addEventListener('click', (ev) => {
+                    ev.stopPropagation();
+                    const input = document.createElement('input'); input.type='text'; input.value = arch.name || 'Chat'; input.style.minWidth='220px';
+                    nameDiv.replaceWith(input);
+                    input.focus();
+                    function finishRename() { 
+                        const newName = input.value.trim() || 'Chat';
+                        (async () => {
+                            try {
+                                const res = await fetch('/api/chat/archives/' + arch.id + '/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: newName }) });
+                                if (!res.ok) throw new Error('HTTP ' + res.status);
+                                const out = await res.json();
+                                if (out && out.success) {
+                                    nameDiv.textContent = newName;
+                                    input.replaceWith(nameDiv);
+                                    arch.name = newName;
+                                    showToast('Renamed', false);
+                                    await refreshArchiveList();
+                                } else {
+                                    showToast('Rename failed', true);
+                                    input.replaceWith(nameDiv);
+                                }
+                            } catch (err) { showToast('Rename error: ' + err.message, true); input.replaceWith(nameDiv);}    
+                        })(); 
+                    }
+                    input.addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ finishRename(); }});
+                    input.addEventListener('blur', finishRename);
+                });
+            }
+        }
+
+        chatArchiveBtn?.addEventListener('click', async () => {
+            try {
+                showToast('Archiving chat...', false);
+                const out = await apiPostJson('/api/chat/archive', {});
+                if (out && out.success) {
+                    showToast('Chat archived: ' + out.archive_id, false);
+                    // Clear the chat UI
+                    const messagesEl = document.getElementById('messages');
+                    if (messagesEl) messagesEl.innerHTML = '';
+                    saveChatState();
+                } else {
+                    showToast('Archive failed', true);
+                }
+            } catch (err) {
+                console.error('[synth_webui] Archive failed', err);
+                showToast('Archive error: ' + err.message, true);
+            }
+        });
+
+        chatRestoreBtn?.addEventListener('click', async () => {
+            try {
+                const modal = createArchiveModal();
+                bindArchiveModalButtons();
+                modal.style.display = 'flex';
+                await refreshArchiveList();
+            } catch (err) {
+                console.error('[synth_webui] Open archives failed', err);
+                showToast('Open archives error: ' + err.message, true);
+            }
+        });
+
+        // Archive delete removed from main UI; handled in the archive modal per-item
 
     </script>
 </body>

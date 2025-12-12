@@ -57,3 +57,4 @@ docker-compose-*.yml
 backups/
 SyntH_main
 TODO*.md
+.github/prompts
