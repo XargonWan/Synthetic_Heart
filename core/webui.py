@@ -224,6 +224,7 @@ class SynthWebUIInterface:
         # Chat archive API (filesystem-backed)
         self.app.post("/api/chat/archive")(self.archive_chat)
         self.app.get("/api/chat/archives")(self.list_chat_archives)
+        self.app.get("/api/chat/archives/{archive_id}")(self.get_chat_archive)
         self.app.post("/api/chat/restore")(self.restore_chat_archive)
         self.app.delete("/api/chat/archives/{archive_id}")(self.delete_chat_archive)
         self.app.post("/api/chat/archives/{archive_id}/rename")(self.rename_chat_archive)
@@ -969,7 +970,8 @@ class SynthWebUIInterface:
                 # Try common keys from chat_history_cache / context_manager
                 if isinstance(item, dict):
                     sname = item.get('sender_name') or item.get('username') or None
-                    if sname and str(sname).lower() == 'self':
+                    # Normalize commonly used names for the SyntH agent to 'synth'
+                    if sname and str(sname).lower() in ('self', 'synth', 'bot', 'system', 'synth_webui'):
                         sender = 'synth'
                     else:
                         sender = 'user'
@@ -989,7 +991,18 @@ class SynthWebUIInterface:
             from datetime import datetime
             from core.chat_history_cache import save_chat_message
             interface_path = f"{INTERFACE_NAME}/{session_id}"
-            await save_chat_message(interface_path, text, sender_name=sender, sender_id=session_id, timestamp=datetime.utcnow().isoformat())
+            # Normalize sender_name for DB storage: we want to store "self" as the
+            # canonical name for the SyntH agent so that restore/replay can map
+            # it back to "synth" for WS payloads. This avoids misattribution
+            # where stored value "synth" would be considered a user on replay.
+            db_sender_name = sender
+            try:
+                if isinstance(sender, str) and sender.lower() in ("synth", "bot", "synth_webui"):
+                    db_sender_name = "self"
+            except Exception:
+                db_sender_name = sender
+
+            await save_chat_message(interface_path, text, sender_name=db_sender_name, sender_id=session_id, timestamp=datetime.utcnow().isoformat())
         except Exception as e:
             log_debug(f"{LOG_PREFIX} Failed to persist chat message for {session_id}: {e}")
 
@@ -2234,6 +2247,17 @@ class SynthWebUIInterface:
             log_error(f"{LOG_PREFIX} Failed to list chat archives: {exc}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
 
+    async def get_chat_archive(self, archive_id: str):
+        try:
+            from core.chat_archives_db import load_archive
+            arch = await load_archive(archive_id)
+            return JSONResponse({"success": True, "archive": arch})
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="Archive not found")
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to get chat archive {archive_id}: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
     async def restore_chat_archive(self, request: Request):
         """Restore a previously-created chat archive to the current session.
 
@@ -2278,13 +2302,27 @@ class SynthWebUIInterface:
             else:
                 log_debug(f"{LOG_PREFIX} No session metadata in archive {archive_id}")
             # 3) Save back to DB and memory
+            saved_count = 0
             for i, msg in enumerate(messages):
                 text = msg.get('text') or msg.get('message_text') or ''
                 sender_name = msg.get('sender_name') or msg.get('username') or 'unknown'
+                # Normalize aliases used for the SyntH agent to the canonical 'self'
+                try:
+                    if isinstance(sender_name, str) and sender_name.lower() in ('synth', 'bot', 'system', 'synth_webui'):
+                        sender_name = 'self'
+                except Exception:
+                    pass
                 sender_id = msg.get('sender_id') or msg.get('user_id') or 'unknown'
                 ts = msg.get('timestamp')
-                await save_chat_message(interface_path, text, sender_name=sender_name, sender_id=sender_id, timestamp=ts)
-                log_debug(f"{LOG_PREFIX} Saved restored message {i+1}/{len(messages)} for session {session_id}")
+                try:
+                    saved = await save_chat_message(interface_path, text, sender_name=sender_name, sender_id=sender_id, timestamp=ts)
+                    if saved:
+                        saved_count += 1
+                        log_debug(f"{LOG_PREFIX} Saved restored message {i+1}/{len(messages)} for session {session_id}")
+                    else:
+                        log_debug(f"{LOG_PREFIX} Skipped saving restored message {i+1}/{len(messages)} for session {session_id} (empty or invalid message)")
+                except Exception as e:
+                    log_warning(f"{LOG_PREFIX} Failed to save restored message {i+1}/{len(messages)} to cache: {e}")
             # ensure the in-memory context is repopulated
             from core.chat_context_manager import load_chat_history as ctx_load
             await ctx_load(interface_path)
@@ -2298,13 +2336,33 @@ class SynthWebUIInterface:
                 log_debug(f"{LOG_PREFIX} Failed to replay history after restore: {e}")
 
             # Remove the archive after successful restore so it won't be re-archived as duplicate
-            try:
-                from core.chat_archives_db import delete_archive as db_delete_archive
-                await db_delete_archive(archive_id)
-                log_info(f"{LOG_PREFIX} Deleted archive {archive_id} after successful restore")
-            except Exception as e:
-                log_debug(f"{LOG_PREFIX} Failed to delete archive {archive_id} after restore: {e}")
-            return JSONResponse({"success": True, "restored": len(messages), "messages": messages, "deleted_archive_id": archive_id})
+            deleted_archive_id = None
+            # Delete only if we successfully saved at least one message
+            if saved_count > 0:
+                try:
+                    from core.chat_archives_db import delete_archive as db_delete_archive
+                    await db_delete_archive(archive_id)
+                    log_info(f"{LOG_PREFIX} Deleted archive {archive_id} after successful restore")
+                    deleted_archive_id = archive_id
+                except Exception as e:
+                    log_debug(f"{LOG_PREFIX} Failed to delete archive {archive_id} after restore: {e}")
+            else:
+                log_warning(f"{LOG_PREFIX} Restore completed but no messages were saved for archive {archive_id} (saved_count=0). Archive kept for inspection.")
+                # Log message keys for debug purposes
+                try:
+                    for i, msg in enumerate(messages):
+                        if isinstance(msg, dict):
+                            keys = list(msg.keys())
+                        else:
+                            keys = [type(msg).__name__]
+                        log_debug(f"{LOG_PREFIX} Archive {archive_id} message {i+1} keys: {keys}")
+                except Exception as e:
+                    log_debug(f"{LOG_PREFIX} Failed to log archive message keys: {e}")
+            # Note: do not return raw messages here to avoid double-rendering on client
+            # We always replay the restored messages via WebSocket (_replay_history), so
+            # the client should rely on the WebSocket replay instead of rendering
+            # the API response to avoid duplicates.
+            return JSONResponse({"success": True, "restored": len(messages), "saved_count": saved_count, "deleted_archive_id": deleted_archive_id})
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail="Archive not found")
         except Exception as exc:

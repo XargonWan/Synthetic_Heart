@@ -57,13 +57,20 @@ async def create_archive(session_id: str, messages: List[Dict[str, Any]], name: 
 
 async def list_archives(session_id: Optional[str] = None) -> List[Dict[str, Any]]:
     try:
+        log_debug(f"[chat_archives_db] list_archives called with session_id={session_id}")
         await init_chat_archives_table()
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
+                # Use JSON_LENGTH to count number of messages when possible; fall back to CHAR_LENGTH if not supported
                 if session_id:
-                    await cur.execute("SELECT id, session_id, name, created_at, CHAR_LENGTH(messages) as message_count FROM chat_archives WHERE session_id=%s ORDER BY created_at DESC", (session_id,))
+                    await cur.execute(
+                        "SELECT id, session_id, name, created_at, COALESCE(JSON_LENGTH(messages), CHAR_LENGTH(messages)) as message_count FROM chat_archives WHERE session_id=%s ORDER BY created_at DESC",
+                        (session_id,),
+                    )
                 else:
-                    await cur.execute("SELECT id, session_id, name, created_at, CHAR_LENGTH(messages) as message_count FROM chat_archives ORDER BY created_at DESC")
+                    await cur.execute(
+                        "SELECT id, session_id, name, created_at, COALESCE(JSON_LENGTH(messages), CHAR_LENGTH(messages)) as message_count FROM chat_archives ORDER BY created_at DESC",
+                    )
                 rows = await cur.fetchall()
                 out: List[Dict[str, Any]] = []
                 for r in rows:
@@ -88,6 +95,7 @@ async def load_archive(archive_id: str) -> Dict[str, Any]:
                 await cur.execute("SELECT id, session_id, name, messages, metadata, created_at FROM chat_archives WHERE id = %s", (archive_id,))
                 row = await cur.fetchone()
                 if not row:
+                    log_debug(f"[chat_archives_db] load_archive: archive {archive_id} not found in DB")
                     raise FileNotFoundError(archive_id)
                 return {
                     "id": row[0],

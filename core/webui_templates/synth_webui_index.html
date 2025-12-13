@@ -8075,21 +8075,21 @@
                     const out = await apiPostJson('/api/chat/restore', { archive_id: aid, session_id: sessionId });
                         if (out && out.success) {
                         showToast('Archive restored (' + out.restored + ' messages)', false);
-                        // Render returned messages immediately
-                        if (Array.isArray(out.messages) && out.messages.length) {
-                            const messagesEl = document.getElementById('messages');
-                            if (messagesEl) {
-                                messagesEl.innerHTML = '';
-                                for (const msg of out.messages) {
-                                    const sender = (msg.sender_name || msg.username || 'unknown') === 'self' ? 'synth' : 'user';
-                                    addMessage(sender, msg.text || msg.message_text || '');
-                                }
-                                messagesEl.scrollTop = messagesEl.scrollHeight;
-                            }
-                        }
+                        // We rely on WebSocket replay to render restored messages via _replay_history;
+                        // do not render `out.messages` here to avoid duplicates.
                         modal.style.display = 'none';
                         // Refresh archive list after successful restore
                         try { await refreshArchiveList(); } catch (err) { console.debug('[synth_webui] Failed to refresh archive list after restore:', err); }
+                        // If server returned deleted_archive_id, remove the row immediately
+                        if (out && out.deleted_archive_id) {
+                            try {
+                                const deletedId = out.deleted_archive_id;
+                                const row = document.querySelector(`#archive-list .archive-row[data-id='${deletedId}']`);
+                                if (row) row.remove();
+                            } catch (err) { console.debug('[synth_webui] Failed to remove deleted archive row', err); }
+                        } else if (out && out.saved_count === 0) {
+                            showToast('No messages were restored (archive may be corrupt)', true);
+                        }
                     } else {
                         showToast('Restore failed', true);
                     }

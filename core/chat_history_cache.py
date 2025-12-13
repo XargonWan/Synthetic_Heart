@@ -51,7 +51,7 @@ async def save_chat_message(
     sender_name: str = None,
     sender_id: str = None,
     timestamp: datetime = None
-) -> None:
+    ) -> bool:
     """Save a message to the chat history cache.
     
     Args:
@@ -64,7 +64,7 @@ async def save_chat_message(
                    If tzinfo is None, assumes local time and converts to UTC.
     """
     if not interface_path or not message_text:
-        return
+        return False
     
     try:
         from datetime import timezone
@@ -117,8 +117,10 @@ async def save_chat_message(
                 """, (interface_path, interface_path, CHAT_HISTORY_LIMIT))
                 
                 log_debug(f"[chat_history_cache] Saved message for interface_path {interface_path}, sender={sender_name}, timestamp={timestamp}")
+                return True
     except Exception as e:
         log_debug(f"[chat_history_cache] Failed to save message: {e}")
+        return False
 
 
 
