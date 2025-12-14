@@ -12,8 +12,10 @@ from core.reaction_handler import react_when_mentioned, get_reaction_emoji
 from core.core_initializer import INTERFACE_REGISTRY
 from core.interfaces_registry import get_interface_registry
 from core.chat_context_manager import get_context_memory
+from core.session_meta import set_session_meta as set_session_meta_fn, get_session_meta as get_session_meta_fn
 from plugins.blocklist import is_user_blocked
 from plugins.chat_link import ChatLinkStore
+from core.user_utils import ensure_message_user_fields
 
 # Use a priority queue so events can be processed before regular messages
 HIGH_PRIORITY = 0
@@ -62,6 +64,13 @@ async def enqueue(bot, message, context_memory=None, priority: bool = False, int
     # Use centralized context manager if context_memory not provided
     if context_memory is None:
         context_memory = get_context_memory()
+    # Normalise the incoming message's user fields for consistent downstream handling
+    try:
+        ensure_message_user_fields(message)
+    except Exception:
+        # Don't block enqueue if normalization fails - keep behavior safe
+        log_debug('[QUEUE] Failed to normalise message.user for incoming message')
+
     message_text = getattr(message, 'text', '')
     user_id = getattr(message.from_user, 'id', 'unknown') if message.from_user else 'unknown'
     chat_id = getattr(message, 'chat_id', 'unknown')
@@ -254,6 +263,61 @@ async def enqueue(bot, message, context_memory=None, priority: bool = False, int
         )
 
 
+async def enqueue_low_priority(bot, message, context_memory=None, interface_id: str = None, original_message=None) -> None:
+    """Enqueue a low-priority (background) message into the global queue.
+
+    This is a convenience wrapper for plugins that want to submit background
+    messages that must never block other user messages. It performs the same
+    normalization and persistence steps as :func:`enqueue` but pushes the
+    item with LOW_PRIORITY (value 2).
+    """
+    if context_memory is None:
+        context_memory = get_context_memory()
+
+    # Ensure message fields exist before queueing
+    try:
+        ensure_message_user_fields(message)
+    except Exception:
+        log_debug('[QUEUE] Failed to normalise message.user for enqueue_low_priority')
+
+    user_id = getattr(message.from_user, 'id', 'unknown') if message.from_user else 'unknown'
+    chat_id = getattr(message, 'chat_id', 'unknown')
+    thread_id = getattr(message, 'thread_id', None) or getattr(message, 'message_thread_id', None)
+
+    # Resolve chat name if possible - best effort
+    chat_name = None
+    message_thread_name = None
+    try:
+        store = ChatLinkStore()
+        resolver = store.get_name_resolver(interface_id)
+        if resolver:
+            names = await resolver(chat_id, thread_id, bot)
+            if names:
+                chat_name = names.get('chat_name')
+                message_thread_name = names.get('message_thread_name')
+    except Exception:
+        pass
+
+    item = {
+        'bot': bot,
+        'message': message,
+        'chat_id': chat_id,
+        'thread_id': thread_id,
+        'interface': interface_id or (bot.get_interface_id() if bot and hasattr(bot, 'get_interface_id') else None),
+        'chat_name': chat_name,
+        'message_thread_name': message_thread_name,
+        'timestamp': time.time(),
+        'context': context_memory,
+        'priority': False,
+    }
+
+    global _counter
+    _counter += 1
+    # Use explicit LOW_PRIORITY value
+    await _queue.put((LOW_PRIORITY, _counter, item))
+    log_debug(f"[QUEUE] Low-priority message enqueued from {item['interface']} chat {chat_id} thread {thread_id}")
+
+
 async def compact_similar_messages(first: dict, limit: int = 5) -> list:
     """Collect already-queued messages from same chat/thread/interface."""
     batch = [first]
@@ -304,12 +368,14 @@ async def _consumer_loop() -> None:
                             continue
                         user = getattr(msg, "from_user", None)
                         if user:
+                            # Prefer @username if present, otherwise prefer full_name
+                            from core.user_utils import get_user_display_name, get_user_usertag
                             if getattr(user, "username", None):
-                                name = f"@{user.username}"
+                                name = get_user_usertag(user)
                             elif getattr(user, "full_name", None):
-                                name = user.full_name
+                                name = get_user_display_name(user)
                             else:
-                                name = f"user_{getattr(user, 'id', 'unknown')}"
+                                name = f"user_{get_user_display_name(user)}"
                             lines.append(f"{name}: {msg.text}")
                         else:
                             lines.append(msg.text)
@@ -399,6 +465,13 @@ async def _consumer_loop() -> None:
                     
                     # Deliver the structured event prompt using the standard pipeline with timeout
                     try:
+                        # Set session meta 'processing' True for this chat
+                        try:
+                            existing_meta = await get_session_meta_fn(interface_path) or {}
+                            existing_meta['processing'] = True
+                            await set_session_meta_fn(interface_path, existing_meta)
+                        except Exception as sm_e:
+                            log_debug(f"[QUEUE] Failed to set processing session meta: {sm_e}")
                         await asyncio.wait_for(
                             plugin_instance.handle_incoming_message(
                                 final["bot"], mock_message, final["event_prompt"], final.get("interface")
@@ -427,15 +500,115 @@ async def _consumer_loop() -> None:
                         log_warning(f"[QUEUE] Context is not a dict, cannot add interface_path")
                     
                     try:
-                        await asyncio.wait_for(
+                        # Ensure the message object has normalized user fields and date
+                        try:
+                            ensure_message_user_fields(final.get("message"))
+                        except Exception:
+                            log_debug("[QUEUE] Failed to normalise message fields in consumer loop")
+                        # Run message processing in a Task so we can avoid hard-cancelling long-running
+                        # flows (e.g. Selenium-based LLMs). On timeout we keep the task running and
+                        # clear the session 'processing' flag when it eventually finishes.
+                        processing_task = asyncio.create_task(
                             plugin_instance.handle_incoming_message(
                                 final["bot"], final["message"], context, final.get("interface")
-                            ),
-                            timeout=timeout_seconds
+                            )
                         )
+                        timed_out = False
+                        try:
+                            await asyncio.wait_for(processing_task, timeout=timeout_seconds)
+                        except asyncio.TimeoutError:
+                            timed_out = True
+                            log_error(f"[QUEUE] Message processing timed out after {timeout_seconds}s for chat {chat_id}")
+
+                            # Attempt to send a fallback message so the client isn't left waiting.
+                            try:
+                                from core.message_chain import get_failed_message_text
+                                failed_text = str(get_failed_message_text())
+
+                                bot_obj = final.get('bot')
+                                # Telegram-style bots expose send_message(chat_id=..., text=...)
+                                if bot_obj is not None and hasattr(bot_obj, 'send_message') and chat_id:
+                                    await bot_obj.send_message(chat_id=chat_id, text=failed_text)
+                                    log_debug(f"[QUEUE] Sent fallback message due to timeout to chat {chat_id}")
+                                else:
+                                    # Interface-style send (Discord/WebUI/etc)
+                                    try:
+                                        from core.core_initializer import INTERFACE_REGISTRY
+                                        iface = INTERFACE_REGISTRY.get(interface_id)
+                                    except Exception:
+                                        iface = None
+
+                                    if iface is not None and hasattr(iface, 'send_message') and interface_path:
+                                        payload = {"text": failed_text, "interface_path": interface_path}
+                                        try:
+                                            await iface.send_message(payload, original_message=final.get('message'))
+                                        except TypeError:
+                                            await iface.send_message(payload)
+                                        log_debug(f"[QUEUE] Sent interface fallback due to timeout to {interface_path}")
+                            except Exception as send_exc:
+                                log_warning(f"[QUEUE] Failed to send fallback message on timeout for chat {chat_id}: {send_exc}")
+
+                            async def _clear_processing_when_done() -> None:
+                                try:
+                                    # Log exceptions from the background task, if any
+                                    try:
+                                        exc = processing_task.exception()
+                                        if exc is not None:
+                                            log_warning(f"[QUEUE] Background processing task error for chat {chat_id}: {exc}")
+                                    except asyncio.CancelledError:
+                                        return
+                                    except Exception:
+                                        pass
+
+                                    # Only clear 'processing' if no other messages are pending for this chat
+                                    still_pending = False
+                                    for prio, _, queued_item in list(_queue._queue):
+                                        item_chat = queued_item.get('chat_id') if isinstance(queued_item, dict) else getattr(queued_item, 'chat_id', None)
+                                        if item_chat == chat_id:
+                                            still_pending = True
+                                            break
+                                    if not still_pending:
+                                        try:
+                                            existing_meta = await get_session_meta_fn(interface_path) or {}
+                                            existing_meta['processing'] = False
+                                            await set_session_meta_fn(interface_path, existing_meta)
+                                        except Exception as set_e:
+                                            log_debug(f"[QUEUE] Failed to clear processing session meta (background): {set_e}")
+                                except Exception as e:
+                                    log_debug(f"[QUEUE] Error in background completion handler for chat {chat_id}: {e}")
+
+                            # Keep processing in background; clear meta when done.
+                            try:
+                                processing_task.add_done_callback(lambda _t: asyncio.create_task(_clear_processing_when_done()))
+                            except Exception as cb_e:
+                                log_debug(f"[QUEUE] Failed to attach background completion callback: {cb_e}")
                     except asyncio.TimeoutError:
-                        log_error(f"[QUEUE] Message processing timed out after {timeout_seconds}s for chat {chat_id}")
-                        # Timeout - message_chain will have already sent fallback if needed
+                        # (handled above)
+                        pass
+                    finally:
+                        # Unmark processing for this session if no more messages are pending
+                        try:
+                            # If we timed out and left processing running in background,
+                            # keep the session marked as processing until the callback clears it.
+                            if 'timed_out' in locals() and timed_out:
+                                still_pending = True
+                            else:
+                            # Check for any remaining queued messages for the same chat
+                                still_pending = False
+                                for prio, _, queued_item in list(_queue._queue):
+                                    item_chat = queued_item.get('chat_id') if isinstance(queued_item, dict) else queued_item.chat_id
+                                    if item_chat == chat_id:
+                                        still_pending = True
+                                        break
+                            if not still_pending:
+                                try:
+                                    existing_meta = await get_session_meta_fn(interface_path) or {}
+                                    existing_meta['processing'] = False
+                                    await set_session_meta_fn(interface_path, existing_meta)
+                                except Exception as set_e:
+                                    log_debug(f"[QUEUE] Failed to clear processing session meta: {set_e}")
+                        except Exception as pending_e:
+                            log_debug(f"[QUEUE] Error checking pending queue for chat {chat_id}: {pending_e}")
             except Exception as e:  # pragma: no cover - plugin may misbehave
                 log_error(
                     f"[ERROR] Failed to process message from chat {final['chat_id']}: {e}\n{traceback.format_exc()}",

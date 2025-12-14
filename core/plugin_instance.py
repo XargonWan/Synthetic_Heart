@@ -165,6 +165,13 @@ async def handle_incoming_message(bot, message, context_memory_or_prompt, interf
             log_error(f"[plugin_instance] Fallback plugin loading failed: {fallback_e}")
             raise ValueError("No LLM plugin loaded and fallback failed")
 
+    # Normalize message user/date fields to avoid AttributeErrors later
+    try:
+        from core.user_utils import ensure_message_user_fields
+        ensure_message_user_fields(message)
+    except Exception:
+        pass
+
     if message is None and isinstance(context_memory_or_prompt, dict):
         prompt = context_memory_or_prompt
         message = SimpleNamespace(

@@ -6,6 +6,7 @@ from core.db import get_conn_ctx
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.json_utils import dumps as json_dumps
 from core.config_manager import config_registry
+from core.user_utils import get_user_display_name, get_user_usertag
 import aiomysql
 import os
 
@@ -254,8 +255,8 @@ async def build_json_prompt(message, context_memory, interface_name: str | None 
         "source": {
             "interface_path": interface_path,
             "message_id": message.message_id,
-            "username": message.from_user.full_name,
-            "usertag": f"@{message.from_user.username}" if message.from_user.username else "(no tag)",
+            "username": get_user_display_name(getattr(message, "from_user", None)),
+            "usertag": get_user_usertag(getattr(message, 'from_user', None)),
             "interface": interface_name,
         },
         "timestamp": message.date.isoformat(),
@@ -276,7 +277,7 @@ async def build_json_prompt(message, context_memory, interface_name: str | None 
         reply_date = getattr(reply, "date", None)
         reply_timestamp = reply_date.isoformat() if reply_date else ""
         reply_from = getattr(reply, "from_user", None)
-        reply_full_name = getattr(reply_from, "full_name", "Unknown") if reply_from else "Unknown"
+        reply_full_name = get_user_display_name(reply_from) if reply_from else "Unknown"
         reply_username = getattr(reply_from, "username", None) if reply_from else None
         input_payload["reply_message_id"] = {
             "text": reply_text,

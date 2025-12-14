@@ -27,6 +27,7 @@ from core.mention_utils import is_message_for_bot
 from collections import deque
 import json
 from core.logging_utils import log_debug, log_info, log_warning, log_error
+from core.user_utils import get_user_usertag
 from interface.message_send_utils import (
     safe_send,
     send_with_thread_fallback,

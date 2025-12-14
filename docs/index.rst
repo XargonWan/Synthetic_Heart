@@ -39,6 +39,7 @@ getting started.
    plugins
    action_schema_format
    validation_system
+   message_handling
    ai_diary_personal_memory
    vrm_animations
    animation_system

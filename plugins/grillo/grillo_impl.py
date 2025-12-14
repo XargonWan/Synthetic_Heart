@@ -213,8 +213,11 @@ class GrilloPlugin(AIPluginBase):
             message.chat_id = -1
             message.message_id = 0
             message.text = prompt
-            message.from_user = SimpleNamespace(id=-1, username="grillo", first_name="G.R.I.L.L.O.")
+            message.from_user = SimpleNamespace(id=-1, username="grillo", full_name="G.R.I.L.L.O.", first_name="G.R.I.L.L.O.")
+            from datetime import datetime
             message.chat = SimpleNamespace(id=-1, type="internal")
+            # Ensure the synthetic message has a date so prompt building doesn't fail
+            message.date = datetime.utcnow()
             item = {
                 "bot": None,
                 "message": message,
@@ -227,8 +230,8 @@ class GrilloPlugin(AIPluginBase):
                 "context": {"grillo_beat": True, "beat_type": beat_type},
                 "priority": False,
             }
-            message_queue._counter += 1
-            await message_queue._queue.put((message_queue.LOW_PRIORITY, message_queue._counter, item))
+            # Use the official enqueue API to avoid direct queue access
+            await message_queue.enqueue_low_priority(None, message, context_memory=item.get('context'), interface_id='grillo', original_message=None)
             # Reset pending flag after small delay to avoid flooding
             asyncio.create_task(self._reset_beat_pending_after_delay())
         except Exception as e:

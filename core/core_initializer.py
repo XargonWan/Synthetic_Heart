@@ -238,6 +238,11 @@ class CoreInitializer:
             self._initial_initialization = False  # Reset flag - plugins can now trigger auto-refresh
             log_debug("[core_initializer] Set _initial_initialization=False - auto-refresh now allowed")
             self.initialization_completed = True
+            # Many components (plugins/interfaces) are optional by design.
+            # Keep startup_errors for diagnostics, but don't abort core startup.
+            if self.startup_errors:
+                combined = '; '.join(self.startup_errors)
+                log_warning(f"[core_initializer] Startup warnings/errors: {combined}")
             log_info("[core_initializer] ✅ All core components initialized successfully")
             
             # Start database pool cleanup monitor to prevent exhaustion under load
@@ -446,6 +451,24 @@ class CoreInitializer:
 
                 module_name = ".".join(py_file.relative_to(root_dir).with_suffix("").parts)
 
+                # Enforce policy: plugin files must not write directly to queue internals
+                try:
+                    content = py_file.read_text(encoding='utf-8')
+                    # Detect direct writes to the queue internals to enforce use of enqueue APIs
+                    if (
+                        'message_queue._queue.put' in content
+                        or 'message_queue._queue' in content
+                        or '_queue.put(' in content
+                        or '_queue._queue.put' in content
+                        or '_queue._queue' in content
+                    ):
+                        err_msg = f"Plugin {py_file} writes directly to queue internals; please use enqueue()/enqueue_low_priority()"
+                        log_error(f"[core_initializer] {err_msg}")
+                        self.startup_errors.append(err_msg)
+                        continue
+                except Exception:
+                    log_debug(f"[core_initializer] Could not inspect plugin file for queue write policy: {py_file}")
+
                 try:
                     module = importlib.import_module(module_name)
                 except Exception as e:
@@ -464,9 +487,6 @@ class CoreInitializer:
                 ):
                     log_warning(
                         f"[core_initializer] ⚠️ Plugin {module_name} doesn't implement action interface"
-                    )
-                    self.startup_errors.append(
-                        f"Plugin {module_name}: Missing action interface"
                     )
                     continue
 
@@ -712,19 +732,19 @@ class CoreInitializer:
         
         # Discord interface reload handler
         try:
-            from interface import discord_bot
-            if hasattr(discord_bot, 'reload_interface'):
-                reload_handlers['discord_bot'] = discord_bot.reload_interface
+            from interface import discord_interface
+            if hasattr(discord_interface, 'reload_interface'):
+                reload_handlers['discord_bot'] = discord_interface.reload_interface
                 log_debug("[core_initializer] Registered reload handler for discord_bot")
         except Exception as e:
             log_debug(f"[core_initializer] Failed to register discord_bot reload handler: {e}")
         
         # Matrix interface reload handler
         try:
-            from interface import matrix_bot
-            if hasattr(matrix_bot, 'reload_interface'):
-                reload_handlers['matrix_bot'] = matrix_bot.reload_interface
-                log_debug("[core_initializer] Registered reload handler for matrix_bot")
+            from interface import matrix_interface
+            if hasattr(matrix_interface, 'reload_interface'):
+                reload_handlers['matrix_chat'] = matrix_interface.reload_interface
+                log_debug("[core_initializer] Registered reload handler for matrix_chat")
         except Exception as e:
             log_debug(f"[core_initializer] Failed to register matrix_bot reload handler: {e}")
         

@@ -12,9 +12,22 @@ def get_current_aliases() -> list[str]:
         from core.config_manager import config_registry
         persona_manager = get_persona_manager()
         current_persona = persona_manager.get_current_persona()
-        if current_persona and current_persona.aliases:
-            log_debug(f"[mention] Loaded aliases from persona: {current_persona.aliases}")
-            return current_persona.aliases
+        if current_persona:
+            # Prefer explicit aliases when available
+            persona_aliases = getattr(current_persona, 'aliases', None)
+            if persona_aliases:
+                log_debug(f"[mention] Loaded aliases from persona: {persona_aliases}")
+                aliases = list(persona_aliases)
+                try:
+                    if current_persona.name and current_persona.name not in aliases:
+                        aliases.append(current_persona.name)
+                except Exception:
+                    pass
+                return aliases
+            # No explicit aliases, but persona name exists: expose it as alias
+            if getattr(current_persona, 'name', None):
+                log_debug(f"[mention] Using persona name as alias: {current_persona.name}")
+                return [current_persona.name]
 
         # If persona not loaded or aliases empty, try reading from config registry
         try:
@@ -44,7 +57,7 @@ def get_current_aliases() -> list[str]:
     return synth_ALIASES
 
 
-from core.logging_utils import log_debug
+from core.logging_utils import log_debug, log_info
 
 
 
@@ -67,24 +80,16 @@ def is_synth_mentioned(text: str) -> bool:
     """Return ``True`` if ``text`` contains any alias for synth."""
     if not text:
         return False
-    import re
     lowered = text.lower()
     aliases = get_current_aliases()
-    # Use word-boundary-aware matching to reduce false positives (e.g. avoid
-    # matching 'synth' inside longer words). Support multi-word aliases.
+    # Match aliases as substrings intentionally: users expect 'rekku'
+    # to match 'rekkucina' and similar variations.
     for alias in aliases:
         if not alias:
             continue
-        pattern = r"\b" + re.escape(alias.lower()) + r"\b"
-        try:
-            if re.search(pattern, lowered, flags=re.UNICODE):
-                log_debug(f"[mention] synth alias matched: '{alias}'")
-                return True
-        except Exception:
-            # Fallback: simple substring match if regex fails for some alias
-            if alias.lower() in lowered:
-                log_debug(f"[mention] synth alias matched by fallback: '{alias}'")
-                return True
+        if alias.lower() in lowered:
+            log_debug(f"[mention] synth alias matched (substring): '{alias}'")
+            return True
     return False
 
 
@@ -137,6 +142,7 @@ async def is_message_for_bot(
     # Priority 1: Check for private messages (1:1 chat) - HIGHEST PRIORITY
     try:
         if message.chat.type == "private":
+            log_debug("[mention] match_reason=private_message")
             log_debug("[mention] ✅ Private message detected - PRIORITY 1 - always for bot")
             return True, None
     except Exception as e:
@@ -153,11 +159,13 @@ async def is_message_for_bot(
             
             # Check if reply is to bot by username
             if reply_username and bot_username and reply_username.lower() == bot_username.lower():
+                log_debug("[mention] match_reason=reply_username")
                 log_debug("[mention] ✅ Reply to bot message (username match) - PRIORITY 2 - message is for bot")
                 return True, None
             
             # Check if reply is to bot by ID
             if reply_id and hasattr(bot, 'id') and reply_id == bot.id:
+                log_debug("[mention] match_reason=reply_id")
                 log_debug("[mention] ✅ Reply to bot message (ID match) - PRIORITY 2 - message is for bot")
                 return True, None
     
@@ -165,10 +173,12 @@ async def is_message_for_bot(
     if message_text and "@" in message_text:
         # Check for @synth mention
         if "@synth" in message_text.lower():
+            log_debug("[mention] match_reason=@synth_mention")
             log_debug("[mention] ✅ Explicit @synth mention found - PRIORITY 3 - message is for bot")
             return True, None
         # Check for bot username if provided
         if bot_username and f"@{bot_username}" in message_text:
+            log_debug(f"[mention] match_reason=@{bot_username}_mention")
             log_debug(f"[mention] ✅ Explicit @mention found: @{bot_username} - PRIORITY 3 - message is for bot")
             return True, None
     
@@ -178,26 +188,52 @@ async def is_message_for_bot(
         log_debug(f"[mention] Checking aliases in text: '{text_lower}'")
         aliases = get_current_aliases()
         log_debug(f"[mention] Current aliases to check: {aliases}")
-        for alias in aliases:
-            if alias.lower() in text_lower:
-                log_debug(f"[mention] ✅ Alias found: '{alias}' - PRIORITY 4 - message is for bot")
+        # Use the alias-aware helper which performs word-boundary-aware matching
+        try:
+            if is_synth_mentioned(message_text):
+                log_debug("[mention] match_reason=alias")
+                log_debug(f"[mention] ✅ Alias found in text - PRIORITY 4 - message is for bot")
                 return True, None
+        except Exception:
+            # Fallback to simple substring matching if helper unavailable for any reason
+            for alias in aliases:
+                if alias.lower() in text_lower:
+                    log_debug(f"[mention] match_reason=alias:{alias}")
+                    log_debug(f"[mention] ✅ Alias found: '{alias}' - PRIORITY 4 - message is for bot")
+                    return True, None
         log_debug(f"[mention] No aliases found in '{text_lower}'")
     
     # Priority 4b: Check for persona name in message text
     if message_text:
         try:
+            log_debug("[mention] Checking persona via get_persona_manager()")
             from core.persona_manager import get_persona_manager
             persona_manager = get_persona_manager()
+            log_debug(f"[mention] persona_manager instance: {persona_manager}")
             current_persona = persona_manager.get_current_persona()
+            log_debug(f"[mention] current_persona: {current_persona}")
             if current_persona and current_persona.name:
                 persona_name = current_persona.name
                 text_lower = message_text.lower()
-                if persona_name.lower() in text_lower:
-                    log_debug(f"[mention] ✅ Persona name found: '{persona_name}' - PRIORITY 4b - message is for bot")
-                    return True, None
-                else:
-                    log_debug(f"[mention] Persona name '{persona_name}' not found in '{text_lower}'")
+                # Use word-boundary-aware matching for persona name to avoid
+                # accidental matches inside longer words (e.g. 'synthesis').
+                import re
+                pattern = r"\b" + re.escape(persona_name.lower()) + r"\b"
+                try:
+                    if re.search(pattern, text_lower, flags=re.UNICODE):
+                        log_debug(f"[mention] match_reason=persona_name:{persona_name}")
+                        log_debug(f"[mention] ✅ Persona name found: '{persona_name}' - PRIORITY 4b - message is for bot")
+                        return True, None
+                    else:
+                        log_debug(f"[mention] Persona name '{persona_name}' not found in '{text_lower}'")
+                except Exception:
+                    # Fallback to simple substring check if regex fails for some reason
+                    if persona_name.lower() in text_lower:
+                        log_debug(f"[mention] match_reason=persona_name_fallback:{persona_name}")
+                        log_debug(f"[mention] ✅ Persona name found by fallback: '{persona_name}' - PRIORITY 4b - message is for bot")
+                        return True, None
+                    else:
+                        log_debug(f"[mention] Persona name '{persona_name}' not found in '{text_lower}' (fallback)")
             else:
                 log_debug(f"[mention] No persona name available to check")
         except Exception as e:
@@ -205,6 +241,7 @@ async def is_message_for_bot(
     
     # Priority 5: Check for chat 1:1 using human count (fallback)
     if human_count is not None and human_count == 1:
+        log_debug("[mention] match_reason=single_human")
         log_debug("[mention] ✅ Single human in chat - PRIORITY 5 - treating as message for bot")
         return True, None
     

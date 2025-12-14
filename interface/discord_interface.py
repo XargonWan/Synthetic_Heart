@@ -184,10 +184,17 @@ class DiscordInterface:
         if not isinstance(text, str) or not text:
             errors.append("payload.text must be a non-empty string")
 
+        # Preferred routing uses interface_path; keep legacy support for payload.target
+        interface_path = payload.get("interface_path")
         target = payload.get("target")
-        if target is None:
-            errors.append("payload.target is required")
-        elif not isinstance(target, (int, str)):
+
+        if not interface_path and target is None:
+            errors.append("payload.interface_path is required (or payload.target for legacy)")
+
+        if interface_path is not None and not isinstance(interface_path, str):
+            errors.append("payload.interface_path must be a string")
+
+        if target is not None and not isinstance(target, (int, str)):
             errors.append("payload.target must be an int or string")
 
         reply_to = payload.get("reply_to_message_id")

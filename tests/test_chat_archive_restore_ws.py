@@ -117,7 +117,7 @@ async def test_restore_archive_with_empty_messages_keeps_archive():
          patch('core.chat_history_cache.save_chat_message', AsyncMock(side_effect=fake_save)) as mock_save_empty, \
          patch('core.chat_history_cache.load_chat_history', AsyncMock(return_value=[])), \
          patch('core.chat_history_cache.clear_chat_history', AsyncMock()), \
-         patch('core.session_meta.set_session_meta', AsyncMock()):
+            patch('core.session_meta.set_session_meta', AsyncMock()) as mock_set_meta_empty:
         resp = await webui.restore_chat_archive(req)
     assert resp.status_code == 200
     body = resp.body.decode('utf-8') if hasattr(resp, 'body') else None
@@ -133,6 +133,10 @@ async def test_restore_archive_with_empty_messages_keeps_archive():
     # No messages should have been sent since they were empty and not saved
     # However _replay_history still sends messages from message_history if any; considered saved_count=0 so history should be empty and no send_json should occur
     assert mock_ws.send_json.call_count == 0
+
+    # set_session_meta should have been called to clear the processing flag
+    interface_path = f"synth_webui/{session_id}"
+    mock_set_meta_empty.assert_called_with(interface_path, {'processing': False})
 
     # No real DB cleanup required; the mocked delete was not called for empty archive
 
@@ -201,4 +205,27 @@ async def test_restore_archive_with_empty_messages_keeps_archive():
         calls = mock_ws.send_json.call_args_list
         second = calls[1][0][0]
         assert second['sender'] == 'synth'
+
+
+@pytest.mark.asyncio
+async def test_archive_clears_processing_meta():
+    from core.webui import SynthWebUIInterface
+    webui = SynthWebUIInterface()
+    session_id = 'archive_meta_session'
+    # Prepare dummy payload
+    payload = {"session_id": session_id, "name": "test-archive-meta"}
+    req = DummyRequest(payload)
+
+    # Patch DB and cache calls
+    with patch('core.chat_history_cache.load_chat_history', AsyncMock(return_value=[])), \
+         patch('core.chat_archives_db.create_archive', AsyncMock(return_value={'id': 'arch-meta-id', 'path': '/tmp/arch'})), \
+         patch('core.chat_history_cache.clear_chat_history', AsyncMock()), \
+         patch('core.chat_context_manager.clear_chat_context', AsyncMock()), \
+         patch('core.session_meta.set_session_meta', AsyncMock()) as mock_set_meta:
+        resp = await webui.archive_chat(req)
+
+    assert resp.status_code == 200
+    # set_session_meta should be called with processing=False
+    interface_path = f"synth_webui/{session_id}"
+    mock_set_meta.assert_called_with(interface_path, {'processing': False})
 
