@@ -110,7 +110,7 @@
         header.top-bar {
             position: sticky;
             top: 0;
-            z-index: 10;
+            z-index: 50000;
             display: flex;
             gap: 1.5rem;
             align-items: center;
@@ -307,7 +307,7 @@
             box-shadow: 0 24px 45px -38px rgba(0, 0, 0, 0.9);
             transition: transform 0.3s ease, opacity 0.3s ease;
             overflow: hidden;
-            z-index: 50;
+            z-index: 100;
             /* allow manual control via the corner handle and drag (desktop only) */
             /* Disabled default native resize - handled via explicit drag handles when enabled */
             resize: none;
@@ -535,12 +535,14 @@
             height: 100%;
             overflow: hidden;
             border: none;
+            z-index: 1;
+            pointer-events: auto;
         }
         .chat-toggle-btn {
-            position: absolute;
-            top: clamp(1.2rem, 2vw, 1.6rem);
+            position: fixed;
+            top: 95px;
             right: clamp(1.2rem, 2vw, 1.6rem);
-            z-index: 50;
+            z-index: 150;
             width: 56px;
             height: 56px;
             border-radius: 50%;
@@ -1212,7 +1214,7 @@
                 min-height: clamp(320px, 50vh, 560px);
             }
             .chat-toggle-btn {
-                top: 1rem;
+                top: 85px;
                 right: 1rem;
                 width: 48px;
                 height: 48px;
@@ -1349,6 +1351,7 @@
                Do not force display here so JS can hide it when chat is active. */
             .chat-toggle-btn {
                 z-index: 10050;
+                position: fixed;
             }
             /* Remove header bottom border and any subtle divider so the 3D view is flush with the header */
             header.top-bar { border-bottom: none; box-shadow: none; }
@@ -1368,36 +1371,41 @@
                 flex-direction: column;
                 align-items: stretch;
                 gap: 0.8rem;
+                flex-wrap: nowrap;
                 /* Ensure mobile nav overlays above chat toggle and archive modal */
                 z-index: 10600;
             }
             nav.main-nav.open {
-                display: flex;
+                display: flex !important;
                 /* When open, make the mobile menu overlay above all other UI layers */
                 position: fixed;
                 /* top is set dynamically below header to avoid overlapping first item */
                 left: 0;
                 right: 0;
-                z-index: 20000;
+                z-index: 40000;
                 flex-direction: column !important;
+                flex-wrap: nowrap !important;
+                padding: 1rem;
                 padding-top: 0.5rem;
+                padding-bottom: 1.5rem;
                 align-items: stretch;
-                overflow: auto;
+                overflow-y: auto;
+                max-height: calc(100vh - var(--topbar-height, 60px));
+                min-height: 200px;
             }
 
             /* Ensure nav buttons are full-width and stacked vertically on mobile */
             nav.main-nav.open .nav-btn {
                 display: flex !important;
-                width: 100%;
+                width: 100% !important;
                 justify-content: flex-start;
                 padding: 0.9rem 1rem !important;
                 border-radius: 10px !important;
+                flex-shrink: 0;
+                box-sizing: border-box;
             }
 
             /* Ensure the hamburger button remains clickable above the menu */
-            .hamburger {
-                z-index: 20030;
-            }
             .hamburger {
                 display: block;
                 background: none;
@@ -1406,6 +1414,8 @@
                 font-size: 1.5rem;
                 cursor: pointer;
                 padding: 0.5rem;
+                z-index: 50001;
+                position: relative;
             }
             .hamburger:hover {
                 color: var(--accent);
@@ -1422,6 +1432,7 @@
                 background: rgba(12, 12, 20, 0.92);
                 backdrop-filter: blur(10px);
                 -webkit-backdrop-filter: blur(10px);
+                z-index: 100;
             }
             #composer {
                 flex-direction: row;
@@ -3013,14 +3024,16 @@
                         const isMobileViewport = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768);
 
                         if (localState === 'minimized') {
-                            // If the chat was minimized previously, respect that preference
-                            // and show the restore toggle so mobile users can bring it back.
-                            chatEl.classList.add('hidden');
-                            if (chatToggleBtn) chatToggleBtn.style.display = 'flex';
-                        } else if (localState === 'maximized') {
-                            chatEl.classList.add('maximized');
-                        } else if (localState === 'expanded') {
-                            chatEl.classList.add('expanded');
+                            // On mobile without saved messages, auto-show the chat for better UX
+                            if (isMobileViewport && !hasMessages) {
+                                chatEl.classList.remove('hidden');
+                                if (chatToggleBtn) chatToggleBtn.style.display = 'none';
+                            } else {
+                                // If the chat was minimized previously, respect that preference
+                                // and show the restore toggle so mobile users can bring it back.
+                                chatEl.classList.add('hidden');
+                                if (chatToggleBtn) chatToggleBtn.style.display = 'flex';
+                            }
                         } else if (localState === 'maximized') {
                             chatEl.classList.add('maximized');
                         } else if (localState === 'expanded') {
@@ -4828,7 +4841,7 @@
                     try {
                         const chatEl = document.getElementById('chat');
                         if (chatEl) chatEl.style.zIndex = '50';
-                        if (chatToggleBtn) chatToggleBtn.style.zIndex = '60';
+                        if (chatToggleBtn) chatToggleBtn.style.zIndex = '50';
                         // Also reduce z-index of resize handles that may float above everything
                         document.querySelectorAll('.chat-resize-handle').forEach(h => { h.style.zIndex = '40'; });
                     } catch (e) { /* ignore */ }
@@ -4837,8 +4850,8 @@
                     mainNav.style.bottom = '';
                     try {
                         const chatEl = document.getElementById('chat');
-                        if (chatEl) chatEl.style.zIndex = '';
-                        if (chatToggleBtn) chatToggleBtn.style.zIndex = '';
+                        if (chatEl) chatEl.style.zIndex = '100';
+                        if (chatToggleBtn) chatToggleBtn.style.zIndex = '150';
                         document.querySelectorAll('.chat-resize-handle').forEach(h => { h.style.zIndex = ''; });
                     } catch (e) { /* ignore */ }
                 }
