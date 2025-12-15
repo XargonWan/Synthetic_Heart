@@ -88,6 +88,12 @@ class SynthWebUIInterface:
         self.tls_enabled = os.getenv('SYNTH_WEBUI_TLS', os.getenv('SECURE_CONNECTION', '0')) == '1'
         self.tls_certfile = os.getenv('SYNTH_WEBUI_CERTFILE', None)
         self.tls_keyfile = os.getenv('SYNTH_WEBUI_KEYFILE', None)
+        # Optional HTTP port to serve plain HTTP alongside HTTPS (useful for dev/testing)
+        try:
+            env_http = os.getenv('SYNTH_WEBUI_HTTP_PORT', None)
+            self.http_port = int(env_http) if env_http else (self.port - 1 if self.tls_enabled and self.port > 1 else None)
+        except Exception:
+            self.http_port = None
         # Selkies desktop ports used for UI hints
         try:
             self.selkies_https_port = int(os.getenv('SELKIES_HTTPS_PORT', '3000'))
@@ -349,6 +355,8 @@ class SynthWebUIInterface:
                 '%%FAILED_MESSAGE_TEXT%%': str(get_failed_message_text()),
                 # Expose WEB_DEBUG flag to the template (default false)
                 '%%WEB_DEBUG%%': '1' if os.getenv('WEB_DEBUG', '0') in ('1', 'true', 'True') else '0',
+                # Chat resizable flag (configurable via exposed variable)
+                '%%CHAT_RESIZABLE%%': 'true' if str(self._get_chat_resizable()).lower() in ('1', 'true', 'yes') else 'false',
             }
             
             # Apply replacements
@@ -380,6 +388,19 @@ class SynthWebUIInterface:
             log_error(f"{LOG_PREFIX} failed to render index: {exc}")
             raise HTTPException(status_code=500, detail="Unable to render SyntH Web UI") from exc
         return HTMLResponse(content=html)
+
+    def _get_chat_resizable(self) -> bool:
+        """Return whether chat should be resizable (from config/DB)."""
+        try:
+            from core.config_manager import config_registry
+            # Historically the chat was resizable by default; keep backward
+            # compatible behavior by defaulting to True so upgrades don't
+            # unexpectedly disable the UX. The variable is still configurable
+            # via exposed variables and the config API.
+            val = config_registry.get_var('WEBUI_CHAT_RESIZABLE', True, component='synth_webui')
+            return bool(val)
+        except Exception:
+            return False
 
     async def health(self):
         return JSONResponse({"status": "ok", "time": datetime.utcnow().isoformat()})
@@ -876,6 +897,16 @@ class SynthWebUIInterface:
             except Exception as ack_exc:
                 log_warning(f"{LOG_PREFIX} Failed to send ACK message: {ack_exc}")
             
+            # Mark session as processing in session_meta so clients can persist typing across views
+            try:
+                from core.session_meta import get_session_meta as get_meta_fn, set_session_meta as set_meta_fn
+                interface_path = f"{INTERFACE_NAME}/{session_id}"
+                existing_meta = await get_meta_fn(interface_path) or {}
+                existing_meta['processing'] = True
+                await set_meta_fn(interface_path, existing_meta)
+            except Exception as e:
+                log_debug(f"{LOG_PREFIX} Failed to set session processing meta before enqueue: {e}")
+
             await message_queue.enqueue(
                 bot=self,
                 message=message,
@@ -2230,6 +2261,12 @@ class SynthWebUIInterface:
             clear_chat_context(interface_path)
             # Clear in-memory message history
             self.message_history.pop(session_id, None)
+            # Also clear session processing flag so clients don't keep typing indicator
+            try:
+                from core.session_meta import set_session_meta as set_meta_fn
+                await set_meta_fn(interface_path, {'processing': False})
+            except Exception as e:
+                log_debug(f"{LOG_PREFIX} Failed to clear session processing meta after archive: {e}")
             response = {"success": True, "archive_id": archive.get('id')}
             if archive.get('path'):
                 response['path'] = archive.get('path')
@@ -2287,6 +2324,11 @@ class SynthWebUIInterface:
             await clear_chat_history(interface_path)
             clear_chat_context(interface_path)
             self.message_history.pop(session_id, None)
+            # Ensure we clear the session processing flag when restoring to avoid stale typing indicators
+            try:
+                await set_session_meta(interface_path, {'processing': False})
+            except Exception as e:
+                log_debug(f"{LOG_PREFIX} Failed to clear session processing meta after restore: {e}")
             # 2) Load archive file
             log_debug(f"{LOG_PREFIX} restore_chat_archive called with archive_id={archive_id} session_id={session_id}")
             meta = await load_archive(archive_id)
@@ -3335,13 +3377,39 @@ class SynthWebUIInterface:
                     'ssl_certfile': self.tls_certfile,
                     'ssl_keyfile': self.tls_keyfile,
                 })
-            config = uvicorn.Config(**config_kwargs)
-            server = uvicorn.Server(config)
-            with self._server_lock:
-                self._server = server
-            log_info(f"{LOG_PREFIX} Starting Uvicorn server...")
-            await server.serve()
-            log_info(f"{LOG_PREFIX} Uvicorn server stopped normally")
+            # If TLS is enabled and an HTTP port is provided, start both HTTPS and HTTP servers
+            if self.tls_enabled and self.http_port and self.http_port != self.port:
+                # HTTPS server (original)
+                config_https = uvicorn.Config(**config_kwargs)
+                server_https = uvicorn.Server(config_https)
+                # HTTP server (no TLS)
+                config_http_kwargs = dict(**config_kwargs)
+                config_http_kwargs.update({"port": self.http_port})
+                # Remove SSL keys for HTTP server
+                config_http_kwargs.pop('ssl_certfile', None)
+                config_http_kwargs.pop('ssl_keyfile', None)
+                config_http = uvicorn.Config(**config_http_kwargs)
+                server_http = uvicorn.Server(config_http)
+
+                with self._server_lock:
+                    self._server = server_https
+
+                log_info(f"{LOG_PREFIX} Starting Uvicorn HTTPS server on {self.host}:{self.port} and HTTP server on {self.host}:{self.http_port}...")
+
+                # Run both servers concurrently
+                https_task = asyncio.create_task(server_https.serve())
+                http_task = asyncio.create_task(server_http.serve())
+
+                await asyncio.gather(https_task, http_task)
+                log_info(f"{LOG_PREFIX} Uvicorn servers stopped normally")
+            else:
+                config = uvicorn.Config(**config_kwargs)
+                server = uvicorn.Server(config)
+                with self._server_lock:
+                    self._server = server
+                log_info(f"{LOG_PREFIX} Starting Uvicorn server...")
+                await server.serve()
+                log_info(f"{LOG_PREFIX} Uvicorn server stopped normally")
         except Exception as exc:
             log_error(f"{LOG_PREFIX} Error in _run_server: {exc}")
             import traceback

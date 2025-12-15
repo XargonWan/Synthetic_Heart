@@ -222,7 +222,8 @@
             overflow: hidden;
             z-index: 50;
             /* allow manual control via the corner handle and drag (desktop only) */
-            resize: both;
+            /* Disabled default native resize - handled via explicit drag handles when enabled */
+            resize: none;
             cursor: default;
             touch-action: none; /* Allow pointer events for dragging */
             /* Enable resize handles on all sides */
@@ -2825,10 +2826,24 @@
             try {
                 // Do not restore chat messages from localStorage; server will replay persisted history when session is established
                 
-                // DO NOT restore typing indicator on page load
-                // It should only be shown when Synth is actively responding
-                // Always clear it on load to ensure clean state
+                // Clear any local typing indicator and attempt to restore it
+                // from server-side session meta.processing so the typing indicator
+                // persists across tab changes while the LLM is still processing.
                 removeTypingIndicator();
+                (async () => {
+                    try {
+                        if (!sessionId) return;
+                        const res = await fetch('/api/chat/session_meta?session_id=' + encodeURIComponent(sessionId));
+                        if (!res.ok) return;
+                        const out = await res.json();
+                        const meta = out && out.meta ? out.meta : {};
+                        if (meta && meta.processing) {
+                            addTypingIndicator();
+                        }
+                    } catch (e) {
+                        console.debug('[synth_webui] restoreChatState: failed to fetch session_meta', e);
+                    }
+                })();
                 
                 // Note: VRM model should already be loaded, no need to refresh
                 console.log('[synth_webui] Chat state restored (VRM should persist)');
@@ -2854,7 +2869,17 @@
                     const localStateKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}` : CHAT_WINDOW_STATE_KEY;
                     const localState = localStorage.getItem(localStateKey) || localStorage.getItem(CHAT_WINDOW_STATE_KEY);
                     if (localState && chatEl) {
-                        if (localState === 'minimized') {
+                        // If the chat was minimized in localStorage but there are no
+                        // saved messages yet (fresh session), auto-restore the chat
+                        // to avoid it disappearing silently after load.
+                        const messagesEl = document.getElementById('messages');
+                        const hasMessages = messagesEl && messagesEl.children && messagesEl.children.length > 0;
+
+                        if (localState === 'minimized' && !hasMessages) {
+                            console.debug('[synth_webui] Ignoring minimized state because no messages found; auto-restoring chat');
+                            chatEl.classList.remove('hidden');
+                            if (chatToggleBtn) chatToggleBtn.style.display = 'none';
+                        } else if (localState === 'minimized') {
                             chatEl.classList.add('hidden');
                             if (chatToggleBtn) chatToggleBtn.style.display = 'flex';
                         } else if (localState === 'maximized') {
@@ -4598,6 +4623,16 @@
         // Initialize the chat window
         setupFloatingWindow('chat');
 
+        // Defensive: ensure the floating restore button is visible whenever
+        // the chat panel is hidden on startup (covers cases where restore
+        // state failed to run or session meta wasn't available yet).
+        try {
+            if (chatPanel && chatToggleBtn) {
+                if (chatPanel.classList.contains('hidden')) chatToggleBtn.style.display = 'flex';
+                else chatToggleBtn.style.display = 'none';
+            }
+        } catch (e) { /* ignore */ }
+
         // Hamburger menu toggle
         const hamburgerBtn = document.querySelector('.hamburger');
         const mainNav = document.querySelector('.main-nav');
@@ -4986,6 +5021,18 @@
             bubble.textContent = text;
             container.appendChild(bubble);
             
+            // Avoid inserting duplicate consecutive messages (same sender + identical text)
+            try {
+                const last = messages.lastElementChild;
+                if (last) {
+                    const lastSender = last.classList.contains('synth') ? 'synth' : 'user';
+                    const lastBubble = last.querySelector('.bubble');
+                    const lastText = lastBubble ? lastBubble.textContent : null;
+                    if (lastSender === (sender === 'synth' ? 'synth' : 'user') && lastText === text) {
+                        return; // duplicate, skip
+                    }
+                }
+            } catch (err) { /* ignore duplicate check issues */ }
             messages.appendChild(container);
             messages.scrollTop = messages.scrollHeight;
 
@@ -5028,6 +5075,8 @@
                 addMessage('synth', failedMessage);
                 showToast('Response timeout - LLM did not respond in time', true);
             }, timeoutMs);
+            // Persist processing flag to server for cross-tab/device visibility
+            try { if (sessionId) apiPostJson('/api/chat/session_meta', { session_id: sessionId, meta: { processing: true } }); } catch (e) { /* ignore */ }
         }
 
         function removeTypingIndicator() {
@@ -5039,6 +5088,7 @@
                 clearTimeout(typingTimeoutTimer);
                 typingTimeoutTimer = null;
             }
+            try { if (sessionId) apiPostJson('/api/chat/session_meta', { session_id: sessionId, meta: { processing: false } }); } catch (e) { /* ignore */ }
         }
 
         function connect() {
@@ -7913,7 +7963,9 @@
         }
 
         // Create resize handles to allow resizing from any edge (desktop only)
+        const CHAT_RESIZABLE = %%CHAT_RESIZABLE%%; // server-controlled: toggle to true to allow manual resizing
         (function createChatResizeHandles() {
+            if (!CHAT_RESIZABLE) return; // Disabled by default to avoid accidental resizing
             if (!chatElement || /Mobi|Android/i.test(navigator.userAgent)) return; // disable on mobile
             try { chatElement.style.resize = 'none'; } catch (err) {}
             const sides = ['top','right','bottom','left','tl','tr','bl','br'];
@@ -8003,6 +8055,26 @@
             window.addEventListener('pointermove', pointerMoveHandler);
             window.addEventListener('pointerup', pointerUpHandler);
         })();
+
+        // Allow toggling at runtime via settings
+        function setChatResizable(enabled) {
+            try {
+                const chatElement = document.getElementById('chat');
+                if (!chatElement) return;
+                if (enabled) {
+                    CHAT_RESIZABLE = true;
+                    // Restore native resize for desktop
+                    try { chatElement.style.resize = 'both'; } catch (e) {}
+                    // Re-create handles if createChatResizeHandles is available
+                    try { createChatResizeHandles(); } catch (e) {}
+                } else {
+                    CHAT_RESIZABLE = false;
+                    try { chatElement.style.resize = 'none'; } catch (e) {}
+                    // Remove existing handles
+                    document.querySelectorAll('.chat-resize-handle').forEach(h => h.remove());
+                }
+            } catch (e) { console.debug('[synth_webui] setChatResizable failed', e); }
+        }
 
         // Archive / Restore / Delete UI handlers
         const chatArchiveBtn = document.getElementById('chat-archive');
@@ -8215,9 +8287,12 @@
                 const out = await apiPostJson('/api/chat/archive', {});
                 if (out && out.success) {
                     showToast('Chat archived: ' + out.archive_id, false);
-                    // Clear the chat UI
+                    // Clear the chat UI and local history to avoid duplicates
                     const messagesEl = document.getElementById('messages');
                     if (messagesEl) messagesEl.innerHTML = '';
+                    historyBuffer = [];
+                    try { persistHistory(); } catch (e) { /* ignore */ }
+                    try { localStorage.removeItem(HISTORY_KEY); } catch (e) { /* ignore */ }
                     saveChatState();
                 } else {
                     showToast('Archive failed', true);

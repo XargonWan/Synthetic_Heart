@@ -1471,7 +1471,8 @@
                 }
 
                 // Connect to chat WebSocket
-                const ws = new WebSocket(`ws://${window.location.host}/ws`);
+                const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+                const ws = new WebSocket(`${protocol}://${window.location.host}/ws`);
                 ws.onopen = () => {
                     updateDebug('Chat WebSocket connected');
                     if (statusLabel) statusLabel.textContent = 'Connected';
@@ -1502,7 +1503,8 @@
 
             // Initialize logs WebSocket
             try {
-                const logsWs = new WebSocket(`ws://${window.location.host}/logs`);
+                const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+                const logsWs = new WebSocket(`${protocol}://${window.location.host}/logs`);
                 logsWs.onopen = () => {
                     updateDebug('Logs WebSocket connected');
                 };

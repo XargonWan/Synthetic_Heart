@@ -781,6 +781,15 @@ async def _request_selective_correction(failed_actions, successful_actions, bot,
                 actions = interface.get_supported_actions()
                 for action_type, action_info in actions.items():
                     action_schemas[action_type] = action_info
+            # Also pull verbose prompt instructions from interfaces when available
+            if hasattr(interface, 'get_prompt_instructions'):
+                for action_type in (interface.get_supported_actions() or {}).keys():
+                    try:
+                        instr = interface.get_prompt_instructions(action_type)
+                        if instr and action_type in action_schemas:
+                            action_schemas[action_type]['_verbose_instructions'] = instr
+                    except Exception:
+                        pass
     except Exception as e:
         log_warning(f"[action_parser] Error loading interface schemas: {e}")
     
@@ -801,7 +810,7 @@ async def _request_selective_correction(failed_actions, successful_actions, bot,
             "optional_fields": schema.get("optional_fields", []),
         }
         
-        # Add verbose instructions if available
+        # Add verbose instructions if available (from plugin or interface)
         if '_verbose_instructions' in schema:
             detail['verbose_instructions'] = schema['_verbose_instructions']
         
@@ -835,9 +844,23 @@ FAILED ACTIONS REQUIRING CORRECTION:
         if detail['optional_fields']:
             correction_context["instruction"] += f"   OPTIONAL FIELDS: {', '.join(detail['optional_fields'])}\n"
         
-        # Add verbose instructions if available
+        # Add verbose instructions if available (include description, payload schema, examples, and important notes)
         if 'verbose_instructions' in detail:
-            correction_context["instruction"] += f"   EXAMPLE: {detail['verbose_instructions'].get('payload', {})}\n"
+            vi = detail['verbose_instructions']
+            if vi.get('description'):
+                correction_context["instruction"] += f"   FULL DESCRIPTION: {vi.get('description')}\n"
+            if vi.get('payload'):
+                correction_context["instruction"] += f"   PAYLOAD FIELDS:\n"
+                for k, v in vi.get('payload', {}).items():
+                    desc = v.get('description', '') if isinstance(v, dict) else str(v)
+                    ex = v.get('example', '') if isinstance(v, dict) else ''
+                    correction_context["instruction"] += f"      - {k}: {desc} (example: {ex})\n"
+            if vi.get('examples'):
+                correction_context["instruction"] += f"   EXAMPLES: {vi.get('examples')}\n"
+            if vi.get('important_notes'):
+                correction_context["instruction"] += f"   IMPORTANT NOTES:\n"
+                for note in vi.get('important_notes'):
+                    correction_context["instruction"] += f"      - {note}\n"
         
         # Add specific errors
         correction_context["instruction"] += f"   ERRORS FOUND:\n"

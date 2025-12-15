@@ -527,6 +527,8 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
 
             message.chat_id = chat_id_value
             message.text = ""
+            # Mark this message as coming from an LLM so corrective flows trigger
+            message.from_llm = True
             message.original_text = text
             message.thread_id = kwargs.get('thread_id')
             from datetime import datetime
@@ -558,6 +560,8 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
                     "default": None
                 }
             }  # Add more context as needed
+            # Mark context to indicate source is LLM (used by selective corrector)
+            context["from_llm"] = True
 
             # Filter actions to only include those for the current interface
             current_interface_actions = []
@@ -577,9 +581,18 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
             
             # Only process actions for current interface
             if current_interface_actions:
+                # Diagnostic: list action types and payload summaries
+                try:
+                    types_list = [a.get('type') for a in current_interface_actions]
+                    log_debug(f"[transport] Actions for {current_interface}: {types_list}")
+                    for a in current_interface_actions:
+                        log_debug(f"[transport] Action detail: type={a.get('type')} payload_keys={list((a.get('payload') or {}).keys())}")
+                except Exception:
+                    pass
                 try:
                     result = await run_actions(current_interface_actions, context, bot, message)
                     processed_actions = result.get("processed", []) if isinstance(result, dict) else current_interface_actions
+                    log_debug(f"[transport] run_actions result: processed={len(processed_actions)} failed={len(result.get('failed_actions', [])) if isinstance(result, dict) else 0}")
                 except Exception as e:
                     log_warning(f"[transport] Failed to process actions: {e}")
                     processed_actions = []

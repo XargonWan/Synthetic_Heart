@@ -146,8 +146,9 @@ class DiscordInterface:
         return {
             "message_discord_bot": {
                 "description": "Send a text message to a Discord channel.",
-                "required_fields": ["text", "interface_path"],
-                "optional_fields": ["reply_to_message_id"],
+                # Prefer interface_path but accept legacy 'target' (validation handles either)
+                "required_fields": ["text"],
+                "optional_fields": ["interface_path", "target", "reply_to_message_id"],
             }
         }
 
@@ -251,7 +252,20 @@ class DiscordInterface:
             return
 
         try:
-            await universal_send(self._discord_send, channel_id, text=text)
+            reply_to = kwargs.get("reply_to_message_id")
+            # Set temporary attribute so _discord_send can access reply id
+            if reply_to is not None:
+                setattr(self, '_last_reply_to_id', reply_to)
+            await universal_send(self._discord_send, channel_id, text=text, reply_to_message_id=reply_to)
+            # Clear temporary attribute
+            if hasattr(self, '_last_reply_to_id'):
+                try:
+                    delattr(self, '_last_reply_to_id')
+                except Exception:
+                    try:
+                        del self._last_reply_to_id
+                    except Exception:
+                        pass
             
             # Save SyntH's response via core chat_context_manager
             try:
@@ -268,13 +282,22 @@ class DiscordInterface:
                 f"[discord_interface] Failed to send message to {channel_id}: {repr(e)}"
             )
 
-    async def _discord_send(self, channel_id, text):
+    async def _discord_send(self, channel_id, text, reply_to_message_id=None):
         """Internal Discord send method."""
         if self.client is None:  # pragma: no cover - safety
             raise RuntimeError("Discord client not initialized")
         channel = self.client.get_channel(int(channel_id))
         if channel is None:  # pragma: no cover - invalid channel
             raise RuntimeError("Unknown channel")
+        # If reply to a specific message was requested, try to fetch and reply
+        if reply_to_message_id:
+            try:
+                msg = await channel.fetch_message(int(reply_to_message_id))
+                await msg.reply(text)
+                return
+            except Exception as e:
+                log_debug(f"[discord_interface] Could not reply to message id {reply_to_message_id}: {e}")
+
         await channel.send(text)
 
     async def _process_message(self, message):
@@ -459,11 +482,28 @@ class DiscordInterface:
     ) -> None:
         """Execute actions for this interface."""
         action_type = action.get("type")
+        log_debug(f"[discord_interface] execute_action called with action_type={action_type}, payload={action.get('payload')}, context_keys={list(context.keys()) if context else []}")
         if action_type == "message_discord_bot":
             payload = action.get("payload", {})
             target = payload.get("target")
+            interface_path = payload.get("interface_path")
             text = payload.get("text")
-            if text and target is not None:
+            # Prefer interface_path (new style). If present, pass the whole payload
+            if text and interface_path:
+                try:
+                    from core.persona_manager import PersonaManager
+                    webui_session_id = context.get("webui_session_id") or context.get("session_id")
+                    if webui_session_id:
+                        persona_manager = PersonaManager.get_instance()
+                        if persona_manager:
+                            await persona_manager.set_animation_state("write", session_id=webui_session_id)
+                            log_debug(f"[discord_interface] Set avatar animation to 'write' for WebUI session {webui_session_id}")
+                except Exception as anim_exc:
+                    log_debug(f"[discord_interface] Could not set animation: {anim_exc}")
+
+                log_debug(f"[discord_interface] Sending message via interface_path={interface_path}")
+                await self.send_message({"interface_path": interface_path, "text": text, "reply_to_message_id": payload.get("reply_to_message_id")})
+            elif text and target is not None:
                 # Try to set animation to 'write' if WebUI context is available
                 # Discord itself doesn't have session_id, but context might have it from WebUI
                 try:
@@ -477,7 +517,10 @@ class DiscordInterface:
                 except Exception as anim_exc:
                     log_debug(f"[discord_interface] Could not set animation: {anim_exc}")
                 
+                log_debug(f"[discord_interface] Sending message via legacy target={target}")
                 await self.send_message(target, text)
+            else:
+                log_warning(f"[discord_interface] message_discord_bot called but no valid routing info (interface_path/target) found in payload: {payload}")
 
     async def add_reaction(self, message, emoji: str) -> bool:
         """Add a reaction to a message.
@@ -533,7 +576,13 @@ class DiscordInterface:
                         errors.append("Message text cannot be empty or only whitespace")
                 
                 # Validate target (channel_id)
+                # Validate routing info: prefer interface_path, accept legacy 'target'
+                interface_path = payload.get("interface_path")
                 target = payload.get("target")
+                if not interface_path and target is None:
+                    errors.append("Either payload.interface_path (preferred) or payload.target (legacy) is required")
+                if interface_path is not None and not isinstance(interface_path, str):
+                    errors.append("payload.interface_path must be a string")
                 if target is not None:
                     if isinstance(target, str) and not target.isdigit():
                         errors.append("Channel ID must be numeric")
@@ -551,7 +600,8 @@ class DiscordInterface:
             # Create custom validation rule
             rule = ValidationRule(
                 action_type="message_discord_bot",
-                required_fields=["text", "target"],
+                # Require text only; custom_validator enforces that either interface_path or legacy 'target' is present
+                required_fields=["text"],
                 custom_validator=validate_discord_message,
                 component_name="discord_interface"
             )

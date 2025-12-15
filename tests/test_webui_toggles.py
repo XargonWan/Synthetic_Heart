@@ -106,6 +106,18 @@ def test_card_content_wrapper_and_collapser_exists():
     assert 'function addCardCollapsers' in content
 
 
+def test_chat_resizable_default_true():
+    """The chat should be resizable by default (regression guard).
+
+    This verifies that when no explicit exposed variable is set, the
+    WebUI defaults to a resizable chat (historical behaviour).
+    """
+    from core.webui import WebUI
+
+    w = WebUI(autostart=False)
+    assert w._get_chat_resizable() is True
+
+
 def test_no_decorative_diary_carets():
     path = (pathlib.Path(__file__).resolve().parents[1] / "core" / "webui_templates" / "synth_webui_index.html")
     content = path.read_text(encoding='utf-8')
