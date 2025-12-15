@@ -11,6 +11,11 @@
     <!-- Fallback apple-touch-icon to original bundled logo in case generated icons missing -->
     <link rel="apple-touch-icon" href="%%LOGO_URL%%" />
     <meta name="theme-color" content="#ff6bd6">
+    <!-- PWA / iOS standalone support -->
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="%%BRAND_NAME%%">
     <style>
         :root {
             color-scheme: dark;
@@ -56,7 +61,10 @@
             justify-content: space-between;
             padding: 1.2rem min(4vw, 2.4rem);
             background: linear-gradient(135deg, rgba(12, 12, 20, 0.78), rgba(34, 30, 46, 0.78));
-            border-bottom: 1px solid var(--border);
+            /* remove hard bottom border so full-screen 3D content is not visually clipped */
+            border-bottom: none;
+            /* expose a CSS variable for the header height so content can size itself */
+            --topbar-height: 80px;
             backdrop-filter: blur(18px);
         }
         .brand {
@@ -149,9 +157,11 @@
             height: 100%;
         }
         .home-stage {
-            height: calc(100vh - 80px); /* Adjust based on header height */
+            /* Use computed header height for precise sizing */
+            height: calc(100vh - var(--topbar-height, 80px));
             display: flex;
             flex-direction: column;
+            min-height: 0;
         }
         .home-content {
             flex: 1;
@@ -1149,17 +1159,18 @@
             }
             nav.main-nav {
                 display: none;
-                position: absolute;
-                top: 100%;
+                position: fixed; /* ensure nav overlays entire page on mobile */
+                top: var(--topbar-height, 64px);
                 left: 0;
                 right: 0;
-                background: rgba(12, 12, 20, 0.95);
+                height: calc(100vh - var(--topbar-height, 64px));
+                background: rgba(12, 12, 20, 0.98);
                 backdrop-filter: blur(18px);
-                border-bottom: 1px solid var(--border);
-                padding: 1rem;
+                padding: 1rem 1rem 4rem 1rem;
                 flex-direction: column;
                 gap: 0.8rem;
-                z-index: 90;
+                z-index: 20000;
+                overflow-y: auto;
             }
             nav.main-nav.open {
                 display: flex;

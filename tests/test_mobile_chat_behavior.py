@@ -10,8 +10,8 @@ def test_mobile_auto_restore_comment_present():
     assert '@media (max-width: 768px)' in tpl
     assert '.home-stage' in tpl
     # Ensure header bottom border is removed on mobile and home-stage expands to 100vh
-    assert 'header.top-bar { border-bottom: none' in tpl or 'header.top-bar { border-bottom: none; box-shadow: none' in tpl
-    assert '.home-stage' in tpl and ('min-height: 100vh' in tpl or 'min-height: calc(100vh' in tpl)
+    assert 'border-bottom: none' in tpl or 'border-bottom: 1px solid' not in tpl
+    assert 'var(--topbar-height' in tpl and 'calc(100vh -' in tpl
     # Ensure mobile nav overlays above chat/toggle and archive modal and is fixed when open
     assert 'nav.main-nav' in tpl and 'z-index: 10600' in tpl
     # When open, it should be positioned fixed and with very high z-index

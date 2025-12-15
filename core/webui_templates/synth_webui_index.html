@@ -12,6 +12,66 @@
     <link rel="icon" type="image/png" sizes="512x512" href="/static/synth_icon_512.png" />
     <link rel="manifest" href="/static/manifest.webmanifest">
     <meta name="theme-color" content="#ff6bd6">
+    <!-- Register service worker and handle install prompt -->
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/service-worker.js').then((reg) => {
+                console.debug('[synth_webui] ServiceWorker registered', reg.scope);
+            }).catch((err) => console.debug('[synth_webui] ServiceWorker registration failed', err));
+        }
+
+        // Capture beforeinstallprompt to show custom install UI if needed
+        window.addEventListener('beforeinstallprompt', (e) => {
+            e.preventDefault();
+            window.__synthDeferredPrompt = e;
+            console.debug('[synth_webui] beforeinstallprompt captured');
+            // Reveal install button if present
+            const btn = document.getElementById('synth-install-btn');
+            if (btn) { btn.style.display = 'inline-flex'; }
+        });
+
+        // Log installation event and hide install UI when app is installed
+        window.addEventListener('appinstalled', (evt) => {
+            console.debug('[synth_webui] app installed', evt);
+            const btn = document.getElementById('synth-install-btn');
+            if (btn) { btn.style.display = 'none'; }
+        });
+
+        // Attach click handler to install button (when present)
+        document.addEventListener('DOMContentLoaded', () => {
+            const btn = document.getElementById('synth-install-btn');
+            if (!btn) return;
+            btn.addEventListener('click', async () => {
+                if (window.__synthDeferredPrompt) {
+                    try {
+                        window.__synthDeferredPrompt.prompt();
+                        const choice = await window.__synthDeferredPrompt.userChoice;
+                        console.debug('[synth_webui] install prompt choice', choice);
+                        // Hide the button regardless of the choice
+                        btn.style.display = 'none';
+                        window.__synthDeferredPrompt = null;
+                    } catch (e) {
+                        console.debug('[synth_webui] install prompt failed', e);
+                    }
+                } else {
+                    console.debug('[synth_webui] no deferred prompt available');
+                }
+            });
+        });
+
+        // Compute header height and expose as CSS var so panels can size to viewport correctly
+        function refreshTopbarHeight() {
+            try {
+                const top = document.querySelector('header.top-bar');
+                if (!top) return;
+                const h = top.getBoundingClientRect().height;
+                document.documentElement.style.setProperty('--topbar-height', Math.ceil(h) + 'px');
+            } catch (e) { /* ignore */ }
+        }
+        window.addEventListener('resize', () => { refreshTopbarHeight(); });
+        document.addEventListener('DOMContentLoaded', () => { refreshTopbarHeight(); });
+    </script>
+
     <style>
         :root {
             color-scheme: dark;
@@ -117,6 +177,25 @@
         }
         .nav-btn.active .icon {
             transform: scale(1.08);
+        }
+        /* Install button for PWA (shown when beforeinstallprompt fires) */
+        #synth-install-btn {
+            position: fixed;
+            right: 1rem;
+            bottom: 1.25rem;
+            z-index: 10700;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            width: 52px;
+            height: 52px;
+            border-radius: 999px;
+            background: linear-gradient(135deg, var(--accent), #ff87d6);
+            color: #07070c;
+            border: none;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+            cursor: pointer;
+            font-size: 1.1rem;
         }
         /* Skins grid */
         .skins-grid {
@@ -8530,6 +8609,8 @@
 
         // Archive delete removed from main UI; handled in the archive modal per-item
 
-    </script>
+</script>
+    <!-- Visible install button for PWA (shown only when install is available) -->
+    <button id="synth-install-btn" title="Install Synthetic Heart" aria-label="Install Synthetic Heart">⬇️</button>
 </body>
 </html>
