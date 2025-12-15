@@ -1,6 +1,6 @@
-"""FastAPI-based web interface branded as the SyntH Web UI.
+"""FastAPI-based web interface branded as the Synthetic Heart Web UI.
 
-This is a core component of SyntH that provides a functional chat front-end
+This is a core component of Synthetic Heart that provides a functional chat front-end
 integrating with the existing synth core infrastructure. It offers a refined
 layout, VRM avatar management, and notification helpers so the Docker container
 can serve the application directly.
@@ -46,10 +46,14 @@ from core.animation_handler import AnimationState
 import mimetypes
 
 
-BRAND_NAME = "SyntH Web UI"
+BRAND_NAME = "Synthetic Heart"
 INTERFACE_NAME = "synth_webui"
 LOG_PREFIX = "[synth_webui]"
 WEBUI_LOG = "webui"  # Log file name for WebUI (logs/webui.log)
+# Internal chat/component identifier used when interacting with the LLM and
+# action state manager. This must remain "webui" for compatibility with
+# engines and tests which expect the internal component name to be "webui".
+INTERNAL_CHAT_NAME = "webui"
 _LEGACY_AUTOSTART_ENV = "WEBWAIFU_AUTOSTART"
 _AUTOSTART_ENV = "SYNTH_WEBUI_AUTOSTART"
 _LEGACY_VRM_DIR_ENV = "WEBWAIFU_VRM_DIR"
@@ -373,7 +377,7 @@ class SynthWebUIInterface:
 <html>
 <head><title>Error</title></head>
 <body>
-<h1>SyntH Web UI Error</h1>
+<h1>Synthetic Heart Error</h1>
 <p>Failed to load the web interface: {exc}</p>
 </body>
 </html>
@@ -386,7 +390,7 @@ class SynthWebUIInterface:
             log_info(f"{LOG_PREFIX} Rendered HTML length: {len(html)}")
         except Exception as exc:
             log_error(f"{LOG_PREFIX} failed to render index: {exc}")
-            raise HTTPException(status_code=500, detail="Unable to render SyntH Web UI") from exc
+            raise HTTPException(status_code=500, detail="Unable to render Synthetic Heart") from exc
         return HTMLResponse(content=html)
 
     def _get_chat_resizable(self) -> bool:
@@ -856,10 +860,10 @@ class SynthWebUIInterface:
             # Push THINKING action to global state
             log_info(f"{LOG_PREFIX} Pushing THINKING action: {action_id}")
             thinking_pushed = await self.action_state_manager.push_action(
-                action_id=action_id,
-                phase=AnimationPhase.THINKING,
-                component="webui"
-            )
+                    action_id=action_id,
+                    phase=AnimationPhase.THINKING,
+                    component=INTERNAL_CHAT_NAME
+                )
             if not thinking_pushed:
                 log_warning(f"{LOG_PREFIX} THINKING action was rejected (lower priority than current action)")
             
@@ -945,7 +949,7 @@ class SynthWebUIInterface:
                 writing_pushed = await self.action_state_manager.push_action(
                     action_id=writing_action_id,
                     phase=AnimationPhase.WRITING,
-                    component="webui"
+                    component=INTERNAL_CHAT_NAME
                 )
                 if not writing_pushed:
                     log_debug(f"{LOG_PREFIX} WRITING action was rejected (lower priority than THINKING)")
@@ -2829,9 +2833,9 @@ class SynthWebUIInterface:
         if not raw_name:
             return ""
         overrides = {
-            "synth_webui": "SyntH Web UI",
-            "synth-webui": "SyntH Web UI",
-            "synth_webui_interface": "SyntH Web UI",
+            "synth_webui": "Synthetic Heart",
+            "synth-webui": "Synthetic Heart",
+            "synth_webui_interface": "Synthetic Heart",
         }
         key = str(raw_name)
         lower_key = key.lower()
@@ -3947,7 +3951,7 @@ class SynthWebUIInterface:
 
 
 async def start_server() -> None:
-    """Compatibility helper to run the SyntH Web UI server in the foreground."""
+    """Compatibility helper to run the Synthetic Heart Web UI server in the foreground."""
     if not synth_webui_interface.autostart:
         await synth_webui_interface._run_server()
         return

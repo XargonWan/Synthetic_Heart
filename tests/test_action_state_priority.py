@@ -14,6 +14,7 @@ from core.action_state_manager import (
     AnimationPhase,
     PHASE_PRIORITIES
 )
+from core.webui import INTERNAL_CHAT_NAME
 
 
 class TestActionStatePriority:
@@ -109,7 +110,7 @@ class TestActionStatePriority:
         result = await manager.push_action(
             action_id="webui_msg_1",
             phase=AnimationPhase.THINKING,
-            component="webui"
+            component=INTERNAL_CHAT_NAME
         )
         assert result is True, "Should push THINKING"
         
@@ -117,7 +118,7 @@ class TestActionStatePriority:
         result = await manager.push_action(
             action_id="webui_write_1",
             phase=AnimationPhase.WRITING,
-            component="webui"
+            component=INTERNAL_CHAT_NAME
         )
         assert result is False, "WRITING should NOT push over THINKING"
         

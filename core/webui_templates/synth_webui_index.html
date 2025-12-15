@@ -1249,6 +1249,27 @@
             .brand-text span {
                 font-size: 0.75rem;
             }
+            /* Remove horizontal padding on small devices so the 3D viewport uses full width
+               and allow the 3D canvas to extend to the full viewport height by removing
+               the header bottom border and expanding home-stage to 100vh. */
+            .home-stage {
+                padding: 0;
+                min-height: 100vh; /* allow VRM canvas to take the full viewport */
+            }
+            .home-content {
+                padding: 0;
+            }
+            /* Ensure chat toggle is accessible on mobile (top-right icon).
+               Visibility is controlled by JS (it will set display:flex when chat is hidden).
+               Do not force display here so JS can hide it when chat is active. */
+            .chat-toggle-btn {
+                z-index: 10050;
+            }
+            /* Remove header bottom border and any subtle divider so the 3D view is flush with the header */
+            header.top-bar { border-bottom: none; box-shadow: none; }
+
+            /* Also ensure the main element doesn't add extra spacing at bottom */
+            main { padding-bottom: 0; }
             nav.main-nav {
                 display: none;
                 position: absolute;
@@ -1359,7 +1380,6 @@
             <img src="%%LOGO_URL%%" alt="SyntH logo" />
             <div class="brand-text">
                 <h1>%%BRAND_NAME%%</h1>
-                <span>Synthetic Heart Command Console</span>
             </div>
         </div>
         <button class="hamburger" aria-label="Toggle menu">☰</button>
@@ -2494,6 +2514,7 @@
         const logBuffer = [];
         const logFilterState = { debug: true, info: true, warning: true, error: true, other: true };
         let logSearchTerm = '';
+        let logScrollTimeout = null; // debounce timer for auto-scrolling during bursts
         let componentsLoading = false;
         let componentsLoaded = false;
         let configLoading = false;
@@ -2874,14 +2895,21 @@
                         // to avoid it disappearing silently after load.
                         const messagesEl = document.getElementById('messages');
                         const hasMessages = messagesEl && messagesEl.children && messagesEl.children.length > 0;
+                        // On small screens (mobile), prefer to show the chat by default
+                        // even if the user previously minimized it on desktop so the
+                        // mobile UX is not confusing. We treat viewports <= 768px as
+                        // mobile here.
+                        const isMobileViewport = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768);
 
-                        if (localState === 'minimized' && !hasMessages) {
-                            console.debug('[synth_webui] Ignoring minimized state because no messages found; auto-restoring chat');
-                            chatEl.classList.remove('hidden');
-                            if (chatToggleBtn) chatToggleBtn.style.display = 'none';
-                        } else if (localState === 'minimized') {
+                        if (localState === 'minimized') {
+                            // If the chat was minimized previously, respect that preference
+                            // and show the restore toggle so mobile users can bring it back.
                             chatEl.classList.add('hidden');
                             if (chatToggleBtn) chatToggleBtn.style.display = 'flex';
+                        } else if (localState === 'maximized') {
+                            chatEl.classList.add('maximized');
+                        } else if (localState === 'expanded') {
+                            chatEl.classList.add('expanded');
                         } else if (localState === 'maximized') {
                             chatEl.classList.add('maximized');
                         } else if (localState === 'expanded') {
@@ -2939,6 +2967,12 @@
             }
             
             if (tab === 'logs') {
+                // Ensure the current buffer is rendered (and scrolled if enabled)
+                // before opening the stream so that the user sees the latest
+                // tail of the logs when switching to the tab.
+                try {
+                    renderLog();
+                } catch (e) { console.debug('[synth_webui] Error while rendering logs on tab activation:', e); }
                 openLogStream();
             } else {
                 closeLogStream();
@@ -2988,8 +3022,11 @@
         function renderLog() {
             if (!logOutput) return;
             
-            // Check if auto-scroll is enabled
-            const autoScrollEnabled = logAutoscroll ? logAutoscroll.checked : true;
+            // Check if auto-scroll is enabled. Read the checkbox dynamically in
+            // case the element was replaced or the checkbox was not available
+            // when the script first ran (robustness against dynamic DOM changes).
+            const autoScrollEl = document.getElementById('logs-autoscroll');
+            const autoScrollEnabled = autoScrollEl ? autoScrollEl.checked : true;
             const searchLower = logSearchTerm.toLowerCase();
             
             // Clear the log output
@@ -3028,18 +3065,21 @@
             
             logOutput.appendChild(fragment);
             
-            // Auto-scroll logic: if enabled, ALWAYS scroll to bottom
+            // Auto-scroll logic: if enabled, ALWAYS scroll to bottom. Use a short
+            // debounce timer so that bursts of incoming history messages will
+            // result in a single final scroll (this prevents the UI from
+            // appearing stuck at the top while the initial batch arrives).
             if (autoScrollEnabled) {
                 try {
-                    // Use setTimeout to ensure DOM has been updated before scrolling
-                    setTimeout(() => {
+                    if (logScrollTimeout) clearTimeout(logScrollTimeout);
+                    logScrollTimeout = setTimeout(() => {
                         try {
                             logOutput.scrollTop = logOutput.scrollHeight;
                             console.debug('[synth_webui] Auto-scrolled to bottom. scrollTop=', logOutput.scrollTop, 'scrollHeight=', logOutput.scrollHeight);
                         } catch (e) {
                             console.debug('[synth_webui] Error during auto-scroll:', e);
                         }
-                    }, 0);
+                    }, 50);
                 } catch (e) {
                     console.error('[synth_webui] Unexpected error in renderLog auto-scroll:', e);
                 }
@@ -3071,14 +3111,19 @@
                 console.debug('[synth_webui] Auto-scroll checkbox changed to:', event.target.checked);
                 if (event.target.checked) {
                     // When auto-scroll is enabled, scroll to bottom immediately
-                    setTimeout(() => {
-                        try {
-                            logOutput.scrollTop = logOutput.scrollHeight;
-                            console.debug('[synth_webui] Auto-scroll enabled - scrolled to bottom');
-                        } catch (e) {
-                            console.debug('[synth_webui] Error scrolling to bottom on auto-scroll enable:', e);
-                        }
-                    }, 0);
+                    try {
+                        if (logScrollTimeout) clearTimeout(logScrollTimeout);
+                        logScrollTimeout = setTimeout(() => {
+                            try {
+                                logOutput.scrollTop = logOutput.scrollHeight;
+                                console.debug('[synth_webui] Auto-scroll enabled - scrolled to bottom');
+                            } catch (e) {
+                                console.debug('[synth_webui] Error scrolling to bottom on auto-scroll enable:', e);
+                            }
+                        }, 50);
+                    } catch (e) {
+                        console.debug('[synth_webui] Error while enabling auto-scroll:', e);
+                    }
                 }
             });
         }
@@ -3097,8 +3142,16 @@
             }
             
             // Immediately scroll to bottom without animation when opening logs tab
-            if (logOutput.scrollHeight > 0) {
-                logOutput.scrollTop = logOutput.scrollHeight;
+            // but only if auto-scroll is enabled. This ensures the user's
+            // preference is respected when opening the logs tab.
+            try {
+                const autoScrollEl = document.getElementById('logs-autoscroll');
+                const autoScrollEnabled = autoScrollEl ? autoScrollEl.checked : true;
+                if (autoScrollEnabled && logOutput.scrollHeight > 0) {
+                    logOutput.scrollTop = logOutput.scrollHeight;
+                }
+            } catch (e) {
+                console.debug('[synth_webui] Error while handling initial log scroll:', e);
             }
             
             const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
@@ -3106,9 +3159,15 @@
             logsSocket = new WebSocket(`${protocol}://${window.location.host}/logs`);
             logsSocket.addEventListener('open', () => {
                 appendLog('--- log stream connected ---');
-                // Scroll to bottom again after connection
-                if (logOutput) {
-                    logOutput.scrollTop = logOutput.scrollHeight;
+                // Scroll to bottom again after connection if auto-scroll is enabled
+                try {
+                    const autoScrollEl = document.getElementById('logs-autoscroll');
+                    const autoScrollEnabled = autoScrollEl ? autoScrollEl.checked : true;
+                    if (autoScrollEnabled && logOutput) {
+                        logOutput.scrollTop = logOutput.scrollHeight;
+                    }
+                } catch (e) {
+                    console.debug('[synth_webui] Error while scrolling after logs socket open:', e);
                 }
             });
             logsSocket.addEventListener('message', (event) => {
