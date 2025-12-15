@@ -233,7 +233,6 @@
             position: fixed; /* ensure absolute position for handles */
         }
 
-                    const out = await apiPostJson('/api/chat/archive', { session_id: sessionId });
         .chat-resize-handle { position: absolute; background: transparent; z-index: 99999; pointer-events: all; }
         .chat-resize-handle.handle-top, .chat-resize-handle.handle-bottom { height: 8px; left: 8px; right: 8px; cursor: ns-resize; }
         .chat-resize-handle.handle-left, .chat-resize-handle.handle-right { width: 8px; top: 8px; bottom: 8px; cursor: ew-resize; }
@@ -287,7 +286,6 @@
                 width: 85%;
                 max-width: 95%;
                 height: 50vh;
-                        const out = await apiPostJson('/api/chat/restore', { archive_id: aid, session_id: sessionId });
                 resize: none;
                 cursor: default;
             }
@@ -7955,19 +7953,35 @@
             console.log('[chat-control] Chat drag enabled via title-bar');
         }
         
-        // Chat is using native CSS resize: both for all-sides resize
         // Drag is implemented via JavaScript on the title-bar
         const chatElement = document.getElementById('chat');
         if (chatElement) {
-            console.log('[chat-control] Chat initialized with drag + native resize');
+            console.log('[chat-control] Chat initialized with drag + resize handles');
         }
 
         // Create resize handles to allow resizing from any edge (desktop only)
-        const CHAT_RESIZABLE = %%CHAT_RESIZABLE%%; // server-controlled: toggle to true to allow manual resizing
-        (function createChatResizeHandles() {
-            if (!CHAT_RESIZABLE) return; // Disabled by default to avoid accidental resizing
-            if (!chatElement || /Mobi|Android/i.test(navigator.userAgent)) return; // disable on mobile
-            try { chatElement.style.resize = 'none'; } catch (err) {}
+        // Use `let` so the runtime toggle can enable/disable the feature by
+        // updating the variable. Also expose the creator as a global function
+        // so `setChatResizable` can recreate handles at runtime.
+        let CHAT_RESIZABLE = %%CHAT_RESIZABLE%%; // server-controlled: toggle to true to allow manual resizing
+
+        function createChatResizeHandles() {
+            if (!CHAT_RESIZABLE) {
+                console.debug('[chat-control] CHAT_RESIZABLE disabled on this session');
+                return; // Disabled by default to avoid accidental resizing
+            }
+            if (!chatElement || /Mobi|Android/i.test(navigator.userAgent)) {
+                console.debug('[chat-control] Chat resize disabled for mobile or missing element');
+                return; // disable on mobile
+            }
+            // Avoid recreating handles if they already exist
+            if (document.querySelector('.chat-resize-handle')) {
+                console.debug('[chat-control] Resize handles already present, skipping creation');
+                return;
+            }
+            // Keep native resize disabled: it only shows the bottom-right corner handle.
+            // Resizing from any edge/corner is handled via the custom handles below.
+            try { chatElement.style.resize = 'none'; } catch (err) { console.debug('[chat-control] failed to set native resize', err); }
             const sides = ['top','right','bottom','left','tl','tr','bl','br'];
             const handles = {};
             for (const side of sides) {
@@ -8050,11 +8064,22 @@
             let currentResizeSide = null;
             for (const side of Object.keys(handles)) {
                 const h = handles[side];
-                h.addEventListener('pointerdown', (ev) => { currentResizeSide = side; pointerDownHandler(side, ev); });
+                // Prefer pointer events, but fallback to mouse events for older browsers
+                if (h.addEventListener) {
+                    h.addEventListener('pointerdown', (ev) => { currentResizeSide = side; pointerDownHandler(side, ev); });
+                    h.addEventListener('mousedown', (ev) => { currentResizeSide = side; pointerDownHandler(side, ev); });
+                }
             }
             window.addEventListener('pointermove', pointerMoveHandler);
+            window.addEventListener('mousemove', pointerMoveHandler);
             window.addEventListener('pointerup', pointerUpHandler);
-        })();
+            window.addEventListener('mouseup', pointerUpHandler);
+
+            console.debug('[chat-control] Created resize handles for sides:', Object.keys(handles));
+        }
+
+        // Immediately create handles if enabled on load
+        try { createChatResizeHandles(); } catch (e) { /* ignore */ }
 
         // Allow toggling at runtime via settings
         function setChatResizable(enabled) {
@@ -8063,8 +8088,8 @@
                 if (!chatElement) return;
                 if (enabled) {
                     CHAT_RESIZABLE = true;
-                    // Restore native resize for desktop
-                    try { chatElement.style.resize = 'both'; } catch (e) {}
+                    // Keep native resize disabled; use our edge/corner handles.
+                    try { chatElement.style.resize = 'none'; } catch (e) {}
                     // Re-create handles if createChatResizeHandles is available
                     try { createChatResizeHandles(); } catch (e) {}
                 } else {

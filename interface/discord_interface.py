@@ -221,14 +221,15 @@ class DiscordInterface:
             if interface_path:
                 from core.interface_path_utils import parse_interface_path
                 # For Discord: interface_path = discord_bot/guild_id/channel_id/thread_id
+                # parse_interface_path returns (interface, [levels...])
+                _, levels = parse_interface_path(interface_path)
                 # We want the channel_id (level 2) or thread_id (level 3) if in thread
-                levels = parse_interface_path(interface_path)
-                if len(levels) >= 4:  # Has thread
-                    channel_id = levels[3]  # thread_id
-                elif len(levels) >= 3:  # No thread
-                    channel_id = levels[2]  # channel_id
-                elif len(levels) >= 2:  # DM
-                    channel_id = levels[1]  # user_id
+                if len(levels) >= 3:  # Has thread (guild, channel, thread)
+                    channel_id = levels[2]  # thread_id if present
+                elif len(levels) >= 2:  # No thread, guild/channel present
+                    channel_id = levels[1]  # channel_id
+                elif len(levels) >= 1:  # DM style: discord_bot/user_id
+                    channel_id = levels[0]  # user_id
                 log_debug(f"[discord_interface] Extracted channel_id={channel_id} from interface_path")
             else:
                 # Fallback for backward compatibility
