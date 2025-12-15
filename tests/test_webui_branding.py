@@ -24,3 +24,12 @@ def test_no_subtitle_in_templates():
     tpl_index = Path('core/webui_templates/synth_webui_index.html').read_text(encoding='utf-8')
     assert 'Synthetic Heart Command Console' not in tpl_base
     assert 'Synthetic Heart Command Console' not in tpl_index
+
+
+def test_manifest_and_icons_present():
+    from pathlib import Path
+    tpl = Path('core/webui_templates/synth_webui_index.html').read_text(encoding='utf-8')
+    assert 'manifest.webmanifest' in tpl
+    assert '/static/synth_icon_180.png' in tpl
+    assert '/static/synth_icon_192.png' in tpl
+    assert '/static/synth_icon_512.png' in tpl

@@ -5,7 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>%%BRAND_NAME%%</title>
     <link rel="icon" type="image/png" href="%%LOGO_URL%%" />
-    <link rel="apple-touch-icon" href="%%LOGO_URL%%" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/synth_icon_180.png" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/static/synth_icon_192.png" />
+    <link rel="icon" type="image/png" sizes="512x512" href="/static/synth_icon_512.png" />
+    <link rel="manifest" href="/static/manifest.webmanifest">
     <style>
         :root {
             color-scheme: dark;
@@ -1282,7 +1285,8 @@
                 padding: 1rem;
                 flex-direction: column;
                 gap: 0.8rem;
-                z-index: 90;
+                /* Ensure mobile nav overlays above chat toggle and archive modal */
+                z-index: 10600;
             }
             nav.main-nav.open {
                 display: flex;
@@ -8179,19 +8183,39 @@
             if (archiveModal) return archiveModal;
             const panel = document.createElement('div');
             panel.id = 'archive-panel';
-            panel.style.cssText = `
-                position: fixed;
-                z-index: 10080;
-                right: 2rem;
-                bottom: 4rem;
-                width: 720px;
-                height: 520px;
-                background: rgba(14, 14, 20, 0.96);
-                border: 1px solid var(--border);
-                border-radius: 14px;
-                box-shadow: 0 40px 80px -40px rgba(0,0,0,0.95);
-                display: none; flex-direction: column; overflow: hidden;
-            `;
+            // Determine mobile view to adjust modal behavior
+            const isMobileArchive = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768);
+            if (isMobileArchive) {
+                panel.style.cssText = `
+                    position: fixed;
+                    z-index: 10500;
+                    left: 0;
+                    top: 0;
+                    right: 0;
+                    bottom: 0;
+                    width: 100%;
+                    height: 100%;
+                    background: rgba(14, 14, 20, 0.98);
+                    border: none;
+                    border-radius: 0;
+                    box-shadow: none;
+                    display: none; flex-direction: column; overflow: auto;
+                `;
+            } else {
+                panel.style.cssText = `
+                    position: fixed;
+                    z-index: 10080;
+                    right: 2rem;
+                    bottom: 4rem;
+                    width: 720px;
+                    height: 520px;
+                    background: rgba(14, 14, 20, 0.96);
+                    border: 1px solid var(--border);
+                    border-radius: 14px;
+                    box-shadow: 0 40px 80px -40px rgba(0,0,0,0.95);
+                    display: none; flex-direction: column; overflow: hidden;
+                `;
+            }
             panel.innerHTML = `
                 <div id="archive-header" style="padding:10px 14px; display:flex; align-items:center; justify-content:space-between; cursor:grab;">
                     <div style="font-weight:600">Archives</div>
@@ -8206,12 +8230,17 @@
                 </div>
             `;
             document.body.appendChild(panel);
-            // Dragging header
-            let dragging = false, startX=0, startY=0, startRight=18, startBottom=60;
+            // Dragging header (disabled on mobile where modal is fullscreen)
             const header = panel.querySelector('#archive-header');
-            header.addEventListener('pointerdown', (ev) => { dragging = true; startX = ev.clientX; startY = ev.clientY; startRight = parseFloat(getComputedStyle(panel).right); startBottom = parseFloat(getComputedStyle(panel).bottom); document.body.style.userSelect = 'none'; });
-            window.addEventListener('pointermove', (ev) => { if(!dragging) return; const dx = ev.clientX - startX; const dy = ev.clientY - startY; panel.style.right = (startRight - dx) + 'px'; panel.style.bottom = (startBottom - dy) + 'px'; });
-            window.addEventListener('pointerup', () => { dragging = false; document.body.style.userSelect = ''; });
+            if (!isMobileArchive) {
+                let dragging = false, startX = 0, startY = 0, startRight = 18, startBottom = 60;
+                header.addEventListener('pointerdown', (ev) => { dragging = true; startX = ev.clientX; startY = ev.clientY; startRight = parseFloat(getComputedStyle(panel).right); startBottom = parseFloat(getComputedStyle(panel).bottom); document.body.style.userSelect = 'none'; });
+                window.addEventListener('pointermove', (ev) => { if(!dragging) return; const dx = ev.clientX - startX; const dy = ev.clientY - startY; panel.style.right = (startRight - dx) + 'px'; panel.style.bottom = (startBottom - dy) + 'px'; });
+                window.addEventListener('pointerup', () => { dragging = false; document.body.style.userSelect = ''; });
+            } else {
+                // On mobile, ensure header isn't draggable and shows close/controls clearly
+                header.style.cursor = 'default';
+            }
             archiveModal = panel;
             return panel;
         }

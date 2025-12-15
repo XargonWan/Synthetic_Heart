@@ -12,3 +12,7 @@ def test_mobile_auto_restore_comment_present():
     # Ensure header bottom border is removed on mobile and home-stage expands to 100vh
     assert 'header.top-bar { border-bottom: none' in tpl or 'header.top-bar { border-bottom: none; box-shadow: none' in tpl
     assert '.home-stage' in tpl and ('min-height: 100vh' in tpl or 'min-height: calc(100vh' in tpl)
+    # Ensure mobile nav overlays above chat/toggle and archive modal
+    assert 'nav.main-nav' in tpl and 'z-index: 10600' in tpl
+    # Ensure archive modal has mobile fullscreen behavior
+    assert 'const isMobileArchive' in tpl and 'z-index: 10500' in tpl and 'left: 0;' in tpl
