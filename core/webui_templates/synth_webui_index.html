@@ -6,9 +6,12 @@
     <title>%%BRAND_NAME%%</title>
     <link rel="icon" type="image/png" href="%%LOGO_URL%%" />
     <link rel="apple-touch-icon" sizes="180x180" href="/static/synth_icon_180.png" />
+    <!-- Fallback to original logo if generated icons are not present -->
+    <link rel="apple-touch-icon" href="%%LOGO_URL%%" />
     <link rel="icon" type="image/png" sizes="192x192" href="/static/synth_icon_192.png" />
     <link rel="icon" type="image/png" sizes="512x512" href="/static/synth_icon_512.png" />
     <link rel="manifest" href="/static/manifest.webmanifest">
+    <meta name="theme-color" content="#ff6bd6">
     <style>
         :root {
             color-scheme: dark;
@@ -1284,12 +1287,37 @@
                 border-bottom: 1px solid var(--border);
                 padding: 1rem;
                 flex-direction: column;
+                align-items: stretch;
                 gap: 0.8rem;
                 /* Ensure mobile nav overlays above chat toggle and archive modal */
                 z-index: 10600;
             }
             nav.main-nav.open {
                 display: flex;
+                /* When open, make the mobile menu overlay above all other UI layers */
+                position: fixed;
+                /* top is set dynamically below header to avoid overlapping first item */
+                left: 0;
+                right: 0;
+                z-index: 20000;
+                flex-direction: column !important;
+                padding-top: 0.5rem;
+                align-items: stretch;
+                overflow: auto;
+            }
+
+            /* Ensure nav buttons are full-width and stacked vertically on mobile */
+            nav.main-nav.open .nav-btn {
+                display: flex !important;
+                width: 100%;
+                justify-content: flex-start;
+                padding: 0.9rem 1rem !important;
+                border-radius: 10px !important;
+            }
+
+            /* Ensure the hamburger button remains clickable above the menu */
+            .hamburger {
+                z-index: 20030;
             }
             .hamburger {
                 display: block;
@@ -4707,8 +4735,70 @@
         }
         
         hamburgerBtn?.addEventListener('click', () => {
-            mainNav?.classList.toggle('open');
+            const opened = mainNav?.classList.toggle('open');
+            // Position the mobile nav just under the header so the close button
+            // does not overlap the first menu item. Use header height at runtime
+            // because padding and font sizes may vary across devices.
+            try {
+                if (opened && mainNav) {
+                    const headerEl = document.querySelector('header.top-bar');
+                    const topPx = headerEl ? `${Math.ceil(headerEl.getBoundingClientRect().bottom)}px` : '56px';
+                    mainNav.style.top = topPx;
+                    mainNav.style.bottom = '0';
+                    // When open, ensure chat and chat-toggle are visually below the menu
+                    try {
+                        const chatEl = document.getElementById('chat');
+                        if (chatEl) chatEl.style.zIndex = '50';
+                        if (chatToggleBtn) chatToggleBtn.style.zIndex = '60';
+                    } catch (e) { /* ignore */ }
+                } else if (mainNav) {
+                    mainNav.style.top = '';
+                    mainNav.style.bottom = '';
+                    try {
+                        const chatEl = document.getElementById('chat');
+                        if (chatEl) chatEl.style.zIndex = '';
+                        if (chatToggleBtn) chatToggleBtn.style.zIndex = '';
+                    } catch (e) { /* ignore */ }
+                }
+            } catch (e) { /* ignore */ }
         });
+
+        // Recalculate nav position on resize if it's open
+        window.addEventListener('resize', () => {
+            try {
+                if (mainNav && mainNav.classList.contains('open')) {
+                    const headerEl = document.querySelector('header.top-bar');
+                    const topPx = headerEl ? `${Math.ceil(headerEl.getBoundingClientRect().bottom)}px` : '56px';
+                    mainNav.style.top = topPx;
+                    mainNav.style.bottom = '0';
+                }
+            } catch (e) { /* ignore */ }
+        });
+        // Close mobile nav if clicking on the overlay area (nav itself but not its children)
+        document.addEventListener('click', (ev) => {
+            try {
+                if (!mainNav) return;
+                if (!mainNav.classList.contains('open')) return;
+                if (ev.target === mainNav) {
+                    mainNav.classList.remove('open');
+                    mainNav.style.top = '';
+                    mainNav.style.bottom = '';
+                }
+            } catch (e) { /* ignore */ }
+        });
+        // Recalculate chat toggle visibility on resize as well
+        window.addEventListener('resize', () => {
+            try {
+                if (chatToggleBtn) {
+                    const chatEl = document.getElementById('chat');
+                    if (!chatEl || chatEl.classList.contains('hidden')) chatToggleBtn.style.display = 'flex';
+                    else chatToggleBtn.style.display = 'none';
+                }
+            } catch (e) { /* ignore */ }
+        });
+
+        // Ensure hamburger button toggles the menu - it is always visible above the menu
+        // and can be used to close it even when menu overlays.
 
         // Close menu when clicking nav buttons
         document.querySelectorAll('.nav-btn').forEach(btn => {
@@ -5486,6 +5576,14 @@
 
         restoreHistory();
         activateTab(activeTab, true);
+        // Ensure chat toggle visibility on load (so on mobile at least the icon is visible)
+        try {
+            if (chatToggleBtn) {
+                const chatEl = document.getElementById('chat');
+                if (!chatEl || chatEl.classList.contains('hidden')) chatToggleBtn.style.display = 'flex';
+                else chatToggleBtn.style.display = 'none';
+            }
+        } catch (e) { /* ignore */ }
         connect();
         refreshStats(true);
         setInterval(() => refreshStats(true), 15000);

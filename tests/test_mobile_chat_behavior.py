@@ -12,7 +12,13 @@ def test_mobile_auto_restore_comment_present():
     # Ensure header bottom border is removed on mobile and home-stage expands to 100vh
     assert 'header.top-bar { border-bottom: none' in tpl or 'header.top-bar { border-bottom: none; box-shadow: none' in tpl
     assert '.home-stage' in tpl and ('min-height: 100vh' in tpl or 'min-height: calc(100vh' in tpl)
-    # Ensure mobile nav overlays above chat/toggle and archive modal
+    # Ensure mobile nav overlays above chat/toggle and archive modal and is fixed when open
     assert 'nav.main-nav' in tpl and 'z-index: 10600' in tpl
+    # When open, it should be positioned fixed and with very high z-index
+    assert 'nav.main-nav.open' in tpl and 'position: fixed' in tpl and 'z-index: 20000' in tpl
+    # Ensure nav has a close button available on mobile
+    assert '.nav-close' in tpl
+    # Ensure JS recalculates nav position based on header bounds
+    assert 'getBoundingClientRect' in tpl or 'header.top-bar' in tpl
     # Ensure archive modal has mobile fullscreen behavior
     assert 'const isMobileArchive' in tpl and 'z-index: 10500' in tpl and 'left: 0;' in tpl

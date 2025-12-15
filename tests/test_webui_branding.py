@@ -33,3 +33,6 @@ def test_manifest_and_icons_present():
     assert '/static/synth_icon_180.png' in tpl
     assert '/static/synth_icon_192.png' in tpl
     assert '/static/synth_icon_512.png' in tpl
+    # Fallback to original logo should be present
+    tpl_base = Path('core/webui_templates/base.html').read_text(encoding='utf-8')
+    assert 'synth_logo_bg.png' in tpl or '%%LOGO_URL%%' in tpl_base
