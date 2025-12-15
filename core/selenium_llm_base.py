@@ -189,6 +189,14 @@ def get_active_selenium_limits() -> dict:
     }
 
 
+def _llm_name_for_logs() -> str:
+    """Return a human-friendly name for the active Selenium LLM to use in logs.
+
+    Falls back to a generic label when the active name is not set.
+    """
+    return _active_selenium_llm_name or "LLM"
+
+
 class SeleniumLLMBase(AIPluginBase):
     """
     Base class for Selenium-based LLM engines.
@@ -1908,9 +1916,9 @@ class SeleniumLLMBase(AIPluginBase):
                     log_debug("[selenium] Textarea is empty, send likely succeeded")
                 # Continue anyway - the message might have been sent
             
-            # CRITICAL: Verify ChatGPT has started processing the request
-            # Wait for signs that ChatGPT is actually responding (streaming indicator, response area changes, etc.)
-            log_debug("[selenium] Verifying ChatGPT has started processing...")
+            # CRITICAL: Verify the active Selenium LLM has started processing the request
+            # Wait for signs that the active LLM is actually responding (streaming indicator, response area changes, etc.)
+            log_debug(f"[selenium] Verifying {_llm_name_for_logs()} has started processing...")
             processing_started = False
             start_time = time.time()
             # Default waiting time for ChatGPT to start processing; can be overridden
@@ -1930,7 +1938,7 @@ class SeleniumLLMBase(AIPluginBase):
                                 # Check if element has any text content (ChatGPT started writing)
                                 if elem.text and len(elem.text.strip()) > 0:
                                     processing_started = True
-                                    log_debug(f"[selenium] ChatGPT has started processing - found response text ({len(elem.text)} chars)")
+                                    log_debug(f"[selenium] {_llm_name_for_logs()} has started processing - found response text ({len(elem.text)} chars)")
                                     break
                         except:
                             pass
@@ -1943,7 +1951,7 @@ class SeleniumLLMBase(AIPluginBase):
                         stop_buttons = self.driver.find_elements(By.CSS_SELECTOR, "[aria-label*='Stop'], button:has-text('Stop')")
                         if len(stop_buttons) > 0:
                             processing_started = True
-                            log_debug("[selenium] ChatGPT has started processing - found stop button")
+                            log_debug(f"[selenium] {_llm_name_for_logs()} has started processing - found stop button")
                             break
                     except:
                         pass
@@ -1954,10 +1962,10 @@ class SeleniumLLMBase(AIPluginBase):
                     break
             
             if not processing_started:
-                log_warning(f"[selenium] ChatGPT did not start processing within {max_wait}s - prompt may not have been sent successfully")
+                log_warning(f"[selenium] {_llm_name_for_logs()} did not start processing within {max_wait}s - prompt may not have been sent successfully")
                 # Don't fail here - let wait_until_response_stabilizes handle the timeout
             else:
-                log_debug(f"[selenium] ChatGPT processing confirmed after {time.time() - start_time:.1f}s")
+                log_debug(f"[selenium] {_llm_name_for_logs()} processing confirmed after {time.time() - start_time:.1f}s")
             
             return True  # Prompt was sent successfully
         
