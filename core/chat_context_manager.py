@@ -163,14 +163,24 @@ async def load_chat_history(interface_path: str) -> None:
         from core.chat_history_cache import load_chat_history as cache_load
         
         history = await cache_load(interface_path)
+        context = get_or_create_chat_context(interface_path)
+        # IMPORTANT: This function is used to rehydrate memory from persistence.
+        # It must be idempotent (e.g., WebUI refresh/reconnect calls it again).
+        # Replace in-memory history with persisted history to avoid duplicates.
+        previous_len = len(context)
+        context.clear()
         if history:
-            context = get_or_create_chat_context(interface_path)
-            # Load all messages from cache
             for msg in history:
                 context.append(msg)
-            log_info(f"[context_manager] Loaded {len(history)} messages for interface_path {interface_path}")
+            log_info(
+                f"[context_manager] Loaded {len(history)} messages for interface_path {interface_path} "
+                f"(replaced {previous_len} in-memory messages)"
+            )
         else:
-            log_debug(f"[context_manager] No persisted history for interface_path {interface_path}")
+            log_debug(
+                f"[context_manager] No persisted history for interface_path {interface_path} "
+                f"(cleared {previous_len} in-memory messages)"
+            )
     except Exception as e:
         log_warning(f"[context_manager] Failed to load chat history for {interface_path}: {e}")
 
