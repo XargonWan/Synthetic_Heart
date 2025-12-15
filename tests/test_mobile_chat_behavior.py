@@ -20,5 +20,7 @@ def test_mobile_auto_restore_comment_present():
     assert '.nav-close' in tpl
     # Ensure JS recalculates nav position based on header bounds
     assert 'getBoundingClientRect' in tpl or 'header.top-bar' in tpl
+    # Ensure any floating resize handles are accounted for when menu opens
+    assert '.chat-resize-handle' in tpl
     # Ensure archive modal has mobile fullscreen behavior
     assert 'const isMobileArchive' in tpl and 'z-index: 10500' in tpl and 'left: 0;' in tpl

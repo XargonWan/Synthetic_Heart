@@ -4829,6 +4829,8 @@
                         const chatEl = document.getElementById('chat');
                         if (chatEl) chatEl.style.zIndex = '50';
                         if (chatToggleBtn) chatToggleBtn.style.zIndex = '60';
+                        // Also reduce z-index of resize handles that may float above everything
+                        document.querySelectorAll('.chat-resize-handle').forEach(h => { h.style.zIndex = '40'; });
                     } catch (e) { /* ignore */ }
                 } else if (mainNav) {
                     mainNav.style.top = '';
@@ -4837,6 +4839,7 @@
                         const chatEl = document.getElementById('chat');
                         if (chatEl) chatEl.style.zIndex = '';
                         if (chatToggleBtn) chatToggleBtn.style.zIndex = '';
+                        document.querySelectorAll('.chat-resize-handle').forEach(h => { h.style.zIndex = ''; });
                     } catch (e) { /* ignore */ }
                 }
             } catch (e) { /* ignore */ }
