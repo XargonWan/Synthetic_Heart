@@ -6236,9 +6236,80 @@
                     this.currentStructuredAction = null; // reference to the structured action object
                     this.loadedAnimations = {};
                     this.loadedDescriptors = {}; // cache descriptor JSON (including null for 404)
+                    // Keep a low-weight idle baseline running so bones that are not keyed
+                    // by the active action don't get stuck in previous poses.
+                    this._baseIdleAction = null;
+                    this._baseIdleKey = null;
                     this._playOnceTimers = {}; // safety timers for play-once actions
                     this._globalMixerFinishBound = false; // ensure we bind a single finished handler
                     this._mixerEventBound = false; // ensure structured action mixer event is bound once
+                }
+
+                _safeFadeStop(action, fadeSec = 0.2) {
+                    try {
+                        if (!action) return;
+                        try { action.enabled = true; } catch (e) { /* ignore */ }
+                        try { action.fadeOut(fadeSec); } catch (e) { /* ignore */ }
+                        setTimeout(() => {
+                            try {
+                                action.stop();
+                                action.reset();
+                                try { action.enabled = false; } catch (e) { /* ignore */ }
+                            } catch (e) { /* ignore */ }
+                        }, Math.round(fadeSec * 1000) + 60);
+                    } catch (e) {
+                        /* ignore */
+                    }
+                }
+
+                async _ensureBaseIdle(minWeight = 0.15, forceReload = false) {
+                    try {
+                        if (this._baseIdleAction && !forceReload) {
+                            try {
+                                this._baseIdleAction.enabled = true;
+                                this._baseIdleAction.setLoop(THREE.LoopRepeat);
+                                this._baseIdleAction.clampWhenFinished = false;
+                                if (typeof this._baseIdleAction.setEffectiveWeight === 'function') {
+                                    this._baseIdleAction.setEffectiveWeight(minWeight);
+                                }
+                                this._baseIdleAction.fadeIn(0.15);
+                                this._baseIdleAction.play();
+                            } catch (e) { /* ignore */ }
+                            return;
+                        }
+
+                        // Replace base idle with a freshly chosen idle variant.
+                        if (this._baseIdleAction) {
+                            this._safeFadeStop(this._baseIdleAction, 0.25);
+                        }
+                        this._baseIdleAction = null;
+                        this._baseIdleKey = null;
+
+                        const idleActionOrStructured = await this.loadAction('idle');
+                        if (!idleActionOrStructured) return;
+
+                        let idleAction = idleActionOrStructured;
+                        if (idleActionOrStructured && idleActionOrStructured.intro && idleActionOrStructured.outro) {
+                            idleAction = idleActionOrStructured.loop || idleActionOrStructured.intro;
+                        }
+                        if (!idleAction) return;
+
+                        this._baseIdleAction = idleAction;
+                        this._baseIdleKey = 'idle';
+
+                        try {
+                            idleAction.enabled = true;
+                            idleAction.setLoop(THREE.LoopRepeat);
+                            idleAction.clampWhenFinished = false;
+                            idleAction.reset();
+                            if (typeof idleAction.setEffectiveWeight === 'function') {
+                                idleAction.setEffectiveWeight(minWeight);
+                            }
+                            idleAction.fadeIn(0.2).play();
+                        } catch (e) { /* ignore */ }
+                    } catch (e) {
+                        console.warn('[AnimationHandler] Failed to ensure base idle:', e);
+                    }
                 }
 
                 async getAnimationsForType(actionName) {
@@ -6461,7 +6532,7 @@
                             introAction.setLoop(THREE.LoopOnce, 0);
                             introAction.clampWhenFinished = true;
                             outroAction.setLoop(THREE.LoopOnce, 0);
-                            outroAction.clampWhenFinished = true;
+                            outroAction.clampWhenFinished = false;
 
                             // Create structured action object
                             const structuredAction = {
@@ -6564,6 +6635,31 @@
                     console.log(`[AnimationHandler] startAction called with actionName: ${actionName}, animationFile: ${animationFile}, playOnce: ${playOnce}, playSection: ${playSection}`);
                     console.log(`[AnimationHandler] this.mixer exists:`, !!this.mixer);
                     console.log(`[AnimationHandler] this.vrm exists:`, !!this.vrm);
+
+                    // Missing tracks are common in Mixamo clips; keep a low-weight idle baseline
+                    // so unkeyed bones don't stay in previous poses.
+                    // When entering IDLE (no specific file), refresh the baseline and boost it to full weight.
+                    if (actionName === 'idle' && !playSection && !animationFile) {
+                        await this._ensureBaseIdle(1.0, true);
+                        // Fade out any overlay actions to return naturally to idle.
+                        try {
+                            if (this.currentStructuredAction) {
+                                this._safeFadeStop(this.currentStructuredAction.intro, 0.25);
+                                this._safeFadeStop(this.currentStructuredAction.loop, 0.25);
+                                this._safeFadeStop(this.currentStructuredAction.outro, 0.25);
+                            }
+                            this._safeFadeStop(this.currentAction, 0.25);
+                        } catch (e) { /* ignore */ }
+                        this.currentAction = null;
+                        this.currentActionName = 'idle';
+                        this.currentActionPhase = null;
+                        this.currentStructuredAction = null;
+                        return;
+                    }
+
+                    if (actionName !== 'idle') {
+                        await this._ensureBaseIdle(0.15, false);
+                    }
                     
                     let action = this.actions[actionName];
                     
@@ -6667,7 +6763,7 @@
                                         introAction.setLoop(THREE.LoopOnce, 0);
                                         introAction.clampWhenFinished = true;
                                         outroAction.setLoop(THREE.LoopOnce, 0);
-                                        outroAction.clampWhenFinished = true;
+                                        outroAction.clampWhenFinished = false;
 
                                         const structuredAction = {
                                             intro: introAction,
@@ -6788,6 +6884,45 @@
                         return;
                     }
 
+                    // If we explicitly entered IDLE with a specific animation, make it the baseline.
+                    if (actionName === 'idle' && animationFile && !playSection && !playOnce) {
+                        try {
+                            // Replace base idle with this action (simple or structured loop).
+                            if (this._baseIdleAction && this._baseIdleAction !== action) {
+                                this._safeFadeStop(this._baseIdleAction, 0.25);
+                            }
+                            let base = action;
+                            if (action && action.intro && action.outro) {
+                                base = action.loop || action.intro;
+                            }
+                            this._baseIdleAction = base;
+                            this._baseIdleKey = `idle:${animationFile}`;
+                            try {
+                                base.enabled = true;
+                                base.setLoop(THREE.LoopRepeat);
+                                base.clampWhenFinished = false;
+                                base.reset();
+                                if (typeof base.setEffectiveWeight === 'function') base.setEffectiveWeight(1.0);
+                                base.fadeIn(0.2).play();
+                            } catch (e) { /* ignore */ }
+
+                            // Fade out overlays and return.
+                            if (this.currentStructuredAction) {
+                                this._safeFadeStop(this.currentStructuredAction.intro, 0.25);
+                                this._safeFadeStop(this.currentStructuredAction.loop, 0.25);
+                                this._safeFadeStop(this.currentStructuredAction.outro, 0.25);
+                            }
+                            this._safeFadeStop(this.currentAction, 0.25);
+                            this.currentAction = null;
+                            this.currentActionName = 'idle';
+                            this.currentActionPhase = null;
+                            this.currentStructuredAction = null;
+                            return;
+                        } catch (e) {
+                            // If anything goes wrong, fall through to legacy playback.
+                        }
+                    }
+
                     // If action is structured (intro/outro with optional loop), handle it differently
                     // Check for intro and outro (loop is optional for play_once animations)
                     if (action && action.intro && action.outro) {
@@ -6831,7 +6966,7 @@
                                                     const outroAction = this.currentStructuredAction.outro;
                                                     outroAction.reset();
                                                     outroAction.setLoop(THREE.LoopOnce, 0);
-                                                    outroAction.clampWhenFinished = true;
+                                                    outroAction.clampWhenFinished = false;
                                                     outroAction.enabled = true;
                                                     outroAction.paused = false;
                                                     outroAction.fadeIn(0.1).play();
@@ -6873,7 +7008,7 @@
                         if (playSection === 'intro') {
                             console.log(`[AnimationHandler] Playing only intro section for ${actionName}`);
                             if (this.currentAction && this.currentAction !== structured.intro) {
-                                this.currentAction.fadeOut(0.25);
+                                this._safeFadeStop(this.currentAction, 0.25);
                             }
                             structured.intro.setLoop(THREE.LoopOnce, 0);
                             structured.intro.clampWhenFinished = true;
@@ -6890,7 +7025,7 @@
                             }
                             console.log(`[AnimationHandler] Playing only loop section for ${actionName}`);
                             if (this.currentAction && this.currentAction !== structured.loop) {
-                                this.currentAction.fadeOut(0.25);
+                                this._safeFadeStop(this.currentAction, 0.25);
                             }
                             structured.loop.setLoop(THREE.LoopRepeat);
                             structured.loop.clampWhenFinished = false;
@@ -6903,10 +7038,10 @@
                         } else if (playSection === 'outro') {
                             console.log(`[AnimationHandler] Playing only outro section for ${actionName}`);
                             if (this.currentAction && this.currentAction !== structured.outro) {
-                                this.currentAction.fadeOut(0.25);
+                                this._safeFadeStop(this.currentAction, 0.25);
                             }
                             structured.outro.setLoop(THREE.LoopOnce, 0);
-                            structured.outro.clampWhenFinished = true;
+                            structured.outro.clampWhenFinished = false;
                             structured.outro.reset().fadeIn(0.15).play();
                             this.currentAction = structured.outro;
                             this.currentActionName = actionName;
@@ -6930,7 +7065,7 @@
                         // Fade out current action if different
                         if (this.currentAction && this.currentAction !== structured.loop && this.currentAction !== structured.intro) {
                             console.log(`[AnimationHandler] Fading out current action`);
-                            this.currentAction.fadeOut(0.25);
+                            this._safeFadeStop(this.currentAction, 0.25);
                         }
 
                         // Ensure we have a mixer finished handler to move intro -> loop and outro -> cleanup
@@ -7012,10 +7147,19 @@
                                         }
                                         if (finishedClipName === outroName) {
                                             console.log(`[AnimationHandler] outro finished for ${key} -> advancing to next animation`);
+                                            // Hard cleanup to avoid pose residue (hands floating / stuck bones).
+                                            try {
+                                                this._safeFadeStop(candidate.intro, 0.05);
+                                                this._safeFadeStop(candidate.loop, 0.05);
+                                                this._safeFadeStop(candidate.outro, 0.05);
+                                            } catch (e) { /* ignore */ }
                                             if (this.currentAction === candidate.outro) this.currentAction = null;
                                             this.currentActionPhase = null;
                                             this.currentActionName = null;
                                             this.currentStructuredAction = null;
+
+                                            // Ensure base idle exists after finishing an outro.
+                                            try { this._ensureBaseIdle(0.15, false); } catch (e) { /* ignore */ }
                                             
                                             // Signal to the page that a structured outro finished for this key
                                             try {
