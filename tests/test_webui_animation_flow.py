@@ -35,6 +35,8 @@ async def test_play_and_stop_with_outro(tmp_path: Path):
 
     handler = get_animation_handler()
     handler.set_animation_search_paths([base])
+    # Force selection of our test animation regardless of active persona/skin content
+    handler.register_state_animations('think', {'loop': ['think_long.fbx']})
 
     session = "sess1"
     fake = FakeWebUI(session)

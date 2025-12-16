@@ -191,6 +191,15 @@
         #chat.hidden {
             display: none;
         }
+        /* Minimized chat styling (fallback for templates using base.css) */
+        #chat.minimized {
+            height: 3.8rem !important;
+            min-height: auto;
+            max-height: none;
+            overflow: hidden;
+            width: 320px;
+            pointer-events: auto;
+        }
         #messages {
             flex: 1;
             overflow-y: auto;

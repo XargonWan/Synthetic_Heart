@@ -171,8 +171,11 @@ class AnimationHandler:
         
         # Get active persona folder (similar to _send_animation_command logic)
         try:
-            from core.persona_manager import get_persona_manager
-            persona_manager = get_persona_manager()
+            import sys
+            persona_manager = None
+            pm_mod = sys.modules.get('core.persona_manager')
+            if pm_mod and hasattr(pm_mod, 'get_persona_manager'):
+                persona_manager = pm_mod.get_persona_manager()
             active_persona_folder = None
             if persona_manager and hasattr(persona_manager, '_current_persona') and persona_manager._current_persona:
                 active_persona_folder = getattr(persona_manager._current_persona, 'id', None) or getattr(persona_manager._current_persona, 'name', None)
@@ -235,8 +238,11 @@ class AnimationHandler:
         paths: List[Path] = []
         # Active persona path
         try:
-            from core.persona_manager import get_persona_manager
-            pm = get_persona_manager()
+            import sys
+            pm = None
+            pm_mod = sys.modules.get('core.persona_manager')
+            if pm_mod and hasattr(pm_mod, 'get_persona_manager'):
+                pm = pm_mod.get_persona_manager()
             active_persona_folder = None
             if pm and hasattr(pm, '_current_persona') and pm._current_persona:
                 active_persona_folder = getattr(pm._current_persona, 'id', None) or getattr(pm._current_persona, 'name', None)
@@ -281,39 +287,104 @@ class AnimationHandler:
             # If any registered overrides exist return them (highest priority)
             return variants
 
-        # 2) Try exact file match <state>.fbx (case-insensitive) across search paths
-        search_paths = self._build_search_paths_for_state(key)
-        found_any = False
-        for sp in search_paths:
+        def _load_local_descriptor(fbx_path: Path) -> Optional[Dict]:
             try:
-                if not sp.exists() or not sp.is_dir():
-                    continue
-                # direct file
-                candidate = sp / (f"{key}.fbx")
-                if candidate.exists() and candidate.is_file():
+                descriptor_path = fbx_path.with_suffix(fbx_path.suffix + '.json')
+                if not descriptor_path.exists() or not descriptor_path.is_file():
+                    return None
+                with descriptor_path.open('r', encoding='utf-8') as df:
+                    return json.load(df)
+            except Exception:
+                return None
+
+        def _classify_and_add(fbx_path: Path) -> None:
+            try:
+                # For discovery/classification, read descriptor next to the FBX file.
+                # This allows classification to work with custom search paths too.
+                desc = _load_local_descriptor(fbx_path)
+                structure = self._analyze_animation_structure(desc, fbx_path.name)
+
+                # Classification rules:
+                # - play_once => post
+                # - has_loop => loop (even if it also has outro; outro is a section)
+                # - has_outro without loop => post
+                # - otherwise => loop
+                if desc and desc.get("play_once"):
+                    variants["post"].append(fbx_path.name)
+                elif structure.get("has_loop"):
+                    variants["loop"].append(fbx_path.name)
+                elif structure.get("has_outro") and not structure.get("has_loop"):
+                    variants["post"].append(fbx_path.name)
+                else:
+                    variants["loop"].append(fbx_path.name)
+            except Exception:
+                # If descriptor parsing fails, treat as loopable by default
+                variants["loop"].append(fbx_path.name)
+
+        def _find_case_insensitive_file(directory: Path, filename: str) -> Optional[Path]:
+            try:
+                direct = directory / filename
+                if direct.exists() and direct.is_file():
+                    return direct
+                lower = filename.lower()
+                for f in directory.glob('*.fbx'):
+                    if f.name.lower() == lower:
+                        return f
+            except Exception:
+                return None
+            return None
+
+        # 2) Resolve exact file match <state>.fbx ONLY in root animation dirs (case-insensitive)
+        found_any = False
+        active_persona_folder = None
+        try:
+            # Avoid importing persona_manager here: it can initialize DB during tests.
+            import sys
+            pm_mod = sys.modules.get('core.persona_manager')
+            if pm_mod and hasattr(pm_mod, 'get_persona_manager'):
+                pm = pm_mod.get_persona_manager()
+                if pm and hasattr(pm, '_current_persona') and pm._current_persona:
+                    active_persona_folder = getattr(pm._current_persona, 'id', None) or getattr(pm._current_persona, 'name', None)
+        except Exception:
+            active_persona_folder = None
+
+        root_dirs: List[Path] = []
+        if active_persona_folder:
+            root_dirs.append(self.SKINS_DIR / str(active_persona_folder) / 'animations')
+        for p in self._search_paths:
+            root_dirs.append(Path(p))
+        root_dirs.append(self.SKIN_DEFAULT_ANIMATIONS_DIR)
+
+        for rd in root_dirs:
+            if not (rd.exists() and rd.is_dir()):
+                continue
+            exact = _find_case_insensitive_file(rd, f"{key}.fbx")
+            if exact is not None:
+                found_any = True
+                _classify_and_add(exact)
+                break
+
+        # 3) Resolve folder variants by scanning ONLY <dir>/<state>/ (and Rei fallback)
+        state_dirs: List[Path] = []
+        if active_persona_folder:
+            state_dirs.append(self.SKINS_DIR / str(active_persona_folder) / 'animations' / key)
+        for p in self._search_paths:
+            state_dirs.append(Path(p) / key)
+        state_dirs.append(self.SKIN_DEFAULT_ANIMATIONS_DIR / key)
+
+        for sd in state_dirs:
+            if not (sd.exists() and sd.is_dir()):
+                continue
+            try:
+                found_in_dir = False
+                for f in sd.glob('*.fbx'):
                     found_any = True
-                    _, desc = self._resolve_animation_descriptor_for_state(candidate.name, key)
-                    structure = self._analyze_animation_structure(desc, candidate.name)
-                    if structure["has_outro"] or (desc and desc.get("play_once")):
-                        variants["post"].append(candidate.name)
-                    elif structure["has_loop"]:
-                        variants["loop"].append(candidate.name)
-                    else:
-                        variants["loop"].append(candidate.name)
-                    # stop searching direct match
+                    found_in_dir = True
+                    _classify_and_add(f)
+                # Precedence: once we found variants in a higher-priority directory,
+                # do not mix in fallback directories.
+                if found_in_dir:
                     break
-                # folder case: list all .fbx inside
-                if sp.is_dir():
-                    for f in sp.glob('*.fbx'):
-                        found_any = True
-                        _, desc = self._resolve_animation_descriptor_for_state(f.name, key)
-                        structure = self._analyze_animation_structure(desc, f.name)
-                        if structure["has_outro"] or (desc and desc.get("play_once")):
-                            variants["post"].append(f.name)
-                        elif structure["has_loop"]:
-                            variants["loop"].append(f.name)
-                        else:
-                            variants["loop"].append(f.name)
             except Exception:
                 continue
 
@@ -429,8 +500,11 @@ class AnimationHandler:
         try:
             # Get active persona
             try:
-                from core.persona_manager import get_persona_manager
-                persona_manager = get_persona_manager()
+                import sys
+                persona_manager = None
+                pm_mod = sys.modules.get('core.persona_manager')
+                if pm_mod and hasattr(pm_mod, 'get_persona_manager'):
+                    persona_manager = pm_mod.get_persona_manager()
                 active_persona_folder = None
                 if persona_manager and hasattr(persona_manager, '_current_persona') and persona_manager._current_persona:
                     active_persona_folder = getattr(persona_manager._current_persona, 'id', None) or getattr(persona_manager._current_persona, 'name', None)
@@ -444,6 +518,14 @@ class AnimationHandler:
             if active_persona_folder and state_folder:
                 p_anim_dir = self.SKINS_DIR / str(active_persona_folder) / 'animations' / state_folder
                 candidates.append((p_anim_dir, f"/skins/{active_persona_folder}/animations/{state_folder}"))
+
+            # Additional configured search paths (state subfolder)
+            if state_folder:
+                for p in self._search_paths:
+                    sp = Path(p) / state_folder
+                    # Generic URL prefix; for non-skin paths this may not be web-served,
+                    # but descriptor resolution still works and callers can override serving.
+                    candidates.append((sp, f"/{self.ANIMATIONS_BASE_PATH}/{state_folder}"))
             
             if state_folder:
                 rei_dir = self.SKINS_DIR / 'Rei' / 'animations' / state_folder
@@ -454,6 +536,10 @@ class AnimationHandler:
             if active_persona_folder:
                 p_anim_dir = self.SKINS_DIR / str(active_persona_folder) / 'animations'
                 candidates.append((p_anim_dir, f"/skins/{active_persona_folder}/animations"))
+
+            for p in self._search_paths:
+                sp = Path(p)
+                candidates.append((sp, f"/{self.ANIMATIONS_BASE_PATH}"))
             
             rei_root_dir = self.SKINS_DIR / 'Rei' / 'animations'
             candidates.append((rei_root_dir, f"/skins/Rei/animations"))
@@ -580,6 +666,24 @@ class AnimationHandler:
         
         return result
 
+    def _sanitize_idle_descriptor(self, descriptor: Optional[Dict]) -> Optional[Dict]:
+        """Return a safe descriptor subset for IDLE.
+
+        IDLE must never clamp or behave like a play-once transition. We allow
+        descriptors mainly to define loop frame ranges (and optionally intro),
+        while intentionally dropping outro/play_once to keep idle stable.
+        """
+        if not descriptor or not isinstance(descriptor, dict):
+            return None
+
+        sanitized: Dict[str, Dict] = {}
+        if isinstance(descriptor.get("intro"), dict):
+            sanitized["intro"] = descriptor["intro"]
+        if isinstance(descriptor.get("loop"), dict):
+            sanitized["loop"] = descriptor["loop"]
+
+        return sanitized or None
+
     async def play_animation(
         self,
         state: AnimationState,
@@ -637,7 +741,11 @@ class AnimationHandler:
             # Select animation file
             # Prefer variants discovered via descriptors and overrides
             variants = self.get_animation_variants(state.value)
-            animations = variants.get("loop", []) or variants.get("post", []) or variants.get("other", [])
+            if state == AnimationState.IDLE:
+                # Never pick `post` variants for idle: they are often play-once/clamped.
+                animations = variants.get("loop", []) or variants.get("other", [])
+            else:
+                animations = variants.get("loop", []) or variants.get("post", []) or variants.get("other", [])
             if not animations:
                 # Fallback to idle if no animations found for this state
                 animations = self.get_animations_for_state(AnimationState.IDLE)
@@ -676,6 +784,8 @@ class AnimationHandler:
                     f"descriptor={'found' if descriptor else 'NOT FOUND'}, "
                     f"structure=(intro:{structure['has_intro']}, loop:{structure['has_loop']}, outro:{structure['has_outro']})"
                 )
+
+                is_idle_state = (state == AnimationState.IDLE)
                 
                 # Determine effective loop behavior based on descriptor structure:
                 # 1. If has intro/outro (structured animation): loop=True if has loop section, else play once
@@ -683,7 +793,11 @@ class AnimationHandler:
                 # 3. Otherwise: use provided loop parameter
                 has_intro_or_outro = structure["has_intro"] or structure["has_outro"]
                 
-                if has_intro_or_outro:
+                if is_idle_state:
+                    # IDLE is always looped; descriptor (if any) is used only to define a safe loop range.
+                    effective_loop = True
+                    start_rotation = len(animations) > 1
+                elif has_intro_or_outro:
                     # Structured animation (intro/outro present)
                     # play_once flag is ignored (warning already logged in _analyze_animation_structure)
                     if structure["has_loop"]:
@@ -754,13 +868,17 @@ class AnimationHandler:
                     animation_file=selected_animation,
                     loop=effective_loop,
                     state=state.value,
-                    descriptor=descriptor
+                    descriptor=self._sanitize_idle_descriptor(descriptor) if is_idle_state else descriptor
                 )
                 
                 # Update centralized animation state and notify all clients
                 self._current_animation_file = selected_animation
-                self._current_animation_descriptor = descriptor
-                await self._notify_animation_state_changed(state, selected_animation, descriptor)
+                self._current_animation_descriptor = self._sanitize_idle_descriptor(descriptor) if is_idle_state else descriptor
+                await self._notify_animation_state_changed(
+                    state,
+                    selected_animation,
+                    self._current_animation_descriptor,
+                )
             else:
                 log_warning("[AnimationHandler] WebUI not set, cannot send animation command")
                 start_rotation = False
@@ -836,26 +954,29 @@ class AnimationHandler:
         if outro_duration > 0:
             await asyncio.sleep(outro_duration)
 
-        # After outro (or immediately if no outro), transition to Idle
+        # After outro (or immediately if no outro), decide whether to transition to Idle.
+        should_return_idle = False
         async with self._lock:
-            # Determine highest remaining priority among active contexts
             remaining_priorities = [p for p in self._active_tasks.values() if p is not None]
             highest = max(remaining_priorities) if remaining_priorities else 0
 
             # Define Idle priority as 0; only return to Idle when no active context has priority > 0
             if highest <= 0:
-                # Return to Idle
-                log_debug(f"[AnimationHandler] No high-priority contexts, returning to Idle (session={session_id})")
-                await self.play_animation(
-                    AnimationState.IDLE,
-                    session_id=session_id,
-                    loop=True,
-                    context_id=None
-                )
-                # When returning to Idle, make sure other rotation tasks for the
-                # previous contexts are cleaned up
-                # (stop any rotation tasks for non-idle states tied to this session)
-                for anim_state in [AnimationState.THINK, AnimationState.WRITE, AnimationState.TALK]:
+                should_return_idle = True
+
+        # IMPORTANT: call play_animation outside the lock to avoid deadlocks.
+        if should_return_idle:
+            log_debug(f"[AnimationHandler] No high-priority contexts, returning to Idle (session={session_id})")
+            await self.play_animation(
+                AnimationState.IDLE,
+                session_id=session_id,
+                loop=True,
+                context_id=None
+            )
+
+            # When returning to Idle, make sure other rotation tasks for the previous
+            # contexts are cleaned up (stop any rotation tasks for non-idle states tied to this session)
+            for anim_state in [AnimationState.THINK, AnimationState.WRITE, AnimationState.TALK]:
                     await self._stop_rotation_task(session_id, anim_state)
             else:
                 log_debug(f"[AnimationHandler] Context {context_id} stopped but other contexts still active")

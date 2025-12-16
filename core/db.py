@@ -16,11 +16,14 @@ try:  # pragma: no cover - import guard
 except Exception:  # pragma: no cover - executed when aiomysql missing
     async def _missing_connect(*args, **kwargs):
         raise RuntimeError("aiomysql is not installed")
-
+    # Provide a minimal stub exposing the async connect/create_pool API so
+    # calling sites receive a clear RuntimeError instead of an AttributeError
+    # when aiomysql is not installed.
     aiomysql = SimpleNamespace(  # type: ignore
         Connection=object,
         Cursor=object,
         connect=_missing_connect,
+        create_pool=_missing_connect,
     )
 
 from core.logging_utils import log_debug, log_info, log_warning, log_error

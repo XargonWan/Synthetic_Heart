@@ -5,13 +5,21 @@ VENV_DIR="venv"
 if [ ! -d "$VENV_DIR" ]; then
     python3 -m venv "$VENV_DIR"
 fi
-source "$VENV_DIR/bin/activate"
+# Ensure we activate or at least use the venv located at ./venv. Prefer sourcing
+# the activation script for convenience, but fall back to calling the venv's
+# python/pip binaries directly so tests always run inside the project venv.
+if [ -f "$VENV_DIR/bin/activate" ]; then
+  # shellcheck disable=SC1090
+  source "$VENV_DIR/bin/activate"
+else
+  echo "Warning: venv activation script not found, will use $VENV_DIR/bin/python directly"
+fi
 
 # Install runtime and development dependencies
-pip install -r requirements.txt >/dev/null
+"$VENV_DIR/bin/pip" install -r requirements.txt >/dev/null
 
-# Install test dependencies
-pip install pytest pytest-asyncio unittest-xml-reporting >/dev/null
+# Install test dependencies explicitly into the venv so pytest is available
+"$VENV_DIR/bin/pip" install pytest pytest-asyncio unittest-xml-reporting >/dev/null
 
 # Ensure a local log directory is used
 export LOG_DIR=${LOG_DIR:-./logs}
@@ -19,7 +27,9 @@ mkdir -p "$LOG_DIR"
 
 # Run the tests but capture the exit code so the script itself always exits 0
 set +e
-python run_tests.py
+# Run the test runner using the venv's python executable to guarantee the
+# tests execute within ./venv regardless of the caller's active environment.
+"$VENV_DIR/bin/python" run_tests.py
 TEST_EXIT=$?
 set -e
 

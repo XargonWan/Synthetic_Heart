@@ -20,6 +20,61 @@
             }).catch((err) => console.debug('[synth_webui] ServiceWorker registration failed', err));
         }
 
+        // Reset movable windows to safe default positions/sizes
+        function resetWindowPositions(confirmAction = true) {
+            try {
+                if (confirmAction && !confirm('Reset window positions to defaults for desktop and mobile?')) return;
+                const chatEl = document.getElementById('chat');
+                if (!chatEl) return;
+                const isMobile = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768);
+                if (isMobile) {
+                    // Mobile safe: bottom with full-ish width and half viewport height
+                    const left = 16;
+                    const width = Math.max(260, Math.round(window.innerWidth - 32));
+                    const height = Math.round(window.innerHeight * 0.5);
+                    chatEl.style.left = left + 'px';
+                    chatEl.style.top = '';
+                    chatEl.style.bottom = '1rem';
+                    chatEl.style.right = 'auto';
+                    chatEl.style.width = width + 'px';
+                    chatEl.style.height = height + 'px';
+                    chatEl.classList.remove('hidden', 'minimized', 'maximized');
+                    if (chatToggleBtn) chatToggleBtn.style.display = 'none';
+                    // Persist
+                    const device = 'mobile';
+                    const rectPayload = { left, top: null, width, height };
+                    try { localStorage.setItem((sessionId ? `${CHAT_RECT_KEY}-${sessionId}-${device}` : `${CHAT_RECT_KEY}-${device}`), JSON.stringify(rectPayload)); } catch (e) {}
+                    try { localStorage.setItem(CHAT_RECT_KEY, JSON.stringify(rectPayload)); } catch (e) {}
+                    try { saveChatRectToServer(rectPayload); } catch (e) {}
+                    try { localStorage.setItem((sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}-${device}` : `${CHAT_WINDOW_STATE_KEY}-${device}`), 'expanded'); } catch (e) {}
+                    try { saveWindowStateToServer({ window: 'chat', state: 'expanded' }); } catch (e) {}
+                } else {
+                    // Desktop safe: bottom-left with moderate width/height
+                    const width = Math.max(420, Math.round(Math.min(600, window.innerWidth * 0.35)));
+                    const height = Math.round(Math.min(window.innerHeight * 0.6, 800));
+                    const left = Math.max(24, 24);
+                    const top = Math.max(100, Math.round(window.innerHeight - height - 24));
+                    chatEl.style.left = left + 'px';
+                    chatEl.style.top = top + 'px';
+                    chatEl.style.right = 'auto';
+                    chatEl.style.bottom = '';
+                    chatEl.style.width = width + 'px';
+                    chatEl.style.height = height + 'px';
+                    chatEl.classList.remove('hidden', 'minimized', 'maximized');
+                    if (chatToggleBtn) chatToggleBtn.style.display = 'none';
+                    // Persist
+                    const device = 'desktop';
+                    const rectPayload = { left, top, width, height };
+                    try { localStorage.setItem((sessionId ? `${CHAT_RECT_KEY}-${sessionId}-${device}` : `${CHAT_RECT_KEY}-${device}`), JSON.stringify(rectPayload)); } catch (e) {}
+                    try { localStorage.setItem(CHAT_RECT_KEY, JSON.stringify(rectPayload)); } catch (e) {}
+                    try { saveChatRectToServer(rectPayload); } catch (e) {}
+                    try { localStorage.setItem((sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}-${device}` : `${CHAT_WINDOW_STATE_KEY}-${device}`), 'expanded'); } catch (e) {}
+                    try { saveWindowStateToServer({ window: 'chat', state: 'expanded' }); } catch (e) {}
+                }
+                showToast('Window positions reset to defaults', false, 2000);
+            } catch (err) { console.error('[synth_webui] resetWindowPositions failed', err); showToast('Failed to reset window positions', true, 2000); }
+        }
+
         // Capture beforeinstallprompt to show custom install UI if needed
         window.addEventListener('beforeinstallprompt', (e) => {
             e.preventDefault();
@@ -310,7 +365,8 @@
             box-shadow: 0 24px 45px -38px rgba(0, 0, 0, 0.9);
             transition: transform 0.3s ease, opacity 0.3s ease;
             overflow: hidden;
-            z-index: 100;
+            /* Keep chat visually above almost all other UI layers */
+            z-index: 60002;
             /* allow manual control via the corner handle and drag (desktop only) */
             /* Disabled default native resize - handled via explicit drag handles when enabled */
             resize: none;
@@ -323,7 +379,7 @@
             position: fixed; /* ensure absolute position for handles */
         }
 
-        .chat-resize-handle { position: absolute; background: transparent; z-index: 99999; pointer-events: all; }
+        .chat-resize-handle { position: absolute; background: transparent; /* keep handles slightly above chat */ z-index: 60003; pointer-events: all; }
         .chat-resize-handle.handle-top, .chat-resize-handle.handle-bottom { height: 8px; left: 8px; right: 8px; cursor: ns-resize; }
         .chat-resize-handle.handle-left, .chat-resize-handle.handle-right { width: 8px; top: 8px; bottom: 8px; cursor: ew-resize; }
         .chat-resize-handle.handle-top { top: -4px; }
@@ -386,6 +442,16 @@
         #chat.hidden {
             display: none;
         }
+        /* Minimized chat: keep title bar visible but collapse content */
+        #chat.minimized {
+            height: 3.8rem !important;
+            min-height: auto;
+            max-height: none;
+            overflow: hidden;
+            width: 320px;
+            pointer-events: auto;
+        }
+        #chat.minimized .chat-resize-handle { display: none; }
         #messages {
             flex: 1;
             overflow-y: auto;
@@ -2482,6 +2548,13 @@
         <section class="tab-panel" id="tab-settings" data-tab="settings" role="tabpanel">
             <div class="settings-grid">
                 <article class="card">
+                    <h2>Window Management</h2>
+                    <p>Reset movable window positions and sizes to safe defaults for desktop and mobile.</p>
+                    <div style="margin-top:0.6rem;">
+                        <button id="reset-window-positions" class="btn-ghost">Reset window positions</button>
+                    </div>
+                </article>
+                <article class="card">
                     <h2>Notifications</h2>
                     <p>Enable desktop notifications and audio cues whenever new messages arrive.</p>
                     <label class="toggle">
@@ -2995,12 +3068,23 @@
                 try {
                     const rect = document.getElementById('chat')?.getBoundingClientRect();
                     if (rect && sessionId) {
-                        const rectPayload = { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
-                        localStorage.setItem(`${CHAT_RECT_KEY}-${sessionId}`, JSON.stringify(rectPayload));
+                        // Ensure we don't persist collapsed/invalid sizes - clamp to sensible minimums
+                        const safeWidth = Math.max(rect.width || 0, 260);
+                        const safeHeight = Math.max(rect.height || 0, 180);
+                        const rectPayload = { left: rect.left, top: rect.top, width: safeWidth, height: safeHeight };
+                        const device = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768) ? 'mobile' : 'desktop';
+                        // Save per-device-session key and also keep session-level legacy key for compatibility
+                        try { localStorage.setItem(`${CHAT_RECT_KEY}-${sessionId}-${device}`, JSON.stringify(rectPayload)); } catch (e) { /* ignore */ }
+                        try { localStorage.setItem(`${CHAT_RECT_KEY}-${sessionId}`, JSON.stringify(rectPayload)); } catch (e) { /* ignore */ }
                         // Persist to server as well for cross-device sync
                         try { saveChatRectToServer(rectPayload); } catch (err) { console.debug('[synth_webui] saveChatRectToServer failed', err); }
                     } else if (rect) {
-                        localStorage.setItem(CHAT_RECT_KEY, JSON.stringify({ left: rect.left, top: rect.top, width: rect.width, height: rect.height }));
+                        const safeWidth = Math.max(rect.width || 0, 260);
+                        const safeHeight = Math.max(rect.height || 0, 180);
+                        const rectPayload = { left: rect.left, top: rect.top, width: safeWidth, height: safeHeight };
+                        const device = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768) ? 'mobile' : 'desktop';
+                        try { localStorage.setItem(`${CHAT_RECT_KEY}-${device}`, JSON.stringify(rectPayload)); } catch (e) { /* ignore */ }
+                        try { localStorage.setItem(CHAT_RECT_KEY, JSON.stringify(rectPayload)); } catch (e) { /* ignore */ }
                     }
                 } catch (err) { /* noop */ }
                 // Save window state (minimized, maximized, expanded, normal)
@@ -3010,8 +3094,12 @@
                         if (chatPanel.classList.contains('hidden')) state = 'minimized';
                         else if (chatPanel.classList.contains('maximized')) state = 'maximized';
                         else if (chatPanel.classList.contains('expanded')) state = 'expanded';
-                        // Save in localStorage for local persistence
-                        try { localStorage.setItem(`${CHAT_WINDOW_STATE_KEY}-${sessionId || 'local'}`, state); } catch (e) { /* ignore */ }
+                        // Save in localStorage for local persistence (per-device key)
+                        try {
+                            const device = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768) ? 'mobile' : 'desktop';
+                            try { localStorage.setItem(`${CHAT_WINDOW_STATE_KEY}-${sessionId || 'local'}-${device}`, state); } catch (e) { /* ignore */ }
+                            try { localStorage.setItem(`${CHAT_WINDOW_STATE_KEY}-${sessionId || 'local'}`, state); } catch (e) { /* ignore */ }
+                        } catch (e) { /* ignore */ }
                         // Persist to server as well
                         try { saveWindowStateToServer({ window: 'chat', state }); } catch (err) { /* ignore */ }
                     }
@@ -3021,10 +3109,23 @@
             }
         }
 
+        // Lightweight JSON POST helper used by session-meta persistence.
+        // Must exist in this (non-module) script scope.
+        async function apiPostJson(url, payload) {
+            const res = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload || {})
+            });
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            return await res.json();
+        }
+
         async function saveChatRectToServer(rectPayload) {
             if (!sessionId) return;
             try {
-                await apiPostJson('/api/chat/session_meta', { session_id: sessionId, meta: { chat_rect: rectPayload } });
+                const device = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768) ? 'mobile' : 'desktop';
+                await apiPostJson('/api/chat/session_meta', { session_id: sessionId, meta: Object.assign({ device }, { chat_rect: rectPayload }) });
             } catch (err) {
                 console.debug('[synth_webui] Failed to save chat rect to server:', err);
             }
@@ -3033,7 +3134,8 @@
         async function saveWindowStateToServer(statePayload) {
             if (!sessionId) return;
             try {
-                await apiPostJson('/api/chat/session_meta', { session_id: sessionId, meta: { window_state: statePayload } });
+                const device = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768) ? 'mobile' : 'desktop';
+                await apiPostJson('/api/chat/session_meta', { session_id: sessionId, meta: Object.assign({ device }, { window_state: statePayload }) });
             } catch (err) {
                 console.debug('[synth_webui] Failed to save window state to server:', err);
             }
@@ -3067,15 +3169,30 @@
                 // Restore chat rectangle (position and size)
                 try {
                     const chatEl = document.getElementById('chat');
+                    const device = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768) ? 'mobile' : 'desktop';
                     let rectKey = CHAT_RECT_KEY;
-                    if (sessionId) rectKey = `${CHAT_RECT_KEY}-${sessionId}`;
-                    const rectRaw = localStorage.getItem(rectKey) || localStorage.getItem(CHAT_RECT_KEY);
+                    if (sessionId) rectKey = `${CHAT_RECT_KEY}-${sessionId}-${device}`;
+                    else rectKey = `${CHAT_RECT_KEY}-${device}`;
+                    const rectRaw = localStorage.getItem(rectKey) || localStorage.getItem(sessionId ? `${CHAT_RECT_KEY}-${sessionId}` : CHAT_RECT_KEY) || localStorage.getItem(CHAT_RECT_KEY);
                     if (rectRaw && chatEl) {
                         const rect = JSON.parse(rectRaw);
+                        // Validate rect values before applying - ignore malformed or zero values
                         if (typeof rect.left === 'number') chatEl.style.left = rect.left + 'px';
                         if (typeof rect.top === 'number') chatEl.style.top = rect.top + 'px';
-                        if (typeof rect.width === 'number') chatEl.style.width = rect.width + 'px';
-                        if (typeof rect.height === 'number') chatEl.style.height = rect.height + 'px';
+                        // Apply width/height only if sensible (prevent collapsed 0px sizes)
+                        if (typeof rect.width === 'number' && rect.width >= 260) {
+                            chatEl.style.width = rect.width + 'px';
+                        } else {
+                            // Clear any inline width so CSS default takes effect
+                            chatEl.style.width = '';
+                            console.debug('[synth_webui] Ignoring invalid saved chat width:', rect.width);
+                        }
+                        if (typeof rect.height === 'number' && rect.height >= 180) {
+                            chatEl.style.height = rect.height + 'px';
+                        } else {
+                            chatEl.style.height = '';
+                            console.debug('[synth_webui] Ignoring invalid saved chat height:', rect.height);
+                        }
                         chatEl.style.right = 'auto';
                         chatEl.style.bottom = 'auto';
                     }
@@ -3083,8 +3200,9 @@
                 // Restore local window state (fallback) if present
                 try {
                     const chatEl = document.getElementById('chat');
-                    const localStateKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}` : CHAT_WINDOW_STATE_KEY;
-                    const localState = localStorage.getItem(localStateKey) || localStorage.getItem(CHAT_WINDOW_STATE_KEY);
+                    const device = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768) ? 'mobile' : 'desktop';
+                    const localStateKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}-${device}` : `${CHAT_WINDOW_STATE_KEY}-${device}`;
+                    const localState = localStorage.getItem(localStateKey) || localStorage.getItem(sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}` : CHAT_WINDOW_STATE_KEY) || localStorage.getItem(CHAT_WINDOW_STATE_KEY);
                     if (localState && chatEl) {
                         // If the chat was minimized in localStorage but there are no
                         // saved messages yet (fresh session), auto-restore the chat
@@ -3102,18 +3220,21 @@
                             if (isMobileViewport && !hasMessages) {
                                 chatEl.classList.remove('hidden');
                                 if (chatToggleBtn) chatToggleBtn.style.display = 'none';
-                            } else {
-                                // If the chat was minimized previously, respect that preference
-                                // and show the restore toggle so mobile users can bring it back.
+                            } else if (isMobileViewport) {
+                                // On mobile with messages or explicit minimize, keep hidden and show restore toggle
                                 chatEl.classList.add('hidden');
                                 if (chatToggleBtn) chatToggleBtn.style.display = 'flex';
+                            } else {
+                                // On desktop, prefer to show a minimized visible bar rather than hiding the chat entirely
+                                chatEl.classList.add('minimized');
+                                if (chatToggleBtn) chatToggleBtn.style.display = 'none';
                             }
                         } else if (localState === 'maximized') {
                             chatEl.classList.add('maximized');
                         } else if (localState === 'expanded') {
                             chatEl.classList.add('expanded');
                         } else {
-                            chatEl.classList.remove('maximized', 'expanded', 'hidden');
+                            chatEl.classList.remove('maximized', 'expanded', 'hidden', 'minimized');
                             if (chatToggleBtn) chatToggleBtn.style.display = 'none';
                         }
                     }
@@ -3185,6 +3306,15 @@
             if (tab === 'history') {
                 initializeHistoryTab();
             }
+        }
+
+        // Attach handlers for settings controls
+        const resetWindowsBtn = document.getElementById('reset-window-positions');
+        if (resetWindowsBtn) {
+            resetWindowsBtn.addEventListener('click', (ev) => {
+                ev.preventDefault();
+                resetWindowPositions(true);
+            });
         }
 
         navButtons.forEach((btn) => {
@@ -4817,36 +4947,76 @@
                 if (panel.classList.contains('maximized')) prevState = 'maximized';
                 else if (panel.classList.contains('expanded')) prevState = 'expanded';
                 else prevState = 'normal';
-                panel.classList.add('hidden');
-                if (toggleBtn) toggleBtn.style.display = 'flex';
+                const isMobileViewport = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768);
+                if (isMobileViewport) {
+                    panel.classList.add('hidden');
+                    if (toggleBtn) toggleBtn.style.display = 'flex';
+                } else {
+                    // On desktop, collapse to a minimized visible bar instead of hiding
+                    panel.classList.add('minimized');
+                    if (toggleBtn) toggleBtn.style.display = 'none';
+                }
                 try { saveWindowStateToServer({ window: windowName, state: 'minimized' }); } catch (e) { /* ignore */ }
-                try { localStorage.setItem(`${CHAT_WINDOW_STATE_KEY}-${sessionId || 'local'}`, 'minimized'); } catch (e) { /* ignore */ }
+                try {
+                    const device = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768) ? 'mobile' : 'desktop';
+                    try { localStorage.setItem(`${CHAT_WINDOW_STATE_KEY}-${sessionId || 'local'}-${device}`, 'minimized'); } catch (e) { /* ignore */ }
+                    try { localStorage.setItem(`${CHAT_WINDOW_STATE_KEY}-${sessionId || 'local'}`, 'minimized'); } catch (e) { /* ignore */ }
+                } catch (e) { /* ignore */ }
             });
 
             maxBtn?.addEventListener('click', () => {
                 const isMax = panel.classList.toggle('maximized');
+                // Ensure minimized state is cleared when maximizing/restoring
+                if (panel.classList.contains('minimized')) panel.classList.remove('minimized');
                 if (isMax) panel.classList.remove('expanded');
                 if (maxBtn) {
                     if (isMax) { maxBtn.setAttribute('title', 'Restore'); maxBtn.innerText = '🗗'; }
                     else { maxBtn.setAttribute('title', 'Maximize'); maxBtn.innerText = '⤢'; }
                 }
                 try { saveWindowStateToServer({ window: windowName, state: isMax ? 'maximized' : 'normal' }); } catch (e) { /* ignore */ }
-                try { localStorage.setItem(`${CHAT_WINDOW_STATE_KEY}-${sessionId || 'local'}`, isMax ? 'maximized' : 'normal'); } catch (e) { /* ignore */ }
+                try {
+                    const device = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768) ? 'mobile' : 'desktop';
+                    try { localStorage.setItem(`${CHAT_WINDOW_STATE_KEY}-${sessionId || 'local'}-${device}`, isMax ? 'maximized' : 'normal'); } catch (e) { /* ignore */ }
+                    try { localStorage.setItem(`${CHAT_WINDOW_STATE_KEY}-${sessionId || 'local'}`, isMax ? 'maximized' : 'normal'); } catch (e) { /* ignore */ }
+                } catch (e) { /* ignore */ }
             });
 
             toggleBtn?.addEventListener('click', () => {
                 panel.classList.remove('hidden');
+                // also clear minimized state when restoring via toggle
+                if (panel.classList.contains('minimized')) panel.classList.remove('minimized');
                 if (toggleBtn) toggleBtn.style.display = 'none';
                 if (prevState === 'maximized') panel.classList.add('maximized');
                 else if (prevState === 'expanded') panel.classList.add('expanded');
                 else panel.classList.remove('maximized', 'expanded');
                 try { saveWindowStateToServer({ window: windowName, state: 'normal' }); } catch (e) { /* ignore */ }
-                try { localStorage.setItem(`${CHAT_WINDOW_STATE_KEY}-${sessionId || 'local'}`, 'normal'); } catch (e) { /* ignore */ }
+                try {
+                    const device = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768) ? 'mobile' : 'desktop';
+                    try { localStorage.setItem(`${CHAT_WINDOW_STATE_KEY}-${sessionId || 'local'}-${device}`, 'normal'); } catch (e) { /* ignore */ }
+                    try { localStorage.setItem(`${CHAT_WINDOW_STATE_KEY}-${sessionId || 'local'}`, 'normal'); } catch (e) { /* ignore */ }
+                } catch (e) { /* ignore */ }
             });
         }
 
         // Initialize the chat window
         setupFloatingWindow('chat');
+
+        // Double-click title bar to restore from minimized state (desktop-friendly)
+        try {
+            const titleBar = document.getElementById('chat-title-bar');
+            titleBar?.addEventListener('dblclick', () => {
+                const panel = document.getElementById('chat');
+                if (panel && panel.classList.contains('minimized')) {
+                    panel.classList.remove('minimized');
+                    try {
+                        const device = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768) ? 'mobile' : 'desktop';
+                        try { localStorage.setItem(`${CHAT_WINDOW_STATE_KEY}-${sessionId || 'local'}-${device}`, 'normal'); } catch (e) { /* ignore */ }
+                        try { localStorage.setItem(`${CHAT_WINDOW_STATE_KEY}-${sessionId || 'local'}`, 'normal'); } catch (e) { /* ignore */ }
+                    } catch (e) { /* ignore */ }
+                    try { saveWindowStateToServer({ window: 'chat', state: 'normal' }); } catch (e) { /* ignore */ }
+                }
+            });
+        } catch (e) { /* ignore */ }
 
         // Defensive: ensure the floating restore button is visible whenever
         // the chat panel is hidden on startup (covers cases where restore
@@ -4858,10 +5028,31 @@
             }
         } catch (e) { /* ignore */ }
 
+        // Sanity check: if chat has been collapsed to width/height 0 for any reason,
+        // clear inline sizes so CSS default sizing applies and chat remains visible.
+        try {
+            setTimeout(() => {
+                const ch = document.getElementById('chat');
+                if (!ch) return;
+                const r = ch.getBoundingClientRect();
+                if ((r.width || 0) < 40 || (r.height || 0) < 40) {
+                    console.debug('[synth_webui] Chat appears collapsed (width/height < 40) - clearing inline sizes');
+                    ch.style.width = '';
+                    ch.style.height = '';
+                    ch.style.left = ch.style.left || '';
+                    ch.style.top = ch.style.top || '';
+                    // ensure not hidden
+                    if (ch.classList.contains('hidden')) ch.classList.remove('hidden');
+                }
+            }, 250);
+        } catch (e) { /* ignore */ }
+
         // Hamburger menu toggle
         const hamburgerBtn = document.querySelector('.hamburger');
         const mainNav = document.querySelector('.main-nav');
         const connectionStatus = document.querySelector('.connection-status');
+        // Unified chat z-index constant to ensure chat stays above other layers (nav, overlays)
+        const CHAT_Z_INDEX = '60002';
         
         // Move connection status inside nav on mobile
         if (window.innerWidth <= 768 && connectionStatus) {
@@ -4880,22 +5071,23 @@
                     mainNav.style.top = topPx;
                     mainNav.style.bottom = '0';
                     // When open, ensure chat and chat-toggle are visually below the menu
-                    try {
-                        const chatEl = document.getElementById('chat');
-                        if (chatEl) chatEl.style.zIndex = '50';
-                        if (chatToggleBtn) chatToggleBtn.style.zIndex = '50';
-                        // Also reduce z-index of resize handles that may float above everything
-                        document.querySelectorAll('.chat-resize-handle').forEach(h => { h.style.zIndex = '40'; });
-                    } catch (e) { /* ignore */ }
+                                try {
+                                    const chatEl = document.getElementById('chat');
+                                    if (chatEl) chatEl.style.zIndex = CHAT_Z_INDEX;
+                                    if (chatToggleBtn) chatToggleBtn.style.zIndex = CHAT_Z_INDEX;
+                                    // Also reduce z-index of resize handles that may float above everything
+                                    document.querySelectorAll('.chat-resize-handle').forEach(h => { h.style.zIndex = String(Number(CHAT_Z_INDEX) + 1); });
+                                } catch (e) { /* ignore */ }
                 } else if (mainNav) {
                     mainNav.style.top = '';
                     mainNav.style.bottom = '';
-                    try {
-                        const chatEl = document.getElementById('chat');
-                        if (chatEl) chatEl.style.zIndex = '100';
-                        if (chatToggleBtn) chatToggleBtn.style.zIndex = '150';
-                        document.querySelectorAll('.chat-resize-handle').forEach(h => { h.style.zIndex = ''; });
-                    } catch (e) { /* ignore */ }
+                                try {
+                                    const chatEl = document.getElementById('chat');
+                                    if (chatEl) chatEl.style.zIndex = CHAT_Z_INDEX;
+                                    if (chatToggleBtn) chatToggleBtn.style.zIndex = String(Number(CHAT_Z_INDEX) + 50);
+                                    // Reset handles to default (keep slightly above chat)
+                                    document.querySelectorAll('.chat-resize-handle').forEach(h => { h.style.zIndex = String(Number(CHAT_Z_INDEX) + 1); });
+                                } catch (e) { /* ignore */ }
                 }
             } catch (e) { /* ignore */ }
         });
@@ -5426,67 +5618,65 @@
                     refreshStats(true);
                     try { restoreChatState(); } catch (e) { console.debug('[synth_webui] restoreChatState error:', e); }
                     // Fetch server-side session meta (camera, rect) to restore cross-device
-                    (async () => {
-                        try {
-                            const res = await fetch('/api/chat/session_meta?session_id=' + encodeURIComponent(sessionId));
-                            if (!res.ok) return;
-                            const out = await res.json();
+                    // Use simple promise-based fetch to avoid complex nested try/catch blocks
+                    fetch('/api/chat/session_meta?session_id=' + encodeURIComponent(sessionId))
+                        .then(res => { if (!res.ok) throw new Error('session_meta fetch failed'); return res.json(); })
+                        .then(out => {
                             if (!out || !out.success) return;
                             const meta = out.meta || {};
-                            if (meta && meta.chat_rect) {
-                                try {
-                                    const rectPayload = meta.chat_rect;
+                            try {
+                                const device = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768) ? 'mobile' : 'desktop';
+                                const viewportMeta = (meta && meta.viewports && meta.viewports[device]) ? meta.viewports[device] : meta || {};
+                                if (viewportMeta && viewportMeta.chat_rect) {
+                                    const rectPayload = viewportMeta.chat_rect;
                                     const chatEl = document.getElementById('chat');
                                     if (chatEl && rectPayload) {
-                                        chatEl.style.left = rectPayload.left + 'px';
-                                        chatEl.style.top = rectPayload.top + 'px';
-                                        chatEl.style.width = rectPayload.width + 'px';
-                                        chatEl.style.height = rectPayload.height + 'px';
+                                        if (typeof rectPayload.left === 'number') chatEl.style.left = rectPayload.left + 'px';
+                                        if (typeof rectPayload.top === 'number') chatEl.style.top = rectPayload.top + 'px';
+                                        if (typeof rectPayload.width === 'number' && rectPayload.width >= 260) chatEl.style.width = rectPayload.width + 'px';
+                                        else chatEl.style.width = '';
+                                        if (typeof rectPayload.height === 'number' && rectPayload.height >= 180) chatEl.style.height = rectPayload.height + 'px';
+                                        else chatEl.style.height = '';
                                     }
-                                } catch (err) { console.debug('[synth_webui] Failed to apply chat_rect:', err); }
-                            }
-                            if (meta && meta.camera && typeof camera !== 'undefined' && camera) {
-                                try {
+                                }
+                            } catch (err) { console.debug('[synth_webui] Failed to apply chat_rect:', err); }
+                            try {
+                                if (meta && meta.camera && typeof camera !== 'undefined' && camera) {
                                     const c = meta.camera;
-                                    if (c.position && c.position.length === 3) {
-                                        camera.position.set(c.position[0], c.position[1], c.position[2]);
-                                    }
-                                    if (c.rotation && c.rotation.length === 3) {
-                                        camera.rotation.set(c.rotation[0], c.rotation[1], c.rotation[2]);
-                                    }
+                                    if (c.position && c.position.length === 3) camera.position.set(c.position[0], c.position[1], c.position[2]);
+                                    if (c.rotation && c.rotation.length === 3) camera.rotation.set(c.rotation[0], c.rotation[1], c.rotation[2]);
                                     if (typeof c.fov === 'number') camera.fov = c.fov;
                                     if (typeof c.zoom === 'number') camera.zoom = c.zoom;
                                     camera.updateProjectionMatrix();
                                     try { controls.update(); } catch (e) {}
-                                } catch (err) { console.debug('[synth_webui] Failed to apply camera state:', err); }
-                            }
-                            // Restore window state for chat if present
-                            if (meta && meta.window_state) {
-                                try {
-                                    const ws = meta.window_state;
-                                    // Support both { window: 'chat', state: 'minimized' } and { chat: 'minimized' }
-                                    let st = null;
-                                    if (ws && typeof ws === 'object') {
-                                        if (ws.window === 'chat') st = ws.state;
-                                        else if (typeof ws.chat !== 'undefined') st = ws.chat;
-                                    }
-                                    if (typeof st === 'string') {
-                                        if (st === 'minimized' && chatPanel) {
+                                }
+                            } catch (err) { console.debug('[synth_webui] Failed to apply camera state:', err); }
+                            try {
+                                const device = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768) ? 'mobile' : 'desktop';
+                                const viewportMeta = (meta && meta.viewports && meta.viewports[device]) ? meta.viewports[device] : meta || {};
+                                const wsState = viewportMeta.window_state || meta.window_state;
+                                let st = null;
+                                if (wsState && typeof wsState === 'object') {
+                                    if (wsState.window === 'chat') st = wsState.state;
+                                    else if (typeof wsState.chat !== 'undefined') st = wsState.chat;
+                                }
+                                if (typeof st === 'string' && chatPanel) {
+                                    if (st === 'minimized') {
+                                        const isMobileViewport = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768);
+                                        if (isMobileViewport) {
                                             chatPanel.classList.add('hidden');
                                             if (chatToggleBtn) chatToggleBtn.style.display = 'flex';
-                                        } else if (st === 'maximized' && chatPanel) {
-                                            chatPanel.classList.add('maximized');
-                                        } else if (st === 'expanded' && chatPanel) {
-                                            chatPanel.classList.add('expanded');
-                                        } else if (chatPanel) {
-                                            chatPanel.classList.remove('hidden', 'maximized', 'expanded');
+                                        } else {
+                                            chatPanel.classList.add('minimized');
                                             if (chatToggleBtn) chatToggleBtn.style.display = 'none';
                                         }
-                                    }
-                                } catch (err) { console.debug('[synth_webui] Failed to apply window_state:', err); }
-                            }
-                        } catch (err) { console.debug('[synth_webui] Failed to fetch session meta:', err); }
-                    })();
+                                    } else if (st === 'maximized') chatPanel.classList.add('maximized');
+                                    else if (st === 'expanded') chatPanel.classList.add('expanded');
+                                    else { chatPanel.classList.remove('hidden', 'maximized', 'expanded'); if (chatToggleBtn) chatToggleBtn.style.display = 'none'; }
+                                }
+                            } catch (err) { console.debug('[synth_webui] Failed to apply window_state:', err); }
+                        })
+                        .catch(err => { console.debug('[synth_webui] Failed to fetch session meta:', err); });
                     return;
                 }
                 if (data.type === 'action_state') {
@@ -6187,6 +6377,22 @@
                         try {
                             const fps = 30; // assumption for subclip frame math
                             const totalFrames = Math.max(2, Math.round(clip.duration * fps));
+
+                            const clampInt = (v, lo, hi) => {
+                                const n = Math.floor(Number(v));
+                                if (!Number.isFinite(n)) return lo;
+                                return Math.max(lo, Math.min(hi, n));
+                            };
+
+                            const normalizeRange = (start, end, label) => {
+                                const s = clampInt(start, 0, totalFrames);
+                                const e = clampInt(end, 0, totalFrames);
+                                // subclip expects end > start; require at least 2 frames to avoid instant-finish loops
+                                if (e <= s + 1) {
+                                    throw new Error(`[AnimationHandler] Invalid ${label} range: ${start}-${end} (normalized ${s}-${e}) totalFrames=${totalFrames}`);
+                                }
+                                return { start: s, end: e };
+                            };
                             
                             // Check if descriptor has a loop section defined
                             const hasLoopSection = descriptor && descriptor.loop;
@@ -6222,6 +6428,19 @@
                                 loopEnd = Math.max(1, Math.round(totalFrames * 0.80));
                                 outroStart = loopEnd;
                                 outroEnd = totalFrames;
+                            }
+
+                            // Validate & clamp ranges; if invalid, fall back to full clip.
+                            const introR = normalizeRange(introStart, introEnd, 'intro');
+                            const outroR = normalizeRange(outroStart, outroEnd, 'outro');
+                            introStart = introR.start;
+                            introEnd = introR.end;
+                            outroStart = outroR.start;
+                            outroEnd = outroR.end;
+                            if (loopStart !== null && loopEnd !== null) {
+                                const loopR = normalizeRange(loopStart, loopEnd, 'loop');
+                                loopStart = loopR.start;
+                                loopEnd = loopR.end;
                             }
 
                             // Use selectedFile in clip names so they match the storage key in mixer finished handler
@@ -6361,8 +6580,24 @@
                                     console.debug(`[AnimationHandler] Could not load descriptor for ${animationFile}`);
                                 }
 
+                                // IDLE must always be a stable looping animation.
+                                // Descriptors are allowed for IDLE, but only to define a safe loop range.
+                                // We intentionally ignore play_once/outro to prevent clamped poses.
+                                if (actionName === 'idle') {
+                                    playOnce = false;
+                                    if (descriptor) {
+                                        try {
+                                            descriptor = { ...descriptor };
+                                            delete descriptor.play_once;
+                                            delete descriptor.outro;
+                                        } catch (e) {
+                                            // ignore
+                                        }
+                                    }
+                                }
+
                                 // Check if this should be a structured animation
-                                const hasStructuredDescriptor = descriptor && descriptor.intro && descriptor.outro;
+                                const hasStructuredDescriptor = (actionName !== 'idle') && descriptor && descriptor.intro && descriptor.outro;
                                 console.log(`[AnimationHandler] hasStructuredDescriptor: ${hasStructuredDescriptor}, hasLoopSection: ${descriptor && descriptor.loop ? 'yes' : 'no'}`);
                                 if (hasStructuredDescriptor && clip && clip.duration && THREE.AnimationUtils && typeof THREE.AnimationUtils.subclip === 'function') {
                                     // Create structured animation (intro/loop/outro)
@@ -6370,6 +6605,21 @@
                                         const fps = 30;
                                         const totalFrames = Math.max(2, Math.round(clip.duration * fps));
                                         const hasLoopSection = descriptor && descriptor.loop;
+
+                                        const clampInt = (v, lo, hi) => {
+                                            const n = Math.floor(Number(v));
+                                            if (!Number.isFinite(n)) return lo;
+                                            return Math.max(lo, Math.min(hi, n));
+                                        };
+
+                                        const normalizeRange = (start, end, label) => {
+                                            const s = clampInt(start, 0, totalFrames);
+                                            const e = clampInt(end, 0, totalFrames);
+                                            if (e <= s + 1) {
+                                                throw new Error(`[AnimationHandler] Invalid ${label} range: ${start}-${end} (normalized ${s}-${e}) totalFrames=${totalFrames}`);
+                                            }
+                                            return { start: s, end: e };
+                                        };
 
                                         let introStart = descriptor.intro?.start_frame ?? 0;
                                         let introEnd = descriptor.intro?.end_frame ?? totalFrames;
@@ -6386,6 +6636,19 @@
                                             loopEnd = null;
                                             outroStart = descriptor.outro?.start_frame ?? introEnd;
                                             outroEnd = descriptor.outro?.end_frame ?? totalFrames;
+                                        }
+
+                                        // Validate & clamp ranges; if invalid, fall back to simple action.
+                                        const introR = normalizeRange(introStart, introEnd, 'intro');
+                                        const outroR = normalizeRange(outroStart, outroEnd, 'outro');
+                                        introStart = introR.start;
+                                        introEnd = introR.end;
+                                        outroStart = outroR.start;
+                                        outroEnd = outroR.end;
+                                        if (loopStart !== null && loopEnd !== null) {
+                                            const loopR = normalizeRange(loopStart, loopEnd, 'loop');
+                                            loopStart = loopR.start;
+                                            loopEnd = loopR.end;
                                         }
 
                                         const introClip = THREE.AnimationUtils.subclip(clip, `${specificKey}_intro`, introStart, introEnd, fps);
@@ -6441,17 +6704,56 @@
                                         this.actions[specificKey] = action;
                                     }
                                 } else {
-                                    // Simple animation without structure
-                                    action = this.mixer.clipAction(clip);
-                                    if (playOnce || (descriptor && descriptor.play_once)) {
-                                        action.setLoop(THREE.LoopOnce, 0);
-                                        action.clampWhenFinished = true;
+                                    // Simple animation without intro/outro structure.
+                                    // For IDLE, if a loop section is provided, subclip to that range and loop it.
+                                    if (actionName === 'idle' && descriptor && descriptor.loop && clip && clip.duration && THREE.AnimationUtils && typeof THREE.AnimationUtils.subclip === 'function') {
+                                        try {
+                                            const fps = 30;
+                                            const totalFrames = Math.max(2, Math.round(clip.duration * fps));
+
+                                            const clampInt = (v, lo, hi) => {
+                                                const n = Math.floor(Number(v));
+                                                if (!Number.isFinite(n)) return lo;
+                                                return Math.max(lo, Math.min(hi, n));
+                                            };
+                                            const normalizeRange = (start, end, label) => {
+                                                const s = clampInt(start, 0, totalFrames);
+                                                const e = clampInt(end, 0, totalFrames);
+                                                if (e <= s + 1) {
+                                                    throw new Error(`[AnimationHandler] Invalid ${label} range: ${start}-${end} (normalized ${s}-${e}) totalFrames=${totalFrames}`);
+                                                }
+                                                return { start: s, end: e };
+                                            };
+
+                                            const loopStart = descriptor.loop?.start_frame ?? 0;
+                                            const loopEnd = descriptor.loop?.end_frame ?? totalFrames;
+                                            const loopR = normalizeRange(loopStart, loopEnd, 'loop');
+                                            const loopClip = THREE.AnimationUtils.subclip(clip, `${specificKey}_idle_loop`, loopR.start, loopR.end, fps);
+                                            loopClip.loop = THREE.LoopRepeat;
+                                            action = this.mixer.clipAction(loopClip);
+                                            action.setLoop(THREE.LoopRepeat);
+                                            action.clampWhenFinished = false;
+                                            this.actions[specificKey] = action;
+                                            console.log(`[AnimationHandler] Created IDLE loop subclip: frames ${loopR.start}-${loopR.end - 1}, LoopRepeat, no clamp`);
+                                        } catch (err) {
+                                            console.warn(`[AnimationHandler] Failed to apply IDLE loop descriptor for ${animationFile}, using full clip:`, err);
+                                            action = this.mixer.clipAction(clip);
+                                            action.setLoop(THREE.LoopRepeat);
+                                            action.clampWhenFinished = false;
+                                            this.actions[specificKey] = action;
+                                        }
                                     } else {
-                                        action.setLoop(THREE.LoopRepeat);
-                                        action.clampWhenFinished = false;
+                                        action = this.mixer.clipAction(clip);
+                                        if (actionName !== 'idle' && (playOnce || (descriptor && descriptor.play_once))) {
+                                            action.setLoop(THREE.LoopOnce, 0);
+                                            action.clampWhenFinished = true;
+                                        } else {
+                                            action.setLoop(THREE.LoopRepeat);
+                                            action.clampWhenFinished = false;
+                                        }
+                                        this.actions[specificKey] = action;
+                                        console.log(`[AnimationHandler] Created simple animation for ${animationFile}, playOnce: ${playOnce || (descriptor && descriptor.play_once)}`);
                                     }
-                                    this.actions[specificKey] = action;
-                                    console.log(`[AnimationHandler] Created simple animation for ${animationFile}, playOnce: ${playOnce || (descriptor && descriptor.play_once)}`);
                                 }
                             } else {
                                 console.log(`[AnimationHandler] Failed to load specific animation ${animationFile}, falling back to random from ${actionName}`);
