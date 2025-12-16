@@ -1382,6 +1382,7 @@
                 /* top is set dynamically below header to avoid overlapping first item */
                 left: 0;
                 right: 0;
+                bottom: 0;
                 z-index: 40000;
                 flex-direction: column !important;
                 flex-wrap: nowrap !important;
@@ -1390,8 +1391,7 @@
                 padding-bottom: 1.5rem;
                 align-items: stretch;
                 overflow-y: auto;
-                max-height: calc(100vh - var(--topbar-height, 60px));
-                min-height: 200px;
+                min-height: 100vh;
             }
 
             /* Ensure nav buttons are full-width and stacked vertically on mobile */
@@ -2101,37 +2101,61 @@
                 // Sub-tab switching
                 const subNavButtons = document.querySelectorAll('.sub-nav-btn[data-subtab]');
                 subNavButtons.forEach(button => {
-                    button.addEventListener('click', () => {
-                        const subtabName = button.dataset.subtab;
-                        console.log(`[History] Switching to ${subtabName} sub-tab`);
-                        
-                        // Update sub-navigation buttons
-                        subNavButtons.forEach(btn => {
-                            btn.classList.remove('active');
-                            btn.setAttribute('aria-selected', 'false');
-                        });
-                        button.classList.add('active');
-                        button.setAttribute('aria-selected', 'true');
-                        
-                        // Update sub-tab panels - hide all, show selected
-                        const subPanels = document.querySelectorAll('.sub-tab-panel');
-                        subPanels.forEach(panel => {
-                            panel.classList.remove('active');
-                            console.log(`[History] Hiding panel: ${panel.dataset.subtab}`);
-                        });
-                        
-                        const targetPanel = document.querySelector(`#subtab-${subtabName}`);
-                        if (targetPanel) {
-                            targetPanel.classList.add('active');
-                            console.log(`[History] Showing panel: ${subtabName}`);
-                            historyState.currentSubTab = subtabName;
-                            loadHistoryData(subtabName);
-                        } else {
-                            console.error(`[History] Target panel not found: subtab-${subtabName}`);
-                        }
-                    });
-                });
+                    hamburgerBtn?.addEventListener('click', () => {
+                        const opened = mainNav?.classList.toggle('open');
+                        // Position the mobile nav just under the header so the close button
+                        // does not overlap the first menu item. Use header height at runtime
+                        // because padding and font sizes may vary across devices.
+                        try {
+                            if (opened && mainNav) {
+                                // On mobile, move the nav outside the header (to body) to avoid
+                                // being clipped by header's stacking context / backdrop-filter.
+                                try {
+                                    if (window.innerWidth <= 768 && mainNav.parentElement && mainNav.parentElement.tagName.toLowerCase() === 'header') {
+                                        if (!navWasMoved) {
+                                            navOriginalParent = mainNav.parentElement;
+                                            navOriginalNextSibling = mainNav.nextSibling;
+                                            document.body.appendChild(mainNav);
+                                            navWasMoved = true;
+                                        }
+                                    }
+                                } catch (e) { /* ignore */ }
 
+                                const headerEl = document.querySelector('header.top-bar');
+                                const topPx = headerEl ? `${Math.ceil(headerEl.getBoundingClientRect().bottom)}px` : '56px';
+                                mainNav.style.top = topPx;
+                                mainNav.style.bottom = '0';
+                                // When open, ensure chat and chat-toggle are visually below the menu
+                                try {
+                                    const chatEl = document.getElementById('chat');
+                                    if (chatEl) chatEl.style.zIndex = '50';
+                                    if (chatToggleBtn) chatToggleBtn.style.zIndex = '50';
+                                    // Also reduce z-index of resize handles that may float above everything
+                                    document.querySelectorAll('.chat-resize-handle').forEach(h => { h.style.zIndex = '40'; });
+                                } catch (e) { /* ignore */ }
+                            } else if (mainNav) {
+                                mainNav.style.top = '';
+                                mainNav.style.bottom = '';
+                                try {
+                                    const chatEl = document.getElementById('chat');
+                                    if (chatEl) chatEl.style.zIndex = '100';
+                                    if (chatToggleBtn) chatToggleBtn.style.zIndex = '150';
+                                    document.querySelectorAll('.chat-resize-handle').forEach(h => { h.style.zIndex = ''; });
+                                } catch (e) { /* ignore */ }
+
+                                // If we moved the nav out of header earlier, move it back now
+                                try {
+                                    if (navWasMoved && navOriginalParent) {
+                                        if (navOriginalNextSibling) navOriginalParent.insertBefore(mainNav, navOriginalNextSibling);
+                                        else navOriginalParent.appendChild(mainNav);
+                                        navWasMoved = false;
+                                        navOriginalParent = null;
+                                        navOriginalNextSibling = null;
+                                    }
+                                } catch (e) { /* ignore */ }
+                            }
+                        } catch (e) { /* ignore */ }
+                    });
                 // Event listeners for diary controls
                 document.getElementById('history-diary-search')?.addEventListener('input', debounce(() => {
                     historyState.diary.search = document.getElementById('history-diary-search').value;
@@ -2584,6 +2608,11 @@
         const logSearchInput = document.getElementById('log-search');
         const chatPanel = document.getElementById('chat');
         const chatToggleBtn = document.getElementById('chat-toggle');
+        // Track original nav parent so we can temporarily move nav out of header
+        // when opening mobile menu to avoid clipping caused by header's backdrop-filter
+        let navOriginalParent = null;
+        let navOriginalNextSibling = null;
+        let navWasMoved = false;
         const componentsLLMSummary = document.getElementById('components-llm-summary');
         const componentsLLMList = document.getElementById('components-llm-list');
         const componentsInterfacesList = document.getElementById('components-interfaces-list');
@@ -4866,6 +4895,16 @@
                     const topPx = headerEl ? `${Math.ceil(headerEl.getBoundingClientRect().bottom)}px` : '56px';
                     mainNav.style.top = topPx;
                     mainNav.style.bottom = '0';
+                    // If viewport became desktop again and nav was moved, move it back
+                    try {
+                        if (window.innerWidth > 768 && navWasMoved && navOriginalParent) {
+                            if (navOriginalNextSibling) navOriginalParent.insertBefore(mainNav, navOriginalNextSibling);
+                            else navOriginalParent.appendChild(mainNav);
+                            navWasMoved = false;
+                            navOriginalParent = null;
+                            navOriginalNextSibling = null;
+                        }
+                    } catch (e) { /* ignore */ }
                 }
             } catch (e) { /* ignore */ }
         });
