@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import time
 import queue as _thread_queue
 from datetime import datetime
@@ -498,6 +499,42 @@ async def _consumer_loop() -> None:
                         log_debug(f"[QUEUE] Added interface_path to context: {interface_path}")
                     else:
                         log_warning(f"[QUEUE] Context is not a dict, cannot add interface_path")
+
+                    async def _call_bot_generation_start() -> None:
+                        try:
+                            bot_obj = final.get("bot")
+                            if bot_obj is None:
+                                return
+                            fn = getattr(bot_obj, "on_generation_start", None)
+                            if fn is None:
+                                return
+                            if inspect.iscoroutinefunction(fn):
+                                await fn(interface_path=interface_path, context=context, message=final.get("message"))
+                            else:
+                                fn(interface_path=interface_path, context=context, message=final.get("message"))
+                        except Exception as hook_exc:
+                            log_debug(f"[QUEUE] on_generation_start hook failed for {interface_path}: {hook_exc}")
+
+                    async def _call_bot_generation_end(task: asyncio.Task) -> None:
+                        try:
+                            bot_obj = final.get("bot")
+                            if bot_obj is None:
+                                return
+                            fn = getattr(bot_obj, "on_generation_end", None)
+                            if fn is None:
+                                return
+                            success = True
+                            try:
+                                exc = task.exception()
+                                success = exc is None
+                            except Exception:
+                                success = False
+                            if inspect.iscoroutinefunction(fn):
+                                await fn(interface_path=interface_path, success=success, context=context, message=final.get("message"))
+                            else:
+                                fn(interface_path=interface_path, success=success, context=context, message=final.get("message"))
+                        except Exception as hook_exc:
+                            log_debug(f"[QUEUE] on_generation_end hook failed for {interface_path}: {hook_exc}")
                     
                     try:
                         # Ensure the message object has normalized user fields and date
@@ -505,6 +542,11 @@ async def _consumer_loop() -> None:
                             ensure_message_user_fields(final.get("message"))
                         except Exception:
                             log_debug("[QUEUE] Failed to normalise message fields in consumer loop")
+
+                        # Optional: notify the interface/bot that generation is starting.
+                        # This is intentionally duck-typed so the core does not hard-code interface logic.
+                        await _call_bot_generation_start()
+
                         # Run message processing in a Task so we can avoid hard-cancelling long-running
                         # flows (e.g. Selenium-based LLMs). On timeout we keep the task running and
                         # clear the session 'processing' flag when it eventually finishes.
@@ -560,6 +602,12 @@ async def _consumer_loop() -> None:
                                     except Exception:
                                         pass
 
+                                    # Notify optional hook that generation ended (even after a timeout).
+                                    try:
+                                        await _call_bot_generation_end(processing_task)
+                                    except Exception:
+                                        pass
+
                                     # Only clear 'processing' if no other messages are pending for this chat
                                     still_pending = False
                                     for prio, _, queued_item in list(_queue._queue):
@@ -582,6 +630,13 @@ async def _consumer_loop() -> None:
                                 processing_task.add_done_callback(lambda _t: asyncio.create_task(_clear_processing_when_done()))
                             except Exception as cb_e:
                                 log_debug(f"[QUEUE] Failed to attach background completion callback: {cb_e}")
+                        finally:
+                            # If we completed within the timeout (success or error), notify generation end now.
+                            if not timed_out:
+                                try:
+                                    await _call_bot_generation_end(processing_task)
+                                except Exception:
+                                    pass
                     except asyncio.TimeoutError:
                         # (handled above)
                         pass

@@ -81,6 +81,9 @@ class SynthWebUIInterface:
         # Track pending THINKING actions per session so we can deterministically
         # switch THINK -> WRITE -> IDLE when the async response is actually sent.
         self._pending_thinking_actions: Dict[str, Deque[str]] = {}
+        # Track active WRITING actions per session so we can stop them immediately
+        # after sending, and avoid starting WRITING too late.
+        self._active_writing_actions: Dict[str, Deque[str]] = {}
         # Runtime/configurable attributes with sensible defaults
         # The Web UI must always autostart; do not allow runtime toggle.
         self.autostart = True
@@ -1093,34 +1096,36 @@ class SynthWebUIInterface:
             log_debug(f"{LOG_PREFIX} send_message payload target: {chat_id}, text length: {len(text) if text else 0}")
             return
 
-        # Transition: THINK -> WRITE
-        pending = self._pending_thinking_actions.get(session_id)
-        if pending:
-            while pending:
-                pending_action_id = pending.popleft()
-                try:
-                    await self.action_state_manager.pop_action(pending_action_id)
-                except Exception as exc:
-                    log_warning(f"{LOG_PREFIX} Failed to pop pending THINKING action {pending_action_id}: {exc}")
-            if not pending:
-                self._pending_thinking_actions.pop(session_id, None)
+        # Ensure any pending THINKING is cleared before delivery (fallback).
+        await self._webui_clear_pending_thinking(session_id)
 
-        writing_action_id = f"webui_write_{session_id}_{int(datetime.utcnow().timestamp() * 1000) % 1_000_000}"
+        # Ensure WRITING is active while delivering the message, but avoid starting it late
+        # if it was already started at generation-time.
+        writing_action_id = None
         writing_pushed = False
-        try:
-            writing_pushed = await self.action_state_manager.push_action(
-                action_id=writing_action_id,
-                phase=AnimationPhase.WRITING,
-                component=INTERNAL_CHAT_NAME,
-            )
-        except Exception as exc:
-            log_warning(f"{LOG_PREFIX} Failed to push WRITING action state: {exc}")
-
-        if self.persona_manager and writing_pushed:
+        existing_writing = self._active_writing_actions.get(session_id)
+        if existing_writing and len(existing_writing) > 0:
+            writing_action_id = existing_writing[-1]
+            writing_pushed = True
+        else:
+            writing_action_id = f"webui_write_{session_id}_{int(datetime.utcnow().timestamp() * 1000) % 1_000_000}"
             try:
-                await self.persona_manager.set_animation_state("write", session_id=session_id)
-            except Exception as anim_exc:
-                log_debug(f"{LOG_PREFIX} Failed to set 'write' animation: {anim_exc}")
+                writing_pushed = await self.action_state_manager.push_action(
+                    action_id=writing_action_id,
+                    phase=AnimationPhase.WRITING,
+                    component=INTERNAL_CHAT_NAME,
+                )
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to push WRITING action state: {exc}")
+                writing_pushed = False
+
+            if writing_pushed:
+                self._active_writing_actions.setdefault(session_id, deque()).append(writing_action_id)
+                if self.persona_manager:
+                    try:
+                        await self.persona_manager.set_animation_state("write", session_id=session_id)
+                    except Exception as anim_exc:
+                        log_debug(f"{LOG_PREFIX} Failed to set 'write' animation: {anim_exc}")
 
         await websocket.send_json({"type": "message", "sender": "synth", "text": text})
         await self._append_history(session_id, "synth", text)
@@ -1136,11 +1141,24 @@ class SynthWebUIInterface:
         log_info(f"{LOG_PREFIX} Sent message to session {session_id}: {text[:80]}{'...' if len(text)>80 else ''}")
 
         # Transition: WRITE -> IDLE
-        if writing_pushed:
+        if writing_pushed and writing_action_id:
             try:
                 await self.action_state_manager.pop_action(writing_action_id)
             except Exception as exc:
                 log_warning(f"{LOG_PREFIX} Failed to pop WRITING action state: {exc}")
+            # Remove from per-session registry
+            try:
+                dq = self._active_writing_actions.get(session_id)
+                if dq and writing_action_id in dq:
+                    try:
+                        dq.remove(writing_action_id)
+                    except Exception:
+                        # Fallback: rebuild without the id
+                        self._active_writing_actions[session_id] = deque([x for x in dq if x != writing_action_id])
+                if dq is not None and len(dq) == 0:
+                    self._active_writing_actions.pop(session_id, None)
+            except Exception:
+                pass
 
         if self.persona_manager:
             try:
@@ -1159,6 +1177,99 @@ class SynthWebUIInterface:
             await set_meta_fn(interface_path, existing_meta)
         except Exception as e:
             log_debug(f"{LOG_PREFIX} Failed to clear session processing meta after send: {e}")
+
+    async def _webui_clear_pending_thinking(self, session_id: str) -> None:
+        pending = self._pending_thinking_actions.get(session_id)
+        if not pending:
+            return
+        while pending:
+            pending_action_id = pending.popleft()
+            try:
+                await self.action_state_manager.pop_action(pending_action_id)
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to pop pending THINKING action {pending_action_id}: {exc}")
+        self._pending_thinking_actions.pop(session_id, None)
+
+    async def on_generation_start(self, interface_path: str, **kwargs) -> None:
+        """Optional hook called by the queue when processing starts.
+
+        For WebUI this approximates 'LLM started responding', so we switch THINK->WRITE
+        as early as possible (before the final message is sent).
+        """
+        try:
+            session_id = None
+            if interface_path and "/" in str(interface_path):
+                parts = str(interface_path).split("/")
+                if len(parts) >= 2 and parts[0] == INTERFACE_NAME:
+                    session_id = parts[1]
+            if not session_id:
+                return
+
+            # Clear any pending THINKING for this session first.
+            await self._webui_clear_pending_thinking(session_id)
+
+            writing_action_id = f"webui_write_{session_id}_{int(datetime.utcnow().timestamp() * 1000) % 1_000_000}"
+            writing_pushed = False
+            try:
+                writing_pushed = await self.action_state_manager.push_action(
+                    action_id=writing_action_id,
+                    phase=AnimationPhase.WRITING,
+                    component=INTERNAL_CHAT_NAME,
+                )
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to push WRITING action state (generation_start): {exc}")
+                writing_pushed = False
+
+            if writing_pushed:
+                self._active_writing_actions.setdefault(session_id, deque()).append(writing_action_id)
+                if self.persona_manager:
+                    try:
+                        await self.persona_manager.set_animation_state("write", session_id=session_id)
+                    except Exception as anim_exc:
+                        log_debug(f"{LOG_PREFIX} Failed to set 'write' animation (generation_start): {anim_exc}")
+        except Exception as exc:
+            log_debug(f"{LOG_PREFIX} on_generation_start failed: {exc}")
+
+    async def on_generation_end(self, interface_path: str, success: bool = True, **kwargs) -> None:
+        """Optional hook called by the queue when processing ends.
+
+        For WebUI this is the earliest reliable signal that generation is finished.
+        If the response path didn't go through send_message (errors/plugins), we still
+        want to stop WRITING and return to IDLE when appropriate.
+        """
+        try:
+            session_id = None
+            if interface_path and "/" in str(interface_path):
+                parts = str(interface_path).split("/")
+                if len(parts) >= 2 and parts[0] == INTERFACE_NAME:
+                    session_id = parts[1]
+            if not session_id:
+                return
+
+            # Pop any active WRITING actions for this session.
+            try:
+                dq = self._active_writing_actions.get(session_id)
+            except Exception:
+                dq = None
+
+            if dq:
+                for action_id in list(dq):
+                    try:
+                        await self.action_state_manager.pop_action(action_id)
+                    except Exception:
+                        pass
+                self._active_writing_actions.pop(session_id, None)
+
+            # Only set idle if nothing higher-priority is active.
+            if self.persona_manager:
+                try:
+                    current_phase = await self.action_state_manager.get_current_phase()
+                    if current_phase == AnimationPhase.IDLE:
+                        await self.persona_manager.set_animation_state("idle", session_id=session_id)
+                except Exception as anim_exc:
+                    log_debug(f"{LOG_PREFIX} Failed to set 'idle' animation (generation_end): {anim_exc}")
+        except Exception as exc:
+            log_debug(f"{LOG_PREFIX} on_generation_end failed: {exc}")
 
     async def execute_action(self, action: dict, context: dict, bot, original_message):
         if action.get("type") == "message_synth_webui":

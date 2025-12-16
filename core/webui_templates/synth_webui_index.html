@@ -6215,14 +6215,16 @@
             blobLoader.register((parser) => new VRMLoaderPlugin(parser));
             console.log('[synth_webui] Blob loader configured');
 
-            // Animation mappings - now dynamically loaded from API
-            const animationMappings = {
-                think: [],
-                write: [],
-                talk: [],
-                idle: []
-            };
-            const animationMappingsLoaded = new Map(); // Track which skins/types have been loaded
+            // Animation mappings registry (GLOBAL, plugin/interface-extensible).
+            // Plugins/interfaces can populate this at runtime, including new states
+            // like GAMING without changing the WebUI code.
+            // Supported shapes:
+            //  - window.VRMAnimationMappings[state] = ["/skins/.../file.fbx", ...]
+            //  - window.VRMAnimationMappings[skinName][state] = ["/skins/.../file.fbx", ...]
+            window.VRMAnimationMappings = window.VRMAnimationMappings || {};
+            const animationMappings = window.VRMAnimationMappings;
+            const animationMappingsLoaded = window.__VRMAnimationMappingsLoaded || new Map(); // per-session cache
+            window.__VRMAnimationMappingsLoaded = animationMappingsLoaded;
 
             // Animation handler
             class AnimationHandler {
@@ -6315,6 +6317,20 @@
                 async getAnimationsForType(actionName) {
                     const skin = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
                     const cacheKey = `${skin}:${actionName}`;
+
+                    // 1) Prefer global registry overrides (skin-aware).
+                    try {
+                        const reg = window.VRMAnimationMappings || {};
+                        const perSkin = (reg && typeof reg[skin] === 'object' && reg[skin] !== null) ? reg[skin] : null;
+                        const list = (perSkin && Array.isArray(perSkin[actionName])) ? perSkin[actionName]
+                                     : (Array.isArray(reg[actionName]) ? reg[actionName] : null);
+                        if (Array.isArray(list)) {
+                            animationMappingsLoaded.set(cacheKey, true);
+                            return list;
+                        }
+                    } catch (e) {
+                        // ignore registry lookup errors
+                    }
                     
                     // Return cached mappings if available
                     if (animationMappingsLoaded.has(cacheKey)) {
@@ -6326,9 +6342,20 @@
                         const response = await fetch(`/api/animations/${skin}/${actionName}`);
                         if (response.ok) {
                             const data = await response.json();
-                            animationMappings[actionName] = data.animations || [];
+                            // Store in global registry (skin-aware) so plugins can read/extend.
+                            try {
+                                window.VRMAnimationMappings = window.VRMAnimationMappings || {};
+                                if (!window.VRMAnimationMappings[skin] || typeof window.VRMAnimationMappings[skin] !== 'object') {
+                                    window.VRMAnimationMappings[skin] = {};
+                                }
+                                window.VRMAnimationMappings[skin][actionName] = data.animations || [];
+                            } catch (e) {
+                                // Fallback to local mapping object
+                                animationMappings[actionName] = data.animations || [];
+                            }
                             animationMappingsLoaded.set(cacheKey, true);
-                            console.log(`[AnimationHandler] Loaded ${animationMappings[actionName].length} animations for ${actionName}:`, animationMappings[actionName]);
+                            const arr = (window.VRMAnimationMappings?.[skin]?.[actionName]) || animationMappings[actionName] || [];
+                            console.log(`[AnimationHandler] Loaded ${arr.length} animations for ${actionName}:`, arr);
                         } else {
                             console.warn(`[AnimationHandler] Failed to load animations: HTTP ${response.status}`);
                             animationMappings[actionName] = [];
@@ -6602,7 +6629,13 @@
                 // NOTE: Only preloads clips, NOT actions. Actions are created by startAction() with proper structure logic.
                 async preloadAllAnimations() {
                     try {
-                        const actionTypes = ['idle', 'think', 'talk', 'write', 'touch'];
+                        // Preload only states we know about from the global registry.
+                        // Always include 'idle' as the only guaranteed built-in.
+                        const reg = window.VRMAnimationMappings || {};
+                        const skin = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
+                        const perSkin = (reg && typeof reg[skin] === 'object' && reg[skin] !== null) ? reg[skin] : null;
+                        const keys = perSkin ? Object.keys(perSkin) : Object.keys(reg);
+                        const actionTypes = Array.from(new Set(['idle', ...keys]));
                         for (const at of actionTypes) {
                             try {
                                 const files = await this.getAnimationsForType(at);
@@ -7987,10 +8020,28 @@
 
             // Expose animation functions globally for message chain integration
             window.VRMAnimations = {
+                // Generic: allows arbitrary states (e.g. GAMING) without hardcoded additions.
+                play: (state, opts = {}) => {
+                    try {
+                        const s = String(state || '').toLowerCase();
+                        if (!s || !window.animationHandler) return;
+                        const animation = opts.animation || null;
+                        const playOnce = !!opts.playOnce;
+                        const playSection = opts.playSection || null;
+                        const descriptor = opts.descriptor || null;
+                        window.animationHandler.startAction(s, animation, playOnce, playSection, descriptor);
+                    } catch (e) {
+                        console.warn('[synth_webui] VRMAnimations.play failed:', e);
+                    }
+                },
+                // Registry accessors for plugins/interfaces.
+                getMappings: () => (window.VRMAnimationMappings || {}),
+                setMappings: (m) => { window.VRMAnimationMappings = m || {}; },
+                // Backward-compatible wrappers (kept because they existed before).
                 startThinking,
                 stopThinking,
                 startTalking,
-                stopTalking
+                stopTalking,
             };
             window.animationHandler = animationHandler;
             console.log('[synth_webui] Animation functions exposed globally via window.VRMAnimations');
