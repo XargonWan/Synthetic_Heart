@@ -53,6 +53,17 @@ Beta, but stable enough for daily use. Development branch gives access to the la
 - G.R.I.L.L.O. ("grillo"): an autonomous internal "beat" system that periodically triggers reflective prompts (memory consolidation, tag elaboration, self-reflection, curiosity, relationship checks) and can create diary entries, schedule actions, or enqueue other tasks. G.R.I.L.L.O. stands for "Generator for Reflective Inner Loop & Logical Observation" — and the word "grillo" in Italian literally means 'cricket' (see the Pinocchio reference: "grillo parlante", the talking cricket). See `plugins/grillo_plugin.py` for details; it's configurable and may be enabled or disabled.
 - Ollama-compatible HTTP bridge so existing Ollama clients can talk to Synthetic Heart
 - Docker deployment with automatic database backups
+- Mobile support
+
+<div align="center">
+   <img src="docs/res/screenshots/mobile_home.jpg" alt="SyntH Mobile Home Screenshot" style="max-width: 200px; border-radius: 8px; margin: 8px;" />
+   <img src="docs/res/screenshots/mobile_menu.jpg" alt="SyntH Mobile Menu Screenshot" style="max-width: 200px; border-radius: 8px; margin: 8px;" />
+   <img src="docs/res/screenshots/mobile_archive.jpg" alt="SyntH Mobile Chat Archive Screenshot" style="max-width: 200px; border-radius: 8px; margin: 8px;" />
+   <img src="docs/res/screenshots/mobile_config.jpg" alt="SyntH Mobile Config Screenshot" style="max-width: 200px; border-radius: 8px; margin: 8px;" />
+</div>
+<p align="center" style="font-size: 0.9em; color: #888;">
+   <em>* SyntH is fully usable on mobile devices via the WebUI.</em>
+</p>
 
 > [!NOTE]
 > **G.R.I.L.L.O. System**: SyntH personas already maintain persistent awareness and memory. The G.R.I.L.L.O. system (Generator for Reflective Inner Loop & Logical Observation) enables them to autonomously think and initiate actions based on their interests and internal motivations—much like a real person deciding to act on their own. The name "grillo" nods to the Italian "grillo parlante" (the talking cricket) from Pinocchio — the companion conscience.
