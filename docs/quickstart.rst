@@ -3,6 +3,45 @@ Quickstart
 
 .. image:: res/quickstart.png
    :alt: Quickstart screenshot
+
+Logging in to Gemini or ChatGPT via Selkies (Chromium Synth browser)
+------------------------------------------------------------------
+
+Sometimes you need the Synth instance to interact with external LLM web UIs such as
+ChatGPT or Google Gemini. If you are running the project with Selkies (the
+web-desktop), you can open the embedded XFCE desktop and launch the included
+Chromium Synth browser to log in and use those web services.
+
+Steps:
+
+1. Open the Selkies desktop in your browser. By default Selkies runs on
+   https://<host>:3000 (HTTPS) or http://<host>:3001 (HTTP) — the exact ports
+   are configurable via the environment variables `SELKIES_HTTPS_PORT` and
+   `SELKIES_HTTP_PORT` (check `docker-compose.yml` or your environment).
+
+2. From the XFCE Applications menu choose "Internet" → "Chromium SynthH" to
+   open the project browser (see the menu screenshot below).
+
+.. image:: res/selkies_chromium_menu.png
+   :alt: XFCE Applications menu showing Chromium SynthH
+   :align: center
+
+3. In the Chromium window navigate to ChatGPT (https://chat.openai.com) or
+   Gemini (https://gemini.google.com) and sign in with the account you want the
+   Synth to use. Note: many automated flows will send or generate many messages;
+   we recommend using a dedicated account for the Synth to avoid affecting any
+   personal or production accounts.
+
+4. If the provider requests multi-factor authentication or CAPTCHA, complete
+   them in the Selkies desktop as you would in a normal browser session.
+
+Security & operational notes:
+
+- Use a dedicated or disposable account for synthetic agents — they may spam
+  chat endpoints heavily.
+- Check provider terms of service before running automated agents against a
+  public LLM web UI.
+
    :width: 600px
    :align: center
 
