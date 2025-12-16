@@ -439,6 +439,19 @@
         .bubble.synth .bubble-sender {
             color: rgba(255, 255, 255, 0.9);
         }
+        .bubble.pending {
+            opacity: 0.7;
+            font-style: italic;
+            position: relative;
+        }
+        .bubble.pending::after {
+            content: '⏳';
+            position: absolute;
+            right: -1.6rem;
+            top: 0.4rem;
+            font-size: 0.9rem;
+            color: var(--text-soft);
+        }
         .typing-indicator {
             display: flex;
             gap: 0.3rem;
@@ -1490,12 +1503,17 @@
                 max-height: none !important;
                 border-radius: 0 !important;
                 transform: none !important;
-                z-index: 9999 !important;
+                /* Keep maximized chat below the header but above most UI */
+                z-index: 49999 !important;
             }
         }
         @media (min-width: 769px) {
             .hamburger {
                 display: none;
+            }
+            /* Ensure chat floats above most UI layers on desktop (below header) */
+            #chat {
+                z-index: 45000 !important;
             }
         }
     </style>
@@ -2105,61 +2123,28 @@
                 // Sub-tab switching
                 const subNavButtons = document.querySelectorAll('.sub-nav-btn[data-subtab]');
                 subNavButtons.forEach(button => {
-                    hamburgerBtn?.addEventListener('click', () => {
-                        const opened = mainNav?.classList.toggle('open');
-                        // Position the mobile nav just under the header so the close button
-                        // does not overlap the first menu item. Use header height at runtime
-                        // because padding and font sizes may vary across devices.
-                        try {
-                            if (opened && mainNav) {
-                                // On mobile, move the nav outside the header (to body) to avoid
-                                // being clipped by header's stacking context / backdrop-filter.
-                                try {
-                                    if (window.innerWidth <= 768 && mainNav.parentElement && mainNav.parentElement.tagName.toLowerCase() === 'header') {
-                                        if (!navWasMoved) {
-                                            navOriginalParent = mainNav.parentElement;
-                                            navOriginalNextSibling = mainNav.nextSibling;
-                                            document.body.appendChild(mainNav);
-                                            navWasMoved = true;
-                                        }
-                                    }
-                                } catch (e) { /* ignore */ }
+                    button.addEventListener('click', () => {
+                        const subtab = button.dataset.subtab;
 
-                                const headerEl = document.querySelector('header.top-bar');
-                                const topPx = headerEl ? `${Math.ceil(headerEl.getBoundingClientRect().bottom)}px` : '56px';
-                                mainNav.style.top = topPx;
-                                mainNav.style.bottom = '0';
-                                // When open, ensure chat and chat-toggle are visually below the menu
-                                try {
-                                    const chatEl = document.getElementById('chat');
-                                    if (chatEl) chatEl.style.zIndex = '50';
-                                    if (chatToggleBtn) chatToggleBtn.style.zIndex = '50';
-                                    // Also reduce z-index of resize handles that may float above everything
-                                    document.querySelectorAll('.chat-resize-handle').forEach(h => { h.style.zIndex = '40'; });
-                                } catch (e) { /* ignore */ }
-                            } else if (mainNav) {
-                                mainNav.style.top = '';
-                                mainNav.style.bottom = '';
-                                try {
-                                    const chatEl = document.getElementById('chat');
-                                    if (chatEl) chatEl.style.zIndex = '100';
-                                    if (chatToggleBtn) chatToggleBtn.style.zIndex = '150';
-                                    document.querySelectorAll('.chat-resize-handle').forEach(h => { h.style.zIndex = ''; });
-                                } catch (e) { /* ignore */ }
+                        // Update sub-navigation buttons
+                        subNavButtons.forEach(b => {
+                            b.classList.remove('active');
+                            b.setAttribute('aria-selected', 'false');
+                        });
+                        button.classList.add('active');
+                        button.setAttribute('aria-selected', 'true');
 
-                                // If we moved the nav out of header earlier, move it back now
-                                try {
-                                    if (navWasMoved && navOriginalParent) {
-                                        if (navOriginalNextSibling) navOriginalParent.insertBefore(mainNav, navOriginalNextSibling);
-                                        else navOriginalParent.appendChild(mainNav);
-                                        navWasMoved = false;
-                                        navOriginalParent = null;
-                                        navOriginalNextSibling = null;
-                                    }
-                                } catch (e) { /* ignore */ }
-                            }
-                        } catch (e) { /* ignore */ }
+                        // Update sub-tab panels
+                        const panels = document.querySelectorAll('.sub-tab-panel');
+                        panels.forEach(panel => panel.classList.remove('active'));
+                        const targetPanel = document.getElementById(`subtab-${subtab}`);
+                        if (targetPanel) targetPanel.classList.add('active');
+
+                        // Update state and load content
+                        historyState.currentSubTab = subtab;
+                        loadHistoryData(subtab);
                     });
+                });
                 // Event listeners for diary controls
                 document.getElementById('history-diary-search')?.addEventListener('input', debounce(() => {
                     historyState.diary.search = document.getElementById('history-diary-search').value;
@@ -2687,6 +2672,21 @@
         ];
         let emojiPickerElement = null;
         let currentEmojiTarget = null;
+
+        // Enable send button when there is text to send (even if WebSocket is offline)
+        function updateSendButtonState() {
+            try {
+                const hasText = !!(input && input.value && input.value.trim());
+                // Keep disabled when there's no text, otherwise enable (user can queue while offline)
+                sendBtn.disabled = !hasText;
+            } catch (e) { /* ignore */ }
+        }
+
+        if (input) {
+            input.addEventListener('input', updateSendButtonState);
+            // initialize state
+            updateSendButtonState();
+        }
 
         function isElementActuallyVisible(el) {
             if (!el) return false;
@@ -5306,6 +5306,12 @@
         }
 
         function addMessage(sender, text, persist = true) {
+            // persist may be an options object: handle both legacy (boolean) and new ({ pending, persist }) forms
+            let opts = {};
+            if (persist && typeof persist === 'object') {
+                opts = persist;
+                persist = opts.persist !== undefined ? opts.persist : true;
+            }
             const container = document.createElement('div');
             container.className = 'message-container ' + (sender === 'synth' ? 'synth' : 'user');
             
@@ -5319,6 +5325,9 @@
             const bubble = document.createElement('div');
             bubble.className = 'bubble ' + (sender === 'synth' ? 'synth' : 'user');
             bubble.textContent = text;
+            if (opts.pending) {
+                bubble.classList.add('pending');
+            }
             container.appendChild(bubble);
             
             // Avoid inserting duplicate consecutive messages (same sender + identical text)
@@ -5402,6 +5411,8 @@
                 sendBtn.disabled = false;
                 setStatusMessage('Connection established.', 'success');
                 refreshStats(true);
+                // Flush any queued messages persisted while offline
+                try { flushOutbox(); } catch (e) { console.debug('[synth_webui] flushOutbox error:', e); }
             });
 
             ws.addEventListener('message', (event) => {
@@ -5523,13 +5534,10 @@
                     currentDisplayedPhase = incomingPhase;
                     currentDisplayedActionId = incomingActionId;
 
-                    if (animationHandler) {
-                        console.log('[synth_webui] ✅ Setting animation state to:', animationState, 'from phase:', incomingPhase, 'action_id:', incomingActionId);
-                        animationHandler.startAction(animationState);
-                    } else {
-                        console.log('[synth_webui] Animation handler not ready, queueing action_state command:', animationState);
-                        pendingAnimationCommands.push({ state: animationState, phase: incomingPhase, action_id: incomingActionId });
-                    }
+                    // IMPORTANT: Do not start animations from action_state.
+                    // Animation playback is driven ONLY by backend `type=animation` commands
+                    // to avoid duplicate starts and blended/hybrid states.
+                    console.log('[synth_webui] Updated displayed phase to:', incomingPhase, 'action_id:', incomingActionId, '(animationState:', animationState, ')');
                     return;
                 }
                 if (data.type === 'animation') {
@@ -5542,13 +5550,12 @@
                     
                     if (animationHandler && data.state) {
                         console.log('[synth_webui] Calling animationHandler.startAction with:', data.state, data.animation, data.loop, data.descriptor, data.play_section);
-                        // Extract filename from animation URL (e.g., "animations/Idle2.fbx" -> "Idle2.fbx")
-                        const animationFile = data.animation ? data.animation.split('/').pop() : null;
-                        console.log('[synth_webui] Extracted animationFile:', animationFile);
+                        // Pass full URL/path through; loader can handle both filename and URL.
+                        const animationFileOrUrl = data.animation || null;
                         // Determine playOnce from descriptor or loop flag
                         const playOnce = (data.descriptor && data.descriptor.play_once) || (data.loop === false);
                         // If play_section is specified (intro, loop, or outro), pass it through
-                        animationHandler.startAction(data.state, animationFile, !!playOnce, data.play_section);
+                        animationHandler.startAction(data.state, animationFileOrUrl, !!playOnce, data.play_section, data.descriptor || null);
                     } else if (data.state) {
                         // Queue the command if animation handler is not ready yet
                         console.log('[synth_webui] Animation handler not ready, queueing command:', data.state);
@@ -5571,7 +5578,9 @@
                 if (data.type === 'message_ack') {
                     // Message acknowledgement - show thinking animation
                     console.log('[synth_webui] Received message ACK, showing thinking indicator');
-                    showTypingIndicator();
+                    try {
+                        if (typeof showTypingIndicator === 'function') showTypingIndicator();
+                    } catch (e) {}
                     // The actual response will arrive as a 'message' type later
                     return;
                 }
@@ -5589,7 +5598,9 @@
                 statusLabel.textContent = 'Disconnected';
                 statusIndicator?.classList.remove('online');
                 setStatusMessage('Connection lost. Reconnecting…', 'warn');
-                sendBtn.disabled = true;
+                // Allow send button to remain enabled when user has typed text so messages
+                // can be queued locally while the client reconnects.
+                updateSendButtonState();
                 removeTypingIndicator(); // Remove typing indicator on disconnect
                 setTimeout(connect, 1500);
             });
@@ -5616,28 +5627,70 @@
                 for (const cmd of commands) {
                     console.log('[synth_webui] Executing pending animation (from vrmLoaded):', cmd.state, cmd.animation);
                     if (cmd.state && animationHandler) {
-                            const animationFile = cmd.animation ? cmd.animation.split('/').pop() : null;
+                            const animationFileOrUrl = cmd.animation || null;
                             const playOnce = (cmd.descriptor && cmd.descriptor.play_once) || (cmd.loop === false);
-                            animationHandler.startAction(cmd.state, animationFile, !!playOnce);
+                            animationHandler.startAction(cmd.state, animationFileOrUrl, !!playOnce, cmd.play_section || null, cmd.descriptor || null);
                     }
                 }
             }
         });
 
+        const CHAT_OUTBOX_KEY = 'synth-webui-chat-outbox';
+
+        function loadOutbox() {
+            try { const raw = localStorage.getItem(CHAT_OUTBOX_KEY); return raw ? JSON.parse(raw) : []; } catch (e) { return []; }
+        }
+
+        function saveOutbox(outbox) {
+            try { localStorage.setItem(CHAT_OUTBOX_KEY, JSON.stringify(outbox)); } catch (e) { /* ignore */ }
+        }
+
+        async function flushOutbox() {
+            const outbox = loadOutbox();
+            if (!outbox || outbox.length === 0) return;
+            console.log('[synth_webui] Flushing outbox messages:', outbox.length);
+            while (outbox.length > 0) {
+                const msg = outbox.shift();
+                try {
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ text: msg }));
+                        console.log('[synth_webui] Flushed outbox message:', msg);
+                    } else {
+                        outbox.unshift(msg);
+                        break;
+                    }
+                } catch (e) {
+                    console.error('[synth_webui] Failed to flush message:', e);
+                    outbox.unshift(msg);
+                    break;
+                }
+            }
+            saveOutbox(outbox);
+        }
+
         function sendMessage() {
             const text = input.value.trim();
-            if (!text || !ws || ws.readyState !== WebSocket.OPEN) {
-                console.log('[synth_webui] Cannot send message - text:', !!text, 'ws readyState:', ws?.readyState);
+            if (!text) {
+                console.log('[synth_webui] Cannot send message - empty text');
                 return;
             }
-            
+
             // Save current chat state before sending message (in case of page refresh)
-            try {
-                saveChatState();
-            } catch (error) {
-                console.error('[synth_webui] Failed to save chat state before sending:', error);
+            try { saveChatState(); } catch (error) { console.error('[synth_webui] Failed to save chat state before sending:', error); }
+
+            // If WebSocket is not open, queue the message locally
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                console.log('[synth_webui] WebSocket offline - queueing message');
+                const outbox = loadOutbox();
+                outbox.push(text);
+                saveOutbox(outbox);
+                addMessage('user', text, { pending: true });
+                input.value = '';
+                showToast('Message queued - will be sent when connection is restored', false);
+                updateSendButtonState();
+                return;
             }
-            
+
             addMessage('user', text);
             // Show typing indicator after a short delay to simulate processing start
             setTimeout(() => {
@@ -5650,6 +5703,7 @@
             console.log('[synth_webui] Sending message via WebSocket:', text);
             ws.send(JSON.stringify({ text }));
             input.value = '';
+            updateSendButtonState();
         }
 
         sendBtn.addEventListener('click', () => {
@@ -6032,13 +6086,20 @@
                         return this.loadedAnimations[animationFile];
                     }
                     try {
-                        // Build path with action type subdirectory: /skins/{skin}/animations/{actionType}/{file}
-                        const skinName = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
-                        const encodedFile = encodeURIComponent(animationFile);
-                        const animPath = `/skins/${skinName}/animations/${actionName}/${encodedFile}`;
+                        // Accept either a plain filename (resolved under /skins/<skin>/animations/<state>/)
+                        // or a full URL/path provided by the backend.
+                        let animPath = null;
+                        if (typeof animationFile === 'string' && (animationFile.includes('/') || animationFile.startsWith('http'))) {
+                            animPath = animationFile;
+                        } else {
+                            // Build path with action type subdirectory: /skins/{skin}/animations/{actionType}/{file}
+                            const skinName = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
+                            const encodedFile = encodeURIComponent(animationFile);
+                            animPath = `/skins/${skinName}/animations/${actionName}/${encodedFile}`;
+                        }
                         console.log(`[AnimationHandler] Calling loadMixamoAnimation for ${animPath}`);
                         console.log(`[AnimationHandler] loadMixamoAnimation function exists:`, typeof loadMixamoAnimation);
-                        // Load animation from skin-specific subdirectory
+                        // Load animation
                         const clip = await loadMixamoAnimation(animPath, this.vrm);
                         console.log(`[AnimationHandler] loadMixamoAnimation returned clip:`, !!clip);
                         if (clip) {
@@ -6055,10 +6116,17 @@
                 async loadDescriptor(actionName, animationFile) {
                     console.log(`[AnimationHandler] loadDescriptor called for ${actionName}/${animationFile}`);
                     try {
-                        // Build path to descriptor file: /skins/{skin}/animations/{actionType}/{file}.json
-                        const skinName = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
-                        const encodedFile = encodeURIComponent(animationFile + '.json');
-                        const descriptorPath = `/skins/${skinName}/animations/${actionName}/${encodedFile}`;
+                        // Accept either filename (resolved under /skins/<skin>/animations/<state>/)
+                        // or full URL/path (descriptor expected at `<anim>.json`).
+                        let descriptorPath = null;
+                        if (typeof animationFile === 'string' && (animationFile.includes('/') || animationFile.startsWith('http'))) {
+                            descriptorPath = `${animationFile}.json`;
+                        } else {
+                            // Build path to descriptor file: /skins/{skin}/animations/{actionType}/{file}.json
+                            const skinName = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
+                            const encodedFile = encodeURIComponent(animationFile + '.json');
+                            descriptorPath = `/skins/${skinName}/animations/${actionName}/${encodedFile}`;
+                        }
                         console.log(`[AnimationHandler] Fetching descriptor from ${descriptorPath}`);
                         
                         const response = await fetch(descriptorPath);
@@ -6217,6 +6285,14 @@
                     const action = this.mixer.clipAction(clip);
                     action.setLoop(THREE.LoopRepeat);
                     action.clampWhenFinished = false;
+                    // Ensure the underlying clip has a useful name (selectedFile may be null)
+                    try {
+                        const clipName = selectedFile || (clip && clip.name) || `${actionName}`;
+                        const c = action.getClip ? action.getClip() : clip;
+                        if (c && c.name !== clipName) {
+                            try { c.name = clipName; } catch (e) { /* ignore */ }
+                        }
+                    } catch (e) { /* ignore */ }
                     const storageKey = selectedFile ? `${actionName}:${selectedFile}` : actionName;
                     this.actions[storageKey] = action;
                     console.log(`[AnimationHandler] Stored simple action with key: ${storageKey}`);
@@ -6258,7 +6334,7 @@
                     }
                 }
 
-                async startAction(actionName, animationFile = null, playOnce = false, playSection = null) {
+                async startAction(actionName, animationFile = null, playOnce = false, playSection = null, descriptorOverride = null) {
                     console.log(`[AnimationHandler] startAction called with actionName: ${actionName}, animationFile: ${animationFile}, playOnce: ${playOnce}, playSection: ${playSection}`);
                     console.log(`[AnimationHandler] this.mixer exists:`, !!this.mixer);
                     console.log(`[AnimationHandler] this.vrm exists:`, !!this.vrm);
@@ -6279,7 +6355,7 @@
                                 // Load descriptor to check for structured animation (intro/loop/outro)
                                 let descriptor = null;
                                 try {
-                                    descriptor = await this.loadDescriptor(actionName, animationFile);
+                                    descriptor = descriptorOverride || await this.loadDescriptor(actionName, animationFile);
                                     console.log(`[AnimationHandler] Loaded descriptor for ${animationFile}:`, descriptor);
                                 } catch (err) {
                                     console.debug(`[AnimationHandler] Could not load descriptor for ${animationFile}`);
@@ -6814,7 +6890,20 @@
                     // Stop current action
                     if (this.currentAction && this.currentAction !== action) {
                         console.log(`[AnimationHandler] Fading out current action`);
-                        this.currentAction.fadeOut(0.5);
+                        const prevAction = this.currentAction;
+                        const fadeMs = 500;
+                        try { prevAction.fadeOut(fadeMs / 1000); } catch (e) { /* ignore */ }
+                        // After the fade completes, fully stop and disable the previous action
+                        setTimeout(() => {
+                            try {
+                                if (prevAction && typeof prevAction.stop === 'function') {
+                                    try { prevAction.stop(); } catch (e) { /* ignore */ }
+                                }
+                                // Also ensure action is disabled so it doesn't contribute to transforms
+                                try { prevAction.enabled = false; } catch (e) {}
+                                console.log('[AnimationHandler] Previous action stopped and disabled after fade');
+                            } catch (err) { console.warn('[AnimationHandler] Error stopping previous action after fade:', err); }
+                        }, fadeMs + 50);
                     }
 
                     // Start new action (single clip)
@@ -7286,8 +7375,9 @@
                         for (const cmd of commands) {
                             console.log('[synth_webui] Executing pending animation command:', cmd.state, cmd.animation);
                             if (cmd.state && animationHandler) {
-                                const animationFile = cmd.animation ? cmd.animation.split('/').pop() : null;
-                                animationHandler.startAction(cmd.state, animationFile);
+                                const animationFileOrUrl = cmd.animation || null;
+                                const playOnce = (cmd.descriptor && cmd.descriptor.play_once) || (cmd.loop === false);
+                                animationHandler.startAction(cmd.state, animationFileOrUrl, !!playOnce, cmd.play_section || null, cmd.descriptor || null);
                             }
                         }
                     }
@@ -7477,12 +7567,8 @@
                         currentDisplayedPhase = incomingPhase;
                         currentDisplayedActionId = incomingActionId;
 
-                        if (animationHandler) {
-                            console.log('[synth_webui] Starting queued animation state:', animationState);
-                            animationHandler.startAction(animationState);
-                        } else {
-                            pendingAnimationCommands.push({ state: animationState, phase: incomingPhase, action_id: incomingActionId });
-                        }
+                        // IMPORTANT: action_state does not start animations; it's informational/UI only.
+                        console.log('[synth_webui] Applied queued action_state after outro (no playback):', incomingPhase, incomingActionId, animationState);
 
                         // Clear pending
                         window.__synth_pending_action_state = null;

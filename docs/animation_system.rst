@@ -214,21 +214,18 @@ Adding New Animations
 
 Backend
 -------
+1. Place your FBX file(s) under the active skin's ``animations/<state>/`` folder, e.g.
 
-1. Add the FBX file to ``res/synth_webui/animations/``
-2. Update the ``ANIMATION_MAP`` in ``core/animation_handler.py``:
+    skins/Rei/animations/think/Thinking.fbx
 
-.. code-block:: python
+2. Optionally add a JSON descriptor alongside an FBX file named ``<animation>.fbx.json``
+    to describe ``intro``, ``loop`` and ``outro`` frame ranges or a ``play_once`` flag.
 
-    ANIMATION_MAP: Dict[AnimationState, List[str]] = {
-        AnimationState.THINK: ["Thinking.fbx"],
-        AnimationState.WRITE: ["Texting While Standing.fbx", "Texting.fbx"],
-        AnimationState.TALK: ["talking.fbx"],
-        AnimationState.IDLE: ["Idle.fbx", "Idle2.fbx", "Happy Idle.fbx"],
-        AnimationState.CUSTOM: ["CustomAnimation.fbx"],  # New animation
-    }
+3. The backend will dynamically discover available animations. Plugins may also:
 
-3. Add the new state to the ``AnimationState`` enum if needed
+    - Register override lists via ``register_state_animations(state, animations, sequential=False)``
+    - Register aliases via ``register_state_aliases({})``
+    - Add search paths via ``set_animation_search_paths([...])``
 
 Frontend
 --------

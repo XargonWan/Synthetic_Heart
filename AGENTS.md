@@ -53,6 +53,17 @@ If a plugin is missing:
 - Should forward incoming data into the chain and dispatch core outputs.
 - Register supported actions via `get_supported_actions()`.
 
+### Animation handler notes
+
+- The core exposes an `AnimationHandler` in `core/animation_handler.py` which provides dynamic animation discovery and lifecycle control.
+- New plugin-friendly APIs:
+  - `register_state_animations(state: str, animations: Dict[str, List[str]], sequential=False)` to override or register state animations
+  - `register_state_aliases(aliases: Dict[str, List[str]])` to declare alias names for canonical states
+  - `set_animation_search_paths(paths: List[Path])` to add custom search paths
+  - `get_animation_variants(state: str)` which returns categorized variants (`loop`, `post`, `other`) discovered from descriptors
+
+Plugins and interfaces should call `AnimationHandler.play_animation()` and `stop_animation()` using logical state names (e.g., 'think', 'write') rather than raw file paths. See `skins/Rei/animations/README.md` for examples and descriptor format.
+
 ---
 
 ## Testing

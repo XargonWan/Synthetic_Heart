@@ -258,9 +258,9 @@ class SynthWebUIInterface:
         from core.animation_handler import get_animation_handler
         self.animation_handler = get_animation_handler()
         self.animation_handler.set_webui(self)
-        # Register callback to broadcast animation state changes to all WebSocket clients
-        self.animation_handler.register_animation_state_changed_callback(self._broadcast_animation_state)
-        log_info(f"{LOG_PREFIX} Animation handler initialized with WebSocket broadcast", log_file=WEBUI_LOG)
+        # AnimationHandler already sends websocket animation commands via set_webui(); avoid
+        # double-sending by not also broadcasting from a callback.
+        log_info(f"{LOG_PREFIX} Animation handler initialized (single websocket sender)", log_file=WEBUI_LOG)
         
         # Initialize global action state manager
         self.action_state_manager = get_action_state_manager()

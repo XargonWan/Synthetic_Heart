@@ -58,10 +58,6 @@ For more information, see the [Animation System Documentation](../../docs/animat
 - **Purpose**: Contemplative thinking animation
 - **Duration**: Looping
 - **Use Case**: Played when processing incoming messages
-- **Source**: Mixamo animation library
-- **Bones**: Full humanoid rig with emphasis on head/upper body
-
-### Response Generation Animations
 
 #### Texting While Standing.fbx
 - **Purpose**: Standing typing animation
@@ -71,7 +67,6 @@ For more information, see the [Animation System Documentation](../../docs/animat
 - **Bones**: Full humanoid rig with emphasis on arms/hands
 
 #### Texting.fbx
-- **Purpose**: Seated/casual typing animation
 - **Duration**: Looping
 - **Use Case**: Randomly selected when generating responses
 - **Source**: Mixamo animation library
@@ -81,7 +76,10 @@ For more information, see the [Animation System Documentation](../../docs/animat
 
 #### talking.fbx
 - **Purpose**: Speaking animation
-- **Duration**: Looping
+`animations/<state>/` folder for the active skin; the `AnimationHandler` will discover them
+automatically. You can also register overrides or aliases from plugins using the public
+APIs `register_state_animations`, `register_state_aliases` and add custom search paths via
+`set_animation_search_paths` in `core/animation_handler.py`.
 - **Use Case**: Played when the AI vocalizes or speaks
 - **Source**: Mixamo animation library
 - **Bones**: Full humanoid rig with emphasis on head/chest movement
@@ -123,16 +121,11 @@ cp your_animation.fbx res/synth_webui/animations/
 
 ### 3. Update Backend Mapping
 
-Edit `core/animation_handler.py` and update the `ANIMATION_MAP`:
-
-```python
-ANIMATION_MAP: Dict[AnimationState, List[str]] = {
-    AnimationState.THINK: ["Thinking.fbx"],
-    AnimationState.WRITE: ["Texting While Standing.fbx", "Texting.fbx"],
-    AnimationState.TALK: ["talking.fbx"],
-    AnimationState.IDLE: ["Idle.fbx", "Idle2.fbx", "Happy Idle.fbx", "your_animation.fbx"],  # Add here
-}
-```
+Simply drop your `.fbx` files (and optional `.fbx.json` descriptors) into the appropriate
+`animations/<state>/` folder for the active skin; the `AnimationHandler` will discover them
+automatically. You can also register overrides or aliases from plugins using the public
+APIs `register_state_animations`, `register_state_aliases` and add custom search paths via
+`set_animation_search_paths` in `core/animation_handler.py`.
 
 To add a completely new state, update the `AnimationState` enum:
 

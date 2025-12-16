@@ -125,7 +125,11 @@ export function loadMixamoAnimation( url, vrm ) {
 			} );
 
 			console.log(`[loadMixamoAnimation] Converted ${tracks.length} tracks for VRM animation (processed: ${processedBones}, skipped: ${skippedBones})`);
-			const vrmAnimClip = new THREE.AnimationClip( 'vrmAnimation', clip.duration, tracks );
+			// Use a meaningful clip name derived from the source file to avoid multiple
+			// clips all being named 'vrmAnimation' which confuses mixer finished events.
+			const srcName = (new URL(url, window.location.href).pathname.split('/').pop() || 'vrmAnimation');
+			const safeName = decodeURIComponent(srcName);
+			const vrmAnimClip = new THREE.AnimationClip( safeName, clip.duration, tracks );
 			const msg = `[loadMixamoAnimation] ✓ Created VRM clip: ${vrmAnimClip.tracks.length} tracks, ${vrmAnimClip.duration.toFixed(2)}s`;
 			console.log(msg);
 			if (window.SynthWebUISetStatus) window.SynthWebUISetStatus(msg);

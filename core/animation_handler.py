@@ -64,6 +64,9 @@ class AnimationHandler:
     ANIMATIONS_BASE_PATH = "animations"
     # Skins directory (contains skins like Rei)
     SKINS_DIR = Path(__file__).resolve().parent.parent / "skins"
+    # Default animations dir (Rei fallback)
+    SKIN_DEFAULT_ANIMATIONS_DIR = SKINS_DIR / "Rei" / "animations"
+
 
     def __init__(self, webui: Optional[SynthWebUIInterface] = None):
         """Initialize the animation handler.
@@ -89,6 +92,12 @@ class AnimationHandler:
         self._current_animation_file: Optional[str] = None  # Actual file being played
         self._current_animation_descriptor: Optional[Dict] = None  # Descriptor with frame info
         self._animation_state_changed_callbacks: List[callable] = []  # Callbacks when animation changes
+        # Plugin/override state animations: state_name -> {'loop': [...], 'post': [...], 'other': [...]}
+        self._registered_state_animations: Dict[str, Dict[str, List[str]]] = {}
+        # State aliases map (normalized state -> list of alias names)
+        self._state_aliases: Dict[str, List[str]] = {}
+        # Additional search paths to consider (ordered)
+        self._search_paths: List[Path] = []
         
     def set_webui(self, webui: SynthWebUIInterface) -> None:
         """Set or update the WebUI reference.
@@ -195,6 +204,137 @@ class AnimationHandler:
                 unique_animations.append(anim)
         
         return unique_animations
+
+    def set_animation_search_paths(self, paths: List[Path]) -> None:
+        """Set additional search paths (ordered) to resolve animation files.
+
+        These are checked after the active persona skin and before the Rei fallback.
+        """
+        self._search_paths = list(paths)
+        log_debug(f"[AnimationHandler] Animation search paths set: {self._search_paths}")
+
+    def register_state_animations(self, state: str, animations: Dict[str, List[str]], sequential: bool = False) -> None:
+        """Register override animations for a logical state.
+
+        animations should be a dict with optional keys: 'loop', 'post', 'other'.
+        """
+        key = state.lower()
+        self._registered_state_animations[key] = animations
+        if sequential:
+            self._sequential_states.add(key)
+        log_debug(f"[AnimationHandler] Registered override animations for state {key}: {animations}")
+
+    def register_state_aliases(self, aliases: Dict[str, List[str]]) -> None:
+        """Register alias names for canonical states (e.g. THINK -> ['thinking','ponder'])."""
+        for k, v in aliases.items():
+            self._state_aliases[k.lower()] = [a.lower() for a in v]
+        log_debug(f"[AnimationHandler] Registered state aliases: {self._state_aliases}")
+
+    def _build_search_paths_for_state(self, state_name: str) -> List[Path]:
+        """Return ordered list of paths to search for animations for a state."""
+        paths: List[Path] = []
+        # Active persona path
+        try:
+            from core.persona_manager import get_persona_manager
+            pm = get_persona_manager()
+            active_persona_folder = None
+            if pm and hasattr(pm, '_current_persona') and pm._current_persona:
+                active_persona_folder = getattr(pm._current_persona, 'id', None) or getattr(pm._current_persona, 'name', None)
+        except Exception:
+            active_persona_folder = None
+
+        if active_persona_folder:
+            persona_state_dir = self.SKINS_DIR / str(active_persona_folder) / 'animations' / state_name
+            paths.append(persona_state_dir)
+
+        # Additional configured search paths (state subfolder)
+        for p in self._search_paths:
+            candidate = Path(p) / state_name
+            paths.append(candidate)
+
+        # Rei fallback
+        paths.append(self.SKIN_DEFAULT_ANIMATIONS_DIR / state_name)
+
+        # Also include root animations folders (no state subfolder) as fallback
+        if active_persona_folder:
+            paths.append(self.SKINS_DIR / str(active_persona_folder) / 'animations')
+        paths.append(self.SKIN_DEFAULT_ANIMATIONS_DIR)
+
+        return paths
+
+    def get_animation_variants(self, state: str) -> Dict[str, List[str]]:
+        """Discover animation variants for a given state.
+
+        Returns a dict with keys 'loop', 'post', 'other' containing file names (not full paths).
+        Resolution order: registered overrides -> exact file match -> state folder contents -> aliases -> Rei fallback
+        """
+        key = state.lower()
+        variants = {"loop": [], "post": [], "other": []}
+
+        # 1) Registered overrides
+        if key in self._registered_state_animations:
+            reg = self._registered_state_animations[key]
+            for cat in ("loop", "post", "other"):
+                vals = reg.get(cat, [])
+                if vals:
+                    variants[cat].extend(vals)
+            # If any registered overrides exist return them (highest priority)
+            return variants
+
+        # 2) Try exact file match <state>.fbx (case-insensitive) across search paths
+        search_paths = self._build_search_paths_for_state(key)
+        found_any = False
+        for sp in search_paths:
+            try:
+                if not sp.exists() or not sp.is_dir():
+                    continue
+                # direct file
+                candidate = sp / (f"{key}.fbx")
+                if candidate.exists() and candidate.is_file():
+                    found_any = True
+                    _, desc = self._resolve_animation_descriptor_for_state(candidate.name, key)
+                    structure = self._analyze_animation_structure(desc, candidate.name)
+                    if structure["has_outro"] or (desc and desc.get("play_once")):
+                        variants["post"].append(candidate.name)
+                    elif structure["has_loop"]:
+                        variants["loop"].append(candidate.name)
+                    else:
+                        variants["loop"].append(candidate.name)
+                    # stop searching direct match
+                    break
+                # folder case: list all .fbx inside
+                if sp.is_dir():
+                    for f in sp.glob('*.fbx'):
+                        found_any = True
+                        _, desc = self._resolve_animation_descriptor_for_state(f.name, key)
+                        structure = self._analyze_animation_structure(desc, f.name)
+                        if structure["has_outro"] or (desc and desc.get("play_once")):
+                            variants["post"].append(f.name)
+                        elif structure["has_loop"]:
+                            variants["loop"].append(f.name)
+                        else:
+                            variants["loop"].append(f.name)
+            except Exception:
+                continue
+
+        # 3) Aliases
+        if not found_any and key in self._state_aliases:
+            for alias in self._state_aliases[key]:
+                alias_variants = self.get_animation_variants(alias)
+                for cat in variants:
+                    variants[cat].extend(alias_variants.get(cat, []))
+
+        # 4) Ensure uniqueness while preserving order
+        for cat in variants:
+            seen = set()
+            unique = []
+            for a in variants[cat]:
+                if a not in seen:
+                    seen.add(a)
+                    unique.append(a)
+            variants[cat] = unique
+
+        return variants
 
     def _resolve_animation_descriptor(self, animation_file: str):
         """Resolve animation file path and optional JSON descriptor.
@@ -495,7 +635,9 @@ class AnimationHandler:
 
             
             # Select animation file
-            animations = self.get_animations_for_state(state)
+            # Prefer variants discovered via descriptors and overrides
+            variants = self.get_animation_variants(state.value)
+            animations = variants.get("loop", []) or variants.get("post", []) or variants.get("other", [])
             if not animations:
                 # Fallback to idle if no animations found for this state
                 animations = self.get_animations_for_state(AnimationState.IDLE)
