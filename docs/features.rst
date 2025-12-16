@@ -47,6 +47,24 @@ Multi-Platform Integration
 **Cross-Platform Messaging**
     Send messages across different platforms using unified chat identifiers.
 
+Progressive Web App (PWA) Mode (Experimental)
+---------------------------------------------
+
+**Status**: In development — may not be fully functional. Use with caution in production environments.
+
+The Web UI can be installed as a Progressive Web App (PWA) on supported browsers to provide an app-like experience (fullscreen, home-screen install, and basic offline caching). A service worker is included (see ``res/synth_webui/static/service-worker.js``) and the Web UI templates register the service worker and handle the ``beforeinstallprompt`` event to show an install button.
+
+Known limitations include partial offline behavior (real-time features are limited while offline), varying support for push notifications and background sync across browsers, and occasional install prompt availability depending on the client environment.
+
+See ``docs/chat_history.rst`` for how session persistence and archives interact with the Web UI when using PWA mode.
+
+Web UI Chat Archiving
+---------------------
+
+The Web UI supports archiving and restoring entire conversations for the single persistent session. Archives are filesystem-backed JSON snapshots stored under ``backups/chat_archives/`` and exposed via the Web UI API. Basic operations (archive, list, restore, delete) are available and documented in :doc:`chat_history`.
+
+This archiving mechanism is intended for the Web UI MVP; production deployments may prefer database-backed archives or additional metadata storage.
+
 Avatar System
 -------------
 
