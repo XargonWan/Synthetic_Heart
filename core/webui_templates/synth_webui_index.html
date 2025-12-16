@@ -262,10 +262,13 @@
             height: 100%;
             min-height: calc(100vh - 120px);
             padding: clamp(1rem, 2vw, 2rem);
+            box-sizing: border-box;
         }
         .tab-panel.active {
             display: flex;
             flex-direction: column;
+            flex: 1;
+            min-height: 0;
         }
         /* Home tab should not have padding as it contains full-screen VRM viewer */
         #tab-home {
@@ -595,6 +598,7 @@
             box-shadow: 0 24px 45px -42px rgba(0, 0, 0, 0.85);
             flex: 1;
             min-height: 0;
+            max-height: 100%;
             display: flex;
             flex-direction: column;
             gap: 1rem;
@@ -2684,6 +2688,47 @@
         let emojiPickerElement = null;
         let currentEmojiTarget = null;
 
+        function isElementActuallyVisible(el) {
+            if (!el) return false;
+            try {
+                const style = window.getComputedStyle(el);
+                if (!style) return false;
+                if (style.display === 'none' || style.visibility === 'hidden') return false;
+                const rect = el.getBoundingClientRect();
+                return !!(rect && rect.height > 0 && rect.width > 0);
+            } catch (e) {
+                return false;
+            }
+        }
+
+        function isLogAutoscrollEnabled() {
+            const autoScrollEl = document.getElementById('logs-autoscroll');
+            return autoScrollEl ? !!autoScrollEl.checked : true;
+        }
+
+        function scheduleLogScrollToBottom(reason = '') {
+            if (!logOutput) return;
+            if (!isLogAutoscrollEnabled()) return;
+            const logsPanel = document.getElementById('tab-logs');
+            let tries = 0;
+            const maxTries = 10;
+            const attempt = () => {
+                tries += 1;
+                if (logsPanel && !logsPanel.classList.contains('active')) return;
+                if (!isElementActuallyVisible(logOutput) || logOutput.scrollHeight <= 1) {
+                    if (tries < maxTries) requestAnimationFrame(attempt);
+                    return;
+                }
+                try {
+                    logOutput.scrollTop = logOutput.scrollHeight;
+                } catch (e) {
+                    console.debug('[synth_webui] Error during scheduled log auto-scroll:', e, 'reason=', reason);
+                }
+            };
+            // Defer until after the tab becomes visible and the browser paints.
+            requestAnimationFrame(() => requestAnimationFrame(attempt));
+        }
+
         function setStatusMessage(message, tone = 'info') {
             if (!connectionEl) return;
             connectionEl.textContent = message;
@@ -3125,6 +3170,7 @@
                 // tail of the logs when switching to the tab.
                 try {
                     renderLog();
+                    scheduleLogScrollToBottom('tab-activation');
                 } catch (e) { console.debug('[synth_webui] Error while rendering logs on tab activation:', e); }
                 openLogStream();
             } else {
@@ -3175,11 +3221,7 @@
         function renderLog() {
             if (!logOutput) return;
             
-            // Check if auto-scroll is enabled. Read the checkbox dynamically in
-            // case the element was replaced or the checkbox was not available
-            // when the script first ran (robustness against dynamic DOM changes).
-            const autoScrollEl = document.getElementById('logs-autoscroll');
-            const autoScrollEnabled = autoScrollEl ? autoScrollEl.checked : true;
+            const autoScrollEnabled = isLogAutoscrollEnabled();
             const searchLower = logSearchTerm.toLowerCase();
             
             // Clear the log output
@@ -3226,12 +3268,7 @@
                 try {
                     if (logScrollTimeout) clearTimeout(logScrollTimeout);
                     logScrollTimeout = setTimeout(() => {
-                        try {
-                            logOutput.scrollTop = logOutput.scrollHeight;
-                            console.debug('[synth_webui] Auto-scrolled to bottom. scrollTop=', logOutput.scrollTop, 'scrollHeight=', logOutput.scrollHeight);
-                        } catch (e) {
-                            console.debug('[synth_webui] Error during auto-scroll:', e);
-                        }
+                        scheduleLogScrollToBottom('renderLog');
                     }, 50);
                 } catch (e) {
                     console.error('[synth_webui] Unexpected error in renderLog auto-scroll:', e);
@@ -3267,12 +3304,7 @@
                     try {
                         if (logScrollTimeout) clearTimeout(logScrollTimeout);
                         logScrollTimeout = setTimeout(() => {
-                            try {
-                                logOutput.scrollTop = logOutput.scrollHeight;
-                                console.debug('[synth_webui] Auto-scroll enabled - scrolled to bottom');
-                            } catch (e) {
-                                console.debug('[synth_webui] Error scrolling to bottom on auto-scroll enable:', e);
-                            }
+                            scheduleLogScrollToBottom('autoscroll-enabled');
                         }, 50);
                     } catch (e) {
                         console.debug('[synth_webui] Error while enabling auto-scroll:', e);
@@ -3293,35 +3325,16 @@
             if (logsSocket && (logsSocket.readyState === WebSocket.OPEN || logsSocket.readyState === WebSocket.CONNECTING)) {
                 return;
             }
-            
-            // Immediately scroll to bottom without animation when opening logs tab
-            // but only if auto-scroll is enabled. This ensures the user's
-            // preference is respected when opening the logs tab.
-            try {
-                const autoScrollEl = document.getElementById('logs-autoscroll');
-                const autoScrollEnabled = autoScrollEl ? autoScrollEl.checked : true;
-                if (autoScrollEnabled && logOutput.scrollHeight > 0) {
-                    logOutput.scrollTop = logOutput.scrollHeight;
-                }
-            } catch (e) {
-                console.debug('[synth_webui] Error while handling initial log scroll:', e);
-            }
+
+            // Ensure we land on the tail once the tab becomes visible.
+            scheduleLogScrollToBottom('openLogStream');
             
             const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
             appendLog('--- connecting to log stream ---');
             logsSocket = new WebSocket(`${protocol}://${window.location.host}/logs`);
             logsSocket.addEventListener('open', () => {
                 appendLog('--- log stream connected ---');
-                // Scroll to bottom again after connection if auto-scroll is enabled
-                try {
-                    const autoScrollEl = document.getElementById('logs-autoscroll');
-                    const autoScrollEnabled = autoScrollEl ? autoScrollEl.checked : true;
-                    if (autoScrollEnabled && logOutput) {
-                        logOutput.scrollTop = logOutput.scrollHeight;
-                    }
-                } catch (e) {
-                    console.debug('[synth_webui] Error while scrolling after logs socket open:', e);
-                }
+                scheduleLogScrollToBottom('logs-socket-open');
             });
             logsSocket.addEventListener('message', (event) => {
                 appendLog(event.data);
