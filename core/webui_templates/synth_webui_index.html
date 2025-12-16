@@ -6235,6 +6235,7 @@
                     this.currentActionPhase = null; // track 'intro', 'loop', or 'outro'
                     this.currentStructuredAction = null; // reference to the structured action object
                     this.loadedAnimations = {};
+                    this.loadedDescriptors = {}; // cache descriptor JSON (including null for 404)
                     this._playOnceTimers = {}; // safety timers for play-once actions
                     this._globalMixerFinishBound = false; // ensure we bind a single finished handler
                     this._mixerEventBound = false; // ensure structured action mixer event is bound once
@@ -6317,15 +6318,21 @@
                             const encodedFile = encodeURIComponent(animationFile + '.json');
                             descriptorPath = `/skins/${skinName}/animations/${actionName}/${encodedFile}`;
                         }
+                        // Cache descriptors (including null when missing) to avoid repeated 404 fetches.
+                        if (descriptorPath && Object.prototype.hasOwnProperty.call(this.loadedDescriptors, descriptorPath)) {
+                            return this.loadedDescriptors[descriptorPath];
+                        }
+
                         console.log(`[AnimationHandler] Fetching descriptor from ${descriptorPath}`);
-                        
                         const response = await fetch(descriptorPath);
                         if (!response.ok) {
-                            console.log(`[AnimationHandler] Descriptor not found for ${animationFile}`);
+                            // Missing descriptor is valid: treat as simple looping animation until state changes.
+                            this.loadedDescriptors[descriptorPath] = null;
                             return null;
                         }
-                        
+
                         const descriptor = await response.json();
+                        this.loadedDescriptors[descriptorPath] = descriptor;
                         console.log(`[AnimationHandler] Loaded descriptor for ${animationFile}:`, descriptor);
                         return descriptor;
                     } catch (error) {
