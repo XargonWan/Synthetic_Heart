@@ -1,0 +1,42 @@
+# Caddy listens on its container port 443. Host port mapping is configured in docker-compose.
+:443 {
+    # Use internal TLS for development by default (change to `tls you@example.com` for production)
+    tls internal
+
+    # Also write a local debug log so we can inspect it from the host
+    log {
+        output file /data/caddy_debug.log
+        level DEBUG
+    }
+
+    # Health check
+    handle_path /health* {
+        respond "ok"
+    }
+
+    # Route Webtop under /webtop (strip prefix so the webtop app can serve from root)
+    handle_path /webtop* {
+        uri strip_prefix /webtop
+        reverse_proxy http://synth-dev:3000 {
+            header_up Host {host}
+            header_up X-Forwarded-For {remote}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # Expose internal CLI at /cli so we don't need to publish the raw port
+    handle_path /cli* {
+        uri strip_prefix /cli
+        reverse_proxy http://synth-dev:5555 {
+            header_up Host {host}
+            header_up X-Forwarded-For {remote}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # Default: proxy to the SyntH WebUI (SYNTH_WEBUI_PORT must be set in .env-dev)
+    handle {
+        # Proxy to the internal WebUI; use host/port from env
+        reverse_proxy synth-dev:{env.SYNTH_WEBUI_PORT}
+    }
+}

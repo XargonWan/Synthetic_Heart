@@ -180,3 +180,7 @@ The documentation must be written in English and in ReadTheDocs format.
 * No direct, hardcoded coupling between the core and any specific plugin/interface/engine.
 * Validation rules are auto-discovered from `get_supported_actions()` methods.
 * Every time you edit a python file use `python3 -m py_compile` against it. If you edited more than one please check them in a single command to save time and user interaction.
+
+### Reverse proxy (Caddy)
+
+We provide an optional local **Caddy** reverse proxy configuration for development. It performs TLS termination (using `tls internal` by default), path-based routing and WebSocket passthrough. The `caddy` service routes `/webtop` to the Selkies webtop (synth-dev:3000) and `/` to the SyntH WebUI (`synth-dev:${SYNTH_WEBUI_PORT}`). See `caddy/Caddyfile` and `docs/caddy.rst` for details.
