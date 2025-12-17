@@ -89,7 +89,8 @@ class SynthWebUIInterface:
         self.autostart = True
         self.host = os.getenv('SYNTH_WEBUI_HOST', '0.0.0.0')
         try:
-            self.port = int(os.getenv('SYNTH_WEBUI_PORT', os.getenv('PORT', '8080')))
+            # Prefer new env var name SYNTH_WEBUI_HTTP_PORT, fallback to legacy SYNTH_WEBUI_PORT
+            self.port = int(os.getenv('SYNTH_WEBUI_HTTP_PORT', os.getenv('SYNTH_WEBUI_PORT', os.getenv('PORT', '8080'))))
         except Exception:
             self.port = 8080
         self.log_level = os.getenv('SYNTH_WEBUI_LOG_LEVEL', 'info')
@@ -252,6 +253,7 @@ class SynthWebUIInterface:
         self.app.get("/api/history/chat")(self.history_chat)
         self.app.get("/api/selkies")(self.get_selkies_config)
         self.app.get("/api/animations/{skin}/{animation_type}")(self.get_animations_for_type)
+        self.app.get("/api/animation_state")(self.get_animation_state)
         self.app.get("/api/locations")(self.get_suggested_locations)
 
         # Template sections route for modular loading
@@ -264,6 +266,8 @@ class SynthWebUIInterface:
         from core.animation_handler import get_animation_handler
         self.animation_handler = get_animation_handler()
         self.animation_handler.set_webui(self)
+        # Register a broadcast summary endpoint to help clients sync state
+        log_info(f"{LOG_PREFIX} Animation handler initialized (single websocket sender)", log_file=WEBUI_LOG)
         # AnimationHandler already sends websocket animation commands via set_webui(); avoid
         # double-sending by not also broadcasting from a callback.
         log_info(f"{LOG_PREFIX} Animation handler initialized (single websocket sender)", log_file=WEBUI_LOG)
@@ -604,6 +608,18 @@ class SynthWebUIInterface:
                     }
                     await websocket.send_json(message)
                     log_debug(f"{LOG_PREFIX} Sent current animation state to new session {session_id}: {current_anim_state['state']}")
+                    # Also send a lightweight 'animation_state' summary so clients can
+                    # deduce the current state without needing a full animation command.
+                    try:
+                        state_msg = {
+                            "type": "animation_state",
+                            "state": current_anim_state["state"],
+                            "animation": resolved_path,
+                            "descriptor": current_anim_state["descriptor"]
+                        }
+                        await websocket.send_json(state_msg)
+                    except Exception:
+                        pass
         except Exception as anim_exc:
             log_warning(f"{LOG_PREFIX} Failed to send animation state to new session {session_id}: {anim_exc}")
         
@@ -823,6 +839,35 @@ class SynthWebUIInterface:
                 log_debug(f"{LOG_PREFIX} ✓ Sent animation state to session {session_id}: {state.value}")
             except Exception as exc:
                 log_warning(f"{LOG_PREFIX} Failed to broadcast animation state to session {session_id}: {exc}")
+
+    async def _broadcast_animation_state_summary(self, state: AnimationState, animation_file: str, descriptor: Optional[Dict[str, Any]]) -> None:
+        """Broadcast a lightweight animation state summary to all connected clients.
+
+        This is intended for clients that want to observe the canonical animation
+        state without treating it as an authoritative playback command.
+        """
+        try:
+            resolved_path, _ = (None, None)
+            if self.animation_handler:
+                try:
+                    resolved_path, _ = self.animation_handler._resolve_animation_descriptor(animation_file)
+                except Exception:
+                    resolved_path = f"/{self.animation_handler.ANIMATIONS_BASE_PATH}/{animation_file}"
+
+            payload = {
+                "type": "animation_state",
+                "state": state.value,
+                "animation": resolved_path,
+                "descriptor": descriptor
+            }
+
+            for sid, websocket in list(self.connections.items()):
+                try:
+                    await websocket.send_json(payload)
+                except Exception as exc:
+                    log_warning(f"{LOG_PREFIX} Failed to send animation_state to {sid}: {exc}")
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} _broadcast_animation_state_summary failed: {exc}")
 
     async def _handle_user_message(self, session_id: str, text: str) -> None:
         from types import SimpleNamespace

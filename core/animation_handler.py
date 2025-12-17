@@ -107,6 +107,18 @@ class AnimationHandler:
         """
         self.webui = webui
         log_debug("[AnimationHandler] WebUI reference set")
+        # Register a lightweight summary callback so the WebUI can broadcast
+        # the canonical animation state to all connected clients whenever it
+        # changes. This is different from the full 'animation' command (which
+        # includes playback instruction) and allows multiple clients to observe
+        # the central state even if they missed the immediate play command.
+        try:
+            cb = getattr(webui, '_broadcast_animation_state_summary', None)
+            if cb and cb not in self._animation_state_changed_callbacks:
+                self.register_animation_state_changed_callback(cb)
+                log_debug("[AnimationHandler] Registered WebUI animation state summary callback")
+        except Exception:
+            pass
 
     def register_animation_state_changed_callback(self, callback: callable) -> None:
         """Register a callback to be called when animation state changes.

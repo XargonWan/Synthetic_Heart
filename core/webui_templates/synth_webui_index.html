@@ -5738,6 +5738,9 @@
                     console.log('[synth_webui] data.animation:', data.animation);
                     console.log('[synth_webui] data.play_section:', data.play_section);
                     
+                    // Keep a global, read-only view of the current centralized animation
+                    window.__synth_current_animation_state = { state: data.state, animation: data.animation, descriptor: data.descriptor || null };
+
                     if (animationHandler && data.state) {
                         console.log('[synth_webui] Calling animationHandler.startAction with:', data.state, data.animation, data.loop, data.descriptor, data.play_section);
                         // Pass full URL/path through; loader can handle both filename and URL.
@@ -5746,6 +5749,8 @@
                         const playOnce = (data.descriptor && data.descriptor.play_once) || (data.loop === false);
                         // If play_section is specified (intro, loop, or outro), pass it through
                         animationHandler.startAction(data.state, animationFileOrUrl, !!playOnce, data.play_section, data.descriptor || null);
+                        // Ensure displayed phase reflects this authoritative change
+                        currentDisplayedPhase = data.state && data.state.toUpperCase ? data.state.toUpperCase() : currentDisplayedPhase;
                     } else if (data.state) {
                         // Queue the command if animation handler is not ready yet
                         console.log('[synth_webui] Animation handler not ready, queueing command:', data.state);
@@ -5763,6 +5768,28 @@
                     } else {
                         console.warn('[synth_webui] Animation handler not ready or missing state:', animationHandler, data.state);
                     }
+                    return;
+                }
+                if (data.type === 'animation_state') {
+                    // Lightweight summary of current central animation state
+                    try {
+                        window.__synth_current_animation_state = { state: data.state, animation: data.animation, descriptor: data.descriptor || null };
+                        // If we are not currently displaying that phase, ask the animation handler
+                        const desiredPhase = data.state ? data.state.toLowerCase() : null;
+                        if (animationHandler && desiredPhase) {
+                            // If currentDisplayedPhase is different or no current action, start the corresponding action
+                            if (!currentDisplayedPhase || currentDisplayedPhase.toLowerCase() !== desiredPhase) {
+                                try {
+                                    // Use provided animation path if available
+                                    const anim = data.animation || null;
+                                    animationHandler.startAction(desiredPhase, anim, true, null, data.descriptor || null);
+                                    currentDisplayedPhase = desiredPhase.toUpperCase();
+                                } catch (e) {
+                                    console.warn('[synth_webui] Failed to apply central animation state via animation_handler:', e);
+                                }
+                            }
+                        }
+                    } catch (e) { /* ignore malformed state */ }
                     return;
                 }
                 if (data.type === 'message_ack') {
@@ -6590,11 +6617,16 @@
                             // Store with file-specific key if we know the file
                             const storageKey = selectedFile ? `${actionName}:${selectedFile}` : actionName;
                             this.actions[storageKey] = structuredAction;
-                            // ALSO store with generic action name key so startAction('idle') finds it on next call
+                            // Avoid caching a play_once-only idle as the GENERIC 'idle' key: that would cause
+                            // the UI to reuse the play_once animation as the default and potentially loop it.
                             if (selectedFile && actionName !== 'think') {
-                                // For idle/talk/etc with specific file, also cache the generic key
-                                this.actions[actionName] = structuredAction;
-                                console.log(`[AnimationHandler] Stored structured action with keys: ${storageKey} AND ${actionName}, playOnceOnly: ${structuredAction._playOnceOnly}`);
+                                if (actionName === 'idle' && structuredAction._playOnceOnly) {
+                                    console.log(`[AnimationHandler] Not caching playOnce-only idle as generic '${actionName}': ${storageKey}`);
+                                } else {
+                                    // For idle/talk/etc with specific file, also cache the generic key
+                                    this.actions[actionName] = structuredAction;
+                                    console.log(`[AnimationHandler] Stored structured action with keys: ${storageKey} AND ${actionName}, playOnceOnly: ${structuredAction._playOnceOnly}`);
+                                }
                             } else {
                                 console.log(`[AnimationHandler] Stored structured action with key: ${storageKey}, playOnceOnly: ${structuredAction._playOnceOnly}`);
                             }
@@ -7095,10 +7127,31 @@
                             }
                         }
 
-                        // Fade out current action if different
+                        // Cross-fade: start the new structured intro/loop first, then fade out the previous action
+                        // This prevents a momentary gap where no action is active (T-pose) while loading/preparing clips.
+                        let prevStructuredActionToStop = null;
                         if (this.currentAction && this.currentAction !== structured.loop && this.currentAction !== structured.intro) {
-                            console.log(`[AnimationHandler] Fading out current action`);
-                            this._safeFadeStop(this.currentAction, 0.25);
+                            prevStructuredActionToStop = this.currentAction;
+                        }
+                        
+                        // Start the intro immediately, then gently fade out any previous action to avoid T-pose gaps.
+                        try {
+                            structured.intro.reset().fadeIn(0.15).play();
+                            this.currentAction = structured.intro;
+                            this.currentActionName = actionName;
+                            this.currentActionPhase = 'intro';
+                            this.currentStructuredAction = structured;
+                            console.log(`[AnimationHandler] Structured action started (intro playing)`);
+                        } catch (e) {
+                            console.warn('[AnimationHandler] Failed to start structured intro immediately:', e);
+                        }
+
+                        // If there was a previous action to stop, fade it out after new action started
+                        if (prevStructuredActionToStop) {
+                            try {
+                                // Shortly delay to ensure the intro has applied transforms
+                                setTimeout(() => { try { this._safeFadeStop(prevStructuredActionToStop, 0.25); } catch (e) { /* ignore */ } }, 20);
+                            } catch (e) { /* ignore */ }
                         }
 
                         // Ensure we have a mixer finished handler to move intro -> loop and outro -> cleanup
@@ -7125,42 +7178,54 @@
                                             if (candidate._playOnceOnly) {
                                                 // No loop section - go directly to outro
                                                 console.log(`[AnimationHandler] intro finished for play_once animation ${key} -> starting outro`);
-                                                candidate.outro.reset().fadeIn(0.1).play();
-                                                this.currentAction = candidate.outro;
-                                                this.currentActionPhase = 'outro';
-                                            } else if (candidate.loop) {
-                                                // Has loop section - transition to loop
-                                                console.log(`[AnimationHandler] intro finished for ${key} -> starting loop`);
+                                                    if (playSection === 'intro') {
+                                                        console.log(`[AnimationHandler] Playing only intro section for ${actionName}`);
+                                                        // Start intro first, then fade out previous action to avoid T-pose
+                                                        try {
+                                                            structured.intro.setLoop(THREE.LoopOnce, 0);
+                                                            structured.intro.clampWhenFinished = true;
+                                                            structured.intro.reset().fadeIn(0.15).play();
+                                                            const prev = this.currentAction;
+                                                            this.currentAction = structured.intro;
+                                                            this.currentActionName = actionName;
+                                                            this.currentActionPhase = 'intro';
+                                                            this.currentStructuredAction = structured;
+                                                            if (prev && prev !== structured.intro) setTimeout(() => { try { this._safeFadeStop(prev, 0.25); } catch (e) {} }, 20);
+                                                        } catch (e) { /* ignore */ }
+                                                        return;
                                                 // Ensure loop is set to LoopRepeat BOTH on clip and action
                                                 const loopClip = candidate.loop.getClip();
                                                 if (loopClip) loopClip.loop = THREE.LoopRepeat;
                                                 candidate.loop.setLoop(THREE.LoopRepeat);
                                                 candidate.loop.clampWhenFinished = false;
                                                 candidate.loop.reset();
-                                                // Protect against corrupted local time (NaN) — ensure starting time is valid
-                                                try {
-                                                    if (!Number.isFinite(candidate.loop.time)) {
-                                                        console.warn(`[AnimationHandler] 🚑 loop action time invalid (${candidate.loop.time}) — resetting to 0`);
-                                                        candidate.loop.time = 0;
-                                                    }
-                                                } catch (e) {
-                                                    console.warn('[AnimationHandler] Failed to validate loop action time:', e);
-                                                }
-                                                // Make sure it's enabled and unpaused before playing
-                                                try {
+                                                        // Start loop first, then fade out previous action to avoid T-pose
+                                                        try {
+                                                            const prev = this.currentAction;
+                                                            structured.loop.setLoop(THREE.LoopRepeat);
+                                                            structured.loop.clampWhenFinished = false;
+                                                            structured.loop.reset().fadeIn(0.15).play();
+                                                            this.currentAction = structured.loop;
+                                                            this.currentActionName = actionName;
+                                                            this.currentActionPhase = 'loop';
+                                                            this.currentStructuredAction = structured;
+                                                            if (prev && prev !== structured.loop) setTimeout(() => { try { this._safeFadeStop(prev, 0.25); } catch (e) {} }, 20);
+                                                        } catch (e) { /* ignore */ }
+                                                        return;
                                                     candidate.loop.enabled = true;
                                                     candidate.loop.paused = false;
-                                                } catch (e) {
-                                                    /* ignore */
-                                                }
-                                                candidate.loop.fadeIn(0.2).play();
-                                                // When we start the loop, log expected vs actual and ensure frames match
-                                                const loopClipMeta = candidate.loop.getClip()?._meta?.loopFrames;
-                                                if (loopClipMeta) {
-                                                    const expectedDuration = (loopClipMeta.endFrame - loopClipMeta.startFrame) / loopClipMeta.fps;
-                                                    const actualDuration = candidate.loop.getClip().duration || 0;
-                                                    console.log(`[AnimationHandler] ▶ Loop metadata: start=${loopClipMeta.startFrame}, end=${loopClipMeta.endFrame}, fps=${loopClipMeta.fps}, expectedDuration=${expectedDuration.toFixed(3)}s, actualClipDuration=${actualDuration.toFixed(3)}s`);
-                                                    if (Math.abs(expectedDuration - actualDuration) > 0.05) {
+                                                        try {
+                                                            const prev = this.currentAction;
+                                                            structured.outro.setLoop(THREE.LoopOnce, 0);
+                                                            structured.outro.clampWhenFinished = false;
+                                                            structured.outro.reset().fadeIn(0.15).play();
+                                                            this.currentAction = structured.outro;
+                                                            this.currentActionName = actionName;
+                                                            this.currentActionPhase = 'outro';
+                                                            this.currentStructuredAction = structured;
+                                                            if (prev && prev !== structured.outro) setTimeout(() => { try { this._safeFadeStop(prev, 0.05); } catch (e) {} }, 20);
+                                                        } catch (e) { /* ignore */ }
+                                                        return;
                                                         console.warn(`[AnimationHandler] ⚠️ Loop duration mismatch for ${key}: expected ${expectedDuration.toFixed(3)}s != actual ${actualDuration.toFixed(3)}s`);
                                                     }
                                                 }
@@ -7373,26 +7438,8 @@
                         console.warn('[AnimationHandler] Failed to bind global mixer finished handler:', err);
                     }
 
-                    // Stop current action
-                    if (this.currentAction && this.currentAction !== action) {
-                        console.log(`[AnimationHandler] Fading out current action`);
-                        const prevAction = this.currentAction;
-                        const fadeMs = 500;
-                        try { prevAction.fadeOut(fadeMs / 1000); } catch (e) { /* ignore */ }
-                        // After the fade completes, fully stop and disable the previous action
-                        setTimeout(() => {
-                            try {
-                                if (prevAction && typeof prevAction.stop === 'function') {
-                                    try { prevAction.stop(); } catch (e) { /* ignore */ }
-                                }
-                                // Also ensure action is disabled so it doesn't contribute to transforms
-                                try { prevAction.enabled = false; } catch (e) {}
-                                console.log('[AnimationHandler] Previous action stopped and disabled after fade');
-                            } catch (err) { console.warn('[AnimationHandler] Error stopping previous action after fade:', err); }
-                        }, fadeMs + 50);
-                    }
-
-                    // Start new action (single clip)
+                    // Start new action (single clip) and cross-fade previous action after ensuring
+                    // the new action is playing to avoid a momentary T-pose gap.
                     console.log(`[AnimationHandler] Starting new action for ${actionName} (playOnce=${playOnce})`);
                     try {
                         if (playOnce) {
@@ -7403,9 +7450,43 @@
                     } catch (err) {
                         console.warn('[AnimationHandler] Failed to set action playOnce:', err);
                     }
-                    action.reset().fadeIn(0.5).play();
-                    this.currentAction = action;
-                    console.log(`[AnimationHandler] Action started successfully`);
+
+                    // If a previous action exists, start the new action first (fade in) then fade out the previous.
+                    if (this.currentAction && this.currentAction !== action) {
+                        const prevAction = this.currentAction;
+                        try {
+                            action.enabled = true;
+                            action.reset().fadeIn(0.5).play();
+                            this.currentAction = action;
+                            console.log(`[AnimationHandler] New action started (cross-fade in)`);
+                        } catch (e) {
+                            console.warn('[AnimationHandler] Failed to start new action for cross-fade:', e);
+                            // Fallback: start normally
+                            try { action.reset().fadeIn(0.5).play(); this.currentAction = action; } catch (ee) { /* ignore */ }
+                        }
+
+                        // Fade out previous action shortly after new action started to ensure transforms are applied
+                        const fadeMs = 500;
+                        try { prevAction.fadeOut(fadeMs / 1000); } catch (e) { /* ignore */ }
+                        setTimeout(() => {
+                            try {
+                                if (prevAction && typeof prevAction.stop === 'function') {
+                                    try { prevAction.stop(); } catch (e) { /* ignore */ }
+                                }
+                                try { prevAction.enabled = false; } catch (e) {}
+                                console.log('[AnimationHandler] Previous action stopped and disabled after fade');
+                            } catch (err) { console.warn('[AnimationHandler] Error stopping previous action after fade:', err); }
+                        }, fadeMs + 60);
+                    } else {
+                        // No previous action, start normally
+                        try {
+                            action.reset().fadeIn(0.5).play();
+                            this.currentAction = action;
+                            console.log(`[AnimationHandler] Action started successfully`);
+                        } catch (e) {
+                            console.warn('[AnimationHandler] Failed to start action:', e);
+                        }
+                    }
 
                     // Safety fallback: if playOnce requested, schedule a timer to
                     // advance to next animation after the clip duration + buffer

@@ -218,6 +218,27 @@ async def test_get_current_state(animation_handler, mock_webui):
 async def test_get_current_animation(animation_handler, mock_webui):
     """Test getting current animation file."""
     assert animation_handler.get_current_animation() is None
+
+
+@pytest.mark.asyncio
+async def test_state_summary_callback_registered_and_called():
+    """Ensure that when a WebUI with a summary callback is set, it is registered
+    and called when the animation state changes."""
+    handler = AnimationHandler()
+    # Create a mock webui with an async summary callback
+    class FakeWebUI:
+        def __init__(self):
+            self.connections = {}
+            self._called = False
+        async def _broadcast_animation_state_summary(self, state, animation_file, descriptor):
+            self._called = True
+
+    fake = FakeWebUI()
+    handler.set_webui(fake)
+
+    # Trigger an animation change
+    await handler.play_animation(AnimationState.THINK, session_id=None, loop=True, context_id='ctx')
+    assert fake._called is True
     
     session_id = "test_session"
     mock_ws = AsyncMock()
