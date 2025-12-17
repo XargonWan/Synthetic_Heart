@@ -253,7 +253,34 @@ class SynthWebUIInterface:
         self.app.get("/api/history/chat")(self.history_chat)
         self.app.get("/api/selkies")(self.get_selkies_config)
         self.app.get("/api/animations/{skin}/{animation_type}")(self.get_animations_for_type)
-        self.app.get("/api/animation_state")(self.get_animation_state)
+        # Provide an internal endpoint implementation that doesn't rely on a
+        # bound `get_animation_state` method at init time. This avoids
+        # AttributeError in environments with dynamic reloads.
+        async def _animation_state_endpoint(request: Request = None):
+            try:
+                if not getattr(self, 'animation_handler', None):
+                    return JSONResponse({"state": "idle", "animation": None, "descriptor": None})
+
+                current = self.animation_handler.get_current_animation_state()
+                animation_file = current.get("animation_file")
+                resolved = None
+                if animation_file:
+                    try:
+                        resolved, _ = self.animation_handler._resolve_animation_descriptor(animation_file)
+                    except Exception:
+                        resolved = animation_file
+
+                payload = {
+                    "state": current.get("state"),
+                    "animation": resolved,
+                    "descriptor": current.get("descriptor"),
+                }
+                return JSONResponse(payload)
+            except Exception as exc:
+                log_error(f"{LOG_PREFIX} animation_state endpoint failed: {exc}")
+                raise HTTPException(status_code=500, detail=f"Failed to retrieve animation state: {exc}") from exc
+
+        self.app.get("/api/animation_state")(_animation_state_endpoint)
         self.app.get("/api/locations")(self.get_suggested_locations)
 
         # Template sections route for modular loading
@@ -868,6 +895,35 @@ class SynthWebUIInterface:
                     log_warning(f"{LOG_PREFIX} Failed to send animation_state to {sid}: {exc}")
         except Exception as exc:
             log_warning(f"{LOG_PREFIX} _broadcast_animation_state_summary failed: {exc}")
+
+    async def get_animation_state(self):
+        """HTTP endpoint that returns a lightweight animation state summary.
+
+        This endpoint is used by clients to query the current canonical
+        animation state (state name, resolved animation path and descriptor).
+        """
+        try:
+            if not self.animation_handler:
+                return JSONResponse({"state": "idle", "animation": None, "descriptor": None})
+
+            current = self.animation_handler.get_current_animation_state()
+            animation_file = current.get("animation_file")
+            resolved = None
+            if animation_file:
+                try:
+                    resolved, _ = self.animation_handler._resolve_animation_descriptor(animation_file)
+                except Exception:
+                    resolved = animation_file
+
+            payload = {
+                "state": current.get("state"),
+                "animation": resolved,
+                "descriptor": current.get("descriptor"),
+            }
+            return JSONResponse(payload)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} get_animation_state failed: {exc}")
+            raise HTTPException(status_code=500, detail=f"Failed to retrieve animation state: {exc}") from exc
 
     async def _handle_user_message(self, session_id: str, text: str) -> None:
         from types import SimpleNamespace
