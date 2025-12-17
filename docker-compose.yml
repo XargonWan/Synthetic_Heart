@@ -9,8 +9,7 @@ services:
     ports:
       - "${SELKIES_HTTPS_PORT:-3000}:3000"
       - "${SELKIES_HTTP_PORT:-3001}:3001"
-      - "${CLI_SERVER_PORT:-5555}:5555"
-      - "${SYNTH_WEBUI_PORT:-8000}:${SYNTH_WEBUI_PORT:-8000}"
+      # CLI and WebUI will be proxied by Caddy; do not expose these directly on the host
       - "${OLLAMA_PORT:-11434}:11434"
     volumes:
       - synth_data:/config
@@ -37,6 +36,24 @@ services:
     tty: true
     depends_on:
       - synth-db
+    networks:
+      - synth_network
+
+  caddy:
+    image: caddy:2
+    container_name: synth-caddy
+    env_file:
+      - .env
+    ports:
+      # Expose only the configured high port to avoid colliding with host's 80/443
+      - "${SYNTH_WEBUI_PORT:-9009}:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - synth
+    restart: unless-stopped
     networks:
       - synth_network
 
@@ -90,6 +107,8 @@ services:
 volumes:
   synth_db_data:
   synth_data:
+  caddy_data:
+  caddy_config:
 
 networks:
   synth_network:
