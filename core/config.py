@@ -176,13 +176,31 @@ async def switch_active_llm(name: str, use_hot_swap: bool = True):
             from core.plugin_instance import load_plugin
             await load_plugin(name)
             log_info(f"[config] ✅ LLM hot-swapped to {name}")
+            # Notify trainer about successful change
+            try:
+                from core.notifier import notify_trainer
+                notify_trainer(f"✅ LLM mode dynamically updated to `{name}`.")
+            except Exception as e:  # pragma: no cover - best-effort notify
+                log_warning(f"[config] Failed to notify trainer about LLM change: {e}")
         else:
             # Full reinitialization
             from core.core_initializer import core_initializer
             await core_initializer.initialize_all()
             log_info(f"[config] ✅ LLM switched to {name} (full reinitialization)")
+            # Notify trainer about successful change
+            try:
+                from core.notifier import notify_trainer
+                notify_trainer(f"✅ LLM mode dynamically updated to `{name}`.")
+            except Exception as e:  # pragma: no cover - best-effort notify
+                log_warning(f"[config] Failed to notify trainer about LLM change: {e}")
     except Exception as e:
         log_error(f"[config] ❌ Failed to switch LLM to {name}: {e}")
+        # Notify trainer about failure
+        try:
+            from core.notifier import notify_trainer
+            notify_trainer(f"❌ Failed to switch LLM to `{name}`: {e}")
+        except Exception:
+            pass
         raise
 
 _log_chat_id: int | None = None  # cached log chat ID

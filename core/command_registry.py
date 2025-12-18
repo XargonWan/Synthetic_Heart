@@ -201,12 +201,9 @@ async def llm_command(*args) -> str:
         return f"❌ LLM `{choice}` not found."
 
     try:
-        await set_active_llm(choice)
-        
-        # Reload system with new LLM
-        from core.core_initializer import core_initializer
-        # Note: This should be handled by the interface that needs notification
-        await core_initializer.initialize_all()
+        # Use centralized switching helper to ensure consistent behavior and notifications
+        from core.config import switch_active_llm
+        await switch_active_llm(choice, use_hot_swap=False)
         
         return f"✅ LLM mode dynamically updated to `{choice}`."
     except Exception as e:
