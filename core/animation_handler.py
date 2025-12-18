@@ -119,6 +119,18 @@ class AnimationHandler:
                 log_debug("[AnimationHandler] Registered WebUI animation state summary callback")
         except Exception:
             pass
+        # Also register the authoritative broadcast callback so that when the
+        # centralized animation state changes we explicitly push an
+        # 'animation' command to all connected WebUI clients. This helps
+        # ensure clients that treat the lightweight 'animation_state' as
+        # informational will still receive a playback command to apply.
+        try:
+            cb2 = getattr(webui, '_broadcast_animation_state', None)
+            if cb2 and cb2 not in self._animation_state_changed_callbacks:
+                self.register_animation_state_changed_callback(cb2)
+                log_debug("[AnimationHandler] Registered WebUI authoritative animation broadcast callback")
+        except Exception:
+            pass
 
     def register_animation_state_changed_callback(self, callback: callable) -> None:
         """Register a callback to be called when animation state changes.
@@ -1008,6 +1020,7 @@ class AnimationHandler:
             session_id: The WebUI session ID
             context_id: Optional context identifier
         """
+        log_debug(f"[AnimationHandler] play_animation called: state={state}, session_id={session_id}, loop={loop}, context_id={context_id}, priority={priority}")
         await self.play_animation(
             state=state,
             session_id=session_id,

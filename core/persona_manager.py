@@ -1474,15 +1474,43 @@ Please resend your message with ONLY valid emotions from the list above."""
             log_warning("[persona_manager] No current persona loaded")
             return False
 
-        # Update persona state
-        self._current_persona.current_animation = animation_state
-        await self.save_persona(self._current_persona)
+        # Normalize/alias animation state (interfaces may provide synonyms like
+        # 'thinking' or 'writing'). Keep canonical values for storage/validation.
+        raw_state = animation_state
+        try:
+            normalized = (animation_state or "").strip().lower()
+        except Exception:
+            normalized = ""
+
+        aliases = {
+            # canonical -> aliases
+            "idle": {"idle"},
+            "think": {"think", "thinking"},
+            "write": {"write", "writing", "typing"},
+            "talk": {"talk", "speak", "speaking"},
+        }
+
+        canonical_state = None
+        for canonical, names in aliases.items():
+            if normalized in names:
+                canonical_state = canonical
+                break
+
+        if canonical_state:
+            animation_state = canonical_state
+        else:
+            animation_state = normalized or (raw_state or "")
 
         try:
+            log_info(f"[persona_manager] set_animation_state called: state={animation_state}, session_id={session_id}, context_id={context_id}")
             animation_enum = AnimationState(animation_state)
         except ValueError:
             log_error(f"[persona_manager] Invalid animation state: {animation_state}")
             return False
+
+        # Update persona state (store canonical) only after validation
+        self._current_persona.current_animation = animation_state
+        await self.save_persona(self._current_persona)
 
         handler = self._animation_handler or get_animation_handler()
         if not self._animation_handler and handler:
@@ -1492,6 +1520,7 @@ Please resend your message with ONLY valid emotions from the list above."""
         if handler:
             try:
                 animation_files = handler.get_animations_for_state(animation_enum)
+                log_debug(f"[persona_manager] Found candidate animation files for state {animation_state}: {animation_files}")
             except Exception as exc:
                 log_warning(f"[persona_manager] Failed to list animations for {animation_state}: {exc}")
             if not animation_files:
@@ -1503,8 +1532,9 @@ Please resend your message with ONLY valid emotions from the list above."""
         available_count = len(animation_files)
 
         if not session_id:
-            log_debug(f"[persona_manager] Animation state set to {animation_state} (no session)")
-            return True
+            # No specific WebUI session provided: treat this as a broadcast request
+            log_debug(f"[persona_manager] Animation state set to {animation_state} (no session) - broadcasting to all connected WebUI clients")
+            # continue and let handler.play_animation be called with session_id=None to broadcast
 
         if not handler:
             log_warning("[persona_manager] Animation handler unavailable; cannot send animation command")

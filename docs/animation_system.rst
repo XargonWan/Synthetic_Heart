@@ -247,8 +247,27 @@ Integration with Interfaces
 ============================
 
 While the WebUI interface automatically manages animations for message handling,
-other interfaces (Telegram, Discord, Matrix) can also trigger animations by
-accessing the animation handler if needed.
+other interfaces (Telegram, Discord, Matrix) can integrate with the animation system.
+
+Preferred integration pattern
+-----------------------------
+
+Interfaces should generally **not** broadcast animation states directly on message receipt.
+The core message queue is the fallback owner of the lifecycle:
+
+- Message accepted/enqueued → THINK
+- Generation start → WRITE (or TALK)
+- Generation end → IDLE
+
+If an interface needs a different mapping (e.g. TTS prefers TALK instead of WRITE), it
+should pass override hints through the message context (or implement the optional
+interface hooks used by the queue) rather than bypassing the core chain.
+
+Direct control (advanced)
+------------------------
+
+If an interface explicitly opts out of the core queue animation broadcast (and takes
+full responsibility for animation state), it may call the animation handler directly.
 
 Example for an interface that wants to show the avatar is "thinking":
 

@@ -7,6 +7,14 @@ async def send_content(bot, chat_id, message, content_type, reply_to_message_id=
     log_debug(f"Sending content: {content_type}, reply_message_id={reply_to_message_id}")
 
     try:
+        # Let clients know we're about to write/send a response so they can show 'write' animation
+        try:
+            from core.persona_manager import get_persona_manager
+            pm = get_persona_manager()
+            if pm:
+                await pm.set_animation_state("write", session_id=None)
+        except Exception:
+            pass
         if content_type == "audio":
             try:
                 log_debug("Sending audio...")
@@ -102,6 +110,15 @@ async def send_content(bot, chat_id, message, content_type, reply_to_message_id=
         else:
             log_error(f"Unhandled content type: {content_type}")
             return False, "\u274c Unsupported content type."
+
+        # After sending, return to idle animation
+        try:
+            from core.persona_manager import get_persona_manager
+            pm = get_persona_manager()
+            if pm:
+                await pm.set_animation_state("idle", session_id=None)
+        except Exception:
+            pass
 
         return True, "\u2705 Content sent successfully."
 

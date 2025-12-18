@@ -186,6 +186,74 @@ async def enqueue(bot, message, context_memory=None, priority: bool = False, int
 
     log_debug(f"[QUEUE] Rate limit check passed - continuing to enqueue message")
 
+    async def _broadcast_global_animation_state(state: str) -> None:
+        """Best-effort global animation state update (broadcast to all WebUI clients).
+
+        Interfaces can disable this by setting `core_animation_broadcast=False` in the
+        context dict passed to enqueue.
+        """
+        try:
+            context_obj = context_memory
+            if isinstance(context_obj, dict) and context_obj.get("core_animation_broadcast") is False:
+                return
+        except Exception:
+            pass
+
+        try:
+            from core.persona_manager import get_persona_manager
+
+            pm = get_persona_manager()
+            if pm:
+                await pm.set_animation_state(state, session_id=None)
+        except Exception as anim_exc:
+            log_debug(f"[QUEUE] Failed to broadcast animation state '{state}': {anim_exc}")
+
+    def _resolve_message_animation_state(event: str) -> str:
+        """Resolve animation state for message lifecycle events.
+
+        Currently used for `event='received'` (default: 'think').
+        Override priority:
+        1) context keys: `message_animation_state_received` / `animation_state_on_message_received`
+        2) interface duck-typed method: `get_animation_state_for_message_event(...)`
+        3) default
+        """
+        default_state = "think" if event == "received" else "think"
+
+        context_obj = context_memory
+        if isinstance(context_obj, dict):
+            if event == "received":
+                for k in ("message_animation_state_received", "animation_state_on_message_received"):
+                    v = context_obj.get(k)
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
+
+        iface = None
+        try:
+            iface = INTERFACE_REGISTRY.get(interface_id) if interface_id else None
+        except Exception:
+            iface = None
+
+        try:
+            if iface is not None:
+                fn = getattr(iface, "get_animation_state_for_message_event", None)
+                if callable(fn):
+                    v = fn(
+                        event=event,
+                        interface_id=interface_id,
+                        context=context_obj,
+                        message=message,
+                        original_message=original_message,
+                    )
+                    if isinstance(v, str) and v.strip():
+                        return v.strip()
+        except Exception:
+            pass
+
+        return default_state
+
+    # Per piano: appena il messaggio viene accettato per processing, entra in THINK.
+    await _broadcast_global_animation_state(_resolve_message_animation_state("received"))
+
     meta = message.chat.title or message.chat.username or message.chat.first_name
     # Persist last-active chat, but don't let DB failures abort enqueueing
     try:
@@ -515,6 +583,99 @@ async def _consumer_loop() -> None:
                         except Exception as hook_exc:
                             log_debug(f"[QUEUE] on_generation_start hook failed for {interface_path}: {hook_exc}")
 
+                    def _resolve_generation_animation_state(event: str) -> str:
+                        """Resolve an animation state name for generation lifecycle.
+
+                        Priority (best-effort):
+                        1) context overrides (interface can set these when enqueueing)
+                        2) optional interface methods (duck-typed)
+                        3) defaults: start->write, end->idle
+
+                        Supported context keys:
+                        - generation_animation_state_start / generation_animation_state_end
+                        - animation_state_on_generation_start / animation_state_on_generation_end
+                        """
+                        default_state = "write" if event == "start" else "idle"
+
+                        context_obj = final.get("context")
+                        if isinstance(context_obj, dict):
+                            if event == "start":
+                                for k in ("generation_animation_state_start", "animation_state_on_generation_start"):
+                                    v = context_obj.get(k)
+                                    if isinstance(v, str) and v.strip():
+                                        return v.strip()
+                            else:
+                                for k in ("generation_animation_state_end", "animation_state_on_generation_end"):
+                                    v = context_obj.get(k)
+                                    if isinstance(v, str) and v.strip():
+                                        return v.strip()
+
+                        try:
+                            iface_id = final.get("interface")
+                            iface = INTERFACE_REGISTRY.get(iface_id) if iface_id else None
+                        except Exception:
+                            iface = None
+
+                        # Optional interface methods (duck-typed)
+                        try:
+                            if iface is not None:
+                                fn = getattr(iface, "get_animation_state_for_generation_event", None)
+                                if callable(fn):
+                                    v = fn(
+                                        event=event,
+                                        interface_path=interface_path,
+                                        context=context_obj,
+                                        message=final.get("message"),
+                                    )
+                                    if isinstance(v, str) and v.strip():
+                                        return v.strip()
+                        except Exception:
+                            pass
+
+                        try:
+                            if iface is not None:
+                                fn = getattr(iface, "get_generation_animation_states", None)
+                                if callable(fn):
+                                    res = fn(
+                                        interface_path=interface_path,
+                                        context=context_obj,
+                                        message=final.get("message"),
+                                    )
+                                    # Accept (start, end) or dict-like
+                                    if isinstance(res, (tuple, list)) and len(res) >= 2:
+                                        v = res[0] if event == "start" else res[1]
+                                        if isinstance(v, str) and v.strip():
+                                            return v.strip()
+                                    if isinstance(res, dict):
+                                        v = res.get(event)
+                                        if isinstance(v, str) and v.strip():
+                                            return v.strip()
+                        except Exception:
+                            pass
+
+                        return default_state
+
+                    async def _broadcast_global_animation_state(state: str) -> None:
+                        """Best-effort global animation state update (broadcast to all WebUI clients).
+
+                        Some interfaces (e.g. Telegram) pass a raw Bot object which does not
+                        implement generation hooks; this keeps the THINK → WRITE → IDLE flow
+                        consistent with `plan-animationHandlerVrm.prompt.md`.
+                        """
+                        # Allow interfaces to disable core broadcast if they manage it themselves.
+                        context_obj = final.get("context")
+                        if isinstance(context_obj, dict) and context_obj.get("core_animation_broadcast") is False:
+                            return
+
+                        try:
+                            from core.persona_manager import get_persona_manager
+
+                            pm = get_persona_manager()
+                            if pm:
+                                await pm.set_animation_state(state, session_id=None)
+                        except Exception as anim_exc:
+                            log_debug(f"[QUEUE] Failed to broadcast animation state '{state}': {anim_exc}")
+
                     async def _call_bot_generation_end(task: asyncio.Task) -> None:
                         try:
                             bot_obj = final.get("bot")
@@ -546,6 +707,10 @@ async def _consumer_loop() -> None:
                         # Optional: notify the interface/bot that generation is starting.
                         # This is intentionally duck-typed so the core does not hard-code interface logic.
                         await _call_bot_generation_start()
+
+                        # Global animation flow: when generation starts, switch to an interface-defined
+                        # state (default: 'write'). This keeps THINK → (WRITE|TALK|...) consistent.
+                        await _broadcast_global_animation_state(_resolve_generation_animation_state("start"))
 
                         # Run message processing in a Task so we can avoid hard-cancelling long-running
                         # flows (e.g. Selenium-based LLMs). On timeout we keep the task running and
@@ -622,6 +787,9 @@ async def _consumer_loop() -> None:
                                             await set_session_meta_fn(interface_path, existing_meta)
                                         except Exception as set_e:
                                             log_debug(f"[QUEUE] Failed to clear processing session meta (background): {set_e}")
+
+                                        # Only return to IDLE when no other messages are pending for this chat.
+                                        await _broadcast_global_animation_state(_resolve_generation_animation_state("end"))
                                 except Exception as e:
                                     log_debug(f"[QUEUE] Error in background completion handler for chat {chat_id}: {e}")
 
@@ -662,6 +830,9 @@ async def _consumer_loop() -> None:
                                     await set_session_meta_fn(interface_path, existing_meta)
                                 except Exception as set_e:
                                     log_debug(f"[QUEUE] Failed to clear processing session meta: {set_e}")
+
+                                # Return to IDLE when this chat is done processing.
+                                await _broadcast_global_animation_state(_resolve_generation_animation_state("end"))
                         except Exception as pending_e:
                             log_debug(f"[QUEUE] Error checking pending queue for chat {chat_id}: {pending_e}")
             except Exception as e:  # pragma: no cover - plugin may misbehave

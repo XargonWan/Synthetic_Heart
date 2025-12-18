@@ -374,6 +374,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_warning(f"[telegram_bot] Failed to add message to context: {e}")
         # Continue processing even if context tracking fails
 
+    # Animation lifecycle is handled centrally by the core message queue (enqueue -> THINK,
+    # generation start -> WRITE/TALK, generation end -> IDLE). Telegram should not broadcast
+    # a 'think' state here, otherwise messages that are ignored/pre-filtered would still
+    # trigger UI thinking and can cause duplicates.
+
     # === PRIORITY 1: Handle /say step (chat selection) ===
     log_debug(f"🟡 [PRIORITY 1 CHECK] Checking say_step conditions - chat_type: {message.chat.type}, user_id: {user_id}, trainer_id: {get_trainer_id()}, say_choices: {context.user_data.get('say_choices') is not None}")
     if message.chat.type == "private" and user_id == get_trainer_id() and context.user_data.get("say_choices"):

@@ -5724,10 +5724,30 @@
                     currentDisplayedPhase = incomingPhase;
                     currentDisplayedActionId = incomingActionId;
 
-                    // IMPORTANT: Do not start animations from action_state.
-                    // Animation playback is driven ONLY by backend `type=animation` commands
-                    // to avoid duplicate starts and blended/hybrid states.
+                    // IMPORTANT: Historically we treated action_state as informational only
+                    // and relied on `type=animation` for playback. However, some clients
+                    // (particularly mobile) can miss immediate `animation` commands.
+                    // To improve cross-client sync we will now attempt to apply the
+                    // backend-declared animation when an `animation` field is present
+                    // in the action_state payload and it differs from current playback.
                     console.log('[synth_webui] Updated displayed phase to:', incomingPhase, 'action_id:', incomingActionId, '(animationState:', animationState, ')');
+
+                    try {
+                        const anim = data.animation || null;
+                        const descriptor = data.descriptor || null;
+                        const playOnce = !!(descriptor && descriptor.play_once);
+                        if (anim && animationHandler) {
+                            const currentName = animationHandler.currentActionName || null;
+                            // If the logical state differs or the animation file differs, apply it
+                            if (currentName !== animationState || (window.__synth_current_animation_state && window.__synth_current_animation_state.animation !== anim)) {
+                                console.log('[synth_webui] Applying animation from action_state to ensure sync:', animationState, anim);
+                                animationHandler.startAction(animationState, anim, playOnce, null, descriptor || null);
+                                currentDisplayedPhase = (animationState || currentDisplayedPhase).toUpperCase();
+                            }
+                        }
+                    } catch (err) {
+                        console.warn('[synth_webui] Error while applying animation from action_state:', err);
+                    }
                     return;
                 }
                 if (data.type === 'animation') {
@@ -5740,6 +5760,18 @@
                     
                     // Keep a global, read-only view of the current centralized animation
                     window.__synth_current_animation_state = { state: data.state, animation: data.animation, descriptor: data.descriptor || null };
+
+                    // Lightweight de-duplication: backend may broadcast identical animation commands
+                    // (authoritative + summary paths, reconnect, etc.). Skip exact duplicates.
+                    try {
+                        const last = window.__synth_last_animation_cmd || null;
+                        const key = `${data.state || ''}|${data.animation || ''}|${data.loop === false ? '0' : '1'}|${data.play_section || ''}`;
+                        if (last && last.key === key) {
+                            // Still update current animation snapshot but don't re-start the same action.
+                            return;
+                        }
+                        window.__synth_last_animation_cmd = { key, at: Date.now() };
+                    } catch (e) { /* ignore */ }
 
                     if (animationHandler && data.state) {
                         console.log('[synth_webui] Calling animationHandler.startAction with:', data.state, data.animation, data.loop, data.descriptor, data.play_section);
@@ -5754,13 +5786,58 @@
                     } else if (data.state) {
                         // Queue the command if animation handler is not ready yet
                         console.log('[synth_webui] Animation handler not ready, queueing command:', data.state);
-                        pendingAnimationCommands.push(data);
+                        try {
+                            const k = `${data.state || ''}|${data.animation || ''}|${data.loop === false ? '0' : '1'}|${data.play_section || ''}`;
+                            const last = pendingAnimationCommands.length ? pendingAnimationCommands[pendingAnimationCommands.length - 1] : null;
+                            const lastKey = last ? `${last.state || ''}|${last.animation || ''}|${last.loop === false ? '0' : '1'}|${last.play_section || ''}` : null;
+                            if (lastKey !== k) {
+                                pendingAnimationCommands.push(data);
+                            }
+                            // Prevent unbounded growth if the backend is noisy before VRM load.
+                            if (pendingAnimationCommands.length > 50) {
+                                pendingAnimationCommands.splice(0, pendingAnimationCommands.length - 50);
+                            }
+                        } catch (e) {
+                            pendingAnimationCommands.push(data);
+                        }
                         
                         // Set a timeout to check if animations are still pending (fallback)
                         if (!pendingAnimationTimeout) {
-                            pendingAnimationTimeout = setTimeout(() => {
+                            pendingAnimationTimeout = setTimeout(async () => {
                                 console.warn('[synth_webui] ⚠️ Animation handler still not ready after 10 seconds');
                                 console.warn('[synth_webui] Pending commands:', pendingAnimationCommands.length);
+                                // Attempt a light recovery: check active VRM and try to reload it.
+                                try {
+                                    console.log('[synth_webui] Attempting recovery: fetching /api/vrm/active and retrying model load');
+                                    const resp = await fetch('/api/vrm/active');
+                                    if (resp.ok) {
+                                        const payload = await resp.json();
+                                        console.log('[synth_webui] Active VRM probe result:', payload);
+                                        // If we have a URL and no model loaded, try refreshing models to retry load
+                                        // `currentVRM` and `currentModel` live inside the module script
+                                        // and may be undefined here (different lexical scope). Use
+                                        // typeof checks to avoid ReferenceError and proceed with
+                                        // recovery if no model is loaded.
+                                        if (((typeof currentVRM === 'undefined') || !currentVRM || (typeof currentModel === 'undefined') || !currentModel) && payload && payload.url) {
+                                            // Attempt to call the globally-exposed refreshModels if available.
+                                            try {
+                                                if (typeof refreshModels === 'function') {
+                                                    await refreshModels();
+                                                } else if (window && typeof window.refreshModels === 'function') {
+                                                    await window.refreshModels();
+                                                } else {
+                                                    console.warn('[synth_webui] refreshModels is not available in this scope; cannot retry model load');
+                                                }
+                                            } catch (e) {
+                                                console.warn('[synth_webui] refreshModels failed during recovery:', e);
+                                            }
+                                        }
+                                    } else {
+                                        console.warn('[synth_webui] /api/vrm/active probe returned', resp.status);
+                                    }
+                                } catch (err) {
+                                    console.warn('[synth_webui] Recovery probe failed:', err);
+                                }
                                 // Still log this but don't force anything - wait for vrmLoaded event
                                 pendingAnimationTimeout = null;
                             }, 10000);
@@ -5838,16 +5915,15 @@
                 pendingAnimationTimeout = null;
             }
             
-                if (pendingAnimationCommands.length > 0 && typeof animationHandler !== 'undefined' && animationHandler) {
-                console.log('[synth_webui] Processing', pendingAnimationCommands.length, 'pending animation commands after VRM load');
-                const commands = pendingAnimationCommands.splice(0); // Copy and clear
-                for (const cmd of commands) {
-                    console.log('[synth_webui] Executing pending animation (from vrmLoaded):', cmd.state, cmd.animation);
-                    if (cmd.state && animationHandler) {
-                            const animationFileOrUrl = cmd.animation || null;
-                            const playOnce = (cmd.descriptor && cmd.descriptor.play_once) || (cmd.loop === false);
-                            animationHandler.startAction(cmd.state, animationFileOrUrl, !!playOnce, cmd.play_section || null, cmd.descriptor || null);
-                    }
+            if (pendingAnimationCommands.length > 0 && typeof animationHandler !== 'undefined' && animationHandler) {
+                const last = pendingAnimationCommands[pendingAnimationCommands.length - 1];
+                const count = pendingAnimationCommands.length;
+                pendingAnimationCommands.length = 0;
+                console.log('[synth_webui] Processing last pending animation command after VRM load (dropped', Math.max(0, count - 1), '):', last?.state, last?.animation);
+                if (last && last.state && animationHandler) {
+                    const animationFileOrUrl = last.animation || null;
+                    const playOnce = (last.descriptor && last.descriptor.play_once) || (last.loop === false);
+                    animationHandler.startAction(last.state, animationFileOrUrl, !!playOnce, last.play_section || null, last.descriptor || null);
                 }
             }
         });
@@ -6272,6 +6348,25 @@
                     this._playOnceTimers = {}; // safety timers for play-once actions
                     this._globalMixerFinishBound = false; // ensure we bind a single finished handler
                     this._mixerEventBound = false; // ensure structured action mixer event is bound once
+
+                    // Serialize animation switches to avoid concurrent startAction() calls
+                    // which can momentarily stop the current action and cause a visible T-pose.
+                    this._startActionChain = Promise.resolve();
+                }
+
+                _normalizeAnimationKey(animationFile) {
+                    try {
+                        if (!animationFile || typeof animationFile !== 'string') return animationFile;
+                        // If backend sends a full URL/path, normalize to the filename.
+                        // This matches the filenames returned by /api/animations and used by preloadAllAnimations().
+                        if (animationFile.includes('/')) {
+                            const last = animationFile.split('/').pop() || animationFile;
+                            return decodeURIComponent(last);
+                        }
+                        return animationFile;
+                    } catch (e) {
+                        return animationFile;
+                    }
                 }
 
                 _safeFadeStop(action, fadeSec = 0.2) {
@@ -6397,7 +6492,13 @@
 
                 async loadAnimation(actionName, animationFile) {
                     console.log(`[AnimationHandler] loadAnimation called for ${actionName} with file ${animationFile}`);
-                    if (this.loadedAnimations[animationFile]) {
+                    const cacheKey = this._normalizeAnimationKey(animationFile);
+                    if (this.loadedAnimations[cacheKey]) {
+                        console.log(`[AnimationHandler] Using cached animation for ${cacheKey}`);
+                        return this.loadedAnimations[cacheKey];
+                    }
+                    // Also allow lookup by the original string for backward compatibility.
+                    if (animationFile && this.loadedAnimations[animationFile]) {
                         console.log(`[AnimationHandler] Using cached animation for ${animationFile}`);
                         return this.loadedAnimations[animationFile];
                     }
@@ -6419,8 +6520,12 @@
                         const clip = await loadMixamoAnimation(animPath, this.vrm);
                         console.log(`[AnimationHandler] loadMixamoAnimation returned clip:`, !!clip);
                         if (clip) {
-                            this.loadedAnimations[animationFile] = clip;
-                            console.log(`[AnimationHandler] Animation ${animationFile} cached successfully`);
+                            // Cache both by normalized filename and by the original input string.
+                            this.loadedAnimations[cacheKey] = clip;
+                            if (animationFile !== cacheKey) {
+                                this.loadedAnimations[animationFile] = clip;
+                            }
+                            console.log(`[AnimationHandler] Animation ${cacheKey} cached successfully`);
                         }
                         return clip;
                     } catch (error) {
@@ -6696,7 +6801,17 @@
                     }
                 }
 
-                async startAction(actionName, animationFile = null, playOnce = false, playSection = null, descriptorOverride = null) {
+                startAction(actionName, animationFile = null, playOnce = false, playSection = null, descriptorOverride = null) {
+                    // Queue to prevent concurrent state switches (fixes transient T-pose and out-of-order visual transitions).
+                    this._startActionChain = (this._startActionChain || Promise.resolve())
+                        .then(() => this._startActionInternal(actionName, animationFile, playOnce, playSection, descriptorOverride))
+                        .catch((err) => {
+                            console.warn('[AnimationHandler] startAction chain error:', err);
+                        });
+                    return this._startActionChain;
+                }
+
+                async _startActionInternal(actionName, animationFile = null, playOnce = false, playSection = null, descriptorOverride = null) {
                     console.log(`[AnimationHandler] startAction called with actionName: ${actionName}, animationFile: ${animationFile}, playOnce: ${playOnce}, playSection: ${playSection}`);
                     console.log(`[AnimationHandler] this.mixer exists:`, !!this.mixer);
                     console.log(`[AnimationHandler] this.vrm exists:`, !!this.vrm);
@@ -6725,12 +6840,22 @@
                     if (actionName !== 'idle') {
                         await this._ensureBaseIdle(0.15, false);
                     }
+                    // Guard: if the requested logical action is already active and
+                    // no explicit file override is provided, avoid restarting it to
+                    // prevent rapid transitions / T-pose gaps.
+                    try {
+                        if (!animationFile && this.currentActionName === actionName && this.currentActionPhase && this.currentActionPhase !== 'outro') {
+                            console.log(`[AnimationHandler] startAction: ${actionName} already active (phase=${this.currentActionPhase}) - no-op`);
+                            return;
+                        }
+                    } catch (e) { /* ignore */ }
                     
                     let action = this.actions[actionName];
                     
                     // If specific animation file is requested
                     if (animationFile) {
-                        const specificKey = `${actionName}:${animationFile}`;
+                        const normalizedFile = this._normalizeAnimationKey(animationFile);
+                        const specificKey = `${actionName}:${normalizedFile}`;
                         if (this.actions[specificKey]) {
                             action = this.actions[specificKey];
                             console.log(`[AnimationHandler] Using cached specific animation: ${specificKey}`);
@@ -7172,77 +7297,40 @@
                                         const introName = `${key}_intro`;
                                         const loopName = `${key}_loop`;
                                         const outroName = `${key}_outro`;
-                                        
+
                                         if (finishedClipName === introName) {
-                                            // Intro finished
-                                            if (candidate._playOnceOnly) {
-                                                // No loop section - go directly to outro
-                                                console.log(`[AnimationHandler] intro finished for play_once animation ${key} -> starting outro`);
-                                                    if (playSection === 'intro') {
-                                                        console.log(`[AnimationHandler] Playing only intro section for ${actionName}`);
-                                                        // Start intro first, then fade out previous action to avoid T-pose
-                                                        try {
-                                                            structured.intro.setLoop(THREE.LoopOnce, 0);
-                                                            structured.intro.clampWhenFinished = true;
-                                                            structured.intro.reset().fadeIn(0.15).play();
-                                                            const prev = this.currentAction;
-                                                            this.currentAction = structured.intro;
-                                                            this.currentActionName = actionName;
-                                                            this.currentActionPhase = 'intro';
-                                                            this.currentStructuredAction = structured;
-                                                            if (prev && prev !== structured.intro) setTimeout(() => { try { this._safeFadeStop(prev, 0.25); } catch (e) {} }, 20);
-                                                        } catch (e) { /* ignore */ }
-                                                        return;
-                                                // Ensure loop is set to LoopRepeat BOTH on clip and action
-                                                const loopClip = candidate.loop.getClip();
-                                                if (loopClip) loopClip.loop = THREE.LoopRepeat;
-                                                candidate.loop.setLoop(THREE.LoopRepeat);
-                                                candidate.loop.clampWhenFinished = false;
-                                                candidate.loop.reset();
-                                                        // Start loop first, then fade out previous action to avoid T-pose
-                                                        try {
-                                                            const prev = this.currentAction;
-                                                            structured.loop.setLoop(THREE.LoopRepeat);
-                                                            structured.loop.clampWhenFinished = false;
-                                                            structured.loop.reset().fadeIn(0.15).play();
-                                                            this.currentAction = structured.loop;
-                                                            this.currentActionName = actionName;
-                                                            this.currentActionPhase = 'loop';
-                                                            this.currentStructuredAction = structured;
-                                                            if (prev && prev !== structured.loop) setTimeout(() => { try { this._safeFadeStop(prev, 0.25); } catch (e) {} }, 20);
-                                                        } catch (e) { /* ignore */ }
-                                                        return;
-                                                    candidate.loop.enabled = true;
-                                                    candidate.loop.paused = false;
-                                                        try {
-                                                            const prev = this.currentAction;
-                                                            structured.outro.setLoop(THREE.LoopOnce, 0);
-                                                            structured.outro.clampWhenFinished = false;
-                                                            structured.outro.reset().fadeIn(0.15).play();
-                                                            this.currentAction = structured.outro;
-                                                            this.currentActionName = actionName;
-                                                            this.currentActionPhase = 'outro';
-                                                            this.currentStructuredAction = structured;
-                                                            if (prev && prev !== structured.outro) setTimeout(() => { try { this._safeFadeStop(prev, 0.05); } catch (e) {} }, 20);
-                                                        } catch (e) { /* ignore */ }
-                                                        return;
-                                                        console.warn(`[AnimationHandler] ⚠️ Loop duration mismatch for ${key}: expected ${expectedDuration.toFixed(3)}s != actual ${actualDuration.toFixed(3)}s`);
-                                                    }
+                                            // Intro finished: either start loop or go directly to outro for playOnce animations
+                                            try {
+                                                if (candidate._playOnceOnly || !candidate.loop) {
+                                                    console.log(`[AnimationHandler] intro finished for play_once animation ${key} -> starting outro`);
+                                                    candidate.outro.reset().fadeIn(0.15).play();
+                                                    this.currentAction = candidate.outro;
+                                                    this.currentActionName = key;
+                                                    this.currentActionPhase = 'outro';
+                                                    this.currentStructuredAction = candidate;
+                                                } else {
+                                                    // Ensure loop is set to LoopRepeat on clip and action, then start it
+                                                    const loopClip = candidate.loop.getClip ? candidate.loop.getClip() : null;
+                                                    if (loopClip) loopClip.loop = THREE.LoopRepeat;
+                                                    try { candidate.loop.setLoop(THREE.LoopRepeat); } catch (e) {}
+                                                    try { candidate.loop.clampWhenFinished = false; } catch (e) {}
+                                                    try { candidate.loop.reset().fadeIn(0.15).play(); } catch (e) {}
+                                                    this.currentAction = candidate.loop;
+                                                    this.currentActionName = key;
+                                                    this.currentActionPhase = 'loop';
+                                                    this.currentStructuredAction = candidate;
                                                 }
-                                                this.currentAction = candidate.loop;
-                                                this.currentActionPhase = 'loop';
-                                                console.log(`[AnimationHandler] Loop started: clip.loop=${loopClip?.loop}, action.loop=${candidate.loop.getClip()?.loop}`);
-                                            }
+                                            } catch (e) { /* ignore */ }
                                             break;
                                         }
+
                                         if (finishedClipName === loopName && candidate.loop) {
                                             // Loop finished - this should NOT happen if LoopRepeat is working!
-                                            console.warn(`[AnimationHandler] ⚠️ UNEXPECTED: Loop finished event for ${key}, loopMode:${candidate.loop.getClip()?.loop}, _playOnce:${candidate.loop._playOnce}`);
-                                            // DO NOT try to restart the loop here - if LoopRepeat is working, this should never happen
-                                            // If it does happen, there's a deeper issue with the clip itself
-                                            // For now, just log it and ignore
+                                            console.warn(`[AnimationHandler] ⚠️ UNEXPECTED: Loop finished event for ${key}, loopMode:${candidate.loop.getClip?.()?.loop}, _playOnce:${candidate.loop._playOnce}`);
+                                            // Don't restart here; log and break
                                             break;
                                         }
+
                                         if (finishedClipName === outroName) {
                                             console.log(`[AnimationHandler] outro finished for ${key} -> advancing to next animation`);
                                             // Hard cleanup to avoid pose residue (hands floating / stuck bones).
@@ -7258,10 +7346,20 @@
 
                                             // Ensure base idle exists after finishing an outro.
                                             try { this._ensureBaseIdle(0.15, false); } catch (e) { /* ignore */ }
-                                            
+
                                             // Signal to the page that a structured outro finished for this key
                                             try {
-                                                window.dispatchEvent(new CustomEvent('synth_animation_outro_completed', { detail: { key } }));
+                                                // Avoid dispatching duplicate outro completed events
+                                                // in quick succession (can happen after VRM reloads or
+                                                // if multiple listeners/handlers are present).
+                                                this._lastOutroDispatched = this._lastOutroDispatched || {};
+                                                const now = Date.now();
+                                                if (!this._lastOutroDispatched[key] || (now - this._lastOutroDispatched[key] > 300)) {
+                                                    this._lastOutroDispatched[key] = now;
+                                                    window.dispatchEvent(new CustomEvent('synth_animation_outro_completed', { detail: { key } }));
+                                                } else {
+                                                    console.debug('[AnimationHandler] Skipping duplicate outro dispatch for', key);
+                                                }
                                             } catch (e) { /* ignore non-browser env */ }
 
                                             // If this was an idle animation, advance to next random idle
@@ -7894,29 +7992,27 @@
                     console.log('[synth_webui] Initializing AnimationHandler...');
                     animationHandler = new AnimationHandler(currentMixer, vrm);
                     
-                    console.log('[synth_webui] Loading idle action...');
-                        // Preload all animations for the current skin and action types to
-                        // reduce T-pose flashes when switching animations at runtime.
-                        // This will populate animationHandler.loadedAnimations cache.
-                        try {
-                            console.log('[synth_webui] Preloading all animations (may take a moment)...');
-                            if (typeof animationHandler.preloadAllAnimations === 'function') {
-                                await animationHandler.preloadAllAnimations();
-                                console.log('[synth_webui] ✓ Preloaded all animations');
-                            } else {
-                                console.log('[synth_webui] preloadAllAnimations not available');
-                            }
-                        } catch (err) {
-                            console.warn('[synth_webui] Preload all animations failed:', err);
+                    // Preload all animations for the current skin and action types to
+                    // reduce T-pose flashes when switching animations at runtime.
+                    // This will populate animationHandler.loadedAnimations cache.
+                    try {
+                        console.log('[synth_webui] Preloading all animations (may take a moment)...');
+                        if (typeof animationHandler.preloadAllAnimations === 'function') {
+                            await animationHandler.preloadAllAnimations();
+                            console.log('[synth_webui] ✓ Preloaded all animations');
+                        } else {
+                            console.log('[synth_webui] preloadAllAnimations not available');
                         }
+                    } catch (err) {
+                        console.warn('[synth_webui] Preload all animations failed:', err);
+                    }
 
-                    console.log('[synth_webui] Loading idle action (post-preload)...');
+                    console.log('[synth_webui] Loading base actions...');
                     try {
                         await animationHandler.loadAction('idle');
-                        await animationHandler.startAction('idle');
-                        console.log('[synth_webui] ✓ Idle action loaded and playing');
+                        console.log('[synth_webui] ✓ Idle action loaded');
                     } catch (e) {
-                        console.error('[synth_webui] ✗ Idle action failed:', e);
+                        console.error('[synth_webui] ✗ Idle action load failed:', e);
                     }
 
                     console.log('[synth_webui] Loading think action...');
@@ -7934,17 +8030,91 @@
                     } catch (e) {
                         console.error('[synth_webui] ✗ Write action failed:', e);
                     }
+
+                    console.log('[synth_webui] Loading talk action...');
+                    try {
+                        await animationHandler.loadAction('talk');
+                        console.log('[synth_webui] ✓ Talk action loaded');
+                    } catch (e) {
+                        console.error('[synth_webui] ✗ Talk action failed:', e);
+                    }
                     
                     // Process any pending animation commands that arrived while loading
+                    // Attempt to sync with backend animation state so page reloads pick
+                    // up the current persona state instead of defaulting to idle.
+                    let desiredState = null;
+                    let desiredAnimation = null;
+                    let desiredDescriptor = null;
+                    try {
+                        if (window.__synth_current_animation_state && window.__synth_current_animation_state.state) {
+                            desiredState = window.__synth_current_animation_state.state;
+                            desiredAnimation = window.__synth_current_animation_state.animation || null;
+                            desiredDescriptor = window.__synth_current_animation_state.descriptor || null;
+                            console.log('[synth_webui] Using cached animation state for VRM reload:', desiredState, desiredAnimation);
+                        }
+                    } catch (err) {
+                        // ignore
+                    }
+
+                    if (!desiredState) {
+                        try {
+                            console.log('[synth_webui] Querying backend for current animation state...');
+                            const resp = await fetch('/api/animation_state');
+                            if (resp && resp.ok) {
+                                const summary = await resp.json();
+                                console.log('[synth_webui] Backend animation state:', summary);
+                                if (summary && summary.state) {
+                                    desiredState = summary.state;
+                                    desiredAnimation = summary.animation || null;
+                                    desiredDescriptor = summary.descriptor || null;
+                                    window.__synth_current_animation_state = { state: desiredState, animation: desiredAnimation, descriptor: desiredDescriptor || null };
+                                }
+                            } else {
+                                console.warn('[synth_webui] Failed to fetch backend animation state, resp ok=', !!resp?.ok);
+                            }
+                        } catch (err) {
+                            console.warn('[synth_webui] Error while querying backend animation state:', err);
+                        }
+                    }
+
+                    // Start the desired state (avoids a visible reset to idle during skin/model reload).
+                    try {
+                        const stateToStart = desiredState || 'idle';
+                        const playOnce = !!(desiredDescriptor && desiredDescriptor.play_once);
+                        await animationHandler.startAction(stateToStart, desiredAnimation || null, playOnce, null, desiredDescriptor || null);
+                        console.log('[synth_webui] Started initial animation state:', stateToStart, desiredAnimation || null);
+                    } catch (e) {
+                        console.warn('[synth_webui] Failed to start initial animation state, falling back to idle:', e);
+                        try {
+                            await animationHandler.startAction('idle');
+                        } catch (_e) {
+                            // ignore
+                        }
+                    }
+
+                    // Process any pending animation commands that arrived while loading.
+                    // Only apply the last (authoritative) command to avoid replay storms and T-pose flashes.
                     if (pendingAnimationCommands.length > 0) {
-                        console.log('[synth_webui] Processing', pendingAnimationCommands.length, 'pending animation commands');
-                        const commands = pendingAnimationCommands.splice(0); // Copy and clear the queue
-                        for (const cmd of commands) {
-                            console.log('[synth_webui] Executing pending animation command:', cmd.state, cmd.animation);
-                            if (cmd.state && animationHandler) {
-                                const animationFileOrUrl = cmd.animation || null;
-                                const playOnce = (cmd.descriptor && cmd.descriptor.play_once) || (cmd.loop === false);
-                                animationHandler.startAction(cmd.state, animationFileOrUrl, !!playOnce, cmd.play_section || null, cmd.descriptor || null);
+                        const last = pendingAnimationCommands[pendingAnimationCommands.length - 1];
+                        const count = pendingAnimationCommands.length;
+                        pendingAnimationCommands.length = 0;
+                        console.log('[synth_webui] Processing last pending animation command (dropped', Math.max(0, count - 1), '):', last?.state, last?.animation);
+                        if (last && last.state && animationHandler) {
+                            const animationFileOrUrl = last.animation || null;
+                            const lastPlayOnce = (last.descriptor && last.descriptor.play_once) || (last.loop === false);
+                            const initialPlayOnce = !!(desiredDescriptor && desiredDescriptor.play_once);
+
+                            // Skip if it matches what we just started as initial state.
+                            try {
+                                const startedKey = `${(desiredState || 'idle') || ''}|${desiredAnimation || ''}|${initialPlayOnce ? '1' : '0'}`;
+                                const lastKey = `${last.state || ''}|${last.animation || ''}|${lastPlayOnce ? '1' : '0'}`;
+                                if (startedKey !== lastKey) {
+                                    animationHandler.startAction(last.state, animationFileOrUrl, !!lastPlayOnce, last.play_section || null, last.descriptor || null);
+                                } else {
+                                    console.log('[synth_webui] Pending command matches started state; skipping');
+                                }
+                            } catch (e) {
+                                animationHandler.startAction(last.state, animationFileOrUrl, !!lastPlayOnce, last.play_section || null, last.descriptor || null);
                             }
                         }
                     }
@@ -8132,34 +8302,49 @@
             // emit a custom event so we can resume any queued lower-priority
             // state (that we previously cached instead of dropping).
             try {
-                window.addEventListener('synth_animation_outro_completed', (ev) => {
-                    try {
-                        console.log('[synth_webui] Received synth_animation_outro_completed for', ev?.detail?.key);
-                        const pending = window.__synth_pending_action_state || null;
-                        if (!pending) return;
+                // Add the outro-completed listener only once (idempotent)
+                if (!window.__synth_animation_outro_completed_handler) {
+                    window.__synth_animation_outro_completed_handler = (ev) => {
+                        try {
+                            console.log('[synth_webui] Received synth_animation_outro_completed for', ev?.detail?.key);
+                            const pending = window.__synth_pending_action_state || null;
+                            if (!pending) return;
 
-                        console.log('[synth_webui] Applying previously-queued action_state after outro:', pending);
-                        // Re-run the action_state processing path with the stored payload
-                        // (we re-run minimal logic to avoid duplicating queuing behavior)
-                        const phaseToAnimationState = {
-                            'THINKING': 'think', 'WRITING': 'write', 'CORRECTING': 'think', 'TALKING': 'talk', 'IDLE': 'idle'
-                        };
-                        const incomingPhase = pending.phase || 'IDLE';
-                        const incomingActionId = pending.action_id || null;
-                        const animationState = phaseToAnimationState[incomingPhase] || 'idle';
+                            // guard: avoid applying the same pending more than once
+                            const lastApplied = window.__synth_last_applied_pending || null;
+                            if (lastApplied && lastApplied.action_id && pending.action_id && lastApplied.action_id === pending.action_id) {
+                                console.debug('[synth_webui] Skipping duplicate pending application for', pending.action_id);
+                                // Clear pending to avoid repeated attempts
+                                window.__synth_pending_action_state = null;
+                                try { if (window.__synth_pending_action_state_timeout) clearTimeout(window.__synth_pending_action_state_timeout); window.__synth_pending_action_state_timeout = null; } catch (e) {}
+                                return;
+                            }
 
-                        // Apply the incoming state now that the previous high-priority action is done
-                        currentDisplayedPhase = incomingPhase;
-                        currentDisplayedActionId = incomingActionId;
+                            console.log('[synth_webui] Applying previously-queued action_state after outro:', pending);
+                            // Re-run the action_state processing path with the stored payload
+                            // (we re-run minimal logic to avoid duplicating queuing behavior)
+                            const phaseToAnimationState = {
+                                'THINKING': 'think', 'WRITING': 'write', 'CORRECTING': 'think', 'TALKING': 'talk', 'IDLE': 'idle'
+                            };
+                            const incomingPhase = pending.phase || 'IDLE';
+                            const incomingActionId = pending.action_id || null;
+                            const animationState = phaseToAnimationState[incomingPhase] || 'idle';
 
-                        // IMPORTANT: action_state does not start animations; it's informational/UI only.
-                        console.log('[synth_webui] Applied queued action_state after outro (no playback):', incomingPhase, incomingActionId, animationState);
+                            // Apply the incoming state now that the previous high-priority action is done
+                            currentDisplayedPhase = incomingPhase;
+                            currentDisplayedActionId = incomingActionId;
 
-                        // Clear pending
-                        window.__synth_pending_action_state = null;
-                        try { if (window.__synth_pending_action_state_timeout) clearTimeout(window.__synth_pending_action_state_timeout); window.__synth_pending_action_state_timeout = null; } catch (e) {}
-                    } catch (err) { console.warn('[synth_webui] Error while applying queued action_state after outro:', err); }
-                });
+                            // IMPORTANT: action_state does not start animations; it's informational/UI only.
+                            console.log('[synth_webui] Applied queued action_state after outro (no playback):', incomingPhase, incomingActionId, animationState);
+
+                            // Mark as applied and Clear pending
+                            window.__synth_last_applied_pending = { action_id: incomingActionId, phase: incomingPhase, ts: Date.now() };
+                            window.__synth_pending_action_state = null;
+                            try { if (window.__synth_pending_action_state_timeout) clearTimeout(window.__synth_pending_action_state_timeout); window.__synth_pending_action_state_timeout = null; } catch (e) {}
+                        } catch (err) { console.warn('[synth_webui] Error while applying queued action_state after outro:', err); }
+                    };
+                    window.addEventListener('synth_animation_outro_completed', window.__synth_animation_outro_completed_handler);
+                }
             } catch (e) { /* ignore */ }
 
             // Initialize debug UI when WEB_DEBUG is enabled in the base template
