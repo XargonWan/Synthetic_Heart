@@ -5,7 +5,10 @@ Base library for Selenium-based LLM engines.
 Provides common functionality for ChatGPT, Gemini, Grok and other browser-based LLMs.
 """
 
-import undetected_chromedriver as uc
+try:  # pragma: no cover - import guard for test environments/containers
+    import undetected_chromedriver as uc  # type: ignore
+except Exception:  # pragma: no cover
+    uc = None
 from selenium import webdriver
 import os
 import re
@@ -129,6 +132,74 @@ register_exposed_var(
     tags=["llm_engine"],
 )
 
+register_exposed_var(
+    "SELENIUM_POST_SEND_CONFIRM_TIMEOUT",
+    label="Selenium Post-Send Confirm Timeout (sec)",
+    default=4.0,
+    value_type=float,
+    ui_type="number",
+    description="Seconds to wait for UI confirmation after sending a prompt (textarea cleared or sending indicator).",
+    scope="llm",
+    component="selenium_llm_base",
+    tags=["llm_engine"],
+    advanced=True,
+)
+
+register_exposed_var(
+    "SELENIUM_RESPONSE_POLL_INTERVAL",
+    label="Selenium Response Poll Interval (sec)",
+    default=0.5,
+    value_type=float,
+    ui_type="number",
+    description="Polling interval while waiting for the response to stabilize.",
+    scope="llm",
+    component="selenium_llm_base",
+    tags=["llm_engine"],
+    advanced=True,
+)
+
+register_exposed_var(
+    "SELENIUM_RESPONSE_STABLE_GRACE",
+    label="Selenium Response Stable Grace (sec)",
+    default=3.5,
+    value_type=float,
+    ui_type="number",
+    description="How many seconds the response length must remain unchanged before we consider it complete.",
+    scope="llm",
+    component="selenium_llm_base",
+    tags=["llm_engine"],
+    advanced=True,
+)
+
+register_exposed_var(
+    "SELENIUM_PART1_RESPONSE_STABLE_GRACE",
+    label="Selenium PART1 Stable Grace (sec)",
+    default=0.4,
+    value_type=float,
+    ui_type="number",
+    description="Shorter stable-grace for PART1 (context-only) to reduce latency.",
+    scope="llm",
+    component="selenium_llm_base",
+    tags=["llm_engine"],
+    advanced=True,
+)
+
+register_exposed_var(
+    "SELENIUM_SPLIT_PROMPT_PARTS",
+    label="Selenium Split Prompt Parts",
+    default=3,
+    value_type=int,
+    ui_type="number",
+    description=(
+        "Maximum number of parts when splitting oversized prompts (before any minification/reduction). "
+        "If set to 3 but everything fits in 2, only 2 parts are used."
+    ),
+    scope="llm",
+    component="selenium_llm_base",
+    tags=["llm_engine"],
+    advanced=True,
+)
+
 # Use global timeout
 AWAIT_RESPONSE_TIMEOUT = RESPONSE_TIMEOUT
 
@@ -138,6 +209,13 @@ load_dotenv()
 # Constants
 GRACE_PERIOD_SECONDS = 3
 MAX_WAIT_TIMEOUT_SECONDS = 5 * 60  # hard ceiling
+
+# Faster intermediate prompt handling (e.g., PART1 of double-prompt)
+DEFAULT_RESPONSE_POLL_INTERVAL = 0.5
+DEFAULT_RESPONSE_STABLE_GRACE = 3.5
+DEFAULT_PART1_RESPONSE_STABLE_GRACE = 0.4
+
+DEFAULT_SPLIT_PROMPT_PARTS = 3
 
 # Cache the last response per chat to avoid duplicates
 previous_responses: Dict[str, str] = {}
@@ -550,23 +628,6 @@ class SeleniumLLMBase(AIPluginBase):
         self._queue_lock = asyncio.Lock()
         self._queue_worker: asyncio.Task | None = None
 
-        # Double-prompt toggle (exposed configuration)
-        # Default: enabled (True)
-        try:
-            self.SPLIT_PROMPT_VAR = config_registry.get_var(
-                "SELENIUM_DOUBLE_PROMPT",
-                True,
-                label="Enable Double Prompt (PART1/PART2)",
-                description="When enabled, oversized prompts are split: PART1 (context/memories) and PART2 (actual message).",
-                value_type=bool,
-                group="llm",
-                component="selenium",
-                advanced=False,
-            )
-        except Exception:
-            # Fallback property if config registry not available
-            self.SPLIT_PROMPT_VAR = True
-
         # Internal flag to avoid re-splitting or recursive behaviour for PART2
         self._skip_double_prompt_for_this_send: bool = False
 
@@ -636,12 +697,21 @@ class SeleniumLLMBase(AIPluginBase):
         try:
             log_info("[selenium] Initializing Chrome driver...")
 
+            if uc is None:
+                raise RuntimeError(
+                    "undetected_chromedriver is unavailable in this environment (import failed). "
+                    "Selenium LLM engines cannot start here."
+                )
+
             # Clean up any existing remnants
             self._cleanup_chromium_remnants()
 
             # Initialize undetected-chromedriver with retry logic
             log_debug("[selenium] Creating undetected Chrome driver...")
-            log_debug(f"[selenium] undetected-chromedriver version: {uc.__version__}")
+            try:
+                log_debug(f"[selenium] undetected-chromedriver version: {uc.__version__}")
+            except Exception:
+                pass
             
             max_retries = self.MAX_RETRIES_VAR.value
             retry_delay = 2
@@ -1219,11 +1289,22 @@ class SeleniumLLMBase(AIPluginBase):
 
     # === RESPONSE WAITING ===
 
-    def wait_until_response_stabilizes(self, driver, max_total_wait: int = AWAIT_RESPONSE_TIMEOUT,
-                                      no_change_grace: float = 3.5) -> str:
+    def wait_until_response_stabilizes(
+        self,
+        driver,
+        max_total_wait: int = AWAIT_RESPONSE_TIMEOUT,
+        no_change_grace: float = DEFAULT_RESPONSE_STABLE_GRACE,
+        poll_interval: float | None = None,
+    ) -> str:
         """Return the last response text once its length stops growing."""
         # Convert max_total_wait to int in case it's a ConfigVar
         max_total_wait = int(max_total_wait)
+
+        try:
+            if poll_interval is None:
+                poll_interval = float(config_registry.get_value("SELENIUM_RESPONSE_POLL_INTERVAL", DEFAULT_RESPONSE_POLL_INTERVAL))
+        except Exception:
+            poll_interval = DEFAULT_RESPONSE_POLL_INTERVAL
         
         start = time.time()
         last_len = -1
@@ -1261,7 +1342,10 @@ class SeleniumLLMBase(AIPluginBase):
                 )
                 return text
 
-            time.sleep(0.5)
+            try:
+                time.sleep(max(0.05, float(poll_interval)))
+            except Exception:
+                time.sleep(DEFAULT_RESPONSE_POLL_INTERVAL)
 
     def _dismiss_modal_with_selectors(self, driver, modal_selectors: list) -> bool:
         """Dismiss any modal/dialog overlay using provided selectors.
@@ -1647,7 +1731,13 @@ class SeleniumLLMBase(AIPluginBase):
             log_error(f"[selenium] Failed to navigate to {service_url}: {e}")
             raise
 
-    def _send_prompt_with_confirmation(self, textarea, prompt_text: str, processing_max_wait: int | None = None) -> bool:
+    def _send_prompt_with_confirmation(
+        self,
+        textarea,
+        prompt_text: str,
+        processing_max_wait: int | None = None,
+        post_send_confirm_timeout: float | None = None,
+    ) -> bool:
         """Send the prompt to the LLM service and wait for confirmation.
         
         This generic implementation:
@@ -1664,6 +1754,12 @@ class SeleniumLLMBase(AIPluginBase):
                 return int(config_registry.get_value("SELENIUM_PART1_PROCESSING_TIMEOUT", 8))
             except Exception:
                 return 8
+
+        def _get_post_send_confirm_timeout() -> float:
+            try:
+                return float(config_registry.get_value("SELENIUM_POST_SEND_CONFIRM_TIMEOUT", 4.0))
+            except Exception:
+                return 4.0
 
         try:
             if not textarea:
@@ -1841,7 +1937,10 @@ class SeleniumLLMBase(AIPluginBase):
             # Ensure the textarea still has focus before sending
             log_debug("[selenium] Ensuring textarea has focus before send...")
             self.driver.execute_script("arguments[0].focus();", textarea)
-            time.sleep(0.5)  # Small delay to ensure focus is set
+            try:
+                time.sleep(0.1)
+            except Exception:
+                pass
             
             log_debug(f"[selenium] Prompt pasted, now trying to send")
             
@@ -1859,7 +1958,10 @@ class SeleniumLLMBase(AIPluginBase):
                     try:
                         # Scroll button into view to ensure it's clickable
                         self.driver.execute_script("arguments[0].scrollIntoView(true);", send_button)
-                        time.sleep(0.5)  # Wait for scroll animation
+                        try:
+                            time.sleep(0.1)
+                        except Exception:
+                            pass
                         
                         # Try direct click first
                         send_button.click()
@@ -1890,15 +1992,14 @@ class SeleniumLLMBase(AIPluginBase):
                 textarea.send_keys(Keys.CONTROL, Keys.RETURN)
             
             log_debug(f"[selenium] Send action completed, waiting for confirmation")
-            
-            # CRITICAL: Add delay to ensure the send action (button click or keyboard) is processed by browser
-            log_debug("[selenium] Waiting 3 seconds for browser to process send action...")
-            time.sleep(3)
+
+            if post_send_confirm_timeout is None:
+                post_send_confirm_timeout = _get_post_send_confirm_timeout()
             
             # Wait for confirmation that the prompt was sent (textarea should clear or sending indicator appears)
             try:
                 log_debug("[selenium] Checking if textarea cleared after send...")
-                WebDriverWait(self.driver, 10).until(
+                WebDriverWait(self.driver, max(0.5, float(post_send_confirm_timeout))).until(
                     lambda d: (
                         textarea.get_attribute("value") == "" or
                         textarea.text == "" or
@@ -2438,16 +2539,16 @@ class SeleniumLLMBase(AIPluginBase):
         """Return True if we should split this prompt into PART1/PART2.
 
         Conditions:
-        - Split feature enabled via config
+        - Split feature enabled via `SELENIUM_SPLIT_PROMPT_PARTS` (> 1)
         - Not currently sending PART2 (internal flag)
         - prompt_text length > model limit (character limit)
         """
         try:
-            enabled = bool(self.SPLIT_PROMPT_VAR.value) if hasattr(self, 'SPLIT_PROMPT_VAR') else bool(self.SPLIT_PROMPT_VAR)
+            max_parts = int(config_registry.get_value("SELENIUM_SPLIT_PROMPT_PARTS", DEFAULT_SPLIT_PROMPT_PARTS))
         except Exception:
-            enabled = bool(getattr(self, 'SPLIT_PROMPT_VAR', True))
+            max_parts = DEFAULT_SPLIT_PROMPT_PARTS
 
-        if not enabled:
+        if max_parts <= 1:
             return False
 
         # If we're explicitly skipping (we are in PART2) do not split again
@@ -2499,9 +2600,14 @@ class SeleniumLLMBase(AIPluginBase):
                 if json_candidate:
                     parsed = json.loads(json_candidate)
                     # Only enable double-prompt when we find explicit context keys
+                    split_keys = (
+                        'history_current_chat', 'history_recent', 'memories', 'thoughts', 'tags_placeholder',
+                        # legacy keys (backward compatible)
+                        'current_chat_history', 'chat_history', 'ai_diary', 'diary', 'diary_entries', 'recent_entries',
+                    )
                     if isinstance(parsed, dict) and (
                         'context' in parsed or
-                        any(k in parsed for k in ('chat_history', 'memories', 'diary', 'diary_entries', 'ai_diary', 'recent_entries'))
+                        any(k in parsed for k in split_keys)
                     ):
                         log_debug(f"[selenium] prompt length {size} exceeds model limit {lim} and contains context keys, enabling double-prompt")
                         return True
@@ -2571,12 +2677,9 @@ class SeleniumLLMBase(AIPluginBase):
             # If parsed JSON with context
             # parsed JSON may include context in different shapes. We detect:
             # - a 'context' key (preferred)
-            # - or top-level keys like 'chat_history', 'memories', 'diary', 'diary_entries'
+            # - or top-level keys like history/memories
             if isinstance(parsed, dict):
-                # Simplified behavior requested by the user: extract ONLY `chat_history` and `ai_diary`
-                # (and common alias 'diary' / 'diary_entries') from the parsed JSON. Do not
-                # perform aggressive deep extraction. The prompt JSON format normally places
-                # these keys either at top-level or under a 'context' key.
+                # Extract only the known, safe-to-externalize context lists.
                 context_obj = {}
 
                 # Prefer the 'context' dict if present
@@ -2587,26 +2690,24 @@ class SeleniumLLMBase(AIPluginBase):
                     if key in src:
                         dst[key] = src[key]
 
-                # Copy only the keys requested for PART1: chat_history, ai_diary, memories
-                copy_if_present(context_obj, source, 'chat_history')
-                copy_if_present(context_obj, source, 'ai_diary')
-                copy_if_present(context_obj, source, 'memories')
+                # Canonical keys
+                for k in ('history_current_chat', 'history_recent', 'memories', 'thoughts', 'tags_placeholder'):
+                    copy_if_present(context_obj, source, k)
+                # Legacy keys (backward compatible)
+                for k in ('current_chat_history', 'chat_history', 'ai_diary', 'diary_entries', 'diary'):
+                    copy_if_present(context_obj, source, k)
 
                 # Only create PART1 if we actually found memory/chat keys
                 if context_obj:
                     # Build PART1 header and payload
                     part1_header = (
-                    "[INTERNAL-PART1] This message contains CONTEXT for memory persistence. "
-                    "Read it carefully and keep it available for subsequent messages. "
-                    "Do NOT act on this message. Reply ONLY with an empty JSON object: {}"
-                )
+                        "[INTERNAL-PART1] This message contains CONTEXT for memory persistence. "
+                        "Read it carefully and keep it available for subsequent messages. "
+                        "Do NOT act on this message. Reply ONLY with an empty JSON object: {}"
+                    )
 
-                    # Build PART1 payload containing ONLY ai_diary, chat_history, memories
-                    part1_payload = {
-                        "ai_diary": context_obj.get('ai_diary', []),
-                        "chat_history": context_obj.get('chat_history', []),
-                        "memories": context_obj.get('memories', []),
-                    }
+                    # Build PART1 payload containing ONLY extracted context lists
+                    part1_payload = dict(context_obj)
 
                     part1_text = part1_header + "\n\n" + json.dumps(part1_payload)
 
@@ -2615,13 +2716,12 @@ class SeleniumLLMBase(AIPluginBase):
 
                     # If the original had a 'context' dict, only remove the keys we moved to PART1
                     if 'context' in parsed_part2 and isinstance(parsed_part2['context'], dict):
-                        for k in ('chat_history', 'memories', 'ai_diary'):
+                        for k in context_obj.keys():
                             if k in parsed_part2['context']:
-                                # Empty lists for removed context
                                 parsed_part2['context'][k] = []
 
                     # Also remove top-level occurrences of these keys if present
-                    for k in ('chat_history', 'memories', 'ai_diary'):
+                    for k in context_obj.keys():
                         if k in parsed_part2:
                             parsed_part2[k] = []
 
@@ -2653,13 +2753,162 @@ class SeleniumLLMBase(AIPluginBase):
             # Return an empty context PART1 and the full prompt as PART2
             empty_header = (
                 "[INTERNAL-PART1] This message is intended for CONTEXT only. "
-                "If present, read/store chat_history/diary/memories. Reply ONLY with {}."
+                "If present, read/store history/memories. Reply ONLY with {}."
             )
             # Empty context payload
             return empty_header + "\n\n{}", prompt_text
         except Exception:
             # As a last resort, return original as part2 and empty part1
             return "{}", prompt_text
+
+    def _split_prompt_text_into_n_parts(self, prompt_text: str, max_parts: int) -> list[str]:
+        """Split prompt into up to N parts.
+
+        - 1..(N-1): context-only parts (expecting `{}`), used to persist memory/context
+        - N: final prompt with context keys emptied
+
+        `max_parts` is a hard cap; if everything fits in fewer parts, fewer parts are returned.
+        """
+        try:
+            max_parts_int = int(max_parts)
+        except Exception:
+            max_parts_int = DEFAULT_SPLIT_PROMPT_PARTS
+
+        if max_parts_int <= 1:
+            return [prompt_text]
+
+        # Keep compatibility for the classic 2-part behavior
+        if max_parts_int == 2:
+            p1, p2 = self._split_prompt_text_into_parts(prompt_text)
+            return [p1, p2]
+
+        try:
+            # Parse prompt JSON body (same approach as _split_prompt_text_into_parts)
+            if "\n---\n" in prompt_text:
+                idx = prompt_text.find("\n---\n")
+                remainder = prompt_text[idx + len("\n---\n"):].strip()
+                brace_idx = remainder.find("{")
+                json_candidate = remainder[brace_idx:] if brace_idx != -1 else remainder
+            else:
+                first_brace = prompt_text.find("{")
+                json_candidate = prompt_text[first_brace:] if first_brace != -1 else None
+
+            parsed = None
+            if json_candidate:
+                try:
+                    parsed = json.loads(json_candidate)
+                except Exception:
+                    try:
+                        first = json_candidate.find('{')
+                        last = json_candidate.rfind('}')
+                        if first != -1 and last != -1 and last > first:
+                            parsed = json.loads(json_candidate[first:last + 1])
+                        else:
+                            wrapped = '{' + json_candidate.strip().strip('{}') + '}'
+                            parsed = json.loads(wrapped)
+                    except Exception:
+                        parsed = None
+
+            if not isinstance(parsed, dict):
+                p1, p2 = self._split_prompt_text_into_parts(prompt_text)
+                return [p1, p2]
+
+            source = parsed.get('context') if isinstance(parsed.get('context'), dict) else parsed
+
+            extracted: dict[str, list] = {}
+            for k in (
+                "history_current_chat", "history_recent", "memories", "thoughts", "tags_placeholder",
+                # legacy
+                "current_chat_history", "chat_history", "ai_diary", "diary_entries", "diary",
+            ):
+                v = source.get(k)
+                if isinstance(v, list) and v:
+                    extracted[k] = v
+
+            if not extracted:
+                p1, p2 = self._split_prompt_text_into_parts(prompt_text)
+                return [p1, p2]
+
+            # Build final prompt by clearing extracted keys (no minification here)
+            parsed_final = dict(parsed)
+            if 'context' in parsed_final and isinstance(parsed_final['context'], dict):
+                for k in extracted.keys():
+                    if k in parsed_final['context']:
+                        parsed_final['context'][k] = []
+            for k in extracted.keys():
+                if k in parsed_final:
+                    parsed_final[k] = []
+            final_text = json.dumps(parsed_final)
+
+            # Determine packing target based on model limit (before any reduction)
+            try:
+                model_limit = int(self._get_model_char_limit(self._get_current_model_name()))
+            except Exception:
+                model_limit = int(_active_selenium_max_prompt_chars)
+
+            per_part_limit = max(2000, int(model_limit * 0.9))
+
+            keys_order = [
+                "history_current_chat", "history_recent", "memories", "thoughts", "tags_placeholder",
+                # legacy
+                "current_chat_history", "chat_history", "ai_diary", "diary_entries", "diary",
+            ]
+            stream: list[tuple[str, object]] = []
+            for k in keys_order:
+                for item in (extracted.get(k) or []):
+                    stream.append((k, item))
+
+            def payload_size(payload: dict[str, list]) -> int:
+                try:
+                    return len(json.dumps(payload))
+                except Exception:
+                    return 10**9
+
+            context_payloads: list[dict[str, list]] = []
+            current_payload: dict[str, list] = {}
+            for k, item in stream:
+                current_payload.setdefault(k, []).append(item)
+
+                if payload_size(current_payload) > per_part_limit:
+                    # If we have more than one item in this payload, move the last item into a new payload.
+                    if len(current_payload.get(k, [])) > 1:
+                        last = current_payload[k].pop()
+                        context_payloads.append(current_payload)
+                        current_payload = {k: [last]}
+                    else:
+                        # Single huge item; accept it as-is to avoid infinite splitting.
+                        context_payloads.append(current_payload)
+                        current_payload = {}
+
+            if current_payload:
+                context_payloads.append(current_payload)
+
+            # Cap to max_parts-1 by merging overflow into the last payload
+            max_context_parts = max_parts_int - 1
+            if len(context_payloads) > max_context_parts:
+                kept = context_payloads[:max_context_parts]
+                for payload in context_payloads[max_context_parts:]:
+                    for k, items in payload.items():
+                        kept[-1].setdefault(k, []).extend(items)
+                context_payloads = kept
+
+            total_parts = len(context_payloads) + 1
+            parts: list[str] = []
+            for idx, payload in enumerate(context_payloads, start=1):
+                header = (
+                    f"[INTERNAL-PART{idx}/{total_parts}] This message contains CONTEXT for memory persistence. "
+                    "Read it carefully and keep it available for subsequent messages. "
+                    "Do NOT act on this message. Reply ONLY with an empty JSON object: {}"
+                )
+                parts.append(header + "\n\n" + json.dumps(payload))
+
+            parts.append(final_text)
+            return parts
+
+        except Exception as e:
+            log_debug(f"[selenium] _split_prompt_text_into_n_parts fallback: {e}")
+            p1, p2 = self._split_prompt_text_into_parts(prompt_text)
+            return [p1, p2]
 
     def _execute_double_prompt_workflow(self, prompt_text: str) -> str:
         """Execute PART1 then PART2 sequentially, ignoring PART1's content for actions.
@@ -2669,7 +2918,18 @@ class SeleniumLLMBase(AIPluginBase):
 
         The internal flag _skip_double_prompt_for_this_send is used to avoid re-splitting PART2.
         """
-        part1_text, part2_text = self._split_prompt_text_into_parts(prompt_text)
+        try:
+            max_parts = int(config_registry.get_value("SELENIUM_SPLIT_PROMPT_PARTS", DEFAULT_SPLIT_PROMPT_PARTS))
+        except Exception:
+            max_parts = DEFAULT_SPLIT_PROMPT_PARTS
+
+        parts = self._split_prompt_text_into_n_parts(prompt_text, max_parts=max_parts)
+        if len(parts) < 2:
+            p1, p2 = self._split_prompt_text_into_parts(prompt_text)
+            parts = [p1, p2]
+
+        context_parts = parts[:-1]
+        final_part_text = parts[-1]
 
         # Send PART1 and wait for a response (we ignore content, but we log parsing/results)
         # Use a shorter processing wait for PART1 to avoid long delays before sending PART2
@@ -2677,64 +2937,67 @@ class SeleniumLLMBase(AIPluginBase):
             part1_processing_timeout = int(config_registry.get_value("SELENIUM_PART1_PROCESSING_TIMEOUT", 8))
         except Exception:
             part1_processing_timeout = 8
-        try:
-            part1_len = len(part1_text) if isinstance(part1_text, str) else None
-        except Exception:
-            part1_len = None
-        log_info(f"[selenium] PART1 -> sending context part to LLM (expecting JSON {{}}) size={part1_len}")
-        # Retry PART1 up to CORRECTOR_RETRIES (if defined); if engine returns any response we proceed
+        # Retry each context PART up to CORRECTOR_RETRIES; any response is enough to proceed.
         max_retries = CORRECTOR_RETRIES if 'CORRECTOR_RETRIES' in globals() else 3
-        part1_resp = None
-        for attempt in range(1, max_retries + 1):
-            log_info(f"[selenium] PART1 attempt {attempt}/{max_retries}")
+        try:
+            part1_stable_grace = float(config_registry.get_value("SELENIUM_PART1_RESPONSE_STABLE_GRACE", DEFAULT_PART1_RESPONSE_STABLE_GRACE))
+        except Exception:
+            part1_stable_grace = DEFAULT_PART1_RESPONSE_STABLE_GRACE
+
+        for part_index, context_text in enumerate(context_parts, start=1):
             try:
-                attempt_start = time.time()
-                part1_resp = self._execute_complete_workflow(
-                    part1_text,
-                    processing_max_wait=part1_processing_timeout,
-                    stabilize_max_wait=part1_processing_timeout,
-                )
-                attempt_elapsed = time.time() - attempt_start
-                log_debug(f"[selenium] PART1 attempt {attempt} completed in {attempt_elapsed:.1f}s")
-            except Exception as e:
-                log_warning(f"[selenium] PART1 attempt {attempt} failed with error: {e}")
-                # If this was the last attempt, we'll continue to PART2 anyway
+                part_len = len(context_text) if isinstance(context_text, str) else None
+            except Exception:
+                part_len = None
+
+            log_info(f"[selenium] PART{part_index}/{len(parts)} -> sending context part to LLM (expecting JSON {{}}) size={part_len}")
+            part_resp = None
+
+            for attempt in range(1, max_retries + 1):
+                log_info(f"[selenium] PART{part_index} attempt {attempt}/{max_retries}")
+                try:
+                    attempt_start = time.time()
+                    part_resp = self._execute_complete_workflow(
+                        context_text,
+                        processing_max_wait=part1_processing_timeout,
+                        stabilize_max_wait=part1_processing_timeout,
+                        stabilize_no_change_grace=part1_stable_grace,
+                        post_send_confirm_timeout=1.5,
+                    )
+                    attempt_elapsed = time.time() - attempt_start
+                    log_debug(f"[selenium] PART{part_index} attempt {attempt} completed in {attempt_elapsed:.1f}s")
+                except Exception as e:
+                    log_warning(f"[selenium] PART{part_index} attempt {attempt} failed with error: {e}")
+                    if attempt < max_retries:
+                        time.sleep(1)
+                        continue
+                    part_resp = None
+                    break
+
+                if isinstance(part_resp, str) and part_resp.strip() != "":
+                    try:
+                        parsed = json.loads(part_resp)
+                    except Exception:
+                        parsed = None
+
+                    if parsed == {}:
+                        log_info(f"[selenium] PART{part_index} attempt {attempt} parsed as {{}} (OK)")
+                    else:
+                        log_warning(f"[selenium] PART{part_index} attempt {attempt} response did not strictly parse as {{}} - proceeding anyway")
+                    break
+
+                log_warning(f"[selenium] PART{part_index} attempt {attempt} returned empty response; retrying...")
                 if attempt < max_retries:
                     time.sleep(1)
                     continue
-                else:
-                    part1_resp = None
-                    break
-
-            # We received a response -> try to parse and log result
-            if isinstance(part1_resp, str) and part1_resp.strip() != "":
-                try:
-                    parsed = json.loads(part1_resp)
-                except Exception:
-                    parsed = None
-
-                if parsed == {}:
-                    log_info(f"[selenium] PART1 attempt {attempt} parsed as {{}} (OK)")
-                else:
-                    log_warning(f"[selenium] PART1 attempt {attempt} response did not strictly parse as {{}} - proceeding anyway")
-
-                # PART1 considered received as soon as LLM returns any response
-                break
-
-            # Empty or no response, retry unless out of attempts
-            log_warning(f"[selenium] PART1 attempt {attempt} returned empty response; retrying...")
-            if attempt < max_retries:
-                time.sleep(1)
-                continue
-            else:
-                log_warning("[selenium] PART1 exhausted retries without valid response; proceeding to PART2")
+                log_warning(f"[selenium] PART{part_index} exhausted retries without valid response; proceeding")
 
         # Send PART2 - ensure we do not re-split
         try:
-            part2_len = len(part2_text) if isinstance(part2_text, str) else None
+            part2_len = len(final_part_text) if isinstance(final_part_text, str) else None
         except Exception:
             part2_len = None
-        log_info(f"[selenium] PART2 -> sending main prompt (is_part2=True) size_before_minify={part2_len}")
+        log_info(f"[selenium] PART{len(parts)}/{len(parts)} -> sending main prompt (is_part2=True) size_before_minify={part2_len}")
         self._skip_double_prompt_for_this_send = True
         # Give the browser a very short grace to process previous message before sending PART2
         try:
@@ -2742,14 +3005,21 @@ class SeleniumLLMBase(AIPluginBase):
         except Exception:
             pass
         try:
-            resp = self._execute_complete_workflow(part2_text)
+            resp = self._execute_complete_workflow(final_part_text)
             log_info("[selenium] PART2 response received — treating as final response for action parsing/corrector flow")
             return resp
         finally:
             # Always reset the flag to avoid residual state
             self._skip_double_prompt_for_this_send = False
 
-    def _execute_complete_workflow(self, prompt_text: str, processing_max_wait: int | None = None, stabilize_max_wait: int | None = None) -> str:
+    def _execute_complete_workflow(
+        self,
+        prompt_text: str,
+        processing_max_wait: int | None = None,
+        stabilize_max_wait: int | None = None,
+        stabilize_no_change_grace: float | None = None,
+        post_send_confirm_timeout: float | None = None,
+    ) -> str:
         """Execute the complete workflow (interaction only) in a single thread."""
         try:
             log_debug(f"[selenium] _execute_complete_workflow called with driver: {self.driver is not None}")
@@ -2772,7 +3042,12 @@ class SeleniumLLMBase(AIPluginBase):
             textarea = self._locate_prompt_area(self.driver)
 
             # Send prompt and wait for response
-            if not self._send_prompt_with_confirmation(textarea, prompt_text, processing_max_wait=processing_max_wait):
+            if not self._send_prompt_with_confirmation(
+                textarea,
+                prompt_text,
+                processing_max_wait=processing_max_wait,
+                post_send_confirm_timeout=post_send_confirm_timeout,
+            ):
                 return "❌ Failed to send prompt"
 
             # Handle response choice if applicable (e.g., ChatGPT offers two responses)
@@ -2781,9 +3056,18 @@ class SeleniumLLMBase(AIPluginBase):
             # Wait for response to stabilize (text stops growing for N seconds)
             # Use a shorter stabilization timeout for PART1 when requested
             if stabilize_max_wait is not None:
-                response = self.wait_until_response_stabilizes(self.driver, max_total_wait=stabilize_max_wait)
+                grace = stabilize_no_change_grace if stabilize_no_change_grace is not None else DEFAULT_RESPONSE_STABLE_GRACE
+                response = self.wait_until_response_stabilizes(
+                    self.driver,
+                    max_total_wait=stabilize_max_wait,
+                    no_change_grace=grace,
+                )
             else:
-                response = self.wait_until_response_stabilizes(self.driver)
+                try:
+                    default_grace = float(config_registry.get_value("SELENIUM_RESPONSE_STABLE_GRACE", DEFAULT_RESPONSE_STABLE_GRACE))
+                except Exception:
+                    default_grace = DEFAULT_RESPONSE_STABLE_GRACE
+                response = self.wait_until_response_stabilizes(self.driver, no_change_grace=default_grace)
 
             # Log the full response for debugging
             if response:

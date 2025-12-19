@@ -15,11 +15,21 @@ from core.db import get_conn_ctx
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.config_manager import config_registry
 
-# Get chat history limit from config
-try:
-    CHAT_HISTORY_LIMIT = config_registry.get_value('CHAT_HISTORY', 10, value_type=int)
-except Exception:
-    CHAT_HISTORY_LIMIT = 10
+
+def _get_history_limit(default: int = 10) -> int:
+    """Return the unified history limit.
+
+    Prefers the new global `CONTEXT_VERBOSITY` setting; falls back to legacy
+    settings (`CHAT_HISTORY`, `CHAT_HISTORY_LIMIT`) for backward compatibility.
+    """
+    for key in ("CONTEXT_VERBOSITY", "CHAT_HISTORY", "CHAT_HISTORY_LIMIT"):
+        try:
+            val = config_registry.get_value(key, None, value_type=int)
+            if val is not None:
+                return max(1, int(val))
+        except Exception:
+            continue
+    return max(1, int(default))
 
 
 async def init_chat_history_table() -> None:
@@ -86,6 +96,7 @@ async def save_chat_message(
         
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
+                history_limit = _get_history_limit(10)
                 # Insert message with timestamp (always in UTC)
                 if timestamp:
                     await cur.execute("""
@@ -114,7 +125,7 @@ async def save_chat_message(
                             LIMIT %s
                         ) AS temp
                     )
-                """, (interface_path, interface_path, CHAT_HISTORY_LIMIT))
+                """, (interface_path, interface_path, history_limit))
                 
                 log_debug(f"[chat_history_cache] Saved message for interface_path {interface_path}, sender={sender_name}, timestamp={timestamp}")
                 return True
@@ -139,6 +150,7 @@ async def load_chat_history(interface_path: str) -> deque:
     try:
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
+                history_limit = _get_history_limit(10)
                 # Load messages in chronological order
                 await cur.execute("""
                     SELECT sender_name, sender_id, message_text, timestamp, interface_path
@@ -146,7 +158,7 @@ async def load_chat_history(interface_path: str) -> deque:
                     WHERE interface_path = %s
                     ORDER BY timestamp ASC
                     LIMIT %s
-                """, (interface_path, CHAT_HISTORY_LIMIT))
+                """, (interface_path, history_limit))
                 
                 rows = await cur.fetchall()
                 
@@ -202,6 +214,7 @@ async def get_cache_stats() -> dict:
         dict with cache statistics
     """
     try:
+        history_limit = _get_history_limit(10)
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
                 # Total messages in cache
@@ -218,6 +231,14 @@ async def get_cache_stats() -> dict:
                 """)
                 result = await cur.fetchone()
                 oldest, newest = result if result else (None, None)
+
+                return {
+                    "total_messages": total_messages,
+                    "unique_paths": unique_paths,
+                    "oldest": oldest.isoformat() if oldest else None,
+                    "newest": newest.isoformat() if newest else None,
+                    "history_limit": history_limit,
+                }
                 
                 return {
                     "total_messages": total_messages,

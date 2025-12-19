@@ -1,6 +1,14 @@
 # core/ai_plugin_base.py
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, List
+
 from core.prompt_engine import build_prompt
+
+if TYPE_CHECKING:  # pragma: no cover
+    from core.history_types import HistoryContribution
+
 
 class AIPluginBase:
     """
@@ -51,3 +59,12 @@ class AIPluginBase:
     def get_prompt_instructions(self, action_name: str) -> dict:
         """Return prompt instructions for the given action."""
         return {}
+
+    def get_history_contributions(self, **kwargs) -> List['HistoryContribution']:
+        """Optional: provide history contributions for prompt context.
+
+        Engines may choose to contribute context (e.g., model notes). The core
+        `HistoryEngine` will handle toggles, ordering, limiting, and dedup.
+        """
+
+        return []

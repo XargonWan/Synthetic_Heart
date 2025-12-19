@@ -27,6 +27,17 @@ CHAT_HISTORY_LIMIT = config_registry.get_var(
     value_type=int,
 )
 
+# How many recent messages to include in the explicit current chat recap
+CHAT_RECAP_LAST_N = config_registry.get_var(
+    "CHAT_RECAP_LAST_N",
+    3,
+    label="Chat recap last N",
+    description="Number of recent messages from the current chat to include as a concise recap (current_chat_history).",
+    group="core",
+    component="prompt_engine",
+    value_type=int,
+)
+
 # Diary history days
 DIARY_HISTORY_DAYS = config_registry.get_var(
     "DIARY_HISTORY_DAYS",
@@ -109,50 +120,37 @@ async def build_json_prompt(message, context_memory, interface_name: str | None 
         key in context_memory for key in ['interface_path', 'system_message', 'chat_id_context']
     )
 
-    # === 1. Context messages (chat_history) ===
-    # Use CHAT_HISTORY from config_registry
-    # First, load persisted history from database if not in memory
-    # Only do this if context_memory is a chat history map, not a context dict
-    if not is_context_dict and interface_path and interface_path not in context_memory:
-        try:
-            from core.chat_history_cache import load_chat_history as cache_load
-            cached_history = await cache_load(interface_path)
-            if cached_history:
-                context_memory[interface_path] = cached_history
-                log_debug(f"[json_prompt] Loaded {len(cached_history)} cached messages for interface_path {interface_path}")
-        except Exception as e:
-            log_warning(f"[json_prompt] Failed to load cached chat history for {interface_path}: {e}")
-    
-    # Get chat history from context_memory if it's a history map, otherwise empty
-    if is_context_dict:
-        chat_history = []  # No history in context dict
-    else:
-        chat_history = list(context_memory.get(interface_path, []))[-CHAT_HISTORY_LIMIT:]
-    
-    # Log chat history details for LLM context
-    if chat_history:
-        log_info(f"[json_prompt] 📝 Chat history for {interface_path} ({len(chat_history)} messages):")
-        for msg in chat_history:
-            sender = msg.get("sender_name", msg.get("username", "Unknown"))
-            sender_id = msg.get("sender_id", msg.get("user_id", "?"))
-            timestamp = msg.get("timestamp", "N/A")
-            text_preview = msg.get("text", "")[:60]
-            log_info(f"[json_prompt]   [{timestamp}] {sender} ({sender_id}): {text_preview}...")
+    # History-like context is now produced by HistoryEngine (plugin-centric aggregation)
 
     # === 2. Tags and memory lookup ===
     tags = extract_tags(text)
     expanded_tags = expand_tags(tags)
     memories = []
     if expanded_tags:
-        # Reduced to 3 memories for lighter JSON payloads; each will be trimmed to max 400 chars during reduction if needed
-        memories = await search_memories(tags=expanded_tags, limit=3)
+        # Limit follows unified verbosity (HistoryEngine will also apply a hard cap)
+        try:
+            from core.history_engine import _get_int as _history_get_int
+            mem_limit = int(_history_get_int('CONTEXT_VERBOSITY', 10))
+        except Exception:
+            mem_limit = 10
+        memories = await search_memories(tags=expanded_tags, limit=max(1, mem_limit))
         log_debug(f"[json_prompt] ⏱️ Loaded {len(memories)} memories from tags in {time.time() - start_time:.2f}s")
 
-    # === 3. Context base (chat_history has priority over diary) ===
-    context_section = {
-        "chat_history": chat_history,
-        "memories": memories,
-    }
+    # === 3. Context base (history + optional plugin contributions) ===
+    try:
+        from core.history_engine import HistoryEngine
+
+        history_engine = HistoryEngine()
+        context_section = await history_engine.build_context(
+            message=message,
+            context_memory=context_memory,
+            interface_name=interface_name,
+            text=text,
+            memories=memories,
+        )
+    except Exception as e:
+        log_warning(f"[json_prompt] Failed to build history context via HistoryEngine: {e}")
+        context_section = {"memories": memories}
 
     # === 3a. Static injections from plugins ===
     static_persona = None  # Extract persona separately for instructions
@@ -168,80 +166,15 @@ async def build_json_prompt(message, context_memory, interface_name: str | None 
                 static_persona = injections.pop("persona")
                 log_info(f"[json_prompt] 👤 Extracted persona for instructions ({len(static_persona) if static_persona else 0} chars)")
             
-            # Add remaining injections to context
+            # Add remaining injections to context (but drop deprecated legacy keys)
             context_section.update(injections)
+            # Deprecated (migrated to HistoryEngine)
+            for legacy_key in ("latest_diary_entries", "diary_entries", "diary", "chat_history", "current_chat_history"):
+                if legacy_key in context_section:
+                    context_section.pop(legacy_key, None)
             log_info(f"[json_prompt] ✅ Updated context_section with injections. Keys now: {list(context_section.keys())}")
     except Exception as e:
         log_warning(f"[json_prompt] Failed to gather static injections: {e}")
-
-    # === 3b. AI Diary injection (uses remaining space after chat_history) ===
-    try:
-        from plugins.ai_diary import get_recent_entries, format_diary_for_injection, is_plugin_enabled, get_max_diary_chars, should_include_diary
-        
-        if is_plugin_enabled():
-            # Get max prompt chars from active LLM first
-            max_prompt_chars = DEFAULT_MAX_PROMPT_CHARS  # Default fallback
-            try:
-                from core.config import get_active_llm
-                active_llm = await get_active_llm()
-                
-                # Get limits directly from the active LLM engine
-                try:
-                    from core.llm_registry import get_llm_registry
-                    registry = get_llm_registry()
-                    engine = registry.get_engine(active_llm)
-                    
-                    if not engine:
-                        engine = registry.load_engine(active_llm)
-                    
-                    if engine and hasattr(engine, 'get_interface_limits'):
-                        limits = engine.get_interface_limits()
-                        max_prompt_chars = limits.get("max_prompt_chars", DEFAULT_MAX_PROMPT_CHARS)
-                    else:
-                        max_prompt_chars = DEFAULT_MAX_PROMPT_CHARS  # Fallback
-                except Exception:
-                    max_prompt_chars = DEFAULT_MAX_PROMPT_CHARS  # Safe fallback
-                    
-                log_debug(f"[json_prompt] Active interface max prompt chars: {max_prompt_chars}")
-            except Exception as e:
-                log_debug(f"[json_prompt] Could not get interface limits: {e}")
-                max_prompt_chars = DEFAULT_MAX_PROMPT_CHARS  # Safe fallback
-            
-            # Get interface name
-            interface_name = interface_name or "manual"
-            
-            # Calculate current prompt length including chat_history (approximate)
-            # Chat history has priority, so diary gets what's left
-            current_length = len(json_dumps(context_section)) + len(text)
-            
-            # Check if we should include diary (considering space already used by chat_history)
-            if should_include_diary(interface_name, current_length, max_prompt_chars):
-                # Pass context_memory to allow maximizing diary space for memory-focused operations
-                max_chars = get_max_diary_chars(interface_name, current_length, context_memory)
-                
-                # Use DIARY_HISTORY_DAYS from config_registry - cast to int to
-                # avoid passing a ConfigVar-like object into timedelta()
-                try:
-                    days_val = int(DIARY_HISTORY_DAYS)
-                except Exception:
-                    days_val = 2
-                recent_entries = get_recent_entries(days=days_val, max_chars=max_chars)
-                
-                if recent_entries:
-                    # Store entries for potential reduction, and also formatted content
-                    context_section["diary_entries"] = recent_entries
-                    diary_content = format_diary_for_injection(recent_entries)
-                    context_section["diary"] = diary_content
-                    log_debug(f"[json_prompt] Added diary content: {len(diary_content)} chars from {len(recent_entries)} entries ({DIARY_HISTORY_DAYS} days)")
-                else:
-                    log_debug(f"[json_prompt] No diary entries to include (space: {max_chars} chars)")
-            else:
-                log_debug(f"[json_prompt] Diary not included due to space constraints (current: {current_length}, max: {max_prompt_chars})")
-        
-    except ImportError:
-        log_debug("[json_prompt] AI Diary plugin not available")
-    except Exception as e:
-        log_warning(f"[json_prompt] Failed to add diary content: {e}")
 
     # === 4. Input payload ===
     # interface_path was already extracted at the beginning
@@ -306,6 +239,12 @@ async def build_json_prompt(message, context_memory, interface_name: str | None 
     if static_persona:
         json_instructions = f"=== CRITICAL SYSTEM IDENTITY ===\n{static_persona}\n\n=== JSON RESPONSE INSTRUCTIONS ===\n{json_instructions}"
         log_info(f"[json_prompt] 👤 Persona prepended to instructions ({len(static_persona)} chars)")
+
+    # Keep `instructions` strictly minified (single-line) for token efficiency and tests.
+    try:
+        json_instructions = " ".join((json_instructions or "").split())
+    except Exception:
+        pass
     
     # Interface-specific instructions are provided via the available actions block
     # No hardcoded interface references - plugins define their own instructions
@@ -597,11 +536,11 @@ def reduce_prompt_for_llm_limit(prompt: dict, max_chars: int) -> dict:
     are NEVER removed - they are SACRED.
     
     Priority order (STEP BY STEP):
-    1. Remove oldest diary entries (if >3 available)
-    2. Remove oldest chat messages (if >3 available)
-    3. Remove memories entirely if needed
-    4. Remove other context sections (but KEEP persona)
-    5. FINAL EMERGENCY: Remove entire context except persona (but KEEP instructions + persona)
+    1. Trim `history_recent` (if present)
+    2. Trim `history_current_chat` (if present)
+    3. Remove `memories` entirely if needed
+    4. Remove other context sections (but KEEP any protected fields)
+    5. FINAL EMERGENCY: Remove entire context (but KEEP instructions)
     
     Args:
         prompt: The JSON prompt dictionary
@@ -635,37 +574,30 @@ def reduce_prompt_for_llm_limit(prompt: dict, max_chars: int) -> dict:
     
     # Get references to sections
     context = reduced_prompt.get("context", {})
-    diary_entries = context.get("diary_entries", [])
-    chat_history = context.get("chat_history", [])
-    
+    history_recent = context.get("history_recent", [])
+    history_current = context.get("history_current_chat", [])
+
     # Minimum thresholds
-    MIN_DIARY_ENTRIES = 3
-    MIN_CHAT_MESSAGES = 3
-    
-    # === STEP 1: Remove oldest diary entries if needed ===
-    while current_size > max_chars and len(diary_entries) > MIN_DIARY_ENTRIES:
-        removed_entry = diary_entries.pop()  # Remove oldest
+    MIN_HISTORY_RECENT = 3
+    MIN_HISTORY_CURRENT = 1
+
+    # === STEP 1: Trim `history_recent` if needed ===
+    while current_size > max_chars and isinstance(history_recent, list) and len(history_recent) > MIN_HISTORY_RECENT:
         try:
-            from plugins.ai_diary import format_diary_for_injection
-            valid_entries = [e for e in diary_entries if isinstance(e, dict)]
-            if valid_entries:
-                new_diary_content = format_diary_for_injection(valid_entries)
-                context["diary"] = new_diary_content
-            else:
-                if "diary" in context:
-                    del context["diary"]
-        except Exception as e:
-            log_warning(f"[reduce_prompt] Error reformatting diary: {e}")
-            if "diary" in context:
-                del context["diary"]
+            history_recent.pop(0)  # Remove oldest
+        except Exception:
+            break
         current_size = len(json_dumps(reduced_prompt))
-        log_debug(f"[reduce_prompt] Removed diary entry, {len(diary_entries)} remaining, now {current_size} chars")
-    
-    # === STEP 2: Remove oldest chat messages if needed ===
-    while current_size > max_chars and len(chat_history) > MIN_CHAT_MESSAGES:
-        chat_history.pop()  # Remove oldest
+        log_debug(f"[reduce_prompt] Trimmed history_recent, {len(history_recent)} remaining, now {current_size} chars")
+
+    # === STEP 2: Trim `history_current_chat` if needed ===
+    while current_size > max_chars and isinstance(history_current, list) and len(history_current) > MIN_HISTORY_CURRENT:
+        try:
+            history_current.pop(0)  # Remove oldest
+        except Exception:
+            break
         current_size = len(json_dumps(reduced_prompt))
-        log_debug(f"[reduce_prompt] Removed chat message, {len(chat_history)} remaining, now {current_size} chars")
+        log_debug(f"[reduce_prompt] Trimmed history_current_chat, {len(history_current)} remaining, now {current_size} chars")
     
     # === STEP 3: Remove memories entirely if still needed ===
     if current_size > max_chars:
@@ -676,14 +608,10 @@ def reduce_prompt_for_llm_limit(prompt: dict, max_chars: int) -> dict:
             current_size = len(json_dumps(reduced_prompt))
             log_debug(f"[reduce_prompt] After removing memories: {current_size} chars")
     
-    # === STEP 4: Remove other context sections (but KEEP persona which is CRITICAL!) ===
+    # === STEP 4: Remove other context sections (but KEEP protected fields) ===
     if current_size > max_chars:
-        # Save persona before any aggressive removal
-        persona_backup = context.get("persona")
-        log_debug(f"[reduce_prompt] 🛡️ PROTECTING persona: {bool(persona_backup)}")
-        
-        # Remove optional context fields, but NEVER remove persona
-        removable_keys = [k for k in list(context.keys()) if k not in ["persona", "chat_history", "diary_entries", "diary"]]
+        protected = ["persona", "history_current_chat", "history_recent"]
+        removable_keys = [k for k in list(context.keys()) if k not in protected]
         for key in removable_keys:
             if current_size <= max_chars:
                 break
@@ -693,17 +621,10 @@ def reduce_prompt_for_llm_limit(prompt: dict, max_chars: int) -> dict:
                 current_size = len(json_dumps(reduced_prompt))
                 log_debug(f"[reduce_prompt] After removing {key}: {current_size} chars")
     
-    # === STEP 5: Emergency - remove entire context but RESTORE persona if still needed ===
+    # === STEP 5: Emergency - remove entire context (instructions are preserved at top-level) ===
     if current_size > max_chars and "context" in reduced_prompt:
-        log_error(f"[reduce_prompt] 🚨 Emergency: removing entire context but KEEPING persona (CRITICAL)")
-        # Save persona before removing context
-        saved_persona = reduced_prompt["context"].get("persona")
-        # Remove entire context
+        log_error(f"[reduce_prompt] 🚨 Emergency: removing entire context")
         del reduced_prompt["context"]
-        # Recreate context with ONLY persona if it exists
-        if saved_persona:
-            reduced_prompt["context"] = {"persona": saved_persona}
-            log_debug(f"[reduce_prompt] ✅ Context cleared but persona RESTORED (CRITICAL)")
         current_size = len(json_dumps(reduced_prompt))
         log_debug(f"[reduce_prompt] After emergency context removal: {current_size} chars")
     
@@ -728,7 +649,7 @@ def reduce_prompt_for_llm_limit(prompt: dict, max_chars: int) -> dict:
 
 
 def reduce_json_text_for_transmission(json_text: str, max_chars: int) -> str:
-    """Reduce JSON text for transmission by removing oldest memories ONLY.
+    """Reduce JSON text for transmission (emergency).
     
     This is an EMERGENCY reduction used when the JSON prompt is too large
     to send to the LLM. It conservatively removes only the oldest memories
@@ -736,10 +657,11 @@ def reduce_json_text_for_transmission(json_text: str, max_chars: int) -> str:
     
     Strategy:
     1. Parse the JSON
-    2. Remove oldest memories one by one from latest_diary_entries
-    3. Reserialize and check size
-    4. Repeat until size <= max_chars or no more memories to remove
-    5. Principle: "meno tagli e meglio è" - minimize cuts
+    2. Remove items from `memories` (if present)
+    3. Trim `history_recent` (if present)
+    4. Trim `history_current_chat` (but keep at least 1)
+    5. Reserialize and check size
+    6. Principle: "meno tagli e meglio è" - minimize cuts
     
     Args:
         json_text: The full JSON text to reduce
@@ -765,29 +687,12 @@ def reduce_json_text_for_transmission(json_text: str, max_chars: int) -> str:
     
     try:
         context = data.get("context", {})
-        
-        # Strategy: Remove oldest diary entries (they are ordered DESC, so end = oldest)
-        diary_entries = context.get("latest_diary_entries", [])
-        if isinstance(diary_entries, list) and len(diary_entries) > 1:
-            log_debug(f"[transmission_reduce] Found {len(diary_entries)} diary entries, will remove oldest first")
-            
-            # Remove entries from the END (oldest first, since ordered DESC by recency)
-            entries_removed = 0
-            while current_size > max_chars and len(diary_entries) > 1:
-                removed_entry = diary_entries.pop()  # Remove oldest
-                context["latest_diary_entries"] = diary_entries
-                current_size = len(json_dumps(data))  # Use imported json_dumps
-                entries_removed += 1
-                log_debug(f"[transmission_reduce] Removed diary entry id={removed_entry.get('id')}, now {current_size} chars, {len(diary_entries)} entries remaining")
-            
-            if entries_removed > 0:
-                log_info(f"[transmission_reduce] Removed {entries_removed} oldest diary entries")
-        
-        # If STILL too big, try reducing memories array
+
+        # Step 1: reduce memories
         if current_size > max_chars:
             memories = context.get("memories", [])
             if isinstance(memories, list) and len(memories) > 0:
-                log_debug(f"[transmission_reduce] Diary reduction insufficient. Found {len(memories)} memories, attempting reduction...")
+                log_debug(f"[transmission_reduce] Found {len(memories)} memories, attempting reduction...")
                 
                 memories_removed = 0
                 while current_size > max_chars and len(memories) > 0:
@@ -799,6 +704,32 @@ def reduce_json_text_for_transmission(json_text: str, max_chars: int) -> str:
                 
                 if memories_removed > 0:
                     log_info(f"[transmission_reduce] Also removed {memories_removed} oldest memories")
+
+        # Step 2: trim history_recent
+        if current_size > max_chars:
+            history_recent = context.get("history_recent", [])
+            if isinstance(history_recent, list) and len(history_recent) > 0:
+                removed = 0
+                while current_size > max_chars and len(history_recent) > 0:
+                    history_recent.pop(0)
+                    context["history_recent"] = history_recent
+                    current_size = len(json_dumps(data))
+                    removed += 1
+                if removed:
+                    log_info(f"[transmission_reduce] Also trimmed history_recent by {removed} items")
+
+        # Step 3: trim history_current_chat (keep at least 1)
+        if current_size > max_chars:
+            history_current = context.get("history_current_chat", [])
+            if isinstance(history_current, list) and len(history_current) > 1:
+                removed = 0
+                while current_size > max_chars and len(history_current) > 1:
+                    history_current.pop(0)
+                    context["history_current_chat"] = history_current
+                    current_size = len(json_dumps(data))
+                    removed += 1
+                if removed:
+                    log_info(f"[transmission_reduce] Also trimmed history_current_chat by {removed} items")
         
         # Serialize back to JSON using imported json_dumps
         reduced_json = json_dumps(data)

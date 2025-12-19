@@ -1149,6 +1149,29 @@ class DiaryPlugin:
     def get_supported_action_types(self):
         return ["static_inject", "create_personal_diary_entry"]
 
+    def get_history_contributions(self, **kwargs):
+        """Provide diary entries as a history contribution for the core HistoryEngine."""
+        try:
+            from core.history_types import HistoryContribution
+            from core.config_manager import config_registry
+
+            try:
+                days = int(config_registry.get_value('DIARY_HISTORY_DAYS', 2, value_type=int))
+            except Exception:
+                days = 2
+
+            entries = get_recent_entries(days=days, max_chars=None)
+            return [
+                HistoryContribution(
+                    name='ai_diary',
+                    priority=INJECTION_PRIORITY,
+                    entries=entries,
+                    enabled_var='ENABLE_AI_DIARY',
+                )
+            ]
+        except Exception:
+            return []
+
     def get_supported_actions(self):
         return {
             "static_inject": {

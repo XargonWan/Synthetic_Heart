@@ -958,6 +958,9 @@ class SynthWebUIInterface:
         )
 
         log_debug(f"{LOG_PREFIX} message from {session_id}: {text}")
+
+        # NOTE: WebUI history is tracked via `_append_history()` which is wired
+        # to the centralized context manager deque in `_ensure_session_history_loaded()`.
         
         # Global action ID for this message
         action_id = f"webui_msg_{session_id}_{message.message_id}"
@@ -1025,7 +1028,7 @@ class SynthWebUIInterface:
             await message_queue.enqueue(
                 bot=self,
                 message=message,
-                context_memory={},
+                context_memory=None,
                 priority=False,  # Normal priority for user messages
                 interface_id=INTERFACE_NAME,
                 skip_mention_check=True,  # WebUI is 1:1 interface, skip mention check
@@ -1092,15 +1095,34 @@ class SynthWebUIInterface:
         log_info(f"{LOG_PREFIX} _replay_history: sent {len(history)} messages to session {session_id}")
 
     async def _append_history(self, session_id: str, sender: str, text: str) -> None:
-        history = self.message_history.setdefault(
-            session_id, deque(maxlen=self.max_history)
+        history = self.message_history.setdefault(session_id, deque(maxlen=self.max_history))
+
+        # Store in the same schema used by the centralized context manager so
+        # HistoryEngine can format `history_current_chat` consistently.
+        from datetime import datetime
+        interface_path = f"{INTERFACE_NAME}/{session_id}"
+
+        canonical_sender = sender
+        try:
+            if isinstance(sender, str) and sender.lower() in ("synth", "bot", "synth_webui"):
+                canonical_sender = "self"
+        except Exception:
+            canonical_sender = sender
+
+        history.append(
+            {
+                "message_id": None,
+                "user_id": "self" if canonical_sender == "self" else str(session_id),
+                "username": canonical_sender,
+                "text": text,
+                "timestamp": datetime.utcnow().isoformat(),
+                "interface_path": interface_path,
+            }
         )
-        history.append({"sender": sender, "text": text})
+
         # Persist to chat_history_cache for long-term storage
         try:
-            from datetime import datetime
             from core.chat_history_cache import save_chat_message
-            interface_path = f"{INTERFACE_NAME}/{session_id}"
             # Normalize sender_name for DB storage: we want to store "self" as the
             # canonical name for the SyntH agent so that restore/replay can map
             # it back to "synth" for WS payloads. This avoids misattribution
