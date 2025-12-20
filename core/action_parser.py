@@ -20,7 +20,8 @@ from core.config_manager import config_registry
 from core.image_processor import RESTRICT_ACTIONS
 
 # Global dictionary to track retry attempts per chat/message thread for the corrector
-CORRECTOR_RETRIES = config_registry.get_value(
+# Use a ConfigVar so consumers always see the latest value (set via WebUI/API)
+CORRECTOR_RETRIES = config_registry.get_var(
     "CORRECTOR_RETRIES",
     2
 )
@@ -104,8 +105,13 @@ def _get_retry_key(message):
     return _norm(interface_path)
 
 
-def _should_retry(message, max_retries: int = CORRECTOR_RETRIES) -> bool:
-    """Check if we should attempt retry for this message context."""
+def _should_retry(message, max_retries: int | None = None) -> bool:
+    """Check if we should attempt retry for this message context.
+
+    If max_retries is None we read the dynamic `CORRECTOR_RETRIES` value.
+    """
+    if max_retries is None:
+        max_retries = int(CORRECTOR_RETRIES)
     retry_key = _get_retry_key(message)
     current_time = time.time()
 
@@ -1479,7 +1485,7 @@ async def corrector_orchestrator(text: str, context: dict, bot, message, max_ret
 
     # Determine max retries
     if max_retries is None:
-        max_retries = CORRECTOR_RETRIES
+            max_retries = int(CORRECTOR_RETRIES)
     
     # Initialize completed_actions if not provided
     if completed_actions is None:

@@ -22,8 +22,9 @@ _EXPECTING_SYSTEM_REPLY: dict = {}
 def _get_system_reply_timeout():
     """Get the system reply timeout from config, default to 10 minutes."""
     try:
-        import os
-        timeout = int(os.getenv('AWAIT_RESPONSE_TIMEOUT', '600'))
+        # Prefer config_registry so UI/API changes are respected at runtime
+        from core.config_manager import config_registry
+        timeout = int(config_registry.get_value('AWAIT_RESPONSE_TIMEOUT', 600))
         return timeout
     except (ValueError, TypeError):
         return 600  # 10 minutes default
@@ -738,7 +739,8 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
             pass
         return None
 
-    max_retries = getattr(action_parser, 'CORRECTOR_RETRIES', 2)
+    # CORRECTOR_RETRIES may be a ConfigVar; ensure we have an int
+    max_retries = int(getattr(action_parser, 'CORRECTOR_RETRIES', 2))
 
     # Extract message from context if available
     message = context.get('message') if context else None

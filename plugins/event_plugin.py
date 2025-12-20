@@ -16,8 +16,7 @@ import json
 import time
 import aiomysql
 from core.core_initializer import core_initializer, register_plugin
-
-CORRECTOR_RETRIES = int(os.getenv("CORRECTOR_RETRIES", "2"))
+from core.action_parser import CORRECTOR_RETRIES
 
 
 def _build_event_reminder_instructions(event_id: int, description: str, is_late: bool, scheduled_time: str, lateness_context: str, original_context: str = None) -> str:
@@ -854,12 +853,12 @@ class EventPlugin(AIPluginBase):
 
             from core.core_initializer import INTERFACE_REGISTRY
             delivered = False
-            for attempt in range(1, CORRECTOR_RETRIES + 1):
+            for attempt in range(1, int(CORRECTOR_RETRIES) + 1):
                 interface = INTERFACE_REGISTRY.get("telegram_bot")
                 if not interface:
                     log_warning(
                         f"[event_plugin] No interface registered for event {event_id} "
-                        f"(attempt {attempt}/{CORRECTOR_RETRIES})"
+                        f"(attempt {attempt}/{int(CORRECTOR_RETRIES)})"
                     )
                 else:
                     from types import SimpleNamespace
@@ -930,12 +929,12 @@ class EventPlugin(AIPluginBase):
                         )
                         break
 
-                if attempt < CORRECTOR_RETRIES and not delivered:
+                if attempt < int(CORRECTOR_RETRIES) and not delivered:
                     await asyncio.sleep(attempt)
 
             if not delivered:
                 log_warning(
-                    f"[event_plugin] Failed to deliver event {event_id} after {CORRECTOR_RETRIES} attempts"
+                    f"[event_plugin] Failed to deliver event {event_id} after {int(CORRECTOR_RETRIES)} attempts"
                 )
             else:
                 # Mark as delivered ONLY if it was successfully sent to LLM

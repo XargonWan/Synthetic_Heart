@@ -11,8 +11,7 @@ from core.logging_utils import log_debug, log_info, log_warning, log_error
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 from core.prompt_engine import build_full_json_instructions, build_minified_json_instructions
-
-CORRECTOR_RETRIES = int(os.getenv("CORRECTOR_RETRIES", "2"))
+from core.action_parser import CORRECTOR_RETRIES
 
 
 class AutoResponseSystem:
@@ -204,14 +203,14 @@ async def request_llm_delivery(
             log_error(f"[auto_response] Failed to build payload for {reason}: {e}")
             return False
 
-        for attempt in range(1, CORRECTOR_RETRIES + 1):
+        for attempt in range(1, int(CORRECTOR_RETRIES) + 1):
             try:
                 import core.plugin_instance as plugin_instance
 
                 active_plugin = plugin_instance.get_plugin()
                 if not active_plugin:
                     log_warning(
-                        f"[auto_response] No active LLM plugin available (attempt {attempt}/{CORRECTOR_RETRIES})"
+                        f"[auto_response] No active LLM plugin available (attempt {attempt}/{int(CORRECTOR_RETRIES)})"
                     )
                     await asyncio.sleep(1)
                     continue
@@ -228,8 +227,8 @@ async def request_llm_delivery(
                         return
 
                 # Log the direction of the message flow
-                if message is not None:
-                    log_info(f"[auto_response] 📤 INTERFACE→LLM transmission: sending message via interface_to_llm transport layer (attempt {attempt}/{CORRECTOR_RETRIES})")
+                    if message is not None:
+                    log_info(f"[auto_response] 📤 INTERFACE→LLM transmission: sending message via interface_to_llm transport layer (attempt {attempt}/{int(CORRECTOR_RETRIES)})")
                     await plugin_instance.handle_incoming_message(
                         interface, message, payload_json, interface.get_interface_id()
                     )
@@ -246,7 +245,7 @@ async def request_llm_delivery(
                     )
                     mock_message.chat = SimpleNamespace(id=-1, type="private")
 
-                    log_info(f"[auto_response] 📤 INTERFACE→LLM transmission: sending synthetic message via interface_to_llm transport layer (attempt {attempt}/{CORRECTOR_RETRIES})")
+                    log_info(f"[auto_response] 📤 INTERFACE→LLM transmission: sending synthetic message via interface_to_llm transport layer (attempt {attempt}/{int(CORRECTOR_RETRIES)})")
                     await plugin_instance.handle_incoming_message(
                         interface, mock_message, payload_json, interface.get_interface_id()
                     )
@@ -260,7 +259,7 @@ async def request_llm_delivery(
                 await asyncio.sleep(1)
 
         log_warning(
-            f"[auto_response] Failed to process {reason} after {CORRECTOR_RETRIES} attempts"
+            f"[auto_response] Failed to process {reason} after {int(CORRECTOR_RETRIES)} attempts"
         )
         return False
     

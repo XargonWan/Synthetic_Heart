@@ -594,15 +594,12 @@ class SeleniumLLMBase(AIPluginBase):
 
     def _init_components(self):
         """Initialize common components."""
-        # Import CHROMIUM_HEADLESS from environment variable directly
-        import os
-        self.CHROMIUM_HEADLESS = os.getenv("CHROMIUM_HEADLESS", "0") == "1"
-
-        # Also register with config registry for UI visibility
+        # Read CHROMIUM_HEADLESS from the config registry (supports ENV override)
         from core.config_manager import config_registry
+        # Use 0 as default; config_registry will populate from ENV if present
         self.CHROMIUM_HEADLESS_VAR = config_registry.get_var(
             "CHROMIUM_HEADLESS",
-            int(os.getenv("CHROMIUM_HEADLESS", "0")),
+            0,
             label="Chromium Headless Mode",
             description="Set to 1 for headless mode (no browser window), 0 for non-headless mode (visible browser window)",
             value_type=int,
@@ -611,10 +608,23 @@ class SeleniumLLMBase(AIPluginBase):
             advanced=True,
         )
 
+        # Local boolean flag (kept in sync via listener)
+        self.CHROMIUM_HEADLESS = bool(int(self.CHROMIUM_HEADLESS_VAR))
+
+        # Keep the instance flag in sync when the config changes at runtime
+        def _on_chromium_headless_change(new_value):
+            try:
+                self.CHROMIUM_HEADLESS = bool(int(new_value))
+            except Exception:
+                # Ignore misformatted values; keep previous state
+                pass
+
+        config_registry.add_listener("CHROMIUM_HEADLESS", _on_chromium_headless_change)
+
         # Max retries for driver initialization
         self.MAX_RETRIES_VAR = config_registry.get_var(
             "SELENIUM_MAX_RETRIES",
-            int(os.getenv("SELENIUM_MAX_RETRIES", "3")),
+            3,
             label="Selenium Max Retries",
             description="Maximum number of retries for Selenium driver initialization",
             value_type=int,
@@ -2938,7 +2948,8 @@ class SeleniumLLMBase(AIPluginBase):
         except Exception:
             part1_processing_timeout = 8
         # Retry each context PART up to CORRECTOR_RETRIES; any response is enough to proceed.
-        max_retries = CORRECTOR_RETRIES if 'CORRECTOR_RETRIES' in globals() else 3
+        # CORRECTOR_RETRIES may be a ConfigVar; ensure int semantics
+        max_retries = int(CORRECTOR_RETRIES) if 'CORRECTOR_RETRIES' in globals() else 3
         try:
             part1_stable_grace = float(config_registry.get_value("SELENIUM_PART1_RESPONSE_STABLE_GRACE", DEFAULT_PART1_RESPONSE_STABLE_GRACE))
         except Exception:

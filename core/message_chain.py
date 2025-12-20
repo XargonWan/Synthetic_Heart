@@ -216,7 +216,7 @@ async def handle_incoming_message(bot, message: Optional[SimpleNamespace], text:
     # Retry/tried set to avoid loops
     tried_texts = set()
     attempt = 0
-    max_retries = ctx.get('max_retries', CORRECTOR_RETRIES)
+    max_retries = ctx.get('max_retries', int(CORRECTOR_RETRIES))
 
     while True:
         log_info(
