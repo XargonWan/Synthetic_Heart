@@ -48,6 +48,14 @@ async def test_play_and_stop_with_outro(tmp_path: Path):
     sent = fake.connections[session].sent
     assert any(p.get("type") == "animation" for p in sent)
 
+    # Ensure rich animation_state is present when descriptor exists
+    anim_payloads = [p for p in sent if p.get("type") == "animation"]
+    assert anim_payloads
+    first = anim_payloads[0]
+    assert first.get('descriptor') is not None
+    assert 'animation_state' in first
+    assert first['animation_state'].get('lipsync') is False
+
     # Now stop animation and expect an outro play_section event
     await handler.stop_animation(context_id="ctx1", session_id=session)
     # After stop, at least one payload with play_section 'outro' should be in sent

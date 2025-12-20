@@ -6,4 +6,39 @@
     "attributes": {
         "appearance": "You have a distinctive digital form. An expressive avatar with character and presence. You are one of the original SyntH archetypes, representing a unique facet of synthetic consciousness."
     }
+    ,
+    "blendshape_map": {
+        "eyes.closed": "eyes_closed",
+        "mouth.O": "mouth_O",
+        "emotions": {
+            "happy": { "mouth_smile": 1.0, "eyes_smile": 0.6 },
+            "sad": { "mouth_frown": 1.0, "eyes_closed": 0.8 }
+        },
+        "visemes": {
+            "A": { "mouth_A": 1.0 },
+            "O": { "mouth_O": 1.0 }
+        },
+        "expressions": {
+            "surprised": { "targets": { "eyes_wide": 0.9, "mouth_open": 0.7 }, "priority": 20 }
+        }
+    },
+    "emotion_speed": {
+        "default": 1.0,
+        "per_emotion": { "happy": 1.2, "sad": 0.8 }
+    },
+    "animation_overrides": {
+        "Think": {
+            "animation": "/skins/Rei/animations/Think/Thinking.fbx",
+            "blendshape_presets": { "mouth_O": 0.05 }
+            ,
+            "expressions": [
+                { "name": "thinking_eyes_closed", "targets": { "eyes_closed": 1.0 }, "priority": 90, "source": "persona_override" }
+            ]
+        }
+    },
+    "defaults": {
+        "lipsync": false,
+        "blink": { "auto": true, "rate_s": 3.5, "intensity": 0.75, "close_ms": 60, "hold_ms": 120, "open_ms": 60 },
+        "eye_movement": { "auto": true, "saccade_rate_s": 2 }
+    }
 }

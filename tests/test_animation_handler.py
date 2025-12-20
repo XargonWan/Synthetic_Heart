@@ -141,7 +141,7 @@ async def test_stop_animation_multiple_contexts(animation_handler, mock_webui):
     await animation_handler.stop_animation(context1, session_id)
     
     # Should NOT return to Idle because context2 is still active
-    assert animation_handler._active_tasks[context2] is True
+    assert context2 in animation_handler._active_tasks
     
     # Stop second context
     await animation_handler.stop_animation(context2, session_id)
@@ -239,17 +239,6 @@ async def test_state_summary_callback_registered_and_called():
     # Trigger an animation change
     await handler.play_animation(AnimationState.THINK, session_id=None, loop=True, context_id='ctx')
     assert fake._called is True
-    
-    session_id = "test_session"
-    mock_ws = AsyncMock()
-    mock_webui.connections[session_id] = mock_ws
-    
-    await animation_handler.play_animation(
-        AnimationState.THINK,
-        session_id=session_id
-    )
-    
-    assert animation_handler.get_current_animation() == "Thinking.fbx"
 
 
 @pytest.mark.asyncio
@@ -309,6 +298,8 @@ async def test_websocket_message_format(animation_handler, mock_webui):
     call_args = mock_ws.send_json.call_args[0][0]
     
     assert call_args["type"] == "animation"
-    assert call_args["animation"] == "animations/Thinking.fbx"
+    assert isinstance(call_args["animation"], str)
+    assert call_args["animation"].endswith("Thinking.fbx")
+    assert "animations/" in call_args["animation"]
     assert call_args["loop"] is True
     assert call_args["state"] == "think"

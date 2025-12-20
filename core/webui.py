@@ -72,7 +72,7 @@ class SynthWebUIInterface:
     
     display_name = "Web UI"
 
-    def __init__(self) -> None:
+    def __init__(self, autostart: bool = True) -> None:
         self.app = FastAPI(title=BRAND_NAME, version="1.0")
         self.start_time = datetime.utcnow()
         self.connections: Dict[str, WebSocket] = {}
@@ -85,8 +85,8 @@ class SynthWebUIInterface:
         # after sending, and avoid starting WRITING too late.
         self._active_writing_actions: Dict[str, Deque[str]] = {}
         # Runtime/configurable attributes with sensible defaults
-        # The Web UI must always autostart; do not allow runtime toggle.
-        self.autostart = True
+        # Autostart can be disabled for tests/dev harnesses.
+        self.autostart = bool(autostart)
         self.host = os.getenv('SYNTH_WEBUI_HOST', '0.0.0.0')
         try:
             # Prefer new env var name SYNTH_WEBUI_HTTP_PORT, fallback to legacy SYNTH_WEBUI_PORT
@@ -286,8 +286,15 @@ class SynthWebUIInterface:
         # Template sections route for modular loading
         self.app.get("/templates/{section}.html")(self.serve_template_section)
 
-        register_interface(INTERFACE_NAME, self)
-        log_info(f"{LOG_PREFIX} Interface registered", log_file=WEBUI_LOG)
+        # Register as an interface only when autostart is enabled.
+        # Tests/dev harnesses may instantiate the WebUI with autostart disabled
+        # and without a fully initialized core initializer.
+        if self.autostart:
+            try:
+                register_interface(INTERFACE_NAME, self)
+                log_info(f"{LOG_PREFIX} Interface registered", log_file=WEBUI_LOG)
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Interface registration failed (non-fatal): {exc}", log_file=WEBUI_LOG)
         
         # Initialize animation handler
         from core.animation_handler import get_animation_handler
@@ -855,6 +862,18 @@ class SynthWebUIInterface:
             "loop": descriptor.get("play_once", False) is False if descriptor else True,
             "descriptor": descriptor
         }
+        # Attach rich animation_state when available from animation handler
+        try:
+            if self.animation_handler:
+                try:
+                    current = self.animation_handler.get_current_animation_state()
+                    anim_state = current.get('animation_state') if isinstance(current, dict) else None
+                    if anim_state:
+                        message['animation_state'] = anim_state
+                except Exception:
+                    pass
+        except Exception:
+            pass
         
         client_count = len(self.connections)
         log_info(f"{LOG_PREFIX} Broadcasting animation state to {client_count} clients: {state.value}/{animation_file}", log_file=WEBUI_LOG)
@@ -887,6 +906,19 @@ class SynthWebUIInterface:
                 "animation": resolved_path,
                 "descriptor": descriptor
             }
+
+            # Attach rich animation_state structure when possible
+            try:
+                current = None
+                if self.animation_handler:
+                    try:
+                        current = self.animation_handler.get_current_animation_state()
+                    except Exception:
+                        current = None
+                if current and isinstance(current, dict) and current.get('animation_state'):
+                    payload['animation_state'] = current.get('animation_state')
+            except Exception:
+                pass
 
             for sid, websocket in list(self.connections.items()):
                 try:
@@ -1319,39 +1351,15 @@ class SynthWebUIInterface:
         For WebUI this approximates 'LLM started responding', so we switch THINK->WRITE
         as early as possible (before the final message is sent).
         """
-        try:
-            session_id = None
-            if interface_path and "/" in str(interface_path):
-                parts = str(interface_path).split("/")
-                if len(parts) >= 2 and parts[0] == INTERFACE_NAME:
-                    session_id = parts[1]
-            if not session_id:
-                return
-
-            # Clear any pending THINKING for this session first.
-            await self._webui_clear_pending_thinking(session_id)
-
-            writing_action_id = f"webui_write_{session_id}_{int(datetime.utcnow().timestamp() * 1000) % 1_000_000}"
-            writing_pushed = False
-            try:
-                writing_pushed = await self.action_state_manager.push_action(
-                    action_id=writing_action_id,
-                    phase=AnimationPhase.WRITING,
-                    component=INTERNAL_CHAT_NAME,
-                )
-            except Exception as exc:
-                log_warning(f"{LOG_PREFIX} Failed to push WRITING action state (generation_start): {exc}")
-                writing_pushed = False
-
-            if writing_pushed:
-                self._active_writing_actions.setdefault(session_id, deque()).append(writing_action_id)
-                if self.persona_manager:
-                    try:
-                        await self.persona_manager.set_animation_state("write", session_id=session_id)
-                    except Exception as anim_exc:
-                        log_debug(f"{LOG_PREFIX} Failed to set 'write' animation (generation_start): {anim_exc}")
-        except Exception as exc:
-            log_debug(f"{LOG_PREFIX} on_generation_start failed: {exc}")
+        # NOTE:
+        # We intentionally do NOT switch to WRITING here.
+        # In practice the queue can call this hook almost immediately after enqueue,
+        # which makes clients skip the visible THINKING phase and can keep WRITING
+        # active longer than intended.
+        #
+        # For WebUI we keep THINKING until we actually deliver the response
+        # (send_message) and then transition to IDLE.
+        return
 
     async def on_generation_end(self, interface_path: str, success: bool = True, **kwargs) -> None:
         """Optional hook called by the queue when processing ends.
@@ -4263,3 +4271,7 @@ def shutdown_interface():
         log_error(f"{LOG_PREFIX} Error during interface shutdown: {e}")
     
     synth_webui_interface = None
+
+
+# Backward-compatible alias used by older code/tests.
+WebUI = SynthWebUIInterface

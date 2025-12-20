@@ -20,6 +20,72 @@
             }).catch((err) => console.debug('[synth_webui] ServiceWorker registration failed', err));
         }
 
+        // Global error overlay and handlers (helpful in dev to surface blocking JS errors)
+        (function(){
+            try {
+                const overlay = document.createElement('pre');
+                overlay.id = 'synth-error-overlay';
+                overlay.style.cssText = 'display:none;position:fixed;left:0;right:0;top:0;max-height:50vh;overflow:auto;z-index:2147483647;background:rgba(0,0,0,0.85);color:#fff;padding:12px;font:12px/1.4 monospace;white-space:pre-wrap;';
+                document.addEventListener('DOMContentLoaded', () => {
+                    try { document.body && document.body.appendChild(overlay); } catch (e) {}
+                });
+
+                function isTransientConnectivityError(text) {
+                    const t = String(text || '');
+                    return /WebSocket|network|ECONN|EHOSTUNREACH|ERR_NETWORK|Failed to fetch|Load failed|Connection lost/i.test(t);
+                }
+
+                function formatRejectionReason(reason) {
+                    try {
+                        // NOTE: JSON.stringify(new Error('x')) => "{}" so treat Error specially.
+                        if (reason instanceof Error) {
+                            return reason.stack || (reason.name + ': ' + reason.message);
+                        }
+                        if (reason && typeof reason === 'object') {
+                            if (reason.stack) return String(reason.stack);
+                            if (reason.message) return String(reason.message);
+                            const json = JSON.stringify(reason);
+                            if (json && json !== '{}' && json !== 'null') return json;
+                            return String(reason);
+                        }
+                        return String(reason);
+                    } catch (e) {
+                        return String(reason);
+                    }
+                }
+
+                function showOverlay(msg) {
+                    try {
+                        const isReconnecting = !!(window && window.__synth_is_reconnecting);
+                        const text = String(msg || '');
+                        // During container restarts the page often triggers fetch/websocket transient errors.
+                        // Avoid surfacing a scary overlay for those expected reconnect conditions.
+                        if ((isReconnecting && isTransientConnectivityError(text)) || isTransientConnectivityError(text)) {
+                            return;
+                        }
+                        overlay.textContent = '[synth_webui] Runtime error:\n' + text;
+                        overlay.style.display = 'block';
+                    } catch (e) { console.error('[synth_webui] showOverlay failed', e); }
+                }
+
+                window.addEventListener('error', function(ev){
+                    try {
+                        const info = `${ev.message} (${ev.filename}:${ev.lineno}:${ev.colno})\n${ev.error && ev.error.stack ? ev.error.stack : ''}`;
+                        console.error('[synth_webui] window.error', info);
+                        showOverlay(info);
+                    } catch (e) { console.error('[synth_webui] error handler failed', e); }
+                });
+
+                window.addEventListener('unhandledrejection', function(ev){
+                    try {
+                        const reasonText = formatRejectionReason(ev.reason);
+                        console.error('[synth_webui] unhandledrejection', reasonText);
+                        showOverlay(reasonText);
+                    } catch (e) { console.error('[synth_webui] unhandledrejection handler failed', e); }
+                });
+            } catch (e) { console.warn('[synth_webui] Failed to install global error overlay', e); }
+        })();
+
         // Reset movable windows to safe default positions/sizes
         function resetWindowPositions(confirmAction = true) {
             try {
@@ -315,7 +381,7 @@
             display: none;
             width: 100%;
             height: 100%;
-            min-height: calc(100vh - 120px);
+            min-height: calc(100vh - var(--topbar-height, 120px));
             padding: clamp(1rem, 2vw, 2rem);
             box-sizing: border-box;
         }
@@ -337,7 +403,7 @@
             height: 100%;
             display: flex;
             flex-direction: column;
-            min-height: calc(100vh - 120px);
+            min-height: calc(100vh - var(--topbar-height, 120px));
         }
         .home-content {
             flex: 1;
@@ -1466,7 +1532,7 @@
                 left: 0;
                 right: 0;
                 bottom: 0;
-                z-index: 40000;
+                z-index: 20000;
                 flex-direction: column !important;
                 flex-wrap: nowrap !important;
                 padding: 1rem;
@@ -5598,6 +5664,7 @@
             ws = new WebSocket(`${protocol}://${window.location.host}/ws`);
 
             ws.addEventListener('open', () => {
+                try { window.__synth_is_reconnecting = false; } catch (e) { /* ignore */ }
                 statusLabel.textContent = 'Connected';
                 statusIndicator?.classList.add('online');
                 sendBtn.disabled = false;
@@ -5724,6 +5791,23 @@
                     currentDisplayedPhase = incomingPhase;
                     currentDisplayedActionId = incomingActionId;
 
+                    // Keep a numeric priority mirror for animation preemption.
+                    try { window.__synth_current_animation_priority = (PHASE_PRIORITIES[incomingPhase] || 0); } catch (e) { /* ignore */ }
+
+                    // If we previously suppressed a low-priority animation command (e.g., idle)
+                    // while a higher-priority phase was active, apply it once we are truly IDLE.
+                    try {
+                        if (incomingPhase === 'IDLE' && window.__synth_suppressed_animation_cmd) {
+                            const cmd = window.__synth_suppressed_animation_cmd;
+                            window.__synth_suppressed_animation_cmd = null;
+                            if (animationHandler && cmd && cmd.state) {
+                                const animationFileOrUrl = cmd.animation || null;
+                                const playOnce = (cmd.descriptor && cmd.descriptor.play_once) || (cmd.loop === false);
+                                animationHandler.startAction(cmd.state, animationFileOrUrl, !!playOnce, cmd.play_section, cmd.descriptor || null);
+                            }
+                        }
+                    } catch (e) { /* ignore */ }
+
                     // IMPORTANT: Historically we treated action_state as informational only
                     // and relied on `type=animation` for playback. However, some clients
                     // (particularly mobile) can miss immediate `animation` commands.
@@ -5742,7 +5826,6 @@
                             if (currentName !== animationState || (window.__synth_current_animation_state && window.__synth_current_animation_state.animation !== anim)) {
                                 console.log('[synth_webui] Applying animation from action_state to ensure sync:', animationState, anim);
                                 animationHandler.startAction(animationState, anim, playOnce, null, descriptor || null);
-                                currentDisplayedPhase = (animationState || currentDisplayedPhase).toUpperCase();
                             }
                         }
                     } catch (err) {
@@ -5757,6 +5840,39 @@
                     console.log('[synth_webui] data.state:', data.state);
                     console.log('[synth_webui] data.animation:', data.animation);
                     console.log('[synth_webui] data.play_section:', data.play_section);
+
+                    // Priority-aware guard for animation commands: don't let low-priority
+                    // states (especially idle) interrupt higher-priority phases.
+                    try {
+                        const s = (data.state || '').toString().toLowerCase();
+                        const stateToPhase = { think: 'THINKING', write: 'WRITING', talk: 'TALKING', idle: 'IDLE' };
+                        const incomingPhase = stateToPhase[s] || null;
+                        if (incomingPhase) {
+                            const incomingPriority = (typeof data.priority === 'number') ? data.priority : (PHASE_PRIORITIES[incomingPhase] || 0);
+                            const currentPriority = (typeof window.__synth_current_animation_priority === 'number') ? window.__synth_current_animation_priority : (PHASE_PRIORITIES[currentDisplayedPhase] || 0);
+                            const isLowerPriority = incomingPriority < currentPriority;
+
+                            // Only suppress when a higher-priority phase is being displayed.
+                            // Additionally, suppress IDLE while not in IDLE.
+                            if ((incomingPhase === 'IDLE' && currentDisplayedPhase && currentDisplayedPhase !== 'IDLE') || isLowerPriority) {
+                                // Remember the most recent suppressed animation so we can
+                                // apply it when we return to IDLE via action_state.
+                                window.__synth_suppressed_animation_cmd = data;
+                                return;
+                            }
+
+                            // Accepted: remember current priority for subsequent preemption.
+                            window.__synth_current_animation_priority = incomingPriority;
+                        }
+                    } catch (e) { /* ignore */ }
+
+                    // Cache the last rich state payload so it can be applied later (e.g. after VRM load/reload)
+                    // even if the animation command is queued, de-duplicated, or skipped.
+                    try {
+                        if (data.animation_state && typeof data.animation_state === 'object') {
+                            window.__synth_last_rich_animation_state = data.animation_state;
+                        }
+                    } catch (e) { /* ignore */ }
                     
                     // Keep a global, read-only view of the current centralized animation
                     window.__synth_current_animation_state = { state: data.state, animation: data.animation, descriptor: data.descriptor || null };
@@ -5773,7 +5889,28 @@
                         window.__synth_last_animation_cmd = { key, at: Date.now() };
                     } catch (e) { /* ignore */ }
 
+                    // Additional anti-spam for idle: if backend keeps flipping between idle files
+                    // while we're already idle, don't restart more often than a small interval.
+                    try {
+                        const s = (data.state || '').toString().toLowerCase();
+                        if (s === 'idle' && animationHandler) {
+                            const now = Date.now();
+                            const lastIdleAt = window.__synth_last_idle_restart_at || 0;
+                            const alreadyIdle = (animationHandler.currentActionName === 'idle');
+                            if (alreadyIdle && (now - lastIdleAt) < 1500) {
+                                return;
+                            }
+                            window.__synth_last_idle_restart_at = now;
+                        }
+                    } catch (e) { /* ignore */ }
+
                     if (animationHandler && data.state) {
+                        // If a rich animation_state is available, let the AnimationHandler consume it first
+                        if (data.animation_state && typeof animationHandler.applyAnimationState === 'function') {
+                            try {
+                                animationHandler.applyAnimationState(data.animation_state);
+                            } catch (e) { console.warn('[synth_webui] applyAnimationState failed', e); }
+                        }
                         console.log('[synth_webui] Calling animationHandler.startAction with:', data.state, data.animation, data.loop, data.descriptor, data.play_section);
                         // Pass full URL/path through; loader can handle both filename and URL.
                         const animationFileOrUrl = data.animation || null;
@@ -5781,8 +5918,12 @@
                         const playOnce = (data.descriptor && data.descriptor.play_once) || (data.loop === false);
                         // If play_section is specified (intro, loop, or outro), pass it through
                         animationHandler.startAction(data.state, animationFileOrUrl, !!playOnce, data.play_section, data.descriptor || null);
-                        // Ensure displayed phase reflects this authoritative change
-                        currentDisplayedPhase = data.state && data.state.toUpperCase ? data.state.toUpperCase() : currentDisplayedPhase;
+                        // Ensure displayed phase uses ActionState-style names (PHASE_PRIORITIES keys)
+                        try {
+                            const s = (data.state || '').toString().toLowerCase();
+                            const stateToPhase = { think: 'THINKING', write: 'WRITING', talk: 'TALKING', idle: 'IDLE' };
+                            currentDisplayedPhase = stateToPhase[s] || currentDisplayedPhase;
+                        } catch (e) { /* ignore */ }
                     } else if (data.state) {
                         // Queue the command if animation handler is not ready yet
                         console.log('[synth_webui] Animation handler not ready, queueing command:', data.state);
@@ -5850,17 +5991,37 @@
                 if (data.type === 'animation_state') {
                     // Lightweight summary of current central animation state
                     try {
+                        const prevCentral = window.__synth_current_animation_state || null;
                         window.__synth_current_animation_state = { state: data.state, animation: data.animation, descriptor: data.descriptor || null };
+
+                        // If a rich animation_state is available, let the AnimationHandler consume it
+                        // so local managers (blink/eye) stay in sync even on summary updates.
+                        try {
+                            if (data.animation_state && typeof data.animation_state === 'object' && animationHandler && typeof animationHandler.applyAnimationState === 'function') {
+                                animationHandler.applyAnimationState(data.animation_state);
+                            }
+                        } catch (e) { /* ignore */ }
                         // If we are not currently displaying that phase, ask the animation handler
                         const desiredPhase = data.state ? data.state.toLowerCase() : null;
                         if (animationHandler && desiredPhase) {
+                            const stateToPhase = { think: 'THINKING', write: 'WRITING', talk: 'TALKING', idle: 'IDLE' };
+                            const desiredAction = desiredPhase;
+                            const desiredPhaseName = stateToPhase[desiredAction] || null;
+
                             // If currentDisplayedPhase is different or no current action, start the corresponding action
-                            if (!currentDisplayedPhase || currentDisplayedPhase.toLowerCase() !== desiredPhase) {
+                            const shouldApplyByPhase = (!desiredPhaseName) ? true : (currentDisplayedPhase !== desiredPhaseName);
+                            const desiredAnim = data.animation || null;
+                            const currentAnim = (prevCentral && prevCentral.animation) || null;
+                            const currentActionName = animationHandler.currentActionName || null;
+                            const shouldApplyByPlayback = (currentActionName !== desiredAction) || (desiredAnim && currentAnim !== desiredAnim);
+
+                            if (!currentDisplayedPhase || shouldApplyByPhase || shouldApplyByPlayback) {
                                 try {
                                     // Use provided animation path if available
-                                    const anim = data.animation || null;
-                                    animationHandler.startAction(desiredPhase, anim, true, null, data.descriptor || null);
-                                    currentDisplayedPhase = desiredPhase.toUpperCase();
+                                    const descriptor = data.descriptor || null;
+                                    const playOnce = !!(descriptor && descriptor.play_once);
+                                    animationHandler.startAction(desiredAction, desiredAnim, playOnce, null, descriptor || null);
+                                    if (desiredPhaseName) currentDisplayedPhase = desiredPhaseName;
                                 } catch (e) {
                                     console.warn('[synth_webui] Failed to apply central animation state via animation_handler:', e);
                                 }
@@ -5889,6 +6050,7 @@
 
             ws.addEventListener('close', () => {
                 console.log('[synth_webui] WebSocket closed');
+                try { window.__synth_is_reconnecting = true; } catch (e) { /* ignore */ }
                 statusLabel.textContent = 'Disconnected';
                 statusIndicator?.classList.remove('online');
                 setStatusMessage('Connection lost. Reconnecting…', 'warn');
@@ -5900,6 +6062,7 @@
             });
 
             ws.addEventListener('error', () => {
+                try { window.__synth_is_reconnecting = true; } catch (e) { /* ignore */ }
                 setStatusMessage('Communication error.', 'error');
                 removeTypingIndicator(); // Remove typing indicator on error
             });
@@ -5921,6 +6084,15 @@
                 pendingAnimationCommands.length = 0;
                 console.log('[synth_webui] Processing last pending animation command after VRM load (dropped', Math.max(0, count - 1), '):', last?.state, last?.animation);
                 if (last && last.state && animationHandler) {
+                    // If the pending command contained a rich animation_state, forward it first
+                    // so local managers (blink/eye/expressions) are configured before playback.
+                    try {
+                        const st = last.animation_state || window.__synth_current_animation_state || null;
+                        if (st && typeof animationHandler.applyAnimationState === 'function') {
+                            animationHandler.applyAnimationState(st);
+                        }
+                    } catch (e) { /* ignore */ }
+
                     const animationFileOrUrl = last.animation || null;
                     const playOnce = (last.descriptor && last.descriptor.play_once) || (last.loop === false);
                     animationHandler.startAction(last.state, animationFileOrUrl, !!playOnce, last.play_section || null, last.descriptor || null);
@@ -6089,13 +6261,15 @@
         const clearBtn = document.getElementById('clear-uploaded');
 
         async function fetchSkins(){
-            try{
+            try {
                 const res = await fetch('/api/skins');
-                if(!res.ok) throw new Error('Failed to load skins')
+                if (!res.ok) throw new Error('Failed to load skins: HTTP ' + res.status);
                 const data = await res.json();
-                renderSkins(data);
-            }catch(e){
-                grid.innerHTML = `<div class="meta">${e.message}</div>`;
+                // The API returns an array of skins
+                renderSkins(data || []);
+            } catch (e) {
+                console.warn('[synth_webui] fetchSkins failed', e);
+                grid.innerHTML = `<div class="meta">${e.message || 'Failed to load skins'}</div>`;
             }
         }
 
@@ -6331,6 +6505,664 @@
 
             // Animation handler
             class AnimationHandler {
+                _getFaceController() {
+                    try {
+                        if (!this.vrm) return null;
+                        if (this.vrm.blendShapeProxy && typeof this.vrm.blendShapeProxy.setValue === 'function') {
+                            return {
+                                kind: 'vrm0',
+                                setValue: (k, v) => this.vrm.blendShapeProxy.setValue(k, v),
+                            };
+                        }
+                        const em = this.vrm.expressionManager || (this.vrm.userData && this.vrm.userData.vrmExpressionManager) || null;
+                        if (em && typeof em.setValue === 'function') {
+                            return {
+                                kind: 'vrm1',
+                                setValue: (k, v) => em.setValue(k, v),
+                            };
+                        }
+                        return null;
+                    } catch (e) {
+                        return null;
+                    }
+                }
+
+                _setFaceValue(key, value) {
+                    try {
+                        const ctrl = this._getFaceController();
+                        if (!ctrl) return false;
+                        ctrl.setValue(key, value);
+                        return true;
+                    } catch (e) {
+                        return false;
+                    }
+                }
+
+                // Apply a rich animation state payload received from server
+                applyAnimationState(state) {
+                    try {
+                        console.debug('[AnimationHandler] applyAnimationState START', state);
+                        // detect previous action so we can react to transitions (e.g., think -> write)
+                        const prevAction = (this._lastAnimationState && this._lastAnimationState.action) ? String(this._lastAnimationState.action).toLowerCase() : null;
+                        // store for reference
+                        this._lastAnimationState = state;
+                        this.currentActionName = state.action || this.currentActionName;
+                        this.currentActionPhase = state.phase || this.currentActionPhase;
+
+                        // Keep emotions snapshot for downstream consumers
+                        try { this._lastEmotions = (state && state.emotions) ? state.emotions : null; } catch (e) { this._lastEmotions = null; }
+
+                        // Emotion overlay: after an action starts, apply the dominant emotion face for
+                        // a random duration that scales with intensity. This is action-agnostic because
+                        // plugins may override writing/phase semantics.
+                        try {
+                            const newAction = (state && state.action) ? String(state.action).toLowerCase() : null;
+                            let startedAtMs = NaN;
+                            try {
+                                if (state && state.timing && state.timing.started_at) {
+                                    const t = Date.parse(state.timing.started_at);
+                                    if (Number.isFinite(t)) startedAtMs = t;
+                                }
+                            } catch (e) { /* ignore */ }
+                            if (!Number.isFinite(startedAtMs)) startedAtMs = Date.now();
+
+                            const isNewStart = (!this._lastActionStartMs) || (Math.abs(startedAtMs - this._lastActionStartMs) > 10) || (prevAction !== newAction);
+                            if (isNewStart) {
+                                this._lastActionStartMs = startedAtMs;
+                                // Clear previous overlay on action change
+                                this._emotionOverlay = null;
+
+                                const emo = (state && state.emotions && state.emotions.values && typeof state.emotions.values === 'object') ? state.emotions.values : null;
+                                if (emo) {
+                                    // pick max intensity; tie -> random
+                                    let maxVal = -Infinity;
+                                    Object.keys(emo).forEach(k => {
+                                        const v = Number(emo[k]);
+                                        if (Number.isFinite(v)) maxVal = Math.max(maxVal, v);
+                                    });
+                                    if (Number.isFinite(maxVal) && maxVal > 0) {
+                                        const candidates = Object.keys(emo).filter(k => {
+                                            const v = Number(emo[k]);
+                                            return Number.isFinite(v) && v === maxVal;
+                                        });
+                                        if (candidates.length > 0) {
+                                            const chosen = candidates[Math.floor(Math.random() * candidates.length)];
+
+                                            // normalize intensity to 0..1 (support 0..1 or 0..10-ish)
+                                            let norm = maxVal;
+                                            if (norm > 1) norm = norm / 10.0;
+                                            norm = Math.max(0, Math.min(1, norm));
+
+                                            const delayS = 0.2 + Math.random() * 0.9; // X seconds after action start
+                                            const baseMin = 0.8;
+                                            const baseMax = 3.5;
+                                            const durS = (baseMin + (baseMax - baseMin) * norm) * (0.8 + Math.random() * 0.45);
+
+                                            this._emotionOverlay = {
+                                                action: newAction || 'unknown',
+                                                emotion: String(chosen),
+                                                intensity: norm,
+                                                startsAtMs: startedAtMs + Math.round(delayS * 1000),
+                                                endsAtMs: startedAtMs + Math.round((delayS + durS) * 1000),
+                                                priority: 25,
+                                            };
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (e) { /* ignore */ }
+
+                        // store lipsync flag and emit event if changed
+                        const prev = this._lipsyncEnabled;
+                        this._lipsyncEnabled = !!state.lipsync;
+                        try { window.dispatchEvent(new CustomEvent('synth_animation_state_updated', { detail: state })); } catch (e) {}
+                        if (prev !== this._lipsyncEnabled) {
+                            try { window.dispatchEvent(new CustomEvent('synth_animation_lipsync_changed', { detail: { lipsync: this._lipsyncEnabled } })); } catch (e) {}
+                        }
+                        // manage blink/eye managers according to lipsync flag and persona defaults
+                        try {
+                            this._loadPersonaForSkin(window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei')
+                                .then(persona => {
+                                    console.debug('[AnimationHandler] persona loaded', persona && persona.name ? persona.name : '(unknown)');
+                                    const pdefaults = (persona && persona.defaults) ? persona.defaults : {};
+
+                                    // Apply persona per-animation overrides on the client (hybrid design).
+                                    try {
+                                        const overrides = (persona && persona.animation_overrides && typeof persona.animation_overrides === 'object') ? persona.animation_overrides : null;
+                                        if (overrides) {
+                                            const actionKey = (state && state.action) ? String(state.action).toLowerCase() : '';
+                                            let animStem = '';
+                                            try {
+                                                const a = state && state.animation ? String(state.animation) : '';
+                                                animStem = (a.split('/').pop() || '').replace(/\.[^/.]+$/, '').toLowerCase();
+                                            } catch (e) { animStem = ''; }
+
+                                            let matched = null;
+                                            for (const k of Object.keys(overrides)) {
+                                                const kk = String(k).toLowerCase();
+                                                if ((actionKey && kk === actionKey) || (animStem && kk === animStem)) {
+                                                    matched = overrides[k];
+                                                    break;
+                                                }
+                                            }
+
+                                            if (matched && typeof matched === 'object') {
+                                                if (!Array.isArray(state.expressions)) state.expressions = [];
+
+                                                if (matched.blendshape_presets && typeof matched.blendshape_presets === 'object') {
+                                                    state.expressions.push({
+                                                        start_frame: 0,
+                                                        end_frame: 1000000000,
+                                                        targets: matched.blendshape_presets,
+                                                        priority: (matched.priority !== undefined) ? matched.priority : 90,
+                                                        source: 'persona_override'
+                                                    });
+                                                }
+                                                if (Array.isArray(matched.expressions)) {
+                                                    matched.expressions.forEach((ex) => {
+                                                        const e = Object.assign({}, ex || {});
+                                                        if (e.start_frame === undefined) e.start_frame = 0;
+                                                        if (e.end_frame === undefined) e.end_frame = 1000000000;
+                                                        if (!e.source) e.source = 'persona_override';
+                                                        if (e.priority === undefined) e.priority = 90;
+                                                        state.expressions.push(e);
+                                                    });
+                                                }
+                                                this._lastAnimationState = state;
+                                            }
+                                        }
+                                    } catch (e) { /* ignore */ }
+
+                                    // Defaults tuned for human-like blink timing: ~15–20 blinks/min => ~3–4s interval.
+                                    const blinkCfg = state.blink || pdefaults.blink || { auto: true, rate_s: 3.5, intensity: 0.6, close_ms: 60, hold_ms: 100, open_ms: 60 };
+                                    const eyeCfg = state.eye_movement || pdefaults.eye_movement || { auto: true, saccade_rate_s: 2 };
+
+                                    this._blinkAutoEnabled = (!!blinkCfg.auto) && !this._lipsyncEnabled;
+                                    this._blinkRateS = blinkCfg.rate_s || 3.5;
+                                    this._blinkIntensity = blinkCfg.intensity || 0.6;
+                                    this._blinkCloseMs = (typeof blinkCfg.close_ms === 'number') ? blinkCfg.close_ms : 60;
+                                    this._blinkHoldMs = (typeof blinkCfg.hold_ms === 'number') ? blinkCfg.hold_ms : 120;
+                                    this._blinkOpenMs = (typeof blinkCfg.open_ms === 'number') ? blinkCfg.open_ms : 60;
+
+                                    // Special-case tweaks: during 'think' we prefer faster, shallower blinks
+                                    try {
+                                        const actionKey = (state && state.action) ? String(state.action).toLowerCase() : '';
+                                        if (actionKey === 'think') {
+                                            // Keep frequency within ~15–20/min; only adjust shape/timing.
+                                            this._blinkRateS = (blinkCfg.rate_s && blinkCfg.rate_s > 0) ? Math.max(3.0, blinkCfg.rate_s) : 3.5;
+                                            this._blinkCloseMs = Math.max(30, Math.round((blinkCfg.close_ms || 60) * 0.6));
+                                            this._blinkHoldMs = Math.max(60, Math.round((blinkCfg.hold_ms || 100) * 0.7));
+                                            this._blinkOpenMs = Math.max(30, Math.round((blinkCfg.open_ms || 60) * 0.6));
+                                            this._blinkIntensity = Math.max(0.35, Math.min(0.85, (blinkCfg.intensity || 0.6) * 0.75));
+                                        }
+                                    } catch (e) { /* ignore */ }
+
+                                    this._eyeAutoEnabled = (!!eyeCfg.auto) && !this._lipsyncEnabled;
+                                    this._saccadeRateS = eyeCfg.saccade_rate_s || 2;
+
+                                    if (this._blinkAutoEnabled) this._startBlinkLoop(); else this._stopBlinkLoop();
+                                    if (this._eyeAutoEnabled) this._startEyeMovement(); else this._stopEyeMovement();
+                                })
+                                .catch(() => {});
+                        } catch (e) {}
+
+                        // If we transitioned out of 'think', ensure eyes are open immediately
+                        try {
+                            const newAction = (state && state.action) ? String(state.action).toLowerCase() : null;
+                            if (prevAction === 'think' && newAction !== 'think') {
+                                try { this._forceOpenEyes(); } catch (e) {}
+                            }
+                        } catch (e) {}
+                        // attempt to ensure persona mapping for current skin is loaded
+                        try {
+                            const skin = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
+                            if (!this._personaCache) this._personaCache = {};
+                            if (!this._personaCache[skin]) this._loadPersonaForSkin(skin).catch(() => {});
+                        } catch (e) {}
+
+                        // start ticking expressions if needed
+                        if (!this._expressionsTicking) {
+                            this._lastTickTime = performance.now();
+                            this._expressionsTicking = true;
+                            const tick = (now) => {
+                                try {
+                                    const dt = Math.min(0.1, (now - (this._lastTickTime || now)) / 1000);
+                                    this._lastTickTime = now;
+                                    try { this.applyExpressionsForFrame(this._lastAnimationState, dt); } catch (e) {}
+                                } catch (e) {}
+                                if (this._expressionsTicking) requestAnimationFrame(tick);
+                            };
+                            requestAnimationFrame(tick);
+                        }
+                        console.debug('[AnimationHandler] applyAnimationState END');
+                    } catch (e) {
+                        console.warn('[AnimationHandler] applyAnimationState failed', e);
+                    }
+                }
+
+                // Placeholder: compute expressions for current frame and apply via blendShapeProxy
+                // Apply expressions for the current frame with smoothing
+                applyExpressionsForFrame(state, dt = 0.033) {
+                    try {
+                        // Throttle debug logging to avoid flooding the console during animation ticks.
+                        try {
+                            if (!this._lastExpressionLogTime) this._lastExpressionLogTime = 0;
+                            const nowTs = Date.now();
+                            const exprCount = (state && Array.isArray(state.expressions)) ? state.expressions.length : 0;
+                            // Only log if there are expressions active or if >2s have passed since last log
+                            if (exprCount > 0 || (nowTs - this._lastExpressionLogTime) > 2000) {
+                                this._lastExpressionLogTime = nowTs;
+                                console.debug('[AnimationHandler] applyExpressionsForFrame START', { dt: dt, expressions: exprCount });
+                            }
+                        } catch (e) { /* ignore logging errors */ }
+                        if (!state || !state.expressions || !Array.isArray(state.expressions)) return;
+                        if (!this.vrm) return;
+                        if (!this._getFaceController()) return;
+
+                        // Ensure expression state bookkeeping
+                        if (!this._expressionState) this._expressionState = {};
+
+                        // Resolve persona mapping for current skin (fallback to Rei)
+                        const skin = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
+                        const persona = (this._personaCache && this._personaCache[skin]) || null;
+                        const blendMap = (persona && persona.blendshape_map) ? persona.blendshape_map : {};
+
+                        // Determine current time_in_clip (seconds) or frame.
+                        // The server typically sends started_at + fps; the client derives a moving frame/time.
+                        const fps = (state.clip && typeof state.clip.fps === 'number' && state.clip.fps > 0) ? state.clip.fps : 30;
+                        let timeInClip = (state.timing && typeof state.timing.time_in_clip === 'number') ? state.timing.time_in_clip : null;
+                        let currentFrame = (state.timing && typeof state.timing.current_frame === 'number') ? state.timing.current_frame : null;
+
+                        try {
+                            const startedAt = (state.timing && state.timing.started_at) ? Date.parse(state.timing.started_at) : NaN;
+                            if (Number.isFinite(startedAt)) {
+                                const elapsed = Math.max(0, (Date.now() - startedAt) / 1000);
+                                timeInClip = elapsed;
+
+                                const desc = (state.descriptor && typeof state.descriptor === 'object') ? state.descriptor : null;
+                                const phase = (state.phase && typeof state.phase === 'string') ? state.phase : 'loop';
+                                const sectionKey = (phase === 'clip') ? 'loop' : phase;
+                                const section = (desc && desc[sectionKey] && typeof desc[sectionKey] === 'object') ? desc[sectionKey] : null;
+                                if (section && typeof section.start_frame === 'number' && typeof section.end_frame === 'number') {
+                                    const start = section.start_frame;
+                                    const end = section.end_frame;
+                                    const span = Math.max(1, end - start);
+                                    const tFrames = Math.floor(elapsed * fps);
+                                    if (phase === 'loop') {
+                                        currentFrame = start + (tFrames % span);
+                                    } else {
+                                        currentFrame = start + Math.min(span, tFrames);
+                                    }
+                                } else {
+                                    currentFrame = Math.floor(elapsed * fps);
+                                }
+                            }
+                        } catch (e) { /* ignore */ }
+
+                        // Evaluate each expression and update target blendshape values
+                        const desired = {};
+                        const evaluateFrame = (expr) => {
+                            try {
+                                // Expressions without explicit bounds are treated as always-on.
+                                if (expr.start_frame === undefined || expr.end_frame === undefined) return true;
+                                // Prefer frame indices if present
+                                if (currentFrame !== null && currentFrame !== undefined) {
+                                    if (expr.start_frame <= currentFrame && currentFrame <= expr.end_frame) return true;
+                                    return false;
+                                }
+                                // Fall back to time_in_clip using clip fps if provided
+                                if (timeInClip !== null && expr.start_frame !== undefined && expr.end_frame !== undefined && state.clip && state.clip.fps) {
+                                    const sf = expr.start_frame / state.clip.fps;
+                                    const ef = expr.end_frame / state.clip.fps;
+                                    return (sf <= timeInClip && timeInClip <= ef);
+                                }
+                                return false;
+                            } catch (e) { return false; }
+                        };
+
+                        // Respect expression priority: higher priority wins on conflicts
+                        const exprs = (state.expressions || []).slice().map(e => Object.assign({ priority: 0 }, e));
+
+                        // Emotion overlay injection (client-side): during the scheduled window,
+                        // inject a synthetic expression keyed by emotion name so persona.json
+                        // can map it via blendshape_map.emotions[emotion].
+                        try {
+                            const ov = this._emotionOverlay || null;
+                            const actionKey = (state && state.action) ? String(state.action).toLowerCase() : null;
+                            const now = Date.now();
+                            if (ov && ov.emotion && Number.isFinite(ov.startsAtMs) && Number.isFinite(ov.endsAtMs)) {
+                                if (now > ov.endsAtMs) {
+                                    this._emotionOverlay = null;
+                                } else if (now >= ov.startsAtMs && now <= ov.endsAtMs) {
+                                    if (!ov.action || !actionKey || ov.action === actionKey) {
+                                        const t = {};
+                                        t[String(ov.emotion)] = Math.max(0, Math.min(1, Number(ov.intensity) || 0));
+                                        exprs.push({ targets: t, priority: (ov.priority || 25), source: 'emotion_overlay' });
+                                    }
+                                }
+                            }
+                        } catch (e) { /* ignore */ }
+
+                        exprs.sort((a,b) => (b.priority || 0) - (a.priority || 0));
+                        const assignedPriority = {};
+                        const normalizeKey = (k) => {
+                            try {
+                                if (!k || typeof k !== 'string') return k;
+                                return k.replace(/\./g, '_');
+                            } catch (e) {
+                                return k;
+                            }
+                        };
+
+                        const addBlinkAliases = (intensity) => {
+                            // VRM0 common
+                            desired['eye_blink_left'] = Math.max(desired['eye_blink_left'] || 0, intensity);
+                            desired['eye_blink_right'] = Math.max(desired['eye_blink_right'] || 0, intensity);
+                            // VRM1 presets (three-vrm)
+                            desired['blink'] = Math.max(desired['blink'] || 0, intensity);
+                            desired['blinkLeft'] = Math.max(desired['blinkLeft'] || 0, intensity);
+                            desired['blinkRight'] = Math.max(desired['blinkRight'] || 0, intensity);
+                        };
+
+                        const addVisemeAliases = (key, intensity) => {
+                            try {
+                                const k = String(key || '').toLowerCase();
+                                // Heuristic mapping to VRM1 preset visemes
+                                if (k.includes('mouth_a') || /mouth.*\ba\b/.test(k)) desired['aa'] = Math.max(desired['aa'] || 0, intensity);
+                                if (k.includes('mouth_i') || /mouth.*\bi\b/.test(k)) desired['ih'] = Math.max(desired['ih'] || 0, intensity);
+                                if (k.includes('mouth_u') || /mouth.*\bu\b/.test(k)) desired['ou'] = Math.max(desired['ou'] || 0, intensity);
+                                if (k.includes('mouth_e') || /mouth.*\be\b/.test(k)) desired['ee'] = Math.max(desired['ee'] || 0, intensity);
+                                if (k.includes('mouth_o') || /mouth.*\bo\b/.test(k)) desired['oh'] = Math.max(desired['oh'] || 0, intensity);
+                            } catch (e) { /* ignore */ }
+                        };
+
+                        exprs.forEach(expr => {
+                            if (!evaluateFrame(expr)) return;
+                            const targets = expr.targets || {};
+                            const p = expr.priority || 0;
+                            Object.keys(targets).forEach(key => {
+                                const intensity = Math.max(0, Math.min(1, targets[key]));
+                                const nkey = normalizeKey(key);
+                                // Resolve mapping: support flat maps or grouped maps (emotions, visemes, expressions)
+                                const flat = (blendMap && typeof blendMap[key] === 'string') ? blendMap[key]
+                                           : ((blendMap && typeof blendMap[nkey] === 'string') ? blendMap[nkey] : null);
+                                if (flat) {
+                                    if ((assignedPriority[flat] === undefined) || (p > assignedPriority[flat])) {
+                                        desired[flat] = intensity;
+                                        assignedPriority[flat] = p;
+                                        // Helpful fallbacks for common logical keys (eyes/mouth)
+                                        if (/eyes?|blink/i.test(key) || /eyes?|blink/i.test(nkey)) {
+                                            addBlinkAliases(intensity);
+                                        }
+                                        if (/mouth/i.test(key) || /mouth/i.test(nkey)) {
+                                            const alt = key.replace(/[\.]/g, '_');
+                                            desired[alt] = Math.max(desired[alt] || 0, intensity);
+                                            addVisemeAliases(key, intensity);
+                                        }
+                                    }
+                                    return;
+                                }
+
+                                const grouped = (blendMap && typeof blendMap === 'object') ? blendMap : null;
+                                if (grouped) {
+                                    const groups = ['emotions', 'visemes', 'expressions'];
+                                    for (let g of groups) {
+                                        const entry = (grouped[g] && grouped[g][key]) ? grouped[g][key]
+                                                    : ((grouped[g] && grouped[g][nkey]) ? grouped[g][nkey] : null);
+                                        if (entry) {
+                                            if (entry.targets && typeof entry.targets === 'object') {
+                                                Object.keys(entry.targets).forEach(bs => {
+                                                    if ((assignedPriority[bs] === undefined) || (p > assignedPriority[bs])) {
+                                                        desired[bs] = (entry.targets[bs] || 0) * intensity;
+                                                        assignedPriority[bs] = p;
+                                                    }
+                                                });
+                                            } else if (typeof entry === 'object') {
+                                                Object.keys(entry).forEach(bs => {
+                                                    if ((assignedPriority[bs] === undefined) || (p > assignedPriority[bs])) {
+                                                        desired[bs] = (entry[bs] || 0) * intensity;
+                                                        assignedPriority[bs] = p;
+                                                    }
+                                                });
+                                            }
+                                            if (/eyes?|blink/i.test(key) || /eyes?|blink/i.test(nkey)) {
+                                                addBlinkAliases(intensity);
+                                            }
+                                            if (/mouth/i.test(key) || /mouth/i.test(nkey)) {
+                                                addVisemeAliases(key, intensity);
+                                            }
+                                            return;
+                                        }
+                                    }
+                                }
+
+                                // Fallback: use key as blendshape name
+                                const outKey = nkey || key;
+                                if ((assignedPriority[outKey] === undefined) || (p > assignedPriority[outKey])) {
+                                    desired[outKey] = intensity;
+                                    assignedPriority[outKey] = p;
+                                    // fallback keys
+                                    if (/eyes?|blink/i.test(key) || /eyes?|blink/i.test(outKey)) {
+                                        addBlinkAliases(intensity);
+                                    }
+                                    if (/mouth/i.test(key) || /mouth/i.test(outKey)) {
+                                        const alt = outKey.replace(/[\.]/g, '_');
+                                        desired[alt] = Math.max(desired[alt] || 0, intensity);
+                                        addVisemeAliases(key, intensity);
+                                    }
+                                }
+                            });
+                        });
+
+                        // Apply smoothing/interpolation towards desired values
+                        const speed = (persona && persona.emotion_speed && persona.emotion_speed.default) ? persona.emotion_speed.default : 6.0; // units/sec
+                        Object.keys(desired).forEach(k => {
+                            const cur = this._expressionState[k] || 0;
+                            const tgt = desired[k];
+                            // linear interpolation
+                            const step = Math.min(1, speed * dt);
+                            const next = cur + (tgt - cur) * step;
+                            this._expressionState[k] = next;
+                            const ok = this._setFaceValue(k, next);
+                            if (ok) console.debug('[AnimationHandler] setValue', k, next);
+                        });
+
+                        // Decay any blendshapes that are no longer targeted
+                        Object.keys(this._expressionState).forEach(k => {
+                            if (desired[k] === undefined) {
+                                const cur = this._expressionState[k] || 0;
+                                const next = Math.max(0, cur - Math.min(1, ((persona && persona.emotion_speed && persona.emotion_speed.decay) ? persona.emotion_speed.decay : 4.0) * dt));
+                                if (Math.abs(next - cur) > 1e-4) {
+                                    this._expressionState[k] = next;
+                                    const ok = this._setFaceValue(k, next);
+                                    if (ok) console.debug('[AnimationHandler] decay setValue', k, next);
+                                } else {
+                                    // negligible - clear
+                                    delete this._expressionState[k];
+                                    const ok = this._setFaceValue(k, 0);
+                                    if (ok) console.debug('[AnimationHandler] cleared', k);
+                                }
+                            }
+                        });
+
+                        // End log (throttled to the same policy)
+                        try {
+                            const nowTs2 = Date.now();
+                            if ((nowTs2 - (this._lastExpressionLogTime || 0)) < 2500) {
+                                console.debug('[AnimationHandler] applyExpressionsForFrame END');
+                            }
+                        } catch (e) { /* ignore */ }
+
+                    } catch (e) {
+                        console.warn('[AnimationHandler] applyExpressionsForFrame failed', e);
+                    }
+                }
+
+                // Load persona.json for a skin and cache it
+                async _loadPersonaForSkin(skin) {
+                    try {
+                        if (!this._personaCache) this._personaCache = {};
+                        if (this._personaCache[skin]) return this._personaCache[skin];
+                        const res = await fetch(`/skins/${encodeURIComponent(skin)}/persona.json`);
+                        if (!res.ok) { this._personaCache[skin] = null; return null; }
+                        const json = await res.json();
+                        this._personaCache[skin] = json;
+                        return json;
+                    } catch (e) {
+                        this._personaCache[skin] = null;
+                        return null;
+                    }
+                }
+
+                // Blink manager: schedules automatic blinks with jitter
+                _startBlinkLoop() {
+                    try {
+                        if (this._blinkLoopRunning) return;
+                        console.debug('[AnimationHandler] _startBlinkLoop START', { rate_s: this._blinkRateS, intensity: this._blinkIntensity });
+                        this._blinkLoopRunning = true;
+                        const scheduleNext = () => {
+                            if (!this._blinkLoopRunning) return;
+                            const jitter = (Math.random() - 0.5) * 0.3; // +/-15%
+                            const interval = Math.max(0.4, (this._blinkRateS || 3.0) * (1 + jitter));
+                            this._blinkTimer = setTimeout(() => {
+                                try { this._performBlink(); } catch (e) {}
+                                scheduleNext();
+                            }, interval * 1000);
+                        };
+                        scheduleNext();
+                    } catch (e) { console.warn('[AnimationHandler] _startBlinkLoop failed', e); }
+                }
+
+                _stopBlinkLoop() {
+                    try {
+                        console.debug('[AnimationHandler] _stopBlinkLoop');
+                        this._blinkLoopRunning = false;
+                        if (this._blinkTimer) { clearTimeout(this._blinkTimer); this._blinkTimer = null; }
+                        // clear any phase timers used during blink (close/hold/open)
+                        if (this._blinkPhaseTimers && Array.isArray(this._blinkPhaseTimers)) {
+                            this._blinkPhaseTimers.forEach(t => { try { clearTimeout(t); } catch (e) {} });
+                            this._blinkPhaseTimers = [];
+                        }
+                        this._blinkInProgress = false;
+                        this._blinkState = 'open';
+                    } catch (e) { /* ignore */ }
+                }
+
+                // Force eyes open immediately: cancel blink timers and reset eye blendshapes
+                _forceOpenEyes() {
+                    try {
+                        const wasLoopRunning = !!this._blinkLoopRunning;
+                        // clear phase timers
+                        if (this._blinkPhaseTimers && Array.isArray(this._blinkPhaseTimers)) {
+                            this._blinkPhaseTimers.forEach(t => { try { clearTimeout(t); } catch (e) {} });
+                            this._blinkPhaseTimers = [];
+                        }
+                        this._blinkInProgress = false;
+                        this._blinkState = 'open';
+
+                        // Ensure all candidate blink blendshapes are set to 0 and removed from expressionState
+                        try {
+                            const skin = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
+                            const persona = (this._personaCache && this._personaCache[skin]) || null;
+                            const blendMap = (persona && persona.blendshape_map) ? persona.blendshape_map : {};
+                            const candidates = [];
+                            ['blink','eyes_closed','eyes.close','eyes.closed'].forEach(k => { if (blendMap && blendMap[k]) candidates.push(blendMap[k]); });
+                            candidates.push('eyes_closed','blink','Blink','blinkLeft','blinkRight','BlinkLeft','BlinkRight','eye_blink_left','eye_blink_right','eyeBlinkLeft','eyeBlinkRight');
+                            candidates.forEach(k => { try { this._setFaceValue(k, 0); if (this._expressionState) delete this._expressionState[k]; } catch (e) {} });
+                        } catch (e) { /* ignore */ }
+
+                        // If the blink loop was running, ensure it's still scheduled.
+                        // (We intentionally do NOT clear _blinkTimer here, otherwise the loop can stop permanently.)
+                        try {
+                            if (wasLoopRunning && !this._blinkTimer) {
+                                // Restart scheduling only; _startBlinkLoop() is idempotent.
+                                this._startBlinkLoop();
+                            }
+                        } catch (e) { /* ignore */ }
+                    } catch (e) { /* ignore */ }
+                }
+
+                _performBlink() {
+                    try {
+                        if (!this.vrm || !this._getFaceController()) {
+                            try { window.dispatchEvent(new CustomEvent('synth_animation_blink', { detail: { ok: false } })); } catch (e) {}
+                            return;
+                        }
+
+                        // resolve blink blendshape keys from persona or fallback heuristics
+                        const skin = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
+                        const persona = (this._personaCache && this._personaCache[skin]) || null;
+                        const blendMap = (persona && persona.blendshape_map) ? persona.blendshape_map : {};
+
+                        // Candidate keys (try mapped names first)
+                        const candidates = [];
+                        // check grouped mapping for a 'blink' or 'eyes_closed' mapping
+                        ['blink','eyes_closed','eyes.close','eyes.closed'].forEach(k => { if (blendMap && blendMap[k]) candidates.push(blendMap[k]); });
+                        // fallback common names
+                        candidates.push(
+                            'eyes_closed','blink','Blink',
+                            'blinkLeft','blinkRight','BlinkLeft','BlinkRight',
+                            'eye_blink_left','eye_blink_right','eyeBlinkLeft','eyeBlinkRight'
+                        );
+
+                        const intensity = this._blinkIntensity || 0.6;
+                        const durationMs = 120 + Math.round(Math.random() * 80);
+
+                        // set keys to intensity then reset after duration
+                        candidates.forEach(k => {
+                            try { this._setFaceValue(k, intensity); } catch (e) {}
+                        });
+
+                        try { window.dispatchEvent(new CustomEvent('synth_animation_blink', { detail: { intensity, durationMs } })); } catch (e) {}
+
+                        setTimeout(() => {
+                            candidates.forEach(k => { try { this._setFaceValue(k, 0); } catch (e) {} });
+                        }, durationMs);
+
+                    } catch (e) { console.warn('[AnimationHandler] _performBlink failed', e); }
+                }
+
+                // Eye movement (saccades): simple emit + optional blendshape nudges
+                _startEyeMovement() {
+                    try {
+                        if (this._eyeLoopRunning) return;
+                        this._eyeLoopRunning = true;
+                        const schedule = () => {
+                            if (!this._eyeLoopRunning) return;
+                            const jitter = (Math.random() - 0.5) * 0.5;
+                            const interval = Math.max(0.2, (this._saccadeRateS || 2) * (1 + jitter));
+                            this._eyeTimer = setTimeout(() => {
+                                try { this._performSaccade(); } catch (e) {}
+                                schedule();
+                            }, interval * 1000);
+                        };
+                        schedule();
+                    } catch (e) { console.warn('[AnimationHandler] _startEyeMovement failed', e); }
+                }
+
+                _stopEyeMovement() {
+                    try { this._eyeLoopRunning = false; if (this._eyeTimer) { clearTimeout(this._eyeTimer); this._eyeTimer = null; } } catch (e) {}
+                }
+
+                _performSaccade() {
+                    try {
+                        // small random notch values
+                        const x = (Math.random() - 0.5) * 0.2;
+                        const y = (Math.random() - 0.5) * 0.2;
+                        try { window.dispatchEvent(new CustomEvent('synth_animation_saccade', { detail: { x, y } })); } catch (e) {}
+
+                        // Optionally nudge blendshapes if mapped
+                        const skin = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
+                        const persona = (this._personaCache && this._personaCache[skin]) || null;
+                        const lookMap = (persona && persona.blendshape_map && persona.blendshape_map.expressions && persona.blendshape_map.expressions['look']) ? persona.blendshape_map.expressions['look'] : null;
+                        // try to set tiny values to candidate look blendshapes (if any)
+                        if (this.vrm && this._getFaceController() && lookMap && lookMap.targets) {
+                            Object.keys(lookMap.targets).forEach(k => {
+                                try { this._setFaceValue(k, Math.max(0, Math.min(1, (lookMap.targets[k] || 0) * Math.abs(x)))); } catch (e) {}
+                            });
+                        }
+                    } catch (e) { console.warn('[AnimationHandler] _performSaccade failed', e); }
+                }
                 constructor(mixer, vrm) {
                     this.mixer = mixer;
                     this.vrm = vrm;
@@ -6349,9 +7181,18 @@
                     this._globalMixerFinishBound = false; // ensure we bind a single finished handler
                     this._mixerEventBound = false; // ensure structured action mixer event is bound once
 
+                    // If a structured action ends and we briefly have no active action,
+                    // schedule a conservative fallback to idle to avoid lingering T-pose.
+                    this._postOutroIdleTimer = null;
+                    this._postOutroIdleToken = 0;
+
                     // Serialize animation switches to avoid concurrent startAction() calls
                     // which can momentarily stop the current action and cause a visible T-pose.
                     this._startActionChain = Promise.resolve();
+                    // Blink state tracking to prevent overlapping blinks and control timings
+                    this._blinkInProgress = false;
+                    this._blinkState = 'open'; // open|closing|closed|opening
+                    this._blinkPhaseTimers = [];
                 }
 
                 _normalizeAnimationKey(animationFile) {
@@ -6815,6 +7656,23 @@
                     console.log(`[AnimationHandler] startAction called with actionName: ${actionName}, animationFile: ${animationFile}, playOnce: ${playOnce}, playSection: ${playSection}`);
                     console.log(`[AnimationHandler] this.mixer exists:`, !!this.mixer);
                     console.log(`[AnimationHandler] this.vrm exists:`, !!this.vrm);
+
+                    // Cancel any pending post-outro idle fallback as a new action is starting.
+                    try {
+                        if (this._postOutroIdleTimer) {
+                            clearTimeout(this._postOutroIdleTimer);
+                            this._postOutroIdleTimer = null;
+                        }
+                        this._postOutroIdleToken = (this._postOutroIdleToken || 0) + 1;
+                    } catch (e) { /* ignore */ }
+
+                    // Ensure eyes are open when starting a new non-think action to avoid lingering closed lids
+                    try {
+                        const a = (actionName || '').toString().toLowerCase();
+                        if (a !== 'think') {
+                            try { this._forceOpenEyes(); } catch (e) {}
+                        }
+                    } catch (e) {}
 
                     // Missing tracks are common in Mixamo clips; keep a low-weight idle baseline
                     // so unkeyed bones don't stay in previous poses.
@@ -7345,7 +8203,28 @@
                                             this.currentStructuredAction = null;
 
                                             // Ensure base idle exists after finishing an outro.
-                                            try { this._ensureBaseIdle(0.15, false); } catch (e) { /* ignore */ }
+                                            try { this._ensureBaseIdle(1.0, true); } catch (e) { /* ignore */ }
+
+                                            // Fallback: if no new action arrives immediately after a structured outro,
+                                            // force a return to idle to avoid a visible T-pose window.
+                                            try {
+                                                const logical = String(key || '').split(':')[0];
+                                                if (logical && logical !== 'idle') {
+                                                    const token = (this._postOutroIdleToken || 0) + 1;
+                                                    this._postOutroIdleToken = token;
+                                                    if (this._postOutroIdleTimer) {
+                                                        clearTimeout(this._postOutroIdleTimer);
+                                                    }
+                                                    this._postOutroIdleTimer = setTimeout(() => {
+                                                        try {
+                                                            if (this._postOutroIdleToken !== token) return;
+                                                            if (!this.currentAction && !this.currentStructuredAction) {
+                                                                this.startAction('idle');
+                                                            }
+                                                        } catch (e) { /* ignore */ }
+                                                    }, 140);
+                                                }
+                                            } catch (e) { /* ignore */ }
 
                                             // Signal to the page that a structured outro finished for this key
                                             try {
@@ -7950,6 +8829,50 @@
                     currentModel = name;
                     console.log('[synth_webui] currentVRM set:', currentVRM);
 
+                    // Detect face/expression capabilities (VRM0 vs VRM1) for case-by-case debugging.
+                    try {
+                        const hasBlendShapeProxy = !!(vrm && vrm.blendShapeProxy && typeof vrm.blendShapeProxy.setValue === 'function');
+                        const hasExpressionManager = !!(vrm && vrm.expressionManager && typeof vrm.expressionManager.setValue === 'function');
+                        const metaVersion = (vrm && vrm.meta && typeof vrm.meta.metaVersion !== 'undefined') ? String(vrm.meta.metaVersion) : null;
+
+                        // Best-effort enumeration of available expression keys (varies by three-vrm version).
+                        const expressionKeys = [];
+                        try {
+                            const em = vrm && (vrm.expressionManager || (vrm.userData && vrm.userData.vrmExpressionManager)) ? (vrm.expressionManager || vrm.userData.vrmExpressionManager) : null;
+                            if (em) {
+                                // Common internal shapes in different builds: expressions, _expressions, expressionMap, _expressionMap
+                                const candidates = [
+                                    em.expressions,
+                                    em._expressions,
+                                    em.expressionMap,
+                                    em._expressionMap,
+                                    em._map,
+                                ].filter(Boolean);
+                                for (const c of candidates) {
+                                    try {
+                                        if (c instanceof Map) {
+                                            for (const k of c.keys()) expressionKeys.push(String(k));
+                                        } else if (typeof c === 'object') {
+                                            for (const k of Object.keys(c)) expressionKeys.push(String(k));
+                                        }
+                                    } catch (_e) { /* ignore */ }
+                                }
+                            }
+                        } catch (_e) { /* ignore */ }
+
+                        const uniq = Array.from(new Set(expressionKeys)).sort();
+                        window.__synth_vrm_capabilities = {
+                            model: name,
+                            metaVersion,
+                            hasBlendShapeProxy,
+                            hasExpressionManager,
+                            expressionKeys: uniq,
+                        };
+                        console.log('[synth_webui] VRM capabilities:', window.__synth_vrm_capabilities);
+                    } catch (e) {
+                        console.warn('[synth_webui] VRM capability probe failed:', e);
+                    }
+
                     // Configure VRM LookAt to face the camera
                     if (vrm.lookAt) {
                         vrm.lookAt.target = camera; // Use camera object, not camera.position
@@ -7991,6 +8914,54 @@
                 try {
                     console.log('[synth_webui] Initializing AnimationHandler...');
                     animationHandler = new AnimationHandler(currentMixer, vrm);
+
+                    // Debug helpers to inspect VRM capabilities case-by-case (VRM0 vs VRM1).
+                    // Usage in DevTools console: `DEBUG_VRM_HELPERS.dump()`
+                    try {
+                        window.DEBUG_VRM_HELPERS = window.DEBUG_VRM_HELPERS || {};
+                        window.DEBUG_VRM_HELPERS.dump = function() {
+                            try {
+                                const v = window.currentVRM || (window.animationHandler && window.animationHandler.vrm) || null;
+                                const caps = window.__synth_vrm_capabilities || null;
+                                console.log('[DEBUG_VRM_HELPERS] __synth_vrm_capabilities:', caps);
+                                if (!v) {
+                                    console.warn('[DEBUG_VRM_HELPERS] No VRM loaded');
+                                    return caps;
+                                }
+
+                                const hasBlendShapeProxy = !!(v.blendShapeProxy && typeof v.blendShapeProxy.setValue === 'function');
+                                const hasExpressionManager = !!(v.expressionManager && typeof v.expressionManager.setValue === 'function');
+                                const metaVersion = (v.meta && typeof v.meta.metaVersion !== 'undefined') ? String(v.meta.metaVersion) : null;
+
+                                const out = { metaVersion, hasBlendShapeProxy, hasExpressionManager };
+                                try {
+                                    const em = v.expressionManager || (v.userData && v.userData.vrmExpressionManager) || null;
+                                    if (em) {
+                                        out.expressionManagerKeys = Object.keys(em);
+                                        const keys = [];
+                                        const candidates = [em.expressions, em._expressions, em.expressionMap, em._expressionMap, em._map].filter(Boolean);
+                                        for (const c of candidates) {
+                                            if (c instanceof Map) {
+                                                for (const k of c.keys()) keys.push(String(k));
+                                            } else if (typeof c === 'object') {
+                                                keys.push(...Object.keys(c).map(String));
+                                            }
+                                        }
+                                        out.expressionKeys = Array.from(new Set(keys)).sort();
+                                    }
+                                } catch (e) {
+                                    out.expressionProbeError = String(e);
+                                }
+
+                                console.log('[DEBUG_VRM_HELPERS] live probe:', out);
+                                return out;
+                            } catch (e) {
+                                console.warn('[DEBUG_VRM_HELPERS] dump failed:', e);
+                                return null;
+                            }
+                        };
+                        console.log('[synth_webui] DEBUG_VRM_HELPERS.dump available');
+                    } catch (e) { /* ignore */ }
                     
                     // Preload all animations for the current skin and action types to
                     // reduce T-pose flashes when switching animations at runtime.
@@ -8022,6 +8993,30 @@
                     } catch (e) {
                         console.error('[synth_webui] ✗ Think action failed:', e);
                     }
+
+                    // Debug helper for manual testing of face expressions/blink
+                    try {
+                        window.DEBUG_ANIM_HELPERS = window.DEBUG_ANIM_HELPERS || {};
+                        window.DEBUG_ANIM_HELPERS.triggerThink = function() {
+                            try {
+                                const state = {
+                                    action: 'think',
+                                    phase: 'loop',
+                                    timing: { time_in_clip: 0, current_frame: 0 },
+                                    expressions: [ { start_frame: 0, end_frame: 15, targets: { 'eyes_closed': 1.0 }, priority: 90, source: 'persona_override' } ],
+                                    blink: { auto: false },
+                                    lipsync: false
+                                };
+                                if (window.animationHandler && typeof window.animationHandler.applyAnimationState === 'function') {
+                                    window.animationHandler.applyAnimationState(state);
+                                    console.info('[DEBUG_ANIM_HELPERS] triggerThink: applied state');
+                                } else {
+                                    console.warn('[DEBUG_ANIM_HELPERS] animationHandler not ready');
+                                }
+                            } catch (e) { console.warn('[DEBUG_ANIM_HELPERS] triggerThink failed', e); }
+                        };
+                        console.debug('[synth_webui] DEBUG_ANIM_HELPERS.triggerThink available');
+                    } catch (e) { /* ignore */ }
                     
                     console.log('[synth_webui] Loading write action...');
                     try {
@@ -8112,6 +9107,15 @@
                                     animationHandler.startAction(last.state, animationFileOrUrl, !!lastPlayOnce, last.play_section || null, last.descriptor || null);
                                 } else {
                                     console.log('[synth_webui] Pending command matches started state; skipping');
+                                    // Even when skipping (because the action is already playing),
+                                    // apply any rich animation_state so blink/eye/lipsync managers are configured.
+                                    try {
+                                        const st = last.animation_state || window.__synth_last_rich_animation_state || null;
+                                        const looksRich = !!(st && (st.blink || st.eye_movement || st.expressions || st.emotions || (typeof st.lipsync === 'boolean')));
+                                        if (looksRich && typeof animationHandler.applyAnimationState === 'function') {
+                                            animationHandler.applyAnimationState(st);
+                                        }
+                                    } catch (e) { /* ignore */ }
                                 }
                             } catch (e) {
                                 animationHandler.startAction(last.state, animationFileOrUrl, !!lastPlayOnce, last.play_section || null, last.descriptor || null);
@@ -9145,9 +10149,9 @@
                 console.debug('[chat-control] Resize handles already present, skipping creation');
                 return;
             }
-            // Keep native resize disabled: it only shows the bottom-right corner handle.
-            // Resizing from any edge/corner is handled via the custom handles below.
-            try { chatElement.style.resize = 'none'; } catch (err) { console.debug('[chat-control] failed to set native resize', err); }
+            // Restore native resize when enabled so browser resize corners work.
+            // Custom handles below still enable resizing from any edge.
+            try { chatElement.style.resize = 'both'; } catch (err) { console.debug('[chat-control] failed to set native resize', err); }
             const sides = ['top','right','bottom','left','tl','tr','bl','br'];
             const handles = {};
             for (const side of sides) {
@@ -9254,8 +10258,8 @@
                 if (!chatElement) return;
                 if (enabled) {
                     CHAT_RESIZABLE = true;
-                    // Keep native resize disabled; use our edge/corner handles.
-                    try { chatElement.style.resize = 'none'; } catch (e) {}
+                    // Restore native resize (regression-guarded by tests).
+                    try { chatElement.style.resize = 'both'; } catch (e) {}
                     // Re-create handles if createChatResizeHandles is available
                     try { createChatResizeHandles(); } catch (e) {}
                 } else {

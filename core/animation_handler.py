@@ -13,7 +13,8 @@ from __future__ import annotations
 import asyncio
 import random
 from enum import Enum
-from typing import Dict, List, Optional, TYPE_CHECKING
+from typing import Dict, List, Optional, TYPE_CHECKING, Any
+from datetime import datetime, timezone
 from pathlib import Path
 import json
 
@@ -91,6 +92,7 @@ class AnimationHandler:
         # Centralized animation state that syncs across all clients
         self._current_animation_file: Optional[str] = None  # Actual file being played
         self._current_animation_descriptor: Optional[Dict] = None  # Descriptor with frame info
+        self._current_animation_started_at: Optional[datetime] = None  # UTC timestamp for current animation start
         self._animation_state_changed_callbacks: List[callable] = []  # Callbacks when animation changes
         # Plugin/override state animations: state_name -> {'loop': [...], 'post': [...], 'other': [...]}
         self._registered_state_animations: Dict[str, Dict[str, List[str]]] = {}
@@ -173,11 +175,61 @@ class AnimationHandler:
         Returns:
             Dict with 'state', 'animation_file', and 'descriptor' keys
         """
-        return {
-            "state": self.current_state.value,
-            "animation_file": self._current_animation_file,
-            "descriptor": self._current_animation_descriptor
+        # Minimal informative structure; richer payload is assembled when sending commands
+        anim = self._current_animation_file
+        desc = self._current_animation_descriptor
+        try:
+            resolved, _ = self._resolve_animation_descriptor(anim) if anim else (None, None)
+        except Exception:
+            resolved = anim
+
+        started_at = self._current_animation_started_at
+        timing = {
+            "started_at": started_at.isoformat() if started_at else None,
+            "time_in_clip": 0.0,
+            "current_frame": 0,
         }
+
+        clip = None
+        if isinstance(desc, dict):
+            fps = desc.get("fps") if isinstance(desc.get("fps"), (int, float)) else 30
+            duration = None
+            try:
+                section = desc.get("loop") if isinstance(desc.get("loop"), dict) else None
+                if section and isinstance(section.get("start_frame"), (int, float)) and isinstance(section.get("end_frame"), (int, float)):
+                    frames = max(0.0, float(section.get("end_frame")) - float(section.get("start_frame")))
+                    duration = frames / float(fps) if fps else None
+            except Exception:
+                duration = None
+            try:
+                clip = {
+                    "name": Path(resolved).stem if isinstance(resolved, str) and resolved else (Path(anim).stem if anim else None),
+                    "duration": duration,
+                    "fps": float(fps) if fps else 30,
+                }
+            except Exception:
+                clip = None
+
+        state = {
+            "state": self.current_state.value,
+            "animation_file": anim,
+            "animation": resolved,
+            "descriptor": desc,
+            "animation_state": {
+                "action": self.current_state.value,
+                "phase": "loop",
+                "animation": resolved,
+                "descriptor": desc,
+                "timing": timing,
+                "expressions": desc.get("expressions") if isinstance(desc, dict) else None,
+                "blink": desc.get("blink") if isinstance(desc, dict) else None,
+                "eye_movement": desc.get("eye_movement") if isinstance(desc, dict) else None,
+                "emotions": None,
+                "lipsync": (desc.get("lipsync") if isinstance(desc, dict) and "lipsync" in desc else False)
+            }
+        }
+
+        return state
 
     def get_animations_for_state(self, state: AnimationState) -> List[str]:
         """Get list of animation files for a given state by scanning skin folders.
@@ -438,70 +490,9 @@ class AnimationHandler:
         This centralizes the resolution logic so callers can inspect descriptor
         before deciding loop/rotation behavior.
         """
-        # Use the current state if available to find descriptor in the right subdirectory
-        # This is important because animations are organized by state (think/, write/, etc.)
+        # Use the current state if available to find descriptor in the right subdirectory.
         state_folder = self.current_state.value if self.current_state else None
         return self._resolve_animation_descriptor_for_state(animation_file, state_folder)
-        try:
-            try:
-                from core.persona_manager import get_persona_manager
-            except Exception:
-                get_persona_manager = None
-            persona_manager = None
-            if callable(get_persona_manager):
-                try:
-                    persona_manager = get_persona_manager()
-                except Exception:
-                    persona_manager = None
-            active_persona_folder = None
-            try:
-                if persona_manager and hasattr(persona_manager, '_current_persona') and persona_manager._current_persona:
-                    active_persona_folder = getattr(persona_manager._current_persona, 'id', None) or getattr(persona_manager._current_persona, 'name', None)
-            except Exception:
-                active_persona_folder = None
-
-            candidates = []
-            if active_persona_folder:
-                p_anim_dir = self.SKINS_DIR / str(active_persona_folder) / 'animations'
-                candidates.append((p_anim_dir, f"/skins/{active_persona_folder}/animations"))
-
-            rei_dir = self.SKINS_DIR / 'Rei' / 'animations'
-            candidates.append((rei_dir, f"/skins/Rei/animations"))
-
-            for dir_path, url_prefix in candidates:
-                try:
-                    if dir_path.exists() and dir_path.is_dir():
-                        candidate_file = dir_path / animation_file
-                        if candidate_file.exists():
-                            resolved_rel_path = f"{url_prefix}/{animation_file}"
-                            descriptor_path = candidate_file.with_suffix(candidate_file.suffix + '.json')
-                            if descriptor_path.exists():
-                                try:
-                                    with descriptor_path.open('r', encoding='utf-8') as df:
-                                        descriptor = json.load(df)
-                                except Exception:
-                                    descriptor = None
-                            break
-                        for p in dir_path.iterdir():
-                            if p.is_file() and p.name.lower() == animation_file.lower():
-                                resolved_rel_path = f"{url_prefix}/{p.name}"
-                                descriptor_path = p.with_suffix(p.suffix + '.json')
-                                if descriptor_path.exists():
-                                    try:
-                                        with descriptor_path.open('r', encoding='utf-8') as df:
-                                            descriptor = json.load(df)
-                                    except Exception:
-                                        descriptor = None
-                                break
-                except Exception:
-                    continue
-
-            if not resolved_rel_path:
-                resolved_rel_path = f"/{self.ANIMATIONS_BASE_PATH}/{animation_file}"
-        except Exception:
-            resolved_rel_path = f"/{self.ANIMATIONS_BASE_PATH}/{animation_file}"
-
-        return resolved_rel_path, descriptor
 
     def _resolve_animation_descriptor_for_state(self, animation_file: str, state_folder: Optional[str] = None):
         """Resolve animation file path and descriptor, knowing the state folder.
@@ -512,129 +503,94 @@ class AnimationHandler:
         Args:
             animation_file: The animation file name (e.g., "Thinking.fbx")
             state_folder: The state folder name (e.g., "think", "write"). If None, searches root animations.
-        
+
         Returns:
             Tuple of (resolved_url_path, descriptor) where descriptor may be None
         """
-        descriptor = None
-        resolved_rel_path = None
-        
-        log_debug(f"[AnimationHandler._resolve_descriptor] Called with animation={animation_file}, state_folder={state_folder}")
-        
+        descriptor: Optional[Dict[str, Any]] = None
+        resolved_rel_path: Optional[str] = None
+
+        # Detect current active persona (best-effort)
+        active_persona_folder: Optional[str] = None
         try:
-            # Get active persona
+            from core.persona_manager import get_persona_manager
+            pm = get_persona_manager()
+            if pm and getattr(pm, '_current_persona', None):
+                p = pm._current_persona
+                active_persona_folder = getattr(p, 'id', None) or getattr(p, 'name', None)
+        except Exception:
+            active_persona_folder = None
+
+        search_roots: List[tuple[Path, str]] = []
+
+        # Extra search paths (used by tests and plugin overrides)
+        for p in (self._search_paths or []):
             try:
-                import sys
-                persona_manager = None
-                pm_mod = sys.modules.get('core.persona_manager')
-                if pm_mod and hasattr(pm_mod, 'get_persona_manager'):
-                    persona_manager = pm_mod.get_persona_manager()
-                active_persona_folder = None
-                if persona_manager and hasattr(persona_manager, '_current_persona') and persona_manager._current_persona:
-                    active_persona_folder = getattr(persona_manager._current_persona, 'id', None) or getattr(persona_manager._current_persona, 'name', None)
-            except Exception:
-                active_persona_folder = None
-            
-            log_debug(f"[AnimationHandler._resolve_descriptor] Active persona: {active_persona_folder}")
-            
-            # Build candidate paths with state folder
-            candidates = []
-            if active_persona_folder and state_folder:
-                p_anim_dir = self.SKINS_DIR / str(active_persona_folder) / 'animations' / state_folder
-                candidates.append((p_anim_dir, f"/skins/{active_persona_folder}/animations/{state_folder}"))
-
-            # Additional configured search paths (state subfolder)
-            if state_folder:
-                for p in self._search_paths:
-                    sp = Path(p) / state_folder
-                    # Generic URL prefix; for non-skin paths this may not be web-served,
-                    # but descriptor resolution still works and callers can override serving.
-                    candidates.append((sp, f"/{self.ANIMATIONS_BASE_PATH}/{state_folder}"))
-            
-            if state_folder:
-                rei_dir = self.SKINS_DIR / 'Rei' / 'animations' / state_folder
-                candidates.append((rei_dir, f"/skins/Rei/animations/{state_folder}"))
-                log_debug(f"[AnimationHandler._resolve_descriptor] Will search state folder: {rei_dir}")
-            
-            # Also try root animations folder as fallback
-            if active_persona_folder:
-                p_anim_dir = self.SKINS_DIR / str(active_persona_folder) / 'animations'
-                candidates.append((p_anim_dir, f"/skins/{active_persona_folder}/animations"))
-
-            for p in self._search_paths:
-                sp = Path(p)
-                candidates.append((sp, f"/{self.ANIMATIONS_BASE_PATH}"))
-            
-            rei_root_dir = self.SKINS_DIR / 'Rei' / 'animations'
-            candidates.append((rei_root_dir, f"/skins/Rei/animations"))
-            
-            # Search for animation file
-            for dir_path, url_prefix in candidates:
-                try:
-                    if not dir_path.exists() or not dir_path.is_dir():
-                        continue
-                    
-                    # Direct match
-                    candidate_file = dir_path / animation_file
-                    if candidate_file.exists() and candidate_file.is_file():
-                        # Build URL with state folder if applicable
-                        if state_folder and url_prefix.endswith(state_folder):
-                            resolved_rel_path = f"{url_prefix}/{animation_file}"
-                        else:
-                            resolved_rel_path = f"{url_prefix}/{animation_file}"
-                        
-                        # Look for descriptor
-                        descriptor_path = candidate_file.with_suffix(candidate_file.suffix + '.json')
-                        if descriptor_path.exists():
-                            try:
-                                with descriptor_path.open('r', encoding='utf-8') as df:
-                                    descriptor = json.load(df)
-                                    log_debug(f"[AnimationHandler] Loaded descriptor for {animation_file}: {descriptor}")
-                            except Exception as e:
-                                log_debug(f"[AnimationHandler] Failed to load descriptor for {animation_file}: {e}")
-                                descriptor = None
-                        break
-                    
-                    # Case-insensitive match
-                    for p in dir_path.iterdir():
-                        if p.is_file() and p.name.lower() == animation_file.lower():
-                            if state_folder and url_prefix.endswith(state_folder):
-                                resolved_rel_path = f"{url_prefix}/{p.name}"
-                            else:
-                                resolved_rel_path = f"{url_prefix}/{p.name}"
-                            
-                            descriptor_path = p.with_suffix(p.suffix + '.json')
-                            if descriptor_path.exists():
-                                try:
-                                    with descriptor_path.open('r', encoding='utf-8') as df:
-                                        descriptor = json.load(df)
-                                        log_debug(f"[AnimationHandler] Loaded descriptor for {p.name}: {descriptor}")
-                                except Exception as e:
-                                    log_debug(f"[AnimationHandler] Failed to load descriptor for {p.name}: {e}")
-                                    descriptor = None
-                            break
-                    
-                    if resolved_rel_path:
-                        break
-                        
-                except Exception as e:
-                    log_debug(f"[AnimationHandler] Error searching in {dir_path}: {e}")
-                    continue
-            
-            # Fallback URL if not found
-            if not resolved_rel_path:
+                root = Path(p)
+                url = f"/{self.ANIMATIONS_BASE_PATH}"
                 if state_folder:
-                    resolved_rel_path = f"/skins/Rei/animations/{state_folder}/{animation_file}"
-                else:
-                    resolved_rel_path = f"/skins/Rei/animations/{animation_file}"
-                    
-        except Exception as e:
-            log_warning(f"[AnimationHandler] Error resolving animation descriptor: {e}")
+                    search_roots.append((root / state_folder, f"{url}/{state_folder}"))
+                search_roots.append((root, url))
+            except Exception:
+                continue
+
+        # Active persona skin
+        if active_persona_folder:
+            base = self.SKINS_DIR / str(active_persona_folder) / 'animations'
+            if state_folder:
+                search_roots.append((base / state_folder, f"/skins/{active_persona_folder}/animations/{state_folder}"))
+            search_roots.append((base, f"/skins/{active_persona_folder}/animations"))
+
+        # Default Rei fallback
+        rei_base = self.SKINS_DIR / 'Rei' / 'animations'
+        if state_folder:
+            search_roots.append((rei_base / state_folder, f"/skins/Rei/animations/{state_folder}"))
+        search_roots.append((rei_base, f"/skins/Rei/animations"))
+
+        def _try_load_descriptor(fpath: Path) -> Optional[Dict[str, Any]]:
+            dpath = fpath.with_suffix(fpath.suffix + '.json')
+            if not dpath.exists():
+                return None
+            try:
+                with dpath.open('r', encoding='utf-8') as df:
+                    return json.load(df)
+            except Exception as e:
+                log_debug(f"[AnimationHandler] Failed to load descriptor for {fpath.name}: {e}")
+                return None
+
+        # Search
+        for dir_path, url_prefix in search_roots:
+            try:
+                if not (dir_path.exists() and dir_path.is_dir()):
+                    continue
+
+                # Exact match first
+                candidate = dir_path / animation_file
+                if candidate.exists() and candidate.is_file():
+                    resolved_rel_path = f"{url_prefix}/{candidate.name}"
+                    descriptor = _try_load_descriptor(candidate)
+                    break
+
+                # Case-insensitive match
+                for p in dir_path.iterdir():
+                    if p.is_file() and p.name.lower() == animation_file.lower():
+                        resolved_rel_path = f"{url_prefix}/{p.name}"
+                        descriptor = _try_load_descriptor(p)
+                        break
+
+                if resolved_rel_path:
+                    break
+            except Exception as e:
+                log_debug(f"[AnimationHandler] Error searching in {dir_path}: {e}")
+                continue
+
+        # Fallback URL if not found (descriptor None)
+        if not resolved_rel_path:
             if state_folder:
                 resolved_rel_path = f"/skins/Rei/animations/{state_folder}/{animation_file}"
             else:
                 resolved_rel_path = f"/skins/Rei/animations/{animation_file}"
-        
+
         return resolved_rel_path, descriptor
 
     def _analyze_animation_structure(self, descriptor: Optional[Dict], animation_file: str = "") -> Dict[str, bool]:
@@ -715,6 +671,7 @@ class AnimationHandler:
         loop: bool = True,
         context_id: Optional[str] = None,
         priority: Optional[int] = None,
+        source: Optional[str] = None,
     ) -> None:
         """Play an animation for a specific state.
         
@@ -729,8 +686,13 @@ class AnimationHandler:
             context_id: Optional identifier for this animation context (for tracking)
             priority: Optional priority level for this animation context.
                       If not provided, uses the priority from ANIMATION_STATE_PRIORITIES mapping.
+            source: Optional string describing the origin of the animation request (e.g. 'core', 'plugin').
+                    This is informational and is forwarded to WebUI when provided.
         """
-        log_info(f"[AnimationHandler] ⭐ play_animation CALLED: state={state.value}, session={session_id}, loop={loop}, context={context_id}, priority={priority}", log_file="webui")
+        log_info(
+            f"[AnimationHandler] ⭐ play_animation CALLED: state={state.value}, session={session_id}, loop={loop}, context={context_id}, priority={priority}, source={source}",
+            log_file="webui",
+        )
         
         # Check if we need to play outro before transitioning to new animation
         # This must be done BEFORE acquiring the lock to avoid deadlocks
@@ -877,7 +839,9 @@ class AnimationHandler:
                         loop=False,
                         state=self.current_state.value,
                         descriptor=prev_descriptor,
-                        play_section="outro"
+                        play_section="outro",
+                        priority=priority,
+                        source=source,
                     )
                     
                     # Calculate outro duration to wait before sending the new animation command
@@ -892,7 +856,9 @@ class AnimationHandler:
                     animation_file=selected_animation,
                     loop=effective_loop,
                     state=state.value,
-                    descriptor=self._sanitize_idle_descriptor(descriptor) if is_idle_state else descriptor
+                    descriptor=self._sanitize_idle_descriptor(descriptor) if is_idle_state else descriptor,
+                    priority=priority,
+                    source=source,
                 )
                 
                 # Update centralized animation state and notify all clients
@@ -1001,9 +967,9 @@ class AnimationHandler:
             # When returning to Idle, make sure other rotation tasks for the previous
             # contexts are cleaned up (stop any rotation tasks for non-idle states tied to this session)
             for anim_state in [AnimationState.THINK, AnimationState.WRITE, AnimationState.TALK]:
-                    await self._stop_rotation_task(session_id, anim_state)
-            else:
-                log_debug(f"[AnimationHandler] Context {context_id} stopped but other contexts still active")
+                await self._stop_rotation_task(session_id, anim_state)
+        else:
+            log_debug(f"[AnimationHandler] Context {context_id} stopped but other contexts still active")
 
     async def transition_to(
         self,
@@ -1020,12 +986,14 @@ class AnimationHandler:
             session_id: The WebUI session ID
             context_id: Optional context identifier
         """
-        log_debug(f"[AnimationHandler] play_animation called: state={state}, session_id={session_id}, loop={loop}, context_id={context_id}, priority={priority}")
+        log_debug(
+            f"[AnimationHandler] transition_to called: state={state.value}, session_id={session_id}, context_id={context_id}"
+        )
         await self.play_animation(
             state=state,
             session_id=session_id,
             loop=True,
-            context_id=context_id
+            context_id=context_id,
         )
 
     async def _send_animation_command(
@@ -1035,7 +1003,9 @@ class AnimationHandler:
         loop: bool,
         state: str,
         descriptor: Optional[Dict] = None,
-        play_section: Optional[str] = None
+        play_section: Optional[str] = None,
+        priority: Optional[int] = None,
+        source: Optional[str] = None,
     ) -> None:
         """Send animation command to the WebUI via WebSocket.
         
@@ -1049,6 +1019,8 @@ class AnimationHandler:
             state: The logical state name
             descriptor: Optional animation descriptor with frame info (intro/loop/outro)
             play_section: Optional section to play - 'intro', 'loop', 'outro', or None for full animation
+            priority: Optional numeric priority for client-side preemption.
+            source: Optional origin string forwarded to the WebUI.
         """
         if not self.webui:
             return
@@ -1059,6 +1031,83 @@ class AnimationHandler:
         else:
             resolved_rel_path, _ = self._resolve_animation_descriptor(animation_file)
 
+        # Prepare optional rich animation_state payload
+        animation_state: Dict[str, Any] = {}
+        started_at = datetime.utcnow().replace(tzinfo=timezone.utc)
+        try:
+            resolved_path = resolved_rel_path
+            phase = play_section if play_section is not None else ("loop" if loop else "clip")
+            timing = {"started_at": started_at.isoformat(), "time_in_clip": 0.0, "current_frame": 0}
+
+            # Try to fetch emotions from EmotionManager if available
+            emotions = None
+            try:
+                from plugins.emotion_manager import EmotionManager
+                try:
+                    mgr = EmotionManager()
+                    emotions_raw = await mgr.get_emotion_state()
+                    if emotions_raw:
+                        # compute dominant
+                        dominant = max(emotions_raw.items(), key=lambda x: x[1])[0] if emotions_raw else None
+                        emotions = {"dominant": dominant, "values": emotions_raw}
+                except Exception:
+                    emotions = None
+            except Exception:
+                emotions = None
+
+            lipsync_flag = False
+            if descriptor and isinstance(descriptor, dict):
+                lipsync_flag = bool(descriptor.get("lipsync", False))
+
+            clip = None
+            if isinstance(descriptor, dict):
+                fps = descriptor.get("fps") if isinstance(descriptor.get("fps"), (int, float)) else 30
+                duration = None
+                try:
+                    section_key = play_section or ("loop" if loop else None)
+                    section = descriptor.get(section_key) if section_key and isinstance(descriptor.get(section_key), dict) else None
+                    if section and isinstance(section.get("start_frame"), (int, float)) and isinstance(section.get("end_frame"), (int, float)):
+                        frames = max(0.0, float(section.get("end_frame")) - float(section.get("start_frame")))
+                        duration = frames / float(fps) if fps else None
+                except Exception:
+                    duration = None
+                try:
+                    clip = {
+                        "name": Path(resolved_path).stem if isinstance(resolved_path, str) and resolved_path else Path(animation_file).stem,
+                        "duration": duration,
+                        "fps": float(fps) if fps else 30,
+                    }
+                except Exception:
+                    clip = None
+
+            # Only attach rich animation_state when we have descriptor and/or emotions.
+            if descriptor is None and emotions is None:
+                animation_state = {}
+            else:
+                animation_state = {
+                "action": state,
+                "phase": phase,
+                "animation": resolved_path,
+                "descriptor": descriptor,
+                "clip": clip,
+                "timing": timing,
+                "expressions": descriptor.get("expressions") if isinstance(descriptor, dict) else None,
+                "blink": descriptor.get("blink") if isinstance(descriptor, dict) else None,
+                "eye_movement": descriptor.get("eye_movement") if isinstance(descriptor, dict) else None,
+                "emotions": emotions,
+                "lipsync": lipsync_flag,
+                "priority": int(priority) if isinstance(priority, int) else None,
+                "source": source,
+                }
+        except Exception:
+            animation_state = {}
+
+        # Keep track of start time for summaries
+        try:
+            self._current_animation_started_at = started_at
+        except Exception:
+            pass
+
         # If session_id is None, broadcast to all connected WebUI sessions
         try:
             if session_id is None:
@@ -1066,12 +1115,18 @@ class AnimationHandler:
                     try:
                         payload = {
                             "type": "animation",
-                            "animation": resolved_rel_path,
+                            "animation": resolved_path,
                             "loop": loop,
                             "state": state
                         }
+                        if isinstance(priority, int):
+                            payload["priority"] = int(priority)
+                        if source:
+                            payload["source"] = str(source)
                         if descriptor is not None:
                             payload["descriptor"] = descriptor
+                        if animation_state:
+                            payload["animation_state"] = animation_state
                         if play_section is not None:
                             payload["play_section"] = play_section
                         await websocket.send_json(payload)
@@ -1087,12 +1142,18 @@ class AnimationHandler:
 
             payload = {
                 "type": "animation",
-                "animation": resolved_rel_path,
+                "animation": resolved_path,
                 "loop": loop,
                 "state": state
             }
+            if isinstance(priority, int):
+                payload["priority"] = int(priority)
+            if source:
+                payload["source"] = str(source)
             if descriptor is not None:
                 payload["descriptor"] = descriptor
+            if animation_state:
+                payload["animation_state"] = animation_state
             if play_section is not None:
                 payload["play_section"] = play_section
             await websocket.send_json(payload)
@@ -1146,7 +1207,13 @@ class AnimationHandler:
                     _, candidate_descriptor = self._resolve_animation_descriptor(candidate)
                     candidate_loop = False if (candidate_descriptor and candidate_descriptor.get("play_once")) else True
                     # send new animation command (loop depends on descriptor)
-                    await self._send_animation_command(session_id, candidate, candidate_loop, state.value)
+                    await self._send_animation_command(
+                        session_id=session_id,
+                        animation_file=candidate,
+                        loop=candidate_loop,
+                        state=state.value,
+                        priority=ANIMATION_STATE_PRIORITIES.get(state, 0),
+                    )
         except asyncio.CancelledError:
             # Normal cancellation path
             pass

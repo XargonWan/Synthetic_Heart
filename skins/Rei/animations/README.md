@@ -27,6 +27,32 @@ No manual intervention is required - animations are automatically triggered by t
 
 For more information, see the [Animation System Documentation](../../docs/animation_system.rst).
 
+## Optional descriptor fields (facial state)
+
+Each ``.fbx`` file can ship an optional adjacent descriptor ``.fbx.json``.
+Besides ``intro``/``loop``/``outro`` sections, descriptors may include **optional** facial fields that the backend
+will forward to the WebUI as part of the optional ``animation_state`` payload.
+
+Example ``Thinking.fbx.json`` (shortened):
+
+```json
+{
+    "fps": 30,
+    "loop": { "start_frame": 0, "end_frame": 120 },
+    "expressions": [
+        { "start_frame": 0, "end_frame": 15, "targets": { "eyes.closed": 0.1, "mouth.O": 0.05 }, "priority": 10, "source": "server" }
+    ],
+    "blink": { "auto": true, "rate_s": 3.5, "intensity": 0.6, "close_ms": 60, "hold_ms": 120, "open_ms": 60 },
+    "eye_movement": { "auto": true, "saccade_rate_s": 2 },
+    "lipsync": false
+}
+```
+
+Notes:
+
+- ``lipsync`` is a boolean consent flag only (default: ``false`` when not present).
+- ``expressions.targets`` keys are logical names; the WebUI resolves them via the skin ``persona.json`` (``blendshape_map``).
+
 ## Available Animations
 
 ### Idle Animations
@@ -228,7 +254,33 @@ Planned additions:
 - `thinking.fbx` - Contemplative pose for processing state
 - `excited.fbx` - Enthusiastic response animation
 - `sad.fbx` - Emotional response for negative content
+
+Note: expression and viseme mappings for this skin are stored in `skins/Rei/persona.json` under the `blendshape_map` key. Use that file to tune emotion→blendshape, viseme→blendshape and per-animation presets.
 - `gesture_*.fbx` - Hand gestures for emphasis
+
+## Descriptor example (expressions + blink + lipsync)
+
+Place a descriptor next to your FBX file (same name + `.json`), e.g. `Thinking.fbx.json`:
+
+```json
+{
+    "loop": { "start_frame": 0, "end_frame": 60 },
+    "expressions": [
+        {
+            "start_frame": 0,
+            "end_frame": 15,
+            "targets": { "eyes.closed": 0.4, "mouth.O": 0.05 },
+            "source": "server",
+            "priority": 10
+        }
+    ],
+    "blink": { "auto": true, "rate_s": 4, "intensity": 0.6 },
+    "eye_movement": { "auto": true, "saccade_rate_s": 2 },
+    "lipsync": false
+}
+```
+
+The WebUI will resolve targets through `skins/<skin>/persona.json` (`blendshape_map`).
 
 ## License
 
