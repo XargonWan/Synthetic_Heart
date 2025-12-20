@@ -1039,19 +1039,35 @@ class AnimationHandler:
             phase = play_section if play_section is not None else ("loop" if loop else "clip")
             timing = {"started_at": started_at.isoformat(), "time_in_clip": 0.0, "current_frame": 0}
 
-            # Try to fetch emotions from EmotionManager if available
+            # Try to fetch emotions from the runtime EmotionManager plugin instance if available
+            # (fallback to constructing a local instance).
             emotions = None
             try:
-                from plugins.emotion_manager import EmotionManager
+                mgr = None
                 try:
-                    mgr = EmotionManager()
-                    emotions_raw = await mgr.get_emotion_state()
-                    if emotions_raw:
-                        # compute dominant
-                        dominant = max(emotions_raw.items(), key=lambda x: x[1])[0] if emotions_raw else None
-                        emotions = {"dominant": dominant, "values": emotions_raw}
+                    from core.core_initializer import PLUGIN_REGISTRY
+
+                    mgr = PLUGIN_REGISTRY.get("emotion_manager") if isinstance(PLUGIN_REGISTRY, dict) else None
                 except Exception:
-                    emotions = None
+                    mgr = None
+
+                if mgr is None:
+                    from plugins.emotion_manager import EmotionManager
+
+                    mgr = EmotionManager()
+
+                emotions_raw_maybe = mgr.get_emotion_state()
+                emotions_raw = await emotions_raw_maybe if asyncio.iscoroutine(emotions_raw_maybe) else emotions_raw_maybe
+
+                if isinstance(emotions_raw, dict) and emotions_raw:
+                    # Filter out near-zero values (decay tail) to avoid sending meaningless noise.
+                    emotions_filtered = {k: v for k, v in emotions_raw.items() if isinstance(v, (int, float)) and v >= 0.1}
+                    if emotions_filtered:
+                        dominant, max_intensity = max(emotions_filtered.items(), key=lambda x: x[1])
+                        emotions = {"dominant": dominant, "values": emotions_filtered}
+                        log_debug(
+                            f"[AnimationHandler] Attached emotions to animation_state: dominant={dominant}, max={max_intensity}"
+                        )
             except Exception:
                 emotions = None
 
