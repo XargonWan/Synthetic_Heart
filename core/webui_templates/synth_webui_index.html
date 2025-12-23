@@ -6706,6 +6706,14 @@
                                 // Clear previous overlay on action change
                                 this._emotionOverlay = null;
 
+                                // On action change, perform a smooth eyes reset so that
+                                // persistent eye-closed flags are removed in a non-abrupt way
+                                try {
+                                    if (typeof this._resetEyesSmoothly === 'function') {
+                                        this._resetEyesSmoothly(220);
+                                    }
+                                } catch (e) { /* ignore */ }
+
                                 const emo = (state && state.emotions && state.emotions.values && typeof state.emotions.values === 'object') ? state.emotions.values : null;
                                 if (emo) {
                                     // pick max intensity; tie -> random
@@ -7035,6 +7043,8 @@
                         // Track whether eyes are being intentionally held closed by expressions.
                         // If so, we suppress blink targets *except* those used as the actual
                         // eyelid-closure mapping for eyes_closed (some models only have blink morphs).
+                        // Also maintain a richer eyesState so we can distinguish persistent
+                        // closures (persona/animation) from transient blinks (autoblink).
                         let eyesClosedRequestedMax = 0;
                         const eyesClosedResolvedTargets = new Set();
 
@@ -7157,28 +7167,41 @@
                         // Suspend/resume blink + eye movement based on *requested* eyes_closed.
                         // This works even on models that don't expose a readable eyes_closed morph.
                         try {
-                            const wasEyesClosed = this._eyesClosedByExpression || false;
+                            const wasEyesClosed = !!(this._eyesState && this._eyesState.locked && this._eyesState.value > 0.5);
                             const nowEyesClosed = eyesClosedRequestedMax > 0.5;
-                            this._eyesClosedByExpression = nowEyesClosed;
-                            if (!wasEyesClosed && nowEyesClosed) {
-                                if (this._blinkLoopRunning) {
-                                    console.debug(`[AnimationHandler] Eyes closed by expression request (${eyesClosedRequestedMax.toFixed(2)}), suspending blink`);
-                                    this._stopBlinkLoop();
-                                }
-                                if (this._eyeLoopRunning) {
-                                    console.debug(`[AnimationHandler] Eyes closed by expression request (${eyesClosedRequestedMax.toFixed(2)}), suspending eye movement`);
-                                    this._stopEyeMovement();
-                                }
-                            } else if (wasEyesClosed && !nowEyesClosed) {
-                                if (this._blinkAutoEnabled && !this._blinkLoopRunning) {
-                                    console.debug(`[AnimationHandler] Eyes reopened (${eyesClosedRequestedMax.toFixed(2)}), resuming blink`);
-                                    this._startBlinkLoop();
-                                }
-                                if (this._eyeAutoEnabled && !this._eyeLoopRunning) {
-                                    console.debug(`[AnimationHandler] Eyes reopened (${eyesClosedRequestedMax.toFixed(2)}), resuming eye movement`);
-                                    this._startEyeMovement();
-                                }
+                            // If an expression is requesting eyes closed, set a persistent eyesState
+                            if (nowEyesClosed) {
+                                // source 'expression' indicates a persistent request coming from expressions/persona
+                                this._setEyesState({ value: eyesClosedRequestedMax, source: 'expression' });
+                            } else {
+                                // clear expression-based eyes state if present
+                                if (this._eyesState && this._eyesState.source === 'expression') this._clearEyesState();
                             }
+
+                            // If a new *locked* persistent closure is in effect, suspend blink/eye movement;
+                            // if a previously locked closure was cleared, resume according to config.
+                            try {
+                                const isLockedNow = !!(this._eyesState && this._eyesState.locked && this._eyesState.value > 0.5);
+                                if (!wasEyesClosed && isLockedNow) {
+                                    if (this._blinkLoopRunning) {
+                                        console.debug(`[AnimationHandler] Eyes locked closed by expression/source (${eyesClosedRequestedMax.toFixed(2)}), suspending blink`);
+                                        this._stopBlinkLoop();
+                                    }
+                                    if (this._eyeLoopRunning) {
+                                        console.debug(`[AnimationHandler] Eyes locked closed by expression/source (${eyesClosedRequestedMax.toFixed(2)}), suspending eye movement`);
+                                        this._stopEyeMovement();
+                                    }
+                                } else if (wasEyesClosed && !isLockedNow) {
+                                    if (this._blinkAutoEnabled && !this._blinkLoopRunning) {
+                                        console.debug(`[AnimationHandler] Locked eyes reopened (${eyesClosedRequestedMax.toFixed(2)}), resuming blink`);
+                                        this._startBlinkLoop();
+                                    }
+                                    if (this._eyeAutoEnabled && !this._eyeLoopRunning) {
+                                        console.debug(`[AnimationHandler] Locked eyes reopened (${eyesClosedRequestedMax.toFixed(2)}), resuming eye movement`);
+                                        this._startEyeMovement();
+                                    }
+                                }
+                            } catch (e) { /* ignore */ }
                         } catch (e) { /* ignore */ }
 
                         // Apply smoothing/interpolation towards desired values
@@ -7230,6 +7253,61 @@
                     } catch (e) {
                         console.warn('[AnimationHandler] applyExpressionsForFrame failed', e);
                     }
+                }
+
+                // Manage an eyes state object to distinguish persistent (persona/animation)
+                // closures from transient autoblinks. Value in range [0,1].
+                _setEyesState({ value = 0, source = null, duration = null } = {}) {
+                    try {
+                        if (!this._eyesState) this._eyesState = { value: 0, source: null, since: null, duration: null, locked: false };
+                        const now = Date.now();
+                        this._eyesState.value = Math.max(0, Math.min(1, value || 0));
+                        this._eyesState.source = source || null;
+                        this._eyesState.since = now;
+                        this._eyesState.duration = (typeof duration === 'number' && duration > 0) ? duration : null;
+                        // Lock state for persistent sources
+                        // Only treat the state as "locked" (preventing autoblinks) when:
+                        // - source is present and not an autoblink, AND
+                        // - eyes are substantially closed (>0.5), AND
+                        // - either the request is not from a transient 'expression' OR a duration
+                        //   was explicitly provided (longer closures).
+                        try {
+                            const isLong = (typeof duration === 'number' && duration > 300);
+                            const willLock = (source && source !== 'autoblink' && this._eyesState.value > 0.5 && (source !== 'expression' || isLong));
+                            this._eyesState.locked = willLock;
+                            console.debug('[AnimationHandler] _setEyesState: locked=', willLock, 'source=', source, 'value=', this._eyesState.value, 'duration=', duration);
+                        } catch (e) {
+                            this._eyesState.locked = (source && source !== 'autoblink' && this._eyesState.value > 0.5);
+                        }
+                        try { window.dispatchEvent(new CustomEvent('synth_eyes_state_changed', { detail: { value: this._eyesState.value, source: this._eyesState.source } })); } catch (e) {}
+
+                        // Safety: if persistent close lasts too long, force reopen after timeout (30s)
+                        if (this._eyesState.locked) {
+                            const timeoutMs = 30000;
+                            if (this._eyesStateTimeout) { try { clearTimeout(this._eyesStateTimeout); } catch (e) {} }
+                            this._eyesStateTimeout = setTimeout(() => {
+                                try {
+                                    // If still locked by the same source, force open and log
+                                    if (this._eyesState && this._eyesState.locked && Date.now() - this._eyesState.since >= timeoutMs) {
+                                        console.warn('[AnimationHandler] eyesState locked too long, forcing reopen');
+                                        this._forceOpenEyes();
+                                        this._clearEyesState();
+                                    }
+                                } catch (e) {}
+                            }, timeoutMs);
+                        } else {
+                            if (this._eyesStateTimeout) { try { clearTimeout(this._eyesStateTimeout); } catch (e) {} this._eyesStateTimeout = null; }
+                        }
+                    } catch (e) { /* ignore */ }
+                }
+
+                _clearEyesState() {
+                    try {
+                        if (!this._eyesState) return;
+                        this._eyesState = { value: 0, source: null, since: null, duration: null, locked: false };
+                        try { window.dispatchEvent(new CustomEvent('synth_eyes_state_changed', { detail: { value: 0, source: null } })); } catch (e) {}
+                        if (this._eyesStateTimeout) { try { clearTimeout(this._eyesStateTimeout); } catch (e) {} this._eyesStateTimeout = null; }
+                    } catch (e) { /* ignore */ }
                 }
 
                 // Load persona.json for a skin and cache it
@@ -7319,6 +7397,64 @@
                                 this._startBlinkLoop();
                             }
                         } catch (e) { /* ignore */ }
+                        // Clear any persistent eyesState when forcing open.
+                        try { if (this._eyesState) this._clearEyesState(); } catch (e) {}
+                    } catch (e) { /* ignore */ }
+                }
+
+                // Smoothly reset eyes over a short duration (ms). This will interpolate
+                // eye-related blendshapes down to 0 instead of snapping them, then
+                // clear the persistent eyes state and ensure blink is running.
+                _resetEyesSmoothly(totalMs = 220) {
+                    try {
+                        const candidates = [];
+                        try {
+                            const skin = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
+                            const persona = (this._personaCache && this._personaCache[skin]) || null;
+                            const blendMap = (persona && persona.blendshape_map) ? persona.blendshape_map : {};
+                            ['blink','eyes_closed','eyes.close','eyes.closed'].forEach(k => { if (blendMap && blendMap[k]) candidates.push(blendMap[k]); });
+                        } catch (e) { /* ignore */ }
+
+                        // Add fallback candidates
+                        candidates.push(
+                            'eyes_closed','eyes.closed','eyesClosed','EyesClosed',
+                            'blink','Blink','blinkLeft','blinkRight','BlinkLeft','BlinkRight',
+                            'eye_blink_left','eye_blink_right','eyeBlinkLeft','eyeBlinkRight'
+                        );
+
+                        // Determine current values
+                        const cur = {};
+                        candidates.forEach(k => { try { cur[k] = Math.max(0, Math.min(1, this._getFaceValue(k) || 0)); } catch (e) { cur[k] = 0; } });
+
+                        const steps = Math.max(3, Math.round(totalMs / 20));
+                        const stepDelay = Math.max(10, Math.round(totalMs / steps));
+
+                        let step = 0;
+                        const stepFn = () => {
+                            try {
+                                step++;
+                                const t = step / steps;
+                                candidates.forEach(k => {
+                                    try {
+                                        const start = cur[k] || 0;
+                                        const next = Math.max(0, start * (1 - t));
+                                        this._setFaceValue(k, next);
+                                    } catch (e) { /* ignore */ }
+                                });
+                                if (step < steps) {
+                                    setTimeout(stepFn, stepDelay);
+                                } else {
+                                    // Finalize: ensure zeros, clear expression state, clear persistent eyes state
+                                    candidates.forEach(k => { try { this._setFaceValue(k, 0); if (this._expressionState) delete this._expressionState[k]; } catch (e) {} });
+                                    try { if (this._eyesState) this._clearEyesState(); } catch (e) {}
+                                    // Restart blink loop if it was running or if we want it active
+                                    try { if (!this._blinkLoopRunning) this._startBlinkLoop(); } catch (e) {}
+                                }
+                            } catch (e) { /* ignore */ }
+                        };
+
+                        // Kick off smoothing
+                        setTimeout(stepFn, stepDelay);
                     } catch (e) { /* ignore */ }
                 }
 
@@ -7333,8 +7469,8 @@
                         // Don't use raw face values here: they may be cached or driven by an animation
                         // track and would incorrectly suppress blinking forever in idle.
                         try {
-                            if (this._eyesClosedByExpression) {
-                                console.debug('[AnimationHandler] Skipping blink: eyes held closed by expression request');
+                            if (this._eyesState && this._eyesState.locked && this._eyesState.value > 0.5) {
+                                console.debug('[AnimationHandler] Skipping blink: eyes held closed by state', this._eyesState);
                                 return;
                             }
                         } catch (e) { /* ignore */ }
@@ -7370,15 +7506,29 @@
                         const setAll = (v) => {
                             const vv = Math.max(0, Math.min(1, v));
                             // Re-check if eyes are closed JUST BEFORE applying blink
-                            // This catches cases where expressions closed eyes after blink started
+                            // Prefer authoritative eyesState if present to avoid racing with face cache.
                             try {
+                                if (this._eyesState && this._eyesState.locked && this._eyesState.value > 0.5) {
+                                    console.debug(`[AnimationHandler] Aborting blink mid-execution: eyes closed by state (${this._eyesState.source}=${this._eyesState.value.toFixed(2)})`);
+                                    return;
+                                }
                                 const eyesClosedCandidates = ['eyes_closed', 'eyes.closed', 'eyesClosed', 'EyesClosed'];
                                 for (const candidate of eyesClosedCandidates) {
                                     try {
                                         const eyeValue = this._getFaceValue(candidate);
                                         if (typeof eyeValue === 'number' && eyeValue > 0.5) {
-                                            console.debug(`[AnimationHandler] Aborting blink mid-execution: eyes closed (${candidate}=${eyeValue.toFixed(2)})`);
-                                            return; // Don't apply blink if eyes are closed
+                                            // Allow the current autoblink to proceed even if face value
+                                            // is already > 0.5 (since it's the blink itself applying those values).
+                                            const isAutoblinkActive = !!(this._eyesState && this._eyesState.source === 'autoblink' && this._blinkInProgress);
+                                            if (!isAutoblinkActive) {
+                                                    console.debug(`[AnimationHandler] Aborting blink mid-execution: eyes closed (${candidate}=${eyeValue.toFixed(2)})`, 'blinkInProgress=', !!this._blinkInProgress, 'eyesState=', this._eyesState && this._eyesState.source);
+                                                    // Ensure we don't leave the face in a partially-closed state
+                                                    try { candidates.forEach(k => { try { this._setFaceValue(k, 0); } catch (e) {} }); } catch (e) {}
+                                                    try { if (this._eyesState && this._eyesState.source === 'autoblink') this._clearEyesState(); } catch (e) {}
+                                                    this._blinkInProgress = false;
+                                                    this._blinkState = 'open';
+                                                    return; // Don't apply blink if eyes are closed by external reason
+                                                }
                                         }
                                     } catch (e) { /* ignore */ }
                                 }
@@ -7386,6 +7536,8 @@
                             candidates.forEach(k => { try { this._setFaceValue(k, vv); } catch (e) {} });
                         };
 
+                        // Mark transient autoblink state so other logic can distinguish it
+                        try { this._setEyesState({ value: intensity, source: 'autoblink', duration: totalMs }); } catch (e) {}
                         try { window.dispatchEvent(new CustomEvent('synth_animation_blink', { detail: { intensity, closeMs, holdMs, openMs, totalMs } })); } catch (e) {}
 
                         const t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
@@ -7408,6 +7560,7 @@
                                     this._blinkState = 'open';
                                     this._blinkInProgress = false;
                                     setAll(0);
+                                    try { if (this._eyesState && this._eyesState.source === 'autoblink') this._clearEyesState(); } catch (e) {}
                                     return;
                                 }
 
@@ -7424,7 +7577,7 @@
                         } catch (e) {
                             // RAF unavailable: coarse fallback
                             setAll(intensity);
-                            const t1 = setTimeout(() => { try { setAll(0); } catch (e) {} this._blinkInProgress = false; this._blinkState = 'open'; }, totalMs);
+                            const t1 = setTimeout(() => { try { setAll(0); } catch (e) {} this._blinkInProgress = false; this._blinkState = 'open'; try { if (this._eyesState && this._eyesState.source === 'autoblink') this._clearEyesState(); } catch (e) {} }, totalMs);
                             this._blinkPhaseTimers.push(t1);
                         }
 
@@ -7457,8 +7610,8 @@
                     try {
                         // If eyes are intentionally held closed by expressions, skip saccade.
                         try {
-                            if (this._eyesClosedByExpression) {
-                                console.debug('[AnimationHandler] Skipping saccade: eyes held closed by expression request');
+                            if (this._eyesState && this._eyesState.locked && this._eyesState.value > 0.5) {
+                                console.debug('[AnimationHandler] Skipping saccade: eyes held closed by state', this._eyesState);
                                 return;
                             }
                         } catch (e) { /* ignore */ }
@@ -8241,7 +8394,7 @@
                         // Clear expressions when returning to idle to prevent the previous state's
                         // face pose (e.g., THINK eyes_closed) from persisting.
                         try {
-                            this._eyesClosedByExpression = false;
+                            this._clearEyesState();
                             if (this._expressionState) this._expressionState = {};
                             if (typeof this._forceOpenEyes === 'function') this._forceOpenEyes();
                             // Ensure autonomous blink/eye movement can resume in idle.
@@ -8267,6 +8420,18 @@
                         this.currentStructuredAction = null;
                         return;
                     }
+
+                    // If we're attempting to start a new action while THINK was very recently started,
+                    // enforce a minimum visible duration for THINK to prevent it being immediately preempted.
+                    try {
+                        const now = Date.now();
+                        const minUntil = this._minActionVisibleUntil || 0;
+                        if ((this.currentActionName === 'think' || String(actionName || '').toLowerCase() !== 'think') && now < minUntil && String(actionName || '').toLowerCase() !== 'think') {
+                            const waitMs = Math.max(0, minUntil - now);
+                            console.debug('[AnimationHandler] Delaying startAction due to think minimum visibility, waiting', waitMs, 'ms');
+                            await new Promise((res) => setTimeout(res, waitMs));
+                        }
+                    } catch (e) { /* ignore */ }
 
                     if (actionName !== 'idle') {
                         // Keep base idle at low weight (0.05 = 5%) as fallback skeleton during non-idle animations.
@@ -8294,6 +8459,14 @@
                     } catch (e) { /* ignore */ }
                     
                     let action = this.actions[actionName];
+
+                    // If starting THINK, ensure a small minimum visible window so persona overrides and preload finish
+                    try {
+                        if (String(actionName || '').toLowerCase() === 'think') {
+                            const minMs = 300; // minimum time to show THINK before it can be preempted
+                            this._minActionVisibleUntil = Date.now() + minMs;
+                        }
+                    } catch (e) { /* ignore */ }
                     
                     // If specific animation file is requested
                     if (animationFile) {
@@ -8557,7 +8730,7 @@
                             this.currentStructuredAction = null;
                             // Same as generic idle: clear lingering expressions so eyes don't stay closed.
                             try {
-                                this._eyesClosedByExpression = false;
+                                this._clearEyesState();
                                 if (this._expressionState) this._expressionState = {};
                                 if (typeof this._forceOpenEyes === 'function') this._forceOpenEyes();
                                 if (this._blinkAutoEnabled && !this._blinkLoopRunning) { try { this._startBlinkLoop(); } catch (e) {} }
@@ -8844,6 +9017,16 @@
                                                 }
                                             } catch (e) { /* ignore non-browser env */ }
 
+                                            // Clear any persistent eyes state and ensure avatar eyes are open
+                                            try {
+                                                console.debug('[AnimationHandler] Clearing eyesState and forcing eyes open after outro for', key);
+                                                try { this._clearEyesState(); } catch (e) {}
+                                                try { this._forceOpenEyes(); } catch (e) {}
+                                                try { if (this._blinkAutoEnabled && !this._blinkLoopRunning) this._startBlinkLoop(); } catch (e) {}
+                                                try { if (this._eyeAutoEnabled && !this._eyeLoopRunning) this._startEyeMovement(); } catch (e) {}
+                                                try { this._minActionVisibleUntil = 0; } catch (e) {}
+                                            } catch (e) { /* ignore */ }
+
                                             // If this was an idle animation, advance to next random idle
                                             if (key.startsWith('idle:') || key === 'idle') {
                                                 console.log(`[AnimationHandler] Outro finished for idle animation -> starting next idle`);
@@ -8952,7 +9135,16 @@
                                             this._safeFadeStop(finishedAction, 0.12); 
                                         } catch (e) { /* ignore */ }
                                         try { this._ensureBaseIdle(1.0, false); } catch (e) { /* ignore */ }
-                                        setTimeout(() => { try { this.startAction('idle'); } catch (e) { /* ignore */ } }, 140);
+                                            // Before handing back to idle, ensure eyes are opened and blinking resumes
+                                            try {
+                                                console.debug('[AnimationHandler] Clearing eyesState and forcing eyes open after playOnce finish for', matchedKey);
+                                                try { this._clearEyesState(); } catch (e) {}
+                                                try { this._forceOpenEyes(); } catch (e) {}
+                                                try { if (this._blinkAutoEnabled && !this._blinkLoopRunning) this._startBlinkLoop(); } catch (e) {}
+                                                try { if (this._eyeAutoEnabled && !this._eyeLoopRunning) this._startEyeMovement(); } catch (e) {}
+                                                try { this._minActionVisibleUntil = 0; } catch (e) {}
+                                            } catch (e) {}
+                                            setTimeout(() => { try { this.startAction('idle'); } catch (e) { /* ignore */ } }, 140);
                                         return;
                                     }
 

@@ -103,6 +103,11 @@ When expressions intentionally close the avatar's eyes (via `eyes.closed` blends
 
 This prevents conflicting animations: while eyes are intentionally closed, blinking and saccades remain paused until the eyes are reopened. This applies automatically - no configuration needed.
 
+New: the WebUI now exposes a rich `eyesState` mechanism and a DOM event `synth_eyes_state_changed`.
+- `synth_eyes_state_changed` fires with detail `{ value, source }` when the effective eyes closed state changes.
+- Sources: `persona`, `animation`, `expression` (persistent) or `autoblink` (transient).
+- The handler will lock blinking/eye movement when a persistent source sets `value > 0.5`, and will automatically resume when cleared.
+
 **Implementation:**
 - Execution-time check in `_performBlink()`: skips blink if `eyes.closed > 0.5`
 - Frame-time monitoring in `applyExpressionsForFrame()`: monitors eye state every frame and auto-suspends/resumes loops

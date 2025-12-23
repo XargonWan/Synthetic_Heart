@@ -928,7 +928,7 @@ class SynthWebUIInterface:
                 "descriptor": descriptor
             }
 
-            # Attach rich animation_state structure when possible
+            # Attach rich animation_state structure when possible (best-effort)
             try:
                 current = None
                 if self.animation_handler:
@@ -936,8 +936,40 @@ class SynthWebUIInterface:
                         current = self.animation_handler.get_current_animation_state()
                     except Exception:
                         current = None
+
                 if current and isinstance(current, dict) and current.get('animation_state'):
                     payload['animation_state'] = current.get('animation_state')
+
+                    # If emotions are missing, attempt to fetch runtime emotions (best-effort)
+                    try:
+                        anim_state = payload.get('animation_state') or {}
+                        if anim_state.get('emotions') is None:
+                            mgr = None
+                            try:
+                                from core.core_initializer import PLUGIN_REGISTRY
+                                mgr = PLUGIN_REGISTRY.get('emotion_manager') if isinstance(PLUGIN_REGISTRY, dict) else None
+                            except Exception:
+                                mgr = None
+
+                            if mgr is None:
+                                try:
+                                    from plugins.emotion_manager import EmotionManager
+                                    mgr = EmotionManager()
+                                except Exception:
+                                    mgr = None
+
+                            if mgr is not None:
+                                emotions_raw_maybe = mgr.get_emotion_state()
+                                emotions_raw = await emotions_raw_maybe if asyncio.iscoroutine(emotions_raw_maybe) else emotions_raw_maybe
+                                if isinstance(emotions_raw, dict) and emotions_raw:
+                                    emotions_filtered = {k: v for k, v in emotions_raw.items() if isinstance(v, (int, float)) and v >= 0.1}
+                                    if emotions_filtered:
+                                        dominant = max(emotions_filtered.items(), key=lambda x: x[1])[0]
+                                        anim_state['emotions'] = {"dominant": dominant, "values": emotions_filtered}
+                    except Exception:
+                        # best-effort; don't break the summary broadcast
+                        pass
+
             except Exception:
                 pass
 

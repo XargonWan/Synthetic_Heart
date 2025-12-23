@@ -228,24 +228,57 @@ class AnimationHandler:
         }
 
         clip = None
-        if isinstance(desc, dict):
-            fps = desc.get("fps") if isinstance(desc.get("fps"), (int, float)) else 30
-            duration = None
-            try:
-                section = desc.get("loop") if isinstance(desc.get("loop"), dict) else None
-                if section and isinstance(section.get("start_frame"), (int, float)) and isinstance(section.get("end_frame"), (int, float)):
-                    frames = max(0.0, float(section.get("end_frame")) - float(section.get("start_frame")))
-                    duration = frames / float(fps) if fps else None
-            except Exception:
+        try:
+            if isinstance(desc, dict):
+                fps = desc.get("fps") if isinstance(desc.get("fps"), (int, float)) else 30
                 duration = None
-            try:
-                clip = {
-                    "name": Path(resolved).stem if isinstance(resolved, str) and resolved else (Path(anim).stem if anim else None),
-                    "duration": duration,
-                    "fps": float(fps) if fps else 30,
-                }
-            except Exception:
-                clip = None
+                # Prefer the loop section for timing calculations, fall back to intro/outro
+                section = None
+                try:
+                    section = desc.get("loop") if isinstance(desc.get("loop"), dict) else None
+                    if not section:
+                        section = desc.get("intro") if isinstance(desc.get("intro"), dict) else None
+                    if not section:
+                        section = desc.get("outro") if isinstance(desc.get("outro"), dict) else None
+                    if section and isinstance(section.get("start_frame"), (int, float)) and isinstance(section.get("end_frame"), (int, float)):
+                        frames = max(0.0, float(section.get("end_frame")) - float(section.get("start_frame")))
+                        duration = frames / float(fps) if fps else None
+                except Exception:
+                    duration = None
+
+                try:
+                    clip = {
+                        "name": Path(resolved).stem if isinstance(resolved, str) and resolved else (Path(anim).stem if anim else None),
+                        "duration": duration,
+                        "fps": float(fps) if fps else 30,
+                    }
+                except Exception:
+                    clip = None
+
+                # If we have a start timestamp, compute elapsed time and current_frame
+                try:
+                    if started_at and isinstance(started_at, datetime):
+                        elapsed = max(0.0, (datetime.utcnow().replace(tzinfo=timezone.utc) - started_at).total_seconds())
+                        timing["time_in_clip"] = elapsed
+                        if clip and clip.get("fps"):
+                            fps_val = float(clip.get("fps") or 30)
+                            if section and isinstance(section.get("start_frame"), (int, float)) and isinstance(section.get("end_frame"), (int, float)):
+                                start = float(section.get("start_frame"))
+                                end = float(section.get("end_frame"))
+                                span = max(1.0, end - start)
+                                tframes = int(elapsed * fps_val)
+                                if desc.get("loop"):
+                                    current_frame = int(start + (tframes % span))
+                                else:
+                                    current_frame = int(start + min(span, tframes))
+                                timing["current_frame"] = current_frame
+                            else:
+                                timing["current_frame"] = int(elapsed * fps_val)
+                except Exception:
+                    # best-effort; keep defaults on failure
+                    pass
+        except Exception:
+            clip = None
 
         state = {
             "state": self.current_state.value,
@@ -1259,6 +1292,11 @@ class AnimationHandler:
                 "loop": loop,
                 "state": state
             }
+            # Signal clients to perform a smooth eyes reset when animation changes
+            try:
+                payload["reset_eyes"] = True
+            except Exception:
+                pass
             if isinstance(priority, int):
                 payload["priority"] = int(priority)
             if source:

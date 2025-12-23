@@ -299,6 +299,9 @@ Optional ``animation_state`` payload (facial state)
 In addition to the legacy fields (``state``, ``animation``, ``descriptor``), the backend may attach a richer
 ``animation_state`` object to the WebSocket payload. This is **optional** and fully backward compatible.
 
+Note: the lightweight animation state summary broadcast (used for state synchronization) will also try to
+enrich the ``animation_state`` with runtime emotions when an Emotion Manager plugin is available.
+
 Typical use cases:
 
 - Provide a single structured snapshot for facial controllers (expressions, blink, eye movement)
