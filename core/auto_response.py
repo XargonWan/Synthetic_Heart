@@ -227,7 +227,7 @@ async def request_llm_delivery(
                         return
 
                 # Log the direction of the message flow
-                    if message is not None:
+                if message is not None:
                     log_info(f"[auto_response] 📤 INTERFACE→LLM transmission: sending message via interface_to_llm transport layer (attempt {attempt}/{int(CORRECTOR_RETRIES)})")
                     await plugin_instance.handle_incoming_message(
                         interface, message, payload_json, interface.get_interface_id()

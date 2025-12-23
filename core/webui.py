@@ -84,27 +84,48 @@ class SynthWebUIInterface:
         # Track active WRITING actions per session so we can stop them immediately
         # after sending, and avoid starting WRITING too late.
         self._active_writing_actions: Dict[str, Deque[str]] = {}
+        # Track when THINKING started per session so we can ensure it's visible
+        # before switching to WRITING at generation_start.
+        self._thinking_started_at_ms: Dict[str, int] = {}
         # Runtime/configurable attributes with sensible defaults
         # Autostart can be disabled for tests/dev harnesses.
         self.autostart = bool(autostart)
         self.host = os.getenv('SYNTH_WEBUI_HOST', '0.0.0.0')
-        try:
-            # Prefer new env var name SYNTH_WEBUI_HTTP_PORT, fallback to legacy SYNTH_WEBUI_PORT
-            self.port = int(os.getenv('SYNTH_WEBUI_HTTP_PORT', os.getenv('SYNTH_WEBUI_PORT', os.getenv('PORT', '8080'))))
-        except Exception:
-            self.port = 8080
         self.log_level = os.getenv('SYNTH_WEBUI_LOG_LEVEL', 'info')
         # TLS / HTTPS configuration
         # By default, reuse SECURE_CONNECTION if set by the caller (e.g. compose env)
         self.tls_enabled = os.getenv('SYNTH_WEBUI_TLS', os.getenv('SECURE_CONNECTION', '0')) == '1'
         self.tls_certfile = os.getenv('SYNTH_WEBUI_CERTFILE', None)
         self.tls_keyfile = os.getenv('SYNTH_WEBUI_KEYFILE', None)
-        # Optional HTTP port to serve plain HTTP alongside HTTPS (useful for dev/testing)
+        # Port configuration
+        # - SYNTH_WEBUI_HTTP_PORT: plain HTTP port
+        # - SYNTH_WEBUI_HTTPS_PORT: HTTPS/TLS port (only used when TLS is enabled)
+        # Backward compatible fallbacks:
+        # - SYNTH_WEBUI_PORT / PORT
+        raw_http_port = os.getenv('SYNTH_WEBUI_HTTP_PORT', os.getenv('SYNTH_WEBUI_PORT', os.getenv('PORT', '8080')))
         try:
-            env_http = os.getenv('SYNTH_WEBUI_HTTP_PORT', None)
-            self.http_port = int(env_http) if env_http else (self.port - 1 if self.tls_enabled and self.port > 1 else None)
+            http_port = int(raw_http_port)
         except Exception:
-            self.http_port = None
+            http_port = 8080
+
+        https_port = None
+        if self.tls_enabled:
+            raw_https_port = os.getenv('SYNTH_WEBUI_HTTPS_PORT', None)
+            if raw_https_port:
+                try:
+                    https_port = int(raw_https_port)
+                except Exception:
+                    https_port = http_port
+            else:
+                # If no explicit HTTPS port is provided, keep historical behavior
+                # (serve HTTPS on the HTTP port).
+                https_port = http_port
+
+        # Main server port
+        self.port = https_port if self.tls_enabled else http_port
+
+        # Optional HTTP port to serve plain HTTP alongside HTTPS (useful for dev/testing)
+        self.http_port = http_port if (self.tls_enabled and http_port != self.port) else None
         # Selkies desktop ports used for UI hints
         try:
             self.selkies_https_port = int(os.getenv('SELKIES_HTTPS_PORT', '3000'))
@@ -1022,6 +1043,10 @@ class SynthWebUIInterface:
         # If THINKING was pushed, keep it pending until the async response is sent.
         if thinking_pushed:
             self._pending_thinking_actions.setdefault(session_id, deque()).append(action_id)
+            try:
+                self._thinking_started_at_ms[session_id] = int(datetime.utcnow().timestamp() * 1000)
+            except Exception:
+                pass
         
         # Get the configured response timeout from message_chain
         from core.message_chain import RESPONSE_TIMEOUT
@@ -1295,7 +1320,7 @@ class SynthWebUIInterface:
         
         log_info(f"{LOG_PREFIX} Sent message to session {session_id}: {text[:80]}{'...' if len(text)>80 else ''}")
 
-        # Transition: WRITE -> IDLE
+        # Transition: WRITE -> IDLE (always, once message is sent)
         if writing_pushed and writing_action_id:
             try:
                 await self.action_state_manager.pop_action(writing_action_id)
@@ -1314,14 +1339,13 @@ class SynthWebUIInterface:
                     self._active_writing_actions.pop(session_id, None)
             except Exception:
                 pass
-
-        if self.persona_manager:
-            try:
-                current_phase = await self.action_state_manager.get_current_phase()
-                if current_phase == AnimationPhase.IDLE:
+            
+            # Always return to IDLE after WRITING is popped (don't conditionally check phase)
+            if self.persona_manager:
+                try:
                     await self.persona_manager.set_animation_state("idle", session_id=session_id)
-            except Exception as anim_exc:
-                log_debug(f"{LOG_PREFIX} Failed to set 'idle' animation after send: {anim_exc}")
+                except Exception as anim_exc:
+                    log_debug(f"{LOG_PREFIX} Failed to set 'idle' animation after send: {anim_exc}")
 
         # Clear processing meta now that we've delivered a response
         try:
@@ -1345,20 +1369,94 @@ class SynthWebUIInterface:
                 log_warning(f"{LOG_PREFIX} Failed to pop pending THINKING action {pending_action_id}: {exc}")
         self._pending_thinking_actions.pop(session_id, None)
 
+    async def _pop_latest_pending_thinking_action(self, session_id: str) -> Optional[str]:
+        pending = self._pending_thinking_actions.get(session_id)
+        if not pending:
+            return None
+        while len(pending) > 1:
+            stale_action = pending.popleft()
+            try:
+                await self.action_state_manager.pop_action(stale_action)
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to pop stale THINKING action {stale_action}: {exc}")
+        action_id = pending.pop() if pending else None
+        self._pending_thinking_actions.pop(session_id, None)
+        return action_id
+
     async def on_generation_start(self, interface_path: str, **kwargs) -> None:
         """Optional hook called by the queue when processing starts.
 
         For WebUI this approximates 'LLM started responding', so we switch THINK->WRITE
         as early as possible (before the final message is sent).
         """
-        # NOTE:
-        # We intentionally do NOT switch to WRITING here.
-        # In practice the queue can call this hook almost immediately after enqueue,
-        # which makes clients skip the visible THINKING phase and can keep WRITING
-        # active longer than intended.
-        #
-        # For WebUI we keep THINKING until we actually deliver the response
-        # (send_message) and then transition to IDLE.
+        # Switch THINK -> WRITE when generation actually starts, but ensure THINK
+        # remains visible for a short minimum window to avoid being skipped.
+        try:
+            session_id = None
+            if interface_path and "/" in str(interface_path):
+                parts = str(interface_path).split("/")
+                if len(parts) >= 2 and parts[0] == INTERFACE_NAME:
+                    session_id = parts[1]
+            if not session_id:
+                return
+
+            # Ensure THINK is visible for at least this long before switching.
+            min_think_ms = 450
+            started_ms = self._thinking_started_at_ms.get(session_id)
+            if isinstance(started_ms, int) and started_ms > 0:
+                now_ms = int(datetime.utcnow().timestamp() * 1000)
+                remaining = max(0, (started_ms + min_think_ms) - now_ms)
+                if remaining > 0:
+                    await asyncio.sleep(remaining / 1000)
+
+            # Start WRITING if not already active for this session.
+            existing_writing = self._active_writing_actions.get(session_id)
+            writing_action_id = None
+            writing_pushed = False
+            if existing_writing and len(existing_writing) > 0:
+                writing_action_id = existing_writing[-1]
+                writing_pushed = True
+            else:
+                pending_action_id = await self._pop_latest_pending_thinking_action(session_id)
+                if pending_action_id:
+                    try:
+                        writing_pushed = await self.action_state_manager.update_phase(
+                            pending_action_id,
+                            AnimationPhase.WRITING,
+                        )
+                    except Exception as exc:
+                        log_warning(f"{LOG_PREFIX} Failed to promote THINKING to WRITING: {exc}")
+                        writing_pushed = False
+                    if writing_pushed:
+                        writing_action_id = pending_action_id
+                        self._active_writing_actions.setdefault(session_id, deque()).append(writing_action_id)
+                    else:
+                        try:
+                            await self.action_state_manager.pop_action(pending_action_id)
+                        except Exception:
+                            pass
+            if not writing_pushed:
+                writing_action_id = f"webui_write_{session_id}_{int(datetime.utcnow().timestamp() * 1000) % 1_000_000}"
+                try:
+                    writing_pushed = await self.action_state_manager.push_action(
+                        action_id=writing_action_id,
+                        phase=AnimationPhase.WRITING,
+                        component=INTERNAL_CHAT_NAME,
+                    )
+                except Exception as exc:
+                    log_warning(f"{LOG_PREFIX} Failed to push WRITING action state (generation_start): {exc}")
+                    writing_pushed = False
+
+                if writing_pushed:
+                    self._active_writing_actions.setdefault(session_id, deque()).append(writing_action_id)
+
+            if writing_pushed and self.persona_manager:
+                try:
+                    await self.persona_manager.set_animation_state("write", session_id=session_id)
+                except Exception as anim_exc:
+                    log_debug(f"{LOG_PREFIX} Failed to set 'write' animation (generation_start): {anim_exc}")
+        except Exception as exc:
+            log_debug(f"{LOG_PREFIX} on_generation_start failed: {exc}")
         return
 
     async def on_generation_end(self, interface_path: str, success: bool = True, **kwargs) -> None:

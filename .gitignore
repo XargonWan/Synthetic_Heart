@@ -52,7 +52,6 @@ logs/
 skins/Rekku
 skins/temp
 !skins/temp/README.md
-persona*/
 docker-compose-*.yml
 backups/
 SyntH_main

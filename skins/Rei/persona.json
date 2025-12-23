@@ -42,7 +42,8 @@
             "O": { "mouth_O": 1.0 }
         },
         "expressions": {
-            "surprised": { "targets": { "eyes_wide": 0.9, "mouth_open": 0.7 }, "priority": 20 }
+            "surprised": { "targets": { "eyes_wide": 0.9, "mouth_open": 0.7 }, "priority": 20 },
+            "look": { "targets": { "eye_look_left": 0.5, "eye_look_right": 0.5, "eye_look_up": 0.3, "eye_look_down": 0.3 }, "priority": 5 }
         }
     },
     "emotion_speed": {
@@ -61,7 +62,7 @@
     },
     "defaults": {
         "lipsync": false,
-        "blink": { "auto": true, "rate_s": 3.5, "intensity": 0.75, "close_ms": 60, "hold_ms": 120, "open_ms": 60 },
+        "blink": { "auto": true, "rate_s": 3.5, "intensity": 0.6, "close_ms": 60, "hold_ms": 90, "open_ms": 60 },
         "eye_movement": { "auto": true, "saccade_rate_s": 2 }
     }
 }

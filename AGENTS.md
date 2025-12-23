@@ -167,6 +167,199 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "execute_action|sche
 
 ---
 
+## Animation System (AnimationHandler & VRM Integration)
+
+The **AnimationHandler** (`core/animation_handler.py`) manages VRM avatar animations with state-based triggering (THINK, WRITE, TALK, IDLE) and intelligent transitions.
+
+### Key Architecture
+
+- **State-Based Animation**: Components call `handler.play_animation(AnimationState.THINK, session_id)` instead of hardcoding filenames.
+- **Dynamic Resolution**: Animation files are resolved from persona skins → Rei fallback using the pattern: `skins/<persona>/animations/<state>/` → `skins/Rei/animations/<state>/`.
+- **Descriptor System**: Each FBX file has an optional `.fbx.json` descriptor defining `intro`, `loop`, `outro` sections (frame ranges), `fps`, and metadata (e.g., `play_once`, `lipsync`, `expressions`).
+- **Pre-Loading**: Before sending a `play` command to the WebUI, the AnimationHandler sends a `preload_animation` message to ensure the client has loaded the FBX/descriptor data, preventing T-pose.
+- **Transition Management**: When switching states (e.g., THINK → WRITE), the handler plays the `outro` section of the previous animation before transitioning, ensuring smooth visual flow.
+
+### Descriptor Format (.fbx.json)
+
+Each animation file should have a corresponding `.fbx.json` descriptor:
+
+```json
+{
+  "intro": { "start_frame": 0, "end_frame": 15 },
+  "loop": { "start_frame": 16, "end_frame": 60 },
+  "outro": { "start_frame": 61, "end_frame": 90 },
+  "fps": 30,
+  "play_once": false,
+  "lipsync": false,
+  "expressions": [
+    { "start_frame": 0, "end_frame": 30, "targets": { "eyes.closed": 0.1 }, "source": "descriptor", "priority": 10 }
+  ],
+  "blink": {
+    "auto": true,
+    "rate_s": 3.5,
+    "intensity": 0.6,
+    "close_ms": 60,
+    "hold_ms": 120,
+    "open_ms": 60
+  },
+  "eye_movement": {
+    "auto": true,
+    "saccade_rate_s": 2.0
+  }
+}
+```
+
+**Fields:**
+- `intro`, `loop`, `outro`: Optional frame ranges for structured animations.
+- `fps`: Frames per second (default 30).
+- `play_once`: If true, animation plays once and does not loop (used for transitional animations).
+- `lipsync`: Boolean flag indicating if the animation is suitable for lip-sync synthesis (prepared for future use).
+- `expressions`: Optional array of blendshape targets applied over frame ranges.
+  - `targets`: Object mapping logical blendshape names to intensity (0.0-1.0), resolved via `persona.json` → `blendshape_map`
+  - `priority`: Numeric priority (higher values applied later)
+  - `source`: Origin identifier ("descriptor", "server", "persona_override", etc.)
+- `blink`: Controls autonomous blinking behavior during the animation.
+  - `auto`: Enable autonomous blinking (default: true)
+  - `rate_s`: Average blink rate in seconds (default: 3.5)
+  - `intensity`: Blink intensity 0.0-1.0 (default: 0.6)
+  - `close_ms`: Milliseconds to close eyes (default: 60)
+  - `hold_ms`: Milliseconds to hold eyes closed (default: 120)
+  - `open_ms`: Milliseconds to open eyes (default: 60)
+- `eye_movement`: Controls autonomous eye saccades during the animation.
+  - `auto`: Enable autonomous saccades (default: true)
+  - `saccade_rate_s`: Average time between saccades in seconds (default: 2.0)
+
+### Animation Folder Structure
+
+```
+skins/Rei/animations/
+├── think/
+│   ├── Thinking.fbx
+│   └── Thinking.fbx.json
+├── write/
+│   ├── Texting.fbx
+│   ├── Texting.fbx.json
+│   ├── Texting While Standing.fbx
+│   └── Texting While Standing.fbx.json
+├── talk/
+│   ├── talking.fbx
+│   └── talking.fbx.json
+├── idle/
+│   ├── Idle.fbx
+│   ├── Idle.fbx.json
+│   ├── Idle2.fbx
+│   └── Idle2.fbx.json
+└── [other_states]/
+```
+
+Custom personas can override animations by placing files in `skins/<PersonaName>/animations/<state>/`.
+
+### Typical Animation Flow
+
+1. **Message Received** → Interface calls `persona_manager.set_animation_state("think", session_id)` → AnimationHandler sends `preload_animation` for THINK variants → WebUI client loads FBX/descriptor.
+2. **LLM Starts** → Interface calls `set_animation_state("write", session_id)` → AnimationHandler plays THINK's `outro` (if exists), then switches to WRITE loop.
+3. **Message Complete** → Interface calls `set_animation_state("idle", session_id)` → AnimationHandler plays WRITE's `outro`, then returns to IDLE rotation.
+
+### Pre-Loading Mechanism
+
+When `play_animation()` is called, the handler:
+1. Selects an animation file for the state.
+2. Sends a `preload_animation` WS message to the client with the animation path and descriptor.
+3. Client calls `AnimationHandler.preloadAnimation()` in JavaScript to cache the FBX and descriptor before playback.
+4. Backend then sends the `play` command, confident that the client has loaded the data.
+
+This prevents T-pose and animation skipping caused by missing FBX data.
+
+### Common Issues & Troubleshooting
+
+- **T-pose when animation starts**: Descriptor is missing or FBX file is not found. Add descriptor `.fbx.json` and verify animation file exists.
+- **Animation skipped or shows wrong file**: Check that `get_animation_variants()` is discovering the file correctly. Use logs: `[AnimationHandler] Found candidate animation files for state`.
+- **Transition is abrupt (no outro)**: Descriptor lacks an `outro` section. Add frame range to descriptor.
+- **Animation loops when it should not**: Set `play_once: true` in descriptor or ensure the loop section is defined correctly.
+
+### API Methods
+
+**Backend (Python):**
+- `handler.play_animation(state, session_id, loop=True, context_id=None, priority=None)` — Play animation for a state.
+- `handler.stop_animation(context_id, session_id)` — Stop animation and return to idle (respects outro).
+- `handler.get_animation_variants(state)` — Discover available animations for a state → `{'loop': [...], 'post': [...], 'other': [...]}`.
+- `handler.register_state_animations(state, animations_dict, sequential=False)` — Plugins can override animations for a state.
+
+**Frontend (JavaScript):**
+- `AnimationHandler.preloadAnimation(animationFile, descriptor)` — Pre-load animation (called by WebUI on `preload_animation` message).
+- `AnimationHandler.startAction(actionName, animationFile, playOnce, playSection, descriptor)` — Play animation.
+- `AnimationHandler.applyAnimationState(state)` — Apply rich animation state (expressions, emotions, timing).
+
+### Plugin/Interface Integration
+
+Plugins and interfaces should **not** hardcode animation filenames. Instead:
+
+```python
+# ❌ Wrong
+await webui.send_animation_command(session_id, "/skins/Rei/animations/Think/Thinking.fbx")
+
+# ✅ Correct
+await persona_manager.set_animation_state("think", session_id=session_id)
+```
+
+This ensures consistency, allows personas to override animations, and leverages pre-loading.
+
+### Graceful Fallback to IDLE
+
+When an animation ends or is stopped, the system gracefully returns to IDLE:
+
+1. **Outro Playback**: If the current animation has an `outro` section, it is played before transitioning.
+2. **IDLE Pre-Loading**: When any non-IDLE animation starts (THINK, WRITE, TALK), the AnimationHandler automatically pre-loads IDLE variants in the background via `ensure_idle_preloaded()`.
+3. **Instant Fallback**: When `stop_animation()` is called, the fallback to IDLE is instantaneous because the variants were already pre-loaded.
+
+This ensures **zero T-pose** when animations end and smooth transitions back to the default idle state.
+
+### Smart Eye-Closed Behavior
+
+When expressions intentionally close the avatar's eyes (via `eyes.closed` blendshape > 0.5), both **blink** and **eye movement (saccades)** are automatically suspended until the eyes are reopened. This prevents conflicting autonomous animations while the avatar has its eyes closed.
+
+**Two-Layer Implementation:**
+
+1. **Execution-Time Check**: In `_performBlink()` and `_performSaccade()` methods, before executing a blink or saccade, the code checks if `eyes.closed > 0.5`. If true, the action is skipped entirely.
+
+2. **Loop-Time Management**: In `applyExpressionsForFrame()`, the system continuously monitors the `eyes.closed` blendshape value every frame:
+   - **Eyes close** (value crosses 0.5): Automatically calls `_stopBlinkLoop()` and `_stopEyeMovement()` with debug logging
+   - **Eyes reopen** (value drops below 0.5): Automatically calls `_startBlinkLoop()` and `_startEyeMovement()` (if enabled) with debug logging
+
+**User Requirement Implementation:**
+> "fintanto che gli occhi sono chiusi bisogna disattivare il blink finchè non venegono riaperti"  
+> (While eyes are closed, blink must be disabled until they are reopened)
+
+This is achieved automatically with no additional configuration needed. Expressions that set `eyes.closed` will trigger automatic suspension of all eye-related autonomous animations.
+
+---
+
+## Implicit Animation Descriptor
+
+For animations **without a descriptor file** (`.fbx.json`), the system applies an **implicit descriptor** with sensible default behavior:
+
+**Implicit Descriptor Defaults (per state):**
+- **IDLE state**: Play frame 0 to max frames in a loop (repeating idle animations)
+- **Non-IDLE states** (THINK, WRITE, TALK): Play frame 0 to max frames **once** (`play_once=True`)
+
+**Rationale:**
+- Users can drop animation FBX files without needing to create descriptors
+- Non-IDLE animations naturally transition back to IDLE after completing once
+- Prevents infinite looping of transient animations (thinking, typing, talking)
+- IDLE loops by default to ensure the avatar is always animated when not doing something specific
+
+**Example Flow:**
+1. User sends message → `play_animation(THINK)` → Animation plays once (0→maxframes)
+2. LLM starts generating → `play_animation(WRITE)` → Animation plays once (0→maxframes)
+3. Message sent → `set_animation_state(IDLE)` → Returns to idle loop
+
+**Customization:**
+- Users **can** provide `.fbx.json` descriptors to override implicit behavior
+- Descriptors with `play_once: true` or `intro`/`loop`/`outro` sections take full precedence
+- See `skins/Rei/animations/README.md` for descriptor format
+
+---
+
 ## Documentation
 Everytime you do a change evaluate if it's needed to updated the documentation in `./docs`.
 The documentation must be written in English and in ReadTheDocs format.

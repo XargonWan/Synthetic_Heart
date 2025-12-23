@@ -134,6 +134,43 @@ class AnimationHandler:
         except Exception:
             pass
 
+    async def ensure_idle_preloaded(self, session_id: Optional[str] = None) -> None:
+        """Pre-load IDLE animation in advance to ensure smooth fallback.
+        
+        This is called when a session connects or when starting a non-idle animation,
+        ensuring that IDLE is always ready to play when animations stop.
+        
+        Args:
+            session_id: The WebUI session ID (or None for broadcast)
+        """
+        try:
+            if not self.webui:
+                return
+            
+            # Get IDLE animation variants
+            idle_variants = self.get_animation_variants(AnimationState.IDLE.value)
+            idle_animations = idle_variants.get("loop", []) or idle_variants.get("other", [])
+            
+            if not idle_animations:
+                idle_animations = self.get_animations_for_state(AnimationState.IDLE)
+            
+            if not idle_animations:
+                log_debug("[AnimationHandler] No IDLE animations available to preload")
+                return
+            
+            # Pre-load IDLE variants using the *idle* folder, regardless of current_state.
+            for anim in idle_animations[:3]:  # Pre-load up to 3 idle variants
+                try:
+                    await self._preload_animation(
+                        session_id=session_id,
+                        animation_file=anim,
+                        state_folder=AnimationState.IDLE.value,
+                    )
+                except Exception as exc:
+                    log_debug(f"[AnimationHandler] Failed to preload IDLE variant {anim}: {exc}")
+        except Exception as exc:
+            log_warning(f"[AnimationHandler] ensure_idle_preloaded failed: {exc}")
+
     def register_animation_state_changed_callback(self, callback: callable) -> None:
         """Register a callback to be called when animation state changes.
         
@@ -810,8 +847,20 @@ class AnimationHandler:
                     # Legacy: play_once flag without structured sections
                     effective_loop = False
                     start_rotation = False
+                elif not descriptor:
+                    # IMPLICIT DESCRIPTOR:
+                    # If no descriptor exists, we cannot infer intro/loop/outro. Respect the requested
+                    # loop parameter so core states (THINK/WRITE/TALK) can remain stable (loop=True)
+                    # and avoid ending/clamping into T-pose.
+                    log_debug(
+                        f"[AnimationHandler] Animation '{selected_animation}' has NO descriptor: "
+                        f"respecting requested loop={loop} for non-idle states"
+                    )
+                    effective_loop = bool(loop)
+                    start_rotation = False
                 else:
-                    # No special structure, use provided loop parameter
+                    # Has descriptor but no special flags
+                    # Use provided loop parameter
                     effective_loop = loop
                     start_rotation = len(animations) > 1
 
@@ -821,6 +870,25 @@ class AnimationHandler:
                     f"play_once: {descriptor.get('play_once') if descriptor else False}, "
                     f"effective_loop: {effective_loop}"
                 )
+
+                # CRITICAL: Pre-load animation before sending play command
+                # This ensures the client has the FBX/VRM data loaded before playback starts,
+                # preventing T-pose due to missing animation data.
+                # session_id can be None for broadcast; _preload_animation handles that.
+                try:
+                    if self.webui:
+                        # For non-idle animations, pre-load IDLE first to ensure smooth fallback
+                        if state != AnimationState.IDLE:
+                            await self.ensure_idle_preloaded(session_id=session_id)
+                        
+                        # Then pre-load the requested animation
+                        await self._preload_animation(
+                            session_id=session_id,
+                            animation_file=selected_animation,
+                            state_folder=state.value,
+                        )
+                except Exception as exc:
+                    log_warning(f"[AnimationHandler] Preload failed for {selected_animation}: {exc}")
 
                 # If we need to play outro before transitioning, do it now (before releasing lock)
                 if needs_outro_transition and self.webui:
@@ -869,6 +937,27 @@ class AnimationHandler:
                     selected_animation,
                     self._current_animation_descriptor,
                 )
+                # If animation is not looping and is not idle, schedule a fallback transition
+                # to Idle after the clip duration in case the client doesn't trigger a transition.
+                try:
+                    if not effective_loop and state != AnimationState.IDLE:
+                        # Determine duration from descriptor if available, otherwise default to 1.0s
+                        duration = None
+                        if descriptor and isinstance(descriptor, dict):
+                            # Prefer loop section duration if present, otherwise clip duration
+                            sec = descriptor.get('loop') or descriptor.get('intro') or descriptor.get('outro')
+                            if sec and isinstance(sec, dict) and 'start_frame' in sec and 'end_frame' in sec:
+                                fps = descriptor.get('fps', 30) or 30
+                                frames = max(0.0, float(sec.get('end_frame', 0)) - float(sec.get('start_frame', 0)))
+                                duration = max(0.2, frames / float(fps))
+                        if duration is None:
+                            duration = 1.0
+
+                        # Schedule background task to return to Idle after duration if nothing else changed
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(self._non_loop_fallback(session_id, state, selected_animation, duration))
+                except Exception:
+                    pass
             else:
                 log_warning("[AnimationHandler] WebUI not set, cannot send animation command")
                 start_rotation = False
@@ -885,6 +974,14 @@ class AnimationHandler:
         if needs_outro_transition and outro_duration > 0:
             log_debug(f"[AnimationHandler] Waiting {outro_duration:.2f}s for outro to complete...")
             await asyncio.sleep(outro_duration)
+        
+        # If this is a non-idle animation, pre-load IDLE in the background
+        # so that when the animation stops, the fallback to IDLE is instant
+        if state != AnimationState.IDLE:
+            try:
+                asyncio.create_task(self.ensure_idle_preloaded(session_id=session_id))
+            except Exception:
+                pass
 
     async def stop_animation(self, context_id: str, session_id: str) -> None:
         """Stop an animation context and return to Idle if no other contexts are active.
@@ -1177,6 +1274,58 @@ class AnimationHandler:
         except Exception as exc:
             log_warning(f"[AnimationHandler] Failed to send animation command: {exc}")
 
+    async def _preload_animation(self, session_id: str, animation_file: str, state_folder: Optional[str] = None) -> None:
+        """Pre-load an animation file to the WebUI client.
+        
+        This sends a 'preload_animation' message to the client, instructing it to load
+        the FBX and descriptor data *before* the play command is sent. This prevents
+        T-pose and animation skipping when play is called.
+        
+        Args:
+            session_id: The WebUI session ID
+            animation_file: The animation file name (e.g. 'Thinking.fbx')
+        """
+        if not self.webui:
+            log_debug("[AnimationHandler] WebUI not set, skipping preload")
+            return
+        
+        try:
+            # Resolve path (important: resolve using the requested state folder,
+            # not the current_state, otherwise preloading can point to the wrong
+            # directory, e.g. /think/Idle.fbx).
+            if state_folder:
+                resolved_path, descriptor = self._resolve_animation_descriptor_for_state(animation_file, state_folder)
+            else:
+                resolved_path, descriptor = self._resolve_animation_descriptor(animation_file)
+            
+            # Build preload payload
+            preload_payload = {
+                "type": "preload_animation",
+                "animation": resolved_path,
+                "descriptor": descriptor,
+            }
+            
+            # Send to specific session or broadcast
+            if session_id is None:
+                # Broadcast to all sessions
+                for sid, websocket in list(self.webui.connections.items()):
+                    try:
+                        await websocket.send_json(preload_payload)
+                        log_debug(f"[AnimationHandler] Broadcast preload to session {sid}: {animation_file}")
+                    except Exception as exc:
+                        log_warning(f"[AnimationHandler] Failed to preload animation to session {sid}: {exc}")
+            else:
+                # Send to specific session
+                websocket = self.webui.connections.get(session_id)
+                if not websocket:
+                    log_debug(f"[AnimationHandler] No websocket for session {session_id}, skipping preload")
+                    return
+                
+                await websocket.send_json(preload_payload)
+                log_debug(f"[AnimationHandler] Sent preload for {animation_file} to session {session_id}")
+        except Exception as exc:
+            log_warning(f"[AnimationHandler] Preload failed for {animation_file}: {exc}")
+
     async def _rotation_loop(self, session_id: Optional[str], state: AnimationState, context_id: Optional[str]):
         """Background loop that switches animations sequentially or randomly every 30-60s.
         
@@ -1238,6 +1387,22 @@ class AnimationHandler:
         finally:
             # Clean up rotation task entry
             self._rotation_tasks.pop(key, None)
+
+    async def _non_loop_fallback(self, session_id: Optional[str], state: AnimationState, animation_file: str, duration: float):
+        """Wait for duration and revert to Idle if the animation completed and no other contexts are active."""
+        try:
+            await asyncio.sleep(duration + 0.05)
+            async with self._lock:
+                # Only act if the current animation/state match what we scheduled for
+                if self.current_state != state or self.current_animation != animation_file:
+                    return
+                remaining_priorities = [p for p in self._active_tasks.values() if p is not None]
+                highest = max(remaining_priorities) if remaining_priorities else 0
+                if highest <= 0:
+                    # call play_animation outside lock
+                    asyncio.create_task(self.play_animation(AnimationState.IDLE, session_id=session_id, loop=True, context_id=None))
+        except Exception:
+            pass
 
     async def _start_rotation_task(self, session_id: Optional[str], state: AnimationState, context_id: Optional[str]) -> None:
         key = f"{session_id}:{state.value}"

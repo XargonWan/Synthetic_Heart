@@ -422,8 +422,9 @@ class SeleniumLLMBase(AIPluginBase):
             "--disable-backgrounding-occluded-windows",
         ]
 
-        # Add headless if configured
-        if os.getenv("CHROMIUM_HEADLESS", "0") == "1":
+        # Add headless if configured (use class attribute when creating a shared driver)
+        # Note: this method is a @classmethod, so use 'cls' rather than 'self'.
+        if getattr(cls, 'CHROMIUM_HEADLESS', False):
             essential_args.append("--headless")
 
         for arg in essential_args:
@@ -609,7 +610,10 @@ class SeleniumLLMBase(AIPluginBase):
         )
 
         # Local boolean flag (kept in sync via listener)
-        self.CHROMIUM_HEADLESS = bool(int(self.CHROMIUM_HEADLESS_VAR))
+        try:
+            self.CHROMIUM_HEADLESS = bool(int(self.CHROMIUM_HEADLESS_VAR))
+        except Exception:
+            self.CHROMIUM_HEADLESS = False
 
         # Keep the instance flag in sync when the config changes at runtime
         def _on_chromium_headless_change(new_value):
@@ -620,6 +624,30 @@ class SeleniumLLMBase(AIPluginBase):
                 pass
 
         config_registry.add_listener("CHROMIUM_HEADLESS", _on_chromium_headless_change)
+
+        # AWAIT_RESPONSE_TIMEOUT as a dynamic instance-backed config var
+        self.AWAIT_RESPONSE_TIMEOUT_VAR = config_registry.get_var(
+            "AWAIT_RESPONSE_TIMEOUT",
+            RESPONSE_TIMEOUT,
+            label="Response Timeout (Selenium)",
+            description="Seconds to wait for ChatGPT response before timing out",
+            value_type=int,
+            group="llm",
+            component="selenium",
+        )
+
+        try:
+            self.AWAIT_RESPONSE_TIMEOUT = int(self.AWAIT_RESPONSE_TIMEOUT_VAR)
+        except Exception:
+            self.AWAIT_RESPONSE_TIMEOUT = RESPONSE_TIMEOUT
+
+        def _on_await_response_timeout_change(new_value):
+            try:
+                self.AWAIT_RESPONSE_TIMEOUT = int(new_value)
+            except Exception:
+                pass
+
+        config_registry.add_listener("AWAIT_RESPONSE_TIMEOUT", _on_await_response_timeout_change)
 
         # Max retries for driver initialization
         self.MAX_RETRIES_VAR = config_registry.get_var(
@@ -876,9 +904,9 @@ class SeleniumLLMBase(AIPluginBase):
         try:
             # Note: command_executor.set_timeout() is not supported by undetected-chromedriver
             # Only apply timeouts that are supported by local WebDriver instances
-            driver.set_page_load_timeout(AWAIT_RESPONSE_TIMEOUT)
-            driver.set_script_timeout(AWAIT_RESPONSE_TIMEOUT)
-            log_debug(f"[selenium] Driver timeouts set to {AWAIT_RESPONSE_TIMEOUT}s")
+            driver.set_page_load_timeout(self.AWAIT_RESPONSE_TIMEOUT)
+            driver.set_script_timeout(self.AWAIT_RESPONSE_TIMEOUT)
+            log_debug(f"[selenium] Driver timeouts set to {self.AWAIT_RESPONSE_TIMEOUT}s")
         except Exception as e:
             log_warning(f"[selenium] Could not apply driver timeouts: {e}")
 
@@ -1302,12 +1330,14 @@ class SeleniumLLMBase(AIPluginBase):
     def wait_until_response_stabilizes(
         self,
         driver,
-        max_total_wait: int = AWAIT_RESPONSE_TIMEOUT,
+        max_total_wait: int | None = None,
         no_change_grace: float = DEFAULT_RESPONSE_STABLE_GRACE,
         poll_interval: float | None = None,
     ) -> str:
         """Return the last response text once its length stops growing."""
-        # Convert max_total_wait to int in case it's a ConfigVar
+        # Use instance default if not provided and convert to int in case it's a ConfigVar
+        if max_total_wait is None:
+            max_total_wait = self.AWAIT_RESPONSE_TIMEOUT
         max_total_wait = int(max_total_wait)
 
         try:
@@ -1460,9 +1490,11 @@ class SeleniumLLMBase(AIPluginBase):
             log_warning(f"[selenium] Error extracting response text: {e}")
             return ""
 
-    def wait_for_response_completion(self, driver, timeout: int = AWAIT_RESPONSE_TIMEOUT) -> bool:
+    def wait_for_response_completion(self, driver, timeout: int | None = None) -> bool:
         """Wait until the current response finishes streaming."""
-        # Convert timeout to int in case it's a ConfigVar
+        # Use instance default if not provided and convert to int in case it's a ConfigVar
+        if timeout is None:
+            timeout = self.AWAIT_RESPONSE_TIMEOUT
         timeout = int(timeout)
         
         start_time = time.time()

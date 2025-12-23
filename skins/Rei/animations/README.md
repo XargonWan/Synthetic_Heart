@@ -27,31 +27,92 @@ No manual intervention is required - animations are automatically triggered by t
 
 For more information, see the [Animation System Documentation](../../docs/animation_system.rst).
 
-## Optional descriptor fields (facial state)
+## Descriptor Format (.fbx.json)
 
-Each ``.fbx`` file can ship an optional adjacent descriptor ``.fbx.json``.
-Besides ``intro``/``loop``/``outro`` sections, descriptors may include **optional** facial fields that the backend
-will forward to the WebUI as part of the optional ``animation_state`` payload.
+Each `.fbx` animation file should have an optional adjacent descriptor `.fbx.json` that configures animation properties, facial expressions, blinking behavior, and eye movement.
 
-Example ``Thinking.fbx.json`` (shortened):
+### Example: Full Descriptor
 
 ```json
 {
-    "fps": 30,
-    "loop": { "start_frame": 0, "end_frame": 120 },
-    "expressions": [
-        { "start_frame": 0, "end_frame": 15, "targets": { "eyes.closed": 0.1, "mouth.O": 0.05 }, "priority": 10, "source": "server" }
-    ],
-    "blink": { "auto": true, "rate_s": 3.5, "intensity": 0.6, "close_ms": 60, "hold_ms": 120, "open_ms": 60 },
-    "eye_movement": { "auto": true, "saccade_rate_s": 2 },
-    "lipsync": false
+  "intro": { "start_frame": 0, "end_frame": 15 },
+  "loop": { "start_frame": 16, "end_frame": 60 },
+  "outro": { "start_frame": 61, "end_frame": 90 },
+  "fps": 30,
+  "play_once": false,
+  "lipsync": false,
+  "expressions": [
+    {
+      "start_frame": 0,
+      "end_frame": 15,
+      "targets": { "eyes.closed": 0.1, "mouth.O": 0.05 },
+      "priority": 10,
+      "source": "server"
+    }
+  ],
+  "blink": {
+    "auto": true,
+    "rate_s": 3.5,
+    "intensity": 0.6,
+    "close_ms": 60,
+    "hold_ms": 120,
+    "open_ms": 60
+  },
+  "eye_movement": {
+    "auto": true,
+    "saccade_rate_s": 2.0
+  }
 }
 ```
 
-Notes:
+### Field Descriptions
 
-- ``lipsync`` is a boolean consent flag only (default: ``false`` when not present).
-- ``expressions.targets`` keys are logical names; the WebUI resolves them via the skin ``persona.json`` (``blendshape_map``).
+**Timing Fields:**
+- `intro`: Optional intro section with `start_frame` and `end_frame` (plays once at animation start)
+- `loop`: Main looping section with `start_frame` and `end_frame` (repeats while animation is active)
+- `outro`: Optional outro section (plays once when transitioning away)
+- `fps`: Frames per second of the FBX (default: 30)
+- `play_once`: If true, animation plays once and does not loop (good for transitions)
+
+**Facial Expression Fields:**
+- `lipsync`: Boolean flag (default: false). If true, animation is suitable for lip-sync synthesis
+- `expressions`: Array of expression objects with:
+  - `start_frame`, `end_frame`: Frame range for this expression
+  - `targets`: Object mapping logical blendshape names to intensity (0.0-1.0). Names resolve via `skins/<skin>/persona.json` → `blendshape_map`
+  - `priority`: Numeric priority (higher = applied later, can override lower priority expressions)
+  - `source`: String identifying origin ("server", "descriptor", "persona_override", etc.)
+
+**Blink Control:**
+- `blink.auto`: If true, enable autonomous blinking during this animation
+- `blink.rate_s`: Average blink rate in seconds (default: 3.5)
+- `blink.intensity`: Blink intensity (0.0-1.0, default: 0.6)
+- `blink.close_ms`: Time to close eyes in milliseconds (default: 60)
+- `blink.hold_ms`: Time to keep eyes closed (default: 120)
+- `blink.open_ms`: Time to open eyes (default: 60)
+
+**Eye Movement Control:**
+- `eye_movement.auto`: If true, enable autonomous saccades (eye look movements) during this animation
+- `eye_movement.saccade_rate_s`: Average time between saccades in seconds (default: 2.0)
+
+### Smart Eye-Closed Behavior
+
+When expressions intentionally close the avatar's eyes (via `eyes.closed` blendshape > 0.5):
+- **Blink is automatically suspended** during the eye-closed state
+- **Eye movement (saccades) is automatically suspended** during the eye-closed state
+- **Both automatically resume** when the eyes are reopened by expressions
+
+This prevents conflicting animations: while eyes are intentionally closed, blinking and saccades remain paused until the eyes are reopened. This applies automatically - no configuration needed.
+
+**Implementation:**
+- Execution-time check in `_performBlink()`: skips blink if `eyes.closed > 0.5`
+- Frame-time monitoring in `applyExpressionsForFrame()`: monitors eye state every frame and auto-suspends/resumes loops
+
+### Descriptor Notes
+
+- All fields are optional; omit what you don't need
+- Missing fields use defaults from `skins/<skin>/persona.json` → `defaults`
+- `expressions.targets` keys are resolved through `blendshape_map` in the skin's `persona.json`
+- For transition animations (with `play_once: true`), consider setting `blink.auto: false` and `eye_movement.auto: false` to avoid distraction
 
 ## Available Animations
 
@@ -200,6 +261,53 @@ await handler.transition_to(
 - Upload a VRM model
 - Send a message or trigger your custom animation
 - Check browser console for loading errors
+
+## Implicit Descriptor Behavior
+
+**Animations without a descriptor file (`.fbx.json`) are automatically handled with sensible defaults:**
+
+### Default Behavior by State
+
+| State | Behavior | Looping | Use Case |
+|-------|----------|---------|----------|
+| IDLE | Play 0→maxframes, loop | Yes | Continuous background animation |
+| THINK | Play 0→maxframes, once | No | Transient thinking pose |
+| WRITE | Play 0→maxframes, once | No | Transient writing pose |
+| TALK | Play 0→maxframes, once | No | Transient speaking pose |
+
+### Rationale
+
+- **Zero Configuration**: Drop animations into state folders (`animations/think/`, `animations/write/`, etc.) and they work immediately
+- **Smart Transitions**: Non-IDLE animations play once, automatically returning to IDLE when complete
+- **Override Control**: Provide `.fbx.json` descriptors to customize behavior per animation
+
+### Example: Adding Animations Without Descriptors
+
+```bash
+# Drop animations - system auto-handles them
+skins/Rei/animations/think/MyThinking.fbx         # Auto: plays once
+skins/Rei/animations/write/MyTyping.fbx           # Auto: plays once
+skins/Rei/animations/idle/MyIdle.fbx              # Auto: loops continuously
+```
+
+### When to Use Descriptors
+
+Create `.fbx.json` descriptors when you need:
+- **Structured sections** (intro→loop→outro)
+- **Facial expressions** tied to animation frames
+- **Custom blink/eye behavior**
+- **Play-once behavior** for IDLE animations
+- **Lip-sync support** flag
+
+Example: `MyThinking.fbx.json`
+```json
+{
+  "intro": {"start_frame": 0, "end_frame": 15},
+  "loop": {"start_frame": 16, "end_frame": 50},
+  "outro": {"start_frame": 51, "end_frame": 75},
+  "fps": 30
+}
+```
 
 ## Animation Requirements
 

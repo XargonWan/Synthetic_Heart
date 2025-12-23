@@ -1545,16 +1545,20 @@ Please resend your message with ONLY valid emotions from the list above."""
             priority_map = {
                 "idle": 0,
                 "think": 10,
-                "write": 10,
-                "talk": 20,
+                "write": 3,
+                "talk": 5,
             }
             priority = priority_map.get(animation_state, 0)
 
             try:
+                # All animations should loop by default. The AnimationHandler
+                # will respect the descriptor's intro/loop/outro structure and
+                # will NOT loop if the animation descriptor says play_once.
+                # This prevents T-pose when animations end.
                 await handler.play_animation(
                     animation_enum,
                     session_id,
-                    loop=True,
+                    loop=True,  # Always true; descriptor controls actual behavior
                     context_id=context_id,
                     priority=priority,
                 )
