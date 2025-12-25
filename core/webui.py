@@ -2450,14 +2450,20 @@ class SynthWebUIInterface:
             entries = []
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
-                    # Simplified query without JOIN
+                    # Include a lightweight join to ai_diary so the UI can show the actual
+                    # reflective text when response_text is missing/empty.
                     query = f"""
-                        SELECT id, beat_type, LEFT(prompt_text, 300) as prompt_text, 
-                               LEFT(response_text, 500) as response_text,
-                               diary_entry_id, executed_at
-                        FROM grillo_activity_log
+                        SELECT g.id,
+                               g.beat_type,
+                               LEFT(g.prompt_text, 300) as prompt_text,
+                               LEFT(g.response_text, 500) as response_text,
+                               g.diary_entry_id,
+                               g.executed_at,
+                               LEFT(d.content, 500) as diary_content
+                        FROM grillo_activity_log g
+                        LEFT JOIN ai_diary d ON g.diary_entry_id = d.id
                         WHERE {where_clause}
-                        ORDER BY executed_at {order}
+                        ORDER BY g.executed_at {order}
                         LIMIT %s OFFSET %s
                     """
                     
@@ -2487,7 +2493,8 @@ class SynthWebUIInterface:
                             "response_text": row[3],  # Truncated LLM response
                             "diary_entry_id": row[4],
                             "executed_at": executed_at_str,
-                            "has_diary": row[4] is not None  # Flag instead of content
+                            "has_diary": row[4] is not None,  # Flag instead of content
+                            "diary_content": row[6]
                         })
             
             # Estimate total

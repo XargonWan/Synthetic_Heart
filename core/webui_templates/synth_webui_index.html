@@ -2494,6 +2494,21 @@
             function renderGrilloEntry(entry) {
                 const timestamp = formatTimestamp(entry.executed_at);
                 const beatTypeLabel = entry.beat_type.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+
+                const rawResponse = (entry.response_text || '').trim();
+                const diaryContent = (entry.diary_content || '').trim();
+                let displayResponse = rawResponse;
+                if (!displayResponse) {
+                    displayResponse = diaryContent;
+                } else if (
+                    diaryContent &&
+                    displayResponse.length <= 64 &&
+                    !/\s/.test(displayResponse) &&
+                    /^[a-z0-9_:\-]+$/i.test(displayResponse)
+                ) {
+                    // Often the DB stores just a message/action type; prefer the diary text.
+                    displayResponse = diaryContent;
+                }
                 
                 return `
                     <div class="history-entry">
@@ -2507,10 +2522,10 @@
                             <div style="font-size: 0.85rem; color: var(--text-soft); margin-bottom: 0.5rem; font-weight: 500;">Prompt:</div>
                             <div class="grillo-prompt">${escapeHtml(entry.prompt_text)}</div>
                         </div>
-                        ${entry.response_text ? `
+                        ${displayResponse ? `
                         <div style="margin-bottom: 1rem;">
                             <div style="font-size: 0.85rem; color: var(--text-soft); margin-bottom: 0.5rem; font-weight: 500;">Response:</div>
-                            <div class="grillo-response" style="background: rgba(76, 175, 80, 0.1); border-left: 3px solid #4CAF50; padding: 0.75rem; border-radius: 4px; font-size: 0.9rem; line-height: 1.5; color: var(--text);">${escapeHtml(entry.response_text)}</div>
+                            <div class="grillo-response" style="background: rgba(76, 175, 80, 0.1); border-left: 3px solid #4CAF50; padding: 0.75rem; border-radius: 4px; font-size: 0.9rem; line-height: 1.5; color: var(--text); white-space: pre-wrap; word-break: break-word;">${escapeHtml(displayResponse)}</div>
                         </div>
                         ` : ''}
                         ${entry.has_diary ? `
@@ -2573,6 +2588,7 @@
             }
 
             function escapeHtml(text) {
+                if (text === undefined || text === null) return '';
                 const div = document.createElement('div');
                 div.textContent = text;
                 return div.innerHTML;
@@ -10726,6 +10742,7 @@
             }
 
             function escapeHtml(text) {
+                if (text === undefined || text === null) return '';
                 const div = document.createElement('div');
                 div.textContent = text;
                 return div.innerHTML;
