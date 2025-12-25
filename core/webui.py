@@ -471,6 +471,26 @@ class SynthWebUIInterface:
         except Exception:
             return False
 
+    def _dt_to_utc_iso(self, dt: "datetime | None") -> "str | None":
+        """Serialize a datetime as an explicit UTC ISO string.
+
+        IMPORTANT: MariaDB DATETIME columns are timezone-naive. In this
+        deployment the DB server/session time can be local (e.g. JST). If we
+        incorrectly assume naive == UTC, the browser will render times shifted
+        into the future/past.
+        """
+        if not dt:
+            return None
+
+        from datetime import timezone
+
+        if dt.tzinfo is None:
+            from core.time_zone_utils import get_local_timezone
+
+            dt = dt.replace(tzinfo=get_local_timezone())
+
+        return dt.astimezone(timezone.utc).isoformat()
+
     async def health(self):
         from datetime import timezone
         return JSONResponse({"status": "ok", "time": datetime.now(timezone.utc).isoformat()})
@@ -2169,15 +2189,12 @@ class SynthWebUIInterface:
             # Convert rows to entries format
             entries = []
             for row in rows:
-                from datetime import timezone
                 ts = row[3]
-                if ts and ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
                 entry = {
                     'id': row[0],
                     'content': row[1],
                     'personal_thought': row[2],
-                    'timestamp': ts.astimezone(timezone.utc).isoformat() if ts else None,
+                    'timestamp': self._dt_to_utc_iso(ts),
                     'context_tags': json.loads(row[4] or '[]'),
                     'involved_users': json.loads(row[5] or '[]'),
                     'emotions': json.loads(row[6] or '[]'),
@@ -2289,7 +2306,6 @@ class SynthWebUIInterface:
 
         try:
             from core.db import get_conn_ctx
-            from datetime import timezone
             
             offset = (page - 1) * per_page
             order = "DESC" if sort == "desc" else "ASC"
@@ -2378,11 +2394,8 @@ class SynthWebUIInterface:
                     
                     # Build minimal response objects with timezone conversion
                     for row in rows:
-                        # Always emit explicit UTC timestamps; the browser will render in its local TZ.
-                        timestamp = row[3]
-                        if timestamp and timestamp.tzinfo is None:
-                            timestamp = timestamp.replace(tzinfo=timezone.utc)
-                        timestamp_str = timestamp.astimezone(timezone.utc).isoformat() if timestamp else None
+                        # Emit explicit UTC timestamps; naive datetimes are assumed local TZ.
+                        timestamp_str = self._dt_to_utc_iso(row[3])
                         
                         entries.append({
                             "id": row[0],
@@ -2430,7 +2443,6 @@ class SynthWebUIInterface:
 
         try:
             from core.db import get_conn_ctx
-            from datetime import timezone
             
             offset = (page - 1) * per_page
             order = "DESC" if sort == "desc" else "ASC"
@@ -2478,11 +2490,8 @@ class SynthWebUIInterface:
                         rows = rows[:per_page]
                     
                     for row in rows:
-                        # Always emit explicit UTC timestamps; the browser will render in its local TZ.
-                        executed_at = row[5]
-                        if executed_at and executed_at.tzinfo is None:
-                            executed_at = executed_at.replace(tzinfo=timezone.utc)
-                        executed_at_str = executed_at.astimezone(timezone.utc).isoformat() if executed_at else None
+                        # Emit explicit UTC timestamps; naive datetimes are assumed local TZ.
+                        executed_at_str = self._dt_to_utc_iso(row[5])
                         
                         entries.append({
                             "id": row[0],
@@ -2531,7 +2540,6 @@ class SynthWebUIInterface:
 
         try:
             from core.db import get_conn_ctx
-            from datetime import timezone
             
             offset = (page - 1) * per_page
             order = "DESC" if sort == "desc" else "ASC"
@@ -2570,11 +2578,7 @@ class SynthWebUIInterface:
                         rows = rows[:per_page]
                     
                     for row in rows:
-                        # Convert timestamp from UTC to local timezone
-                        timestamp = row[4]
-                        if timestamp and timestamp.tzinfo is None:
-                            timestamp = timestamp.replace(tzinfo=timezone.utc)
-                        timestamp_str = timestamp.astimezone(timezone.utc).isoformat() if timestamp else None
+                        timestamp_str = self._dt_to_utc_iso(row[3])
                         
                         messages.append({
                             "interface_path": row[0],
