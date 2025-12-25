@@ -1647,11 +1647,11 @@
             /* Maximized chat: full viewport and no border radius */
             #chat.maximized {
                 left: 0 !important;
-                top: 0 !important;
                 right: 0 !important;
-                bottom: 0 !important;
+                top: var(--topbar-height, 64px) !important;
+                bottom: auto !important;
                 width: 100% !important;
-                height: 100vh !important;
+                height: calc(100vh - var(--topbar-height, 64px)) !important;
                 max-width: none !important;
                 max-height: none !important;
                 border-radius: 0 !important;
@@ -3293,35 +3293,19 @@
                     const localStateKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}-${device}` : `${CHAT_WINDOW_STATE_KEY}-${device}`;
                     const localState = localStorage.getItem(localStateKey) || localStorage.getItem(sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}` : CHAT_WINDOW_STATE_KEY) || localStorage.getItem(CHAT_WINDOW_STATE_KEY);
                     if (localState && chatEl) {
-                        // If the chat was minimized in localStorage but there are no
-                        // saved messages yet (fresh session), auto-restore the chat
-                        // to avoid it disappearing silently after load.
-                        const messagesEl = document.getElementById('messages');
-                        const hasMessages = messagesEl && messagesEl.children && messagesEl.children.length > 0;
-                        // On small screens (mobile), prefer to show the chat by default
-                        // even if the user previously minimized it on desktop so the
-                        // mobile UX is not confusing. We treat viewports <= 768px as
-                        // mobile here.
-                        const isMobileViewport = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768);
-
                         if (localState === 'minimized') {
-                            // On mobile without saved messages, auto-show the chat for better UX
-                            if (isMobileViewport && !hasMessages) {
-                                chatEl.classList.remove('hidden');
-                                if (chatToggleBtn) chatToggleBtn.style.display = 'none';
-                            } else if (isMobileViewport) {
-                                // On mobile with messages or explicit minimize, keep hidden and show restore toggle
-                                chatEl.classList.add('hidden');
-                                if (chatToggleBtn) chatToggleBtn.style.display = 'flex';
-                            } else {
-                                // On desktop, prefer to show a minimized visible bar rather than hiding the chat entirely
-                                chatEl.classList.add('minimized');
-                                if (chatToggleBtn) chatToggleBtn.style.display = 'none';
-                            }
+                            // Minimized chat: hide the panel entirely and show the floating restore button.
+                            chatEl.classList.add('hidden');
+                            chatEl.classList.remove('maximized', 'expanded', 'minimized');
+                            if (chatToggleBtn) chatToggleBtn.style.display = 'flex';
                         } else if (localState === 'maximized') {
+                            chatEl.classList.remove('hidden', 'expanded', 'minimized');
                             chatEl.classList.add('maximized');
+                            if (chatToggleBtn) chatToggleBtn.style.display = 'none';
                         } else if (localState === 'expanded') {
+                            chatEl.classList.remove('hidden', 'maximized', 'minimized');
                             chatEl.classList.add('expanded');
+                            if (chatToggleBtn) chatToggleBtn.style.display = 'none';
                         } else {
                             chatEl.classList.remove('maximized', 'expanded', 'hidden', 'minimized');
                             if (chatToggleBtn) chatToggleBtn.style.display = 'none';
@@ -5036,15 +5020,10 @@
                 if (panel.classList.contains('maximized')) prevState = 'maximized';
                 else if (panel.classList.contains('expanded')) prevState = 'expanded';
                 else prevState = 'normal';
-                const isMobileViewport = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768);
-                if (isMobileViewport) {
-                    panel.classList.add('hidden');
-                    if (toggleBtn) toggleBtn.style.display = 'flex';
-                } else {
-                    // On desktop, collapse to a minimized visible bar instead of hiding
-                    panel.classList.add('minimized');
-                    if (toggleBtn) toggleBtn.style.display = 'none';
-                }
+                // Minimized chat: hide the panel and show the floating restore bubble.
+                panel.classList.add('hidden');
+                if (panel.classList.contains('minimized')) panel.classList.remove('minimized');
+                if (toggleBtn) toggleBtn.style.display = 'flex';
                 try { saveWindowStateToServer({ window: windowName, state: 'minimized' }); } catch (e) { /* ignore */ }
                 try {
                     const device = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768) ? 'mobile' : 'desktop';
