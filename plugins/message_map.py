@@ -6,6 +6,12 @@ import time
 from typing import Optional, Tuple, Dict, Any
 
 from core.db import get_conn_ctx
+import asyncio
+
+# In-memory fallback mapping used when DB is unavailable or as a short-term cache.
+# Format: trainer_message_id -> (chat_id, message_id, timestamp)
+_in_memory_map: Dict[int, Tuple[int, int, float]] = {}
+_IN_MEMORY_TTL = 60 * 60 * 24  # 24 hours default TTL
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.core_initializer import core_initializer, register_plugin
 
@@ -70,30 +76,65 @@ async def store_message_mapping(trainer_message_id: int, chat_id: int, message_i
     # Log the values being stored for debugging
     log_debug(f"[message_map] Storing mapping: trainer_msg={trainer_message_id} (type: {type(trainer_message_id)}), chat_id={chat_id} (type: {type(chat_id)}), message_id={message_id} (type: {type(message_id)})")
 
-    async with get_conn_ctx() as conn:
+    # Try to persist to DB with a small retry/backoff strategy. If DB not available,
+    # fall back to in-memory mapping to avoid losing the mapping entirely.
+    attempts = 3
+    delay = 0.1
+    for attempt in range(1, attempts + 1):
         try:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    """
-                    REPLACE INTO message_map 
-                    (trainer_message_id, chat_id, message_id, timestamp)
-                    VALUES (%s, %s, %s, %s)
-                    """,
-                    (trainer_message_id, chat_id, message_id, time.time())
-                )
-                await conn.commit()
-                log_debug(f"[message_map] Stored mapping: trainer_msg={trainer_message_id} -> chat={chat_id}, msg={message_id}")
-                return True
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        """
+                        REPLACE INTO message_map 
+                        (trainer_message_id, chat_id, message_id, timestamp)
+                        VALUES (%s, %s, %s, %s)
+                        """,
+                        (trainer_message_id, chat_id, message_id, time.time())
+                    )
+                    await conn.commit()
+                    log_debug(f"[message_map] Stored mapping in DB: trainer_msg={trainer_message_id} -> chat={chat_id}, msg={message_id}")
+                    return True
         except Exception as e:
-            log_error(f"[message_map] Failed to store mapping: {e}")
-            raise
+            log_warning(f"[message_map] Attempt {attempt} failed to store mapping in DB: {e}")
+            # short backoff before retry
+            await asyncio.sleep(delay)
+            delay *= 2
+
+    # All DB attempts failed — use in-memory fallback and log it
+    try:
+        _in_memory_map[int(trainer_message_id)] = (int(chat_id), int(message_id), time.time())
+        log_warning(f"[message_map] Stored mapping in in-memory fallback: trainer_msg={trainer_message_id} -> chat={chat_id}, msg={message_id}")
+        return True
+    except Exception as e:
+        log_error(f"[message_map] Failed to store mapping in in-memory fallback: {e}")
+        return False
 
 
 async def get_original_message(trainer_message_id: int) -> Optional[Tuple[int, int]]:
-    """Get the original chat_id and message_id for a trainer message."""
-    await init_message_map_table()
-    async with get_conn_ctx() as conn:
-        try:
+    """Get the original chat_id and message_id for a trainer message.
+
+    First consult the in-memory fallback (fast path), then query the DB.
+    """
+    # Check in-memory fallback first
+    entry = _in_memory_map.get(int(trainer_message_id))
+    if entry:
+        chat_id, message_id, ts = entry
+        # Check TTL
+        if time.time() - ts <= _IN_MEMORY_TTL:
+            log_debug(f"[message_map] Found mapping in in-memory fallback: trainer_msg={trainer_message_id} -> chat={chat_id}, msg={message_id}")
+            return (chat_id, message_id)
+        else:
+            # Expired
+            try:
+                del _in_memory_map[int(trainer_message_id)]
+            except KeyError:
+                pass
+
+    # Fallback to persistent DB
+    try:
+        await init_message_map_table()
+        async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """
@@ -105,14 +146,14 @@ async def get_original_message(trainer_message_id: int) -> Optional[Tuple[int, i
                 )
                 result = await cur.fetchone()
                 if result:
-                    log_debug(f"[message_map] Found mapping: trainer_msg={trainer_message_id} -> chat={result[0]}, msg={result[1]}")
+                    log_debug(f"[message_map] Found mapping in DB: trainer_msg={trainer_message_id} -> chat={result[0]}, msg={result[1]}")
                     return (result[0], result[1])
                 else:
                     log_debug(f"[message_map] No mapping found for trainer_message_id={trainer_message_id}")
                     return None
-        except Exception as e:
-            log_error(f"[message_map] Failed to get original message: {e}")
-            return None
+    except Exception as e:
+        log_error(f"[message_map] Failed to get original message from DB: {e}")
+        return None
 
 
 async def cleanup_old_mappings(older_than_hours: int = 24):

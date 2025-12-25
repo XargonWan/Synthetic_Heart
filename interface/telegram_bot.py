@@ -7,7 +7,22 @@ import subprocess
 import time
 from typing import Optional
 from telegram import Update, Bot
-from telegram.error import TelegramError, RetryAfter, BadRequest, TimedOut
+# Some test environments may not expose all exception names from python-telegram-bot
+try:
+    from telegram.error import TelegramError, RetryAfter, BadRequest, TimedOut
+except Exception:
+    # Provide safe fallbacks so the module imports in tests without the real library
+    class TelegramError(Exception):
+        pass
+
+    class RetryAfter(Exception):
+        pass
+
+    class BadRequest(Exception):
+        pass
+
+    class TimedOut(Exception):
+        pass
 from telegram.ext import (
     ApplicationBuilder,
     MessageHandler,
@@ -177,21 +192,108 @@ async def ensure_plugin_loaded(update: Update):
         log_debug(f"[telegram_bot] Plugin already loaded: {plugin_instance.plugin.__class__.__name__}")
     return True
 
-def resolve_forwarded_target(message):
+async def resolve_forwarded_target(message):
+    """Resolve forwarded/correlated original target from a trainer-context message.
+
+    This is a thin wrapper around `_resolve_original_from_reply` so both the
+    legacy response commands and PRIORITY 3 share the same robust resolution
+    logic.
     """
-    Given a message (presumably a reply to a forwarded message), try to
-    reconstruct the original ``chat_id`` and ``message_id`` of the forwarded
-    message.
+    return await _resolve_original_from_reply(message)
+
+
+async def _resolve_original_from_reply(reply_message):
+    """Try multiple strategies to resolve the original chat_id/message_id
+
+    Strategies tried (in order):
+    - plugin_instance.get_target on reply_message.message_id and reply_message.reply_to_message.message_id
+    - forward metadata available on the reply (forward_from_chat / forward_from_message_id)
+    - textual fallback produced when forwarding failed ("(original message from chat X id Y)")
+    Returns tuple (chat_id, message_id) or (None, None)
+
+    Adds debug logging at each decision point for easier troubleshooting.
     """
+    trainer_mid = getattr(reply_message, 'message_id', None)
+    log_debug(f"[telegram_bot] resolving reply for trainer_msg_id={trainer_mid}")
 
-    if hasattr(message, "forward_from_chat") and hasattr(message, "forward_from_message_id"):
-        if message.forward_from_chat and message.forward_from_message_id:
-            return message.forward_from_chat.id, message.forward_from_message_id
+    # 1) plugin mapping (some plugins return tuple or dict)
+    possible_ids = [trainer_mid]
+    if getattr(reply_message, 'reply_to_message', None):
+        possible_ids.append(getattr(reply_message.reply_to_message, 'message_id', None))
 
-    tracked = plugin_instance.get_target(message.message_id)
-    if tracked:
-        return tracked["chat_id"], tracked["message_id"]
+    for mid in possible_ids:
+        if not mid:
+            continue
+        try:
+            log_debug(f"[telegram_bot] Checking plugin mapping for trainer_msg_id={mid}")
+            tracked = plugin_instance.get_target(mid)
+            # Plugins may implement get_target as async; if so await it
+            try:
+                import asyncio as _asyncio
+                if _asyncio.iscoroutine(tracked):
+                    log_debug(f"[telegram_bot] plugin.get_target({mid}) returned coroutine; awaiting result")
+                    tracked = await tracked
+            except Exception as e:
+                log_debug(f"[telegram_bot] Exception while awaiting plugin.get_target result: {e}")
+            log_debug(f"[telegram_bot] plugin lookup for {mid} -> {repr(tracked)}")
+        except Exception as e:
+            tracked = None
+            log_exception(f"Failed to query plugin mapping: {e}")
+        if tracked:
+            # support both tuple and dict return types
+            log_debug(f"[telegram_bot] plugin.get_target({mid}) returned: {repr(tracked)}")
+            if isinstance(tracked, (list, tuple)) and len(tracked) >= 2:
+                return int(tracked[0]), int(tracked[1])
+            if isinstance(tracked, dict) and 'chat_id' in tracked and 'message_id' in tracked:
+                return int(tracked['chat_id']), int(tracked['message_id'])
+        else:
+            # Informational: plugin did not return a mapping for this trainer message id
+            log_info(f"[telegram_bot] plugin.get_target({mid}) returned no mapping")
 
+        # 1b) persistent mapping independent from the active LLM plugin.
+        # This allows replies to work even if the active engine changed after the
+        # trainer message was sent.
+        try:
+            from plugins.message_map import get_original_message as _message_map_get_original_message
+
+            mapped = await _message_map_get_original_message(int(mid))
+            if mapped and isinstance(mapped, (list, tuple)) and len(mapped) >= 2:
+                log_debug(f"[telegram_bot] message_map lookup for {mid} -> {mapped}")
+                return int(mapped[0]), int(mapped[1])
+        except Exception as e:
+            log_debug(f"[telegram_bot] message_map lookup failed for {mid}: {e}")
+
+    # 2) forwarded metadata on the trainer-context message
+    try:
+        log_debug(f"[telegram_bot] Checking forwarded metadata on reply_message: forward_from_chat={getattr(reply_message, 'forward_from_chat', None)}, forward_from_message_id={getattr(reply_message, 'forward_from_message_id', None)}")
+        if hasattr(reply_message, 'forward_from_chat') and hasattr(reply_message, 'forward_from_message_id'):
+            if getattr(reply_message, 'forward_from_chat', None) and getattr(reply_message, 'forward_from_message_id', None):
+                return reply_message.forward_from_chat.id, reply_message.forward_from_message_id
+
+        # Newer Bot API / python-telegram-bot versions expose `forward_origin`
+        origin = getattr(reply_message, 'forward_origin', None)
+        if origin is not None:
+            origin_chat = getattr(origin, 'chat', None) or getattr(origin, 'sender_chat', None)
+            origin_message_id = getattr(origin, 'message_id', None)
+            if origin_chat is not None and origin_message_id is not None:
+                return getattr(origin_chat, 'id', None), int(origin_message_id)
+    except Exception as e:
+        log_debug(f"[telegram_bot] Exception while checking forwarded metadata: {e}")
+        pass
+
+    # 3) textual fallback emitted when forwarding failed
+    text = getattr(reply_message, 'text', '') or ''
+    import re
+    m = re.search(r'original message from chat\s+(-?\d+)\s+id\s+(\d+)', text)
+    log_debug(f"[telegram_bot] textual fallback search in text={text!r} -> match={bool(m)}")
+    if m:
+        try:
+            log_debug(f"[telegram_bot] Textual fallback matched in reply text for trainer message: {text}")
+            return int(m.group(1)), int(m.group(2))
+        except Exception as e:
+            log_exception(f"Error parsing textual fallback: {e}")
+
+    log_debug(f"[telegram_bot] no mapping found for trainer_msg_id={trainer_mid}")
     return None, None
 
 # === Block commands ===
@@ -273,7 +375,7 @@ async def handle_response_command(update: Update, context: ContextTypes.DEFAULT_
         await message.reply_text("⚠️ You must use this command in reply to a message forwarded by Rekku.")
         return
 
-    chat_id, message_id = resolve_forwarded_target(message.reply_to_message)
+    chat_id, message_id = await resolve_forwarded_target(message.reply_to_message)
 
     if not chat_id or not message_id:
         await message.reply_text("❌ Invalid message for this command.")
@@ -438,20 +540,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not target and message.reply_to_message:
             reply = message.reply_to_message
             log_debug(f"Reply to trainer_message_id={reply.message_id}")
-            possible_ids = [reply.message_id]
-            if reply.reply_to_message:
-                possible_ids.append(reply.reply_to_message.message_id)
-            
-            for mid in possible_ids:
-                tracked = plugin_instance.get_target(mid)
-                if tracked:
+            try:
+                chat_id, orig_msg_id = await _resolve_original_from_reply(reply)
+                if chat_id and orig_msg_id:
                     target = {
-                        "chat_id": tracked["chat_id"],
-                        "message_id": tracked["message_id"],
-                        "type": media_type
+                        "chat_id": chat_id,
+                        "message_id": orig_msg_id,
+                        "type": media_type,
                     }
-                    log_debug(f"Found target via plugin_instance.get_target({mid}): {target}")
-                    break
+                    log_debug(f"Found target via reply resolver: {target}")
+            except Exception as e:
+                log_debug(f"[telegram_bot] Exception while resolving reply target for PRIORITY 2: {e}")
         
         # Fallback from /say
         if not target:
@@ -541,20 +640,45 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_debug(f"🟣 [PRIORITY 3 ACTIVE] Processing trainer reply to forwarded message")
         reply_msg_id = message.reply_to_message.message_id
         log_debug(f"Reply to trainer_message_id={reply_msg_id}")
-        original = plugin_instance.get_target(reply_msg_id)
-        if original:
-            log_debug(f"Trainer replies to message {original}")
+
+        # Try robust resolution (plugin mapping, forwarded metadata, textual fallback)
+        chat_id, orig_msg_id = await _resolve_original_from_reply(message.reply_to_message)
+
+        if chat_id and orig_msg_id:
+            log_debug(f"Trainer replies to resolved original: chat_id={chat_id}, message_id={orig_msg_id}")
             await safe_send(
                 context.bot,
-                chat_id=original["chat_id"],
+                chat_id=chat_id,
                 text=message.text,
-                reply_to_message_id=original["message_id"]
+                reply_to_message_id=orig_msg_id,
             )
             await message.reply_text("✅ Reply sent.")
-        else:
-            log_warning("⚠️ No target found for reply. Ensure plugin mapping is correct.")
+            return
+
+        # If no mapping, only block/notify when the replied-to message looks like an
+        # actual forwarded/mapped trainer inbox item. Otherwise, this is probably the
+        # trainer chatting normally with the bot in their private chat, and we should
+        # let the normal processing flow handle it.
+        try:
+            import re as _re
+            replied = message.reply_to_message
+            has_forward_meta = bool(getattr(replied, 'forward_from_chat', None)) or bool(getattr(replied, 'forward_from_message_id', None))
+            has_forward_origin = getattr(replied, 'forward_origin', None) is not None
+            replied_text = getattr(replied, 'text', '') or ''
+            has_textual_fallback = bool(_re.search(r'original message from chat\s+(-?\d+)\s+id\s+(\d+)', replied_text))
+            intended_forward_reply = has_forward_meta or has_forward_origin or has_textual_fallback
+        except Exception:
+            intended_forward_reply = False
+
+        if intended_forward_reply:
+            log_warning(
+                "⚠️ No message found to reply to. Attempted plugin lookup, message_map, forwarded metadata, and textual fallback. "
+                "Enable DEBUG logging (LOGGING_LEVEL=DEBUG) to see detailed resolution steps and plugin responses."
+            )
             await message.reply_text("⚠️ No message found to reply to.")
-        return
+            return
+
+        log_debug("🟣 [PRIORITY 3 SKIP] Reply has no mapping/forward markers; treating as normal trainer chat")
     else:
         log_debug(f"Not a trainer reply - continuing to queue forwarding")
 

@@ -1,6 +1,10 @@
 from typing import Optional
 import asyncio
-from telegram.error import TimedOut
+try:
+    from telegram.error import TimedOut
+except Exception:
+    class TimedOut(Exception):
+        pass
 from core.logging_utils import (
     log_debug,
     log_info,
@@ -10,7 +14,14 @@ from core.logging_utils import (
 )
 import traceback
 import time
-from telegram.error import RetryAfter, NetworkError
+try:
+    from telegram.error import RetryAfter, NetworkError
+except Exception:
+    class RetryAfter(Exception):
+        pass
+
+    class NetworkError(Exception):
+        pass
 
 # Track whether we've already warned about None bot to avoid log spam
 _BOT_NONE_WARNED = False
@@ -660,10 +671,16 @@ async def llm_response_send(bot, chat_id: int, text: str, chunk_size: int = 4000
     # Send as normal text with chunking
     log_debug(f"[telegram_safe_send] Sending as normal text with chunking")
     try:
+        last_sent = None
         for i in range(0, len(text), chunk_size):
             chunk = text[i : i + chunk_size]
             log_debug(f"[llm_response_send] Sending chunk {i//chunk_size + 1} (len={len(chunk)}) to chat_id={chat_id}")
-            await _send_with_retry(bot, chat_id, chunk, retries, delay, **kwargs)
+            sent = await _send_with_retry(bot, chat_id, chunk, retries, delay, **kwargs)
+            # _send_with_retry may return a telegram Message object or None; keep last non-None
+            if sent is not None:
+                last_sent = sent
+        # Return the last sent message (if any) to allow callers to track trainer-side message ids
+        return last_sent
     except Exception as e:
         # Log as WARNING if it's a thread error (will be handled by fallback), ERROR otherwise
         error_msg = str(e).lower()
