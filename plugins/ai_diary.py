@@ -399,12 +399,16 @@ def _run(coro):
         return None
 
 
-async def _execute(query: str, params: tuple = ()) -> None:
-    """Execute a database query."""
+async def _execute(query: str, params: tuple = ()):
+    """Execute a database query and return the cursor.
+
+    Returning the cursor allows callers to read `lastrowid` and `rowcount`.
+    """
     async with get_db() as conn:
         cursor = await conn.cursor()
         await cursor.execute(query, params)
         await conn.commit()
+        return cursor
 
 
 async def _fetchall(query: str, params: tuple = ()) -> List[Dict]:
@@ -526,7 +530,13 @@ def add_diary_entry(
             try:
                 import asyncio
                 from plugins.grillo_plugin import GrilloPlugin
-                asyncio.create_task(GrilloPlugin.link_diary_entry_to_activity(grillo_activity_log_id, diary_entry_id))
+                asyncio.create_task(
+                    GrilloPlugin.link_diary_entry_to_activity(
+                        grillo_activity_log_id,
+                        diary_entry_id,
+                        response_text=content,
+                    )
+                )
                 log_debug(f"[ai_diary] Scheduled grillo activity link: activity_log={grillo_activity_log_id}, diary={diary_entry_id}")
             except Exception as link_error:
                 log_warning(f"[ai_diary] Failed to link grillo activity: {link_error}")
@@ -636,7 +646,11 @@ async def add_diary_entry_async(
         if grillo_activity_log_id and diary_entry_id:
             try:
                 from plugins.grillo_plugin import GrilloPlugin
-                await GrilloPlugin.link_diary_entry_to_activity(grillo_activity_log_id, diary_entry_id)
+                await GrilloPlugin.link_diary_entry_to_activity(
+                    grillo_activity_log_id,
+                    diary_entry_id,
+                    response_text=content,
+                )
                 log_debug(f"[ai_diary] Linked grillo activity: activity_log={grillo_activity_log_id}, diary={diary_entry_id}")
             except Exception as link_error:
                 log_warning(f"[ai_diary] Failed to link grillo activity: {link_error}")
@@ -862,7 +876,8 @@ def create_personal_diary_entry(
     involved_users: List[str] = None,
     interface: str = None,
     chat_id: str = None,
-    thread_id: str = None
+    thread_id: str = None,
+    grillo_activity_log_id: int = None
 ) -> None:
     """Helper function to create a complete personal diary entry.
     
@@ -906,7 +921,8 @@ def create_personal_diary_entry(
         involved_users=involved_users,
         interface=interface,
         chat_id=chat_id,
-        thread_id=thread_id
+        thread_id=thread_id,
+        grillo_activity_log_id=grillo_activity_log_id
     )
 
 
@@ -1047,9 +1063,6 @@ def _generate_emotions_from_interaction(
     """Generate emotions that synth would feel during this interaction."""
     emotions = []
     
-    # Base emotion - engagement (always present during interaction)
-    emotions.append({"type": "engaged", "intensity": 6})
-    
     # Emotions based on context
     if context_tags:
         if 'help' in context_tags or 'assistance' in context_tags:
@@ -1089,6 +1102,10 @@ def _generate_emotions_from_interaction(
     
     if len(synth_response) > 200:  # Long, detailed response
         emotions.append({"type": "thorough", "intensity": 6})
+
+    # Fallback emotion: if nothing else was detected, mark as engaged.
+    if not emotions:
+        emotions.append({"type": "engaged", "intensity": 6})
     
     # Remove duplicates while preserving the highest intensity for each emotion type
     emotion_dict = {}

@@ -384,6 +384,9 @@ async def handle_incoming_message(bot, message, context_memory_or_prompt, interf
                 llm_context['chat_id'] = message.chat_id
             if hasattr(message, 'interface_path'):
                 llm_context['interface_path'] = message.interface_path
+            # Ensure action_parser/plugins can reliably detect the originating interface
+            if interface:
+                llm_context['interface'] = interface
             if isinstance(context_memory_or_prompt, dict):
                 llm_context.update(context_memory_or_prompt)
             

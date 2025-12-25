@@ -1157,7 +1157,8 @@ async def _create_diary_entry_for_actions(processed_actions, context, original_m
             context_tags=context_tags,
             involved_users=involved_list,
             interface=interface_name,
-            chat_id=str(chat_id) if chat_id else None
+            chat_id=str(chat_id) if chat_id else None,
+            grillo_activity_log_id=context.get("activity_log_id") if isinstance(context, dict) else None
         )
         
         log_debug(f"[action_parser] Created personal diary entry: {synth_response}")

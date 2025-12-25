@@ -472,7 +472,8 @@ class SynthWebUIInterface:
             return False
 
     async def health(self):
-        return JSONResponse({"status": "ok", "time": datetime.utcnow().isoformat()})
+        from datetime import timezone
+        return JSONResponse({"status": "ok", "time": datetime.now(timezone.utc).isoformat()})
 
     async def get_action_state_endpoint(self):
         """Get the current global action state."""
@@ -519,7 +520,7 @@ class SynthWebUIInterface:
             return JSONResponse({
                 "emotions": emotions,
                 "dominant_emotion": dominant,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
             })
             
         except Exception as e:
@@ -528,7 +529,7 @@ class SynthWebUIInterface:
             return JSONResponse({
                 "emotions": {},
                 "dominant_emotion": None,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "error": str(e),
             })
 
@@ -1198,13 +1199,14 @@ class SynthWebUIInterface:
         except Exception:
             canonical_sender = sender
 
+        from datetime import timezone
         history.append(
             {
                 "message_id": None,
                 "user_id": "self" if canonical_sender == "self" else str(session_id),
                 "username": canonical_sender,
                 "text": text,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "interface_path": interface_path,
             }
         )
@@ -1223,7 +1225,13 @@ class SynthWebUIInterface:
             except Exception:
                 db_sender_name = sender
 
-            await save_chat_message(interface_path, text, sender_name=db_sender_name, sender_id=session_id, timestamp=datetime.utcnow().isoformat())
+            await save_chat_message(
+                interface_path,
+                text,
+                sender_name=db_sender_name,
+                sender_id=session_id,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            )
         except Exception as e:
             log_debug(f"{LOG_PREFIX} Failed to persist chat message for {session_id}: {e}")
 
@@ -2161,11 +2169,15 @@ class SynthWebUIInterface:
             # Convert rows to entries format
             entries = []
             for row in rows:
+                from datetime import timezone
+                ts = row[3]
+                if ts and ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
                 entry = {
                     'id': row[0],
                     'content': row[1],
                     'personal_thought': row[2],
-                    'timestamp': row[3].isoformat() if row[3] else None,
+                    'timestamp': ts.astimezone(timezone.utc).isoformat() if ts else None,
                     'context_tags': json.loads(row[4] or '[]'),
                     'involved_users': json.loads(row[5] or '[]'),
                     'emotions': json.loads(row[6] or '[]'),
@@ -2277,7 +2289,6 @@ class SynthWebUIInterface:
 
         try:
             from core.db import get_conn_ctx
-            from core.time_zone_utils import utc_to_local
             from datetime import timezone
             
             offset = (page - 1) * per_page
@@ -2367,18 +2378,11 @@ class SynthWebUIInterface:
                     
                     # Build minimal response objects with timezone conversion
                     for row in rows:
-                        # Convert timestamp to local timezone
+                        # Always emit explicit UTC timestamps; the browser will render in its local TZ.
                         timestamp = row[3]
-                        if timestamp:
-                            # Database timestamp is assumed to be in server timezone
-                            # Convert to UTC-aware then to local
-                            if timestamp.tzinfo is None:
-                                # Assume UTC if no timezone info
-                                timestamp = timestamp.replace(tzinfo=timezone.utc)
-                            timestamp_local = utc_to_local(timestamp)
-                            timestamp_str = timestamp_local.isoformat()
-                        else:
-                            timestamp_str = None
+                        if timestamp and timestamp.tzinfo is None:
+                            timestamp = timestamp.replace(tzinfo=timezone.utc)
+                        timestamp_str = timestamp.astimezone(timezone.utc).isoformat() if timestamp else None
                         
                         entries.append({
                             "id": row[0],
@@ -2426,7 +2430,6 @@ class SynthWebUIInterface:
 
         try:
             from core.db import get_conn_ctx
-            from core.time_zone_utils import utc_to_local
             from datetime import timezone
             
             offset = (page - 1) * per_page
@@ -2475,16 +2478,11 @@ class SynthWebUIInterface:
                         rows = rows[:per_page]
                     
                     for row in rows:
-                        # Convert UTC timestamp to local timezone
-                        executed_at_utc = row[5]
-                        if executed_at_utc:
-                            # Ensure it has UTC timezone info
-                            if executed_at_utc.tzinfo is None:
-                                executed_at_utc = executed_at_utc.replace(tzinfo=timezone.utc)
-                            executed_at_local = utc_to_local(executed_at_utc)
-                            executed_at_str = executed_at_local.isoformat()
-                        else:
-                            executed_at_str = None
+                        # Always emit explicit UTC timestamps; the browser will render in its local TZ.
+                        executed_at = row[5]
+                        if executed_at and executed_at.tzinfo is None:
+                            executed_at = executed_at.replace(tzinfo=timezone.utc)
+                        executed_at_str = executed_at.astimezone(timezone.utc).isoformat() if executed_at else None
                         
                         entries.append({
                             "id": row[0],
@@ -2533,7 +2531,6 @@ class SynthWebUIInterface:
 
         try:
             from core.db import get_conn_ctx
-            from core.time_zone_utils import utc_to_local
             from datetime import timezone
             
             offset = (page - 1) * per_page
@@ -2574,14 +2571,10 @@ class SynthWebUIInterface:
                     
                     for row in rows:
                         # Convert timestamp from UTC to local timezone
-                        timestamp = row[3]
-                        if timestamp:
-                            if timestamp.tzinfo is None:
-                                timestamp = timestamp.replace(tzinfo=timezone.utc)
-                            timestamp_local = utc_to_local(timestamp)
-                            timestamp_str = timestamp_local.isoformat()
-                        else:
-                            timestamp_str = None
+                        timestamp = row[4]
+                        if timestamp and timestamp.tzinfo is None:
+                            timestamp = timestamp.replace(tzinfo=timezone.utc)
+                        timestamp_str = timestamp.astimezone(timezone.utc).isoformat() if timestamp else None
                         
                         messages.append({
                             "interface_path": row[0],

@@ -12,7 +12,7 @@ import asyncio
 import random
 from datetime import datetime
 from types import SimpleNamespace
-from typing import Optional
+from typing import Optional, Any
 
 from core.ai_plugin_base import AIPluginBase
 from core.logging_utils import log_debug, log_info, log_warning, log_error
@@ -208,6 +208,13 @@ class GrilloPlugin(AIPluginBase):
     async def _enqueue_with_low_priority(self, prompt: str, beat_type: str):
         try:
             from core import message_queue
+
+            activity_log_id: Optional[int] = None
+            try:
+                activity_log_id = await self.create_activity_log(beat_type=beat_type, prompt_text=prompt)
+            except Exception as e:
+                log_debug(f"[grillo] Failed to create activity log entry: {e}")
+
             # Create a minimal message object representing internal event
             message = SimpleNamespace()
             message.chat_id = -1
@@ -227,7 +234,11 @@ class GrilloPlugin(AIPluginBase):
                 "chat_name": "G.R.I.L.L.O.",
                 "message_thread_name": None,
                 "timestamp": asyncio.get_event_loop().time(),
-                "context": {"grillo_beat": True, "beat_type": beat_type},
+                "context": {
+                    "grillo_beat": True,
+                    "beat_type": beat_type,
+                    "activity_log_id": activity_log_id,
+                },
                 "priority": False,
             }
             # Use the official enqueue API to avoid direct queue access
@@ -237,6 +248,86 @@ class GrilloPlugin(AIPluginBase):
         except Exception as e:
             log_error(f"[grillo] Failed to enqueue beat: {e}")
             GrilloPlugin._beat_pending = False
+
+    @classmethod
+    async def create_activity_log(cls, *, beat_type: str, prompt_text: str, metadata: Optional[dict[str, Any]] = None) -> Optional[int]:
+        """Create a grillo_activity_log row and return its id.
+
+        This enables the WebUI History > Grillo view and lets other plugins link
+        diary entries back to the originating beat.
+        """
+        try:
+            import json
+            from core.db import get_conn_ctx
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        """
+                        INSERT INTO grillo_activity_log (beat_type, prompt_text, response_text, diary_entry_id, metadata)
+                        VALUES (%s, %s, NULL, NULL, %s)
+                        """,
+                        (
+                            beat_type,
+                            prompt_text,
+                            json.dumps(metadata) if metadata else None,
+                        ),
+                    )
+                    try:
+                        await conn.commit()
+                    except Exception:
+                        pass
+                    return getattr(cur, "lastrowid", None)
+        except Exception as e:
+            log_debug(f"[grillo] create_activity_log failed: {e}")
+            return None
+
+    @classmethod
+    async def link_diary_entry_to_activity(
+        cls,
+        activity_log_id: int,
+        diary_entry_id: int,
+        *,
+        response_text: Optional[str] = None,
+    ) -> None:
+        """Link an ai_diary entry to a grillo_activity_log entry.
+
+        Optionally stores a human-readable response_text (e.g. reflection content)
+        so the WebUI can display meaningful output even if the raw model response
+        is not preserved.
+        """
+        if not activity_log_id or not diary_entry_id:
+            return
+
+        try:
+            from core.db import get_conn_ctx
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    if response_text is not None:
+                        await cur.execute(
+                            """
+                            UPDATE grillo_activity_log
+                            SET diary_entry_id=%s,
+                                response_text=CASE
+                                    WHEN response_text IS NULL OR response_text = '' THEN %s
+                                    ELSE response_text
+                                END
+                            WHERE id=%s
+                            """,
+                            (diary_entry_id, response_text, activity_log_id),
+                        )
+                    else:
+                        await cur.execute(
+                            "UPDATE grillo_activity_log SET diary_entry_id=%s WHERE id=%s",
+                            (diary_entry_id, activity_log_id),
+                        )
+                    try:
+                        await conn.commit()
+                    except Exception:
+                        pass
+        except Exception as e:
+            log_debug(f"[grillo] link_diary_entry_to_activity failed: {e}")
 
     async def _reset_beat_pending_after_delay(self):
         await asyncio.sleep(300)
