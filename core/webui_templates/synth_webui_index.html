@@ -8023,6 +8023,190 @@
                         return null;
                     }
 
+                    // IDLE is the baseline layer. To avoid any uncovered window (and resulting T-pose),
+                    // we randomize IDLE animations in blocks of two:
+                    // - current: used now
+                    // - next: preloaded in background for the next refresh/switch
+                    // This way, switching IDLE variants does not depend on immediate IO.
+                    if (actionName === 'idle') {
+                        try {
+                            if (!this._idleQueue) this._idleQueue = { currentFile: null, nextFile: null };
+                            const pickRandom = (arr, avoid) => {
+                                if (!Array.isArray(arr) || arr.length === 0) return null;
+                                if (arr.length === 1) return arr[0];
+                                let tries = 0;
+                                while (tries++ < 10) {
+                                    const f = arr[Math.floor(Math.random() * arr.length)];
+                                    if (f && f !== avoid) return f;
+                                }
+                                // fallback
+                                return arr[0] !== avoid ? arr[0] : arr[1];
+                            };
+
+                            // Initialize queue
+                            if (!this._idleQueue.currentFile) {
+                                this._idleQueue.currentFile = pickRandom(files, null);
+                            }
+                            if (!this._idleQueue.nextFile) {
+                                this._idleQueue.nextFile = pickRandom(files, this._idleQueue.currentFile);
+                            }
+
+                            const selectedFile = this._idleQueue.currentFile;
+                            const nextFile = this._idleQueue.nextFile;
+                            console.log(`[AnimationHandler] IDLE queue: current=${selectedFile}, next=${nextFile}`);
+
+                            // Preload NEXT in background (clip + descriptor) so the next swap is instant.
+                            try {
+                                if (nextFile) {
+                                    this._awaitAnimationReady('idle', nextFile, 2000);
+                                    // Descriptor fetch is also prewarmed; never awaited here.
+                                    this.loadDescriptor('idle', nextFile).catch(() => null);
+                                }
+                            } catch (e) { /* ignore */ }
+
+                            // Load ONLY the selected (current) clip, not every idle clip.
+                            const clip = await this.loadAnimation('idle', selectedFile);
+                            if (!clip) return null;
+
+                            // Also prefetch descriptor for CURRENT (non-blocking refinement happens below).
+                            let descriptor = null;
+                            let descriptorPromise = null;
+                            try {
+                                if (selectedFile) {
+                                    descriptorPromise = this.loadDescriptor('idle', selectedFile)
+                                        .then((d) => {
+                                            console.log(`[AnimationHandler] After loading descriptor for ${selectedFile}, descriptor is:`, d);
+                                            return d;
+                                        })
+                                        .catch((err) => {
+                                            console.warn(`[AnimationHandler] Could not load descriptor for ${selectedFile}:`, err);
+                                            return null;
+                                        });
+                                }
+                            } catch (e) {
+                                descriptorPromise = null;
+                            }
+
+                            // (The existing IDLE branch below will create an immediate loop and refine from descriptor)
+                            // Reuse variables expected by the remainder of this function.
+                            // NOTE: keep names consistent with the existing code.
+                            const clips = [clip];
+                            const fileMap = [selectedFile];
+                            // Fall through into the existing logic by shadowing the variables it uses.
+                            // eslint-disable-next-line no-unused-vars
+                            const clipIndex = 0;
+                            // eslint-disable-next-line no-unused-vars
+                            const selectedFileShadow = selectedFile;
+                            // Provide variables for the downstream code without rewriting large sections.
+                            // We'll return early by jumping into the existing IDLE creation block below.
+
+                            // Shift queue for next time *after* we have a playable current.
+                            try {
+                                this._idleQueue.currentFile = nextFile || selectedFile;
+                                this._idleQueue.nextFile = pickRandom(files, this._idleQueue.currentFile);
+                            } catch (e) { /* ignore */ }
+
+                            // The code below expects `clip` and `selectedFile` vars.
+                            // We can't literally jump, but we can set them in-place.
+                            // eslint-disable-next-line no-var
+                            var __idle_clip = clip;
+                            // eslint-disable-next-line no-var
+                            var __idle_selectedFile = selectedFile;
+                            // eslint-disable-next-line no-var
+                            var __idle_descriptorPromise = descriptorPromise;
+
+                            // Create the immediate IDLE action + background refinement (inline minimal duplication)
+                            // IDLE is the baseline animation: it should start immediately.
+                            // We always loop, but we allow skins to ship a descriptor with an explicit loop-range.
+                            // IMPORTANT: do NOT await descriptor here; create a safe full-clip loop first.
+                            let idleAction = null;
+                            const storageKey = __idle_selectedFile ? `idle:${__idle_selectedFile}` : 'idle';
+                            try {
+                                idleAction = this.mixer.clipAction(__idle_clip);
+                                idleAction.setLoop(THREE.LoopRepeat);
+                                idleAction.clampWhenFinished = false;
+                                // Ensure the underlying clip has a useful name
+                                try {
+                                    const clipName = __idle_selectedFile || (__idle_clip && __idle_clip.name) || `idle`;
+                                    const c = idleAction.getClip ? idleAction.getClip() : __idle_clip;
+                                    if (c && c.name !== clipName) {
+                                        try { c.name = clipName; } catch (e) { /* ignore */ }
+                                    }
+                                } catch (e) { /* ignore */ }
+
+                                this.actions[storageKey] = idleAction;
+                                this.actions['idle'] = idleAction;
+                                console.log(`[AnimationHandler] Stored IDLE action (immediate loop) with keys: ${storageKey} AND idle`);
+                            } catch (e) {
+                                console.warn('[AnimationHandler] Failed to create immediate IDLE action:', e);
+                                return null;
+                            }
+
+                            // Background refinement: if descriptor defines a loop-range, rebuild the idle clip and swap caches.
+                            try {
+                                const currentToken = (this._idleRefineToken = (this._idleRefineToken || 0) + 1);
+                                if (__idle_descriptorPromise) {
+                                    __idle_descriptorPromise.then((d) => {
+                                        try {
+                                            if (this._idleRefineToken !== currentToken) return;
+                                            descriptor = d;
+                                            if (!descriptor || !descriptor.loop) return;
+                                            if (!__idle_clip || !__idle_clip.duration || !THREE.AnimationUtils || typeof THREE.AnimationUtils.subclip !== 'function') return;
+
+                                            const fps = 30;
+                                            const totalFrames = Math.max(2, Math.round(__idle_clip.duration * fps));
+                                            const clampInt = (v, lo, hi) => {
+                                                const n = Math.floor(Number(v));
+                                                if (!Number.isFinite(n)) return lo;
+                                                return Math.max(lo, Math.min(hi, n));
+                                            };
+                                            const normalizeRange = (start, end, label) => {
+                                                const s = clampInt(start, 0, totalFrames);
+                                                const e = clampInt(end, 0, totalFrames);
+                                                if (e <= s + 1) {
+                                                    throw new Error(`[AnimationHandler] Invalid ${label} range: ${start}-${end} (normalized ${s}-${e}) totalFrames=${totalFrames}`);
+                                                }
+                                                return { start: s, end: e };
+                                            };
+
+                                            const loopStart = descriptor.loop?.start_frame ?? 0;
+                                            const loopEnd = descriptor.loop?.end_frame ?? totalFrames;
+                                            const loopR = normalizeRange(loopStart, loopEnd, 'idle.loop');
+                                            const loopClip = THREE.AnimationUtils.subclip(__idle_clip, `${storageKey}_idle_loop`, loopR.start, loopR.end, fps);
+                                            loopClip.loop = THREE.LoopRepeat;
+                                            const refined = this.mixer.clipAction(loopClip);
+                                            refined.setLoop(THREE.LoopRepeat);
+                                            refined.clampWhenFinished = false;
+
+                                            this.actions[storageKey] = refined;
+                                            this.actions['idle'] = refined;
+                                            console.log(`[AnimationHandler] Refined IDLE loop from descriptor for ${storageKey}: frames ${loopR.start}-${loopR.end}`);
+
+                                            try {
+                                                if (this._baseIdleAction && this._baseIdleAction === idleAction) {
+                                                    const w = (typeof idleAction.getEffectiveWeight === 'function') ? idleAction.getEffectiveWeight() : 1.0;
+                                                    refined.enabled = true;
+                                                    refined.reset();
+                                                    if (typeof refined.setEffectiveWeight === 'function' && Number.isFinite(w)) refined.setEffectiveWeight(w);
+                                                    refined.fadeIn(0.25).play();
+                                                    this._safeFadeStop(idleAction, 0.25);
+                                                    this._baseIdleAction = refined;
+                                                }
+                                            } catch (e) { /* ignore */ }
+                                        } catch (e) {
+                                            console.warn('[AnimationHandler] Failed to refine IDLE from descriptor:', e);
+                                        }
+                                    });
+                                }
+                            } catch (e) { /* ignore */ }
+
+                            return idleAction;
+                        } catch (e) {
+                            console.warn('[AnimationHandler] IDLE queue logic failed, falling back to legacy:', e);
+                            // Fall through to legacy behavior below.
+                        }
+                    }
+
                     const clips = [];
                     const fileMap = []; // Track which file corresponds to which clip
                     for (const file of files) {
@@ -8040,55 +8224,39 @@
                     const clip = clips[clipIndex];
                     const selectedFile = fileMap[clipIndex]; // Get the correct file for the selected clip
                     
-                    // Try to load descriptor for the selected file to check for intro/outro structure
+                    // Descriptor loading can be slow (network/file IO). For IDLE we must not block playback,
+                    // otherwise the avatar can briefly fall back to rest pose (T-pose) while no clip is active.
+                    // Strategy:
+                    // - Start IDLE immediately with a safe full-clip loop.
+                    // - Load descriptor in background; if it defines a loop-range, refine/swap the cached idle.
                     let descriptor = null;
+                    let descriptorPromise = null;
                     try {
                         if (selectedFile) {
-                            descriptor = await this.loadDescriptor(actionName, selectedFile);
-                            console.log(`[AnimationHandler] After loading descriptor for ${selectedFile}, descriptor is:`, descriptor);
+                            descriptorPromise = this.loadDescriptor(actionName, selectedFile)
+                                .then((d) => {
+                                    console.log(`[AnimationHandler] After loading descriptor for ${selectedFile}, descriptor is:`, d);
+                                    return d;
+                                })
+                                .catch((err) => {
+                                    console.warn(`[AnimationHandler] Could not load descriptor for ${selectedFile}:`, err);
+                                    return null;
+                                });
                         }
-                    } catch (err) {
-                        console.warn(`[AnimationHandler] Could not load descriptor for ${selectedFile}:`, err);
+                    } catch (e) {
+                        descriptorPromise = null;
                     }
 
-                    // IDLE must always be a stable looping animation.
-                    // Even if a descriptor contains intro/outro or play_once, we ignore that structure for idle.
-                    // If a loop section is provided, we loop that range; otherwise we loop the full clip.
+                    // IDLE is the baseline animation: it should start immediately.
+                    // We always loop, but we allow skins to ship a descriptor with an explicit loop-range.
+                    // IMPORTANT: do NOT await descriptor here; create a safe full-clip loop first.
                     if (actionName === 'idle') {
+                        let idleAction = null;
+                        const storageKey = selectedFile ? `${actionName}:${selectedFile}` : actionName;
                         try {
-                            let idleAction = null;
-                            const storageKey = selectedFile ? `${actionName}:${selectedFile}` : actionName;
-
-                            if (descriptor && descriptor.loop && clip && clip.duration && THREE.AnimationUtils && typeof THREE.AnimationUtils.subclip === 'function') {
-                                const fps = 30;
-                                const totalFrames = Math.max(2, Math.round(clip.duration * fps));
-                                const clampInt = (v, lo, hi) => {
-                                    const n = Math.floor(Number(v));
-                                    if (!Number.isFinite(n)) return lo;
-                                    return Math.max(lo, Math.min(hi, n));
-                                };
-                                const normalizeRange = (start, end, label) => {
-                                    const s = clampInt(start, 0, totalFrames);
-                                    const e = clampInt(end, 0, totalFrames);
-                                    if (e <= s + 1) {
-                                        throw new Error(`[AnimationHandler] Invalid ${label} range: ${start}-${end} (normalized ${s}-${e}) totalFrames=${totalFrames}`);
-                                    }
-                                    return { start: s, end: e };
-                                };
-
-                                const loopStart = descriptor.loop?.start_frame ?? 0;
-                                const loopEnd = descriptor.loop?.end_frame ?? totalFrames;
-                                const loopR = normalizeRange(loopStart, loopEnd, 'idle.loop');
-                                const loopClip = THREE.AnimationUtils.subclip(clip, `${storageKey}_idle_loop`, loopR.start, loopR.end, fps);
-                                loopClip.loop = THREE.LoopRepeat;
-                                idleAction = this.mixer.clipAction(loopClip);
-                            } else {
-                                idleAction = this.mixer.clipAction(clip);
-                            }
-
+                            idleAction = this.mixer.clipAction(clip);
                             idleAction.setLoop(THREE.LoopRepeat);
                             idleAction.clampWhenFinished = false;
-
                             // Ensure the underlying clip has a useful name
                             try {
                                 const clipName = selectedFile || (clip && clip.name) || `${actionName}`;
@@ -8099,20 +8267,75 @@
                             } catch (e) { /* ignore */ }
 
                             this.actions[storageKey] = idleAction;
-                            // Cache generic idle key too
                             this.actions[actionName] = idleAction;
-                            console.log(`[AnimationHandler] Stored IDLE action (forced loop) with keys: ${storageKey} AND ${actionName}`);
-                            return idleAction;
+                            console.log(`[AnimationHandler] Stored IDLE action (immediate loop) with keys: ${storageKey} AND ${actionName}`);
                         } catch (e) {
-                            console.warn('[AnimationHandler] Failed to create forced-loop IDLE action, falling back to default loop:', e);
-                            const action = this.mixer.clipAction(clip);
-                            action.setLoop(THREE.LoopRepeat);
-                            action.clampWhenFinished = false;
-                            const storageKey = selectedFile ? `${actionName}:${selectedFile}` : actionName;
-                            this.actions[storageKey] = action;
-                            this.actions[actionName] = action;
-                            return action;
+                            console.warn('[AnimationHandler] Failed to create immediate IDLE action:', e);
+                            return null;
                         }
+
+                        // Background refinement: if descriptor defines a loop-range, rebuild the idle clip and swap caches.
+                        try {
+                            const currentToken = (this._idleRefineToken = (this._idleRefineToken || 0) + 1);
+                            if (descriptorPromise) {
+                                descriptorPromise.then((d) => {
+                                    try {
+                                        // Only refine if we're still on the same idle load cycle
+                                        if (this._idleRefineToken !== currentToken) return;
+                                        descriptor = d;
+                                        if (!descriptor || !descriptor.loop) return;
+                                        if (!clip || !clip.duration || !THREE.AnimationUtils || typeof THREE.AnimationUtils.subclip !== 'function') return;
+
+                                        const fps = 30;
+                                        const totalFrames = Math.max(2, Math.round(clip.duration * fps));
+                                        const clampInt = (v, lo, hi) => {
+                                            const n = Math.floor(Number(v));
+                                            if (!Number.isFinite(n)) return lo;
+                                            return Math.max(lo, Math.min(hi, n));
+                                        };
+                                        const normalizeRange = (start, end, label) => {
+                                            const s = clampInt(start, 0, totalFrames);
+                                            const e = clampInt(end, 0, totalFrames);
+                                            if (e <= s + 1) {
+                                                throw new Error(`[AnimationHandler] Invalid ${label} range: ${start}-${end} (normalized ${s}-${e}) totalFrames=${totalFrames}`);
+                                            }
+                                            return { start: s, end: e };
+                                        };
+
+                                        const loopStart = descriptor.loop?.start_frame ?? 0;
+                                        const loopEnd = descriptor.loop?.end_frame ?? totalFrames;
+                                        const loopR = normalizeRange(loopStart, loopEnd, 'idle.loop');
+                                        const loopClip = THREE.AnimationUtils.subclip(clip, `${storageKey}_idle_loop`, loopR.start, loopR.end, fps);
+                                        loopClip.loop = THREE.LoopRepeat;
+                                        const refined = this.mixer.clipAction(loopClip);
+                                        refined.setLoop(THREE.LoopRepeat);
+                                        refined.clampWhenFinished = false;
+
+                                        // Swap caches
+                                        this.actions[storageKey] = refined;
+                                        this.actions[actionName] = refined;
+                                        console.log(`[AnimationHandler] Refined IDLE loop from descriptor for ${storageKey}: frames ${loopR.start}-${loopR.end}`);
+
+                                        // If the base idle is currently this action, crossfade to refined.
+                                        try {
+                                            if (this._baseIdleAction && this._baseIdleAction === idleAction) {
+                                                const w = (typeof idleAction.getEffectiveWeight === 'function') ? idleAction.getEffectiveWeight() : 1.0;
+                                                refined.enabled = true;
+                                                refined.reset();
+                                                if (typeof refined.setEffectiveWeight === 'function' && Number.isFinite(w)) refined.setEffectiveWeight(w);
+                                                refined.fadeIn(0.25).play();
+                                                this._safeFadeStop(idleAction, 0.25);
+                                                this._baseIdleAction = refined;
+                                            }
+                                        } catch (e) { /* ignore */ }
+                                    } catch (e) {
+                                        console.warn('[AnimationHandler] Failed to refine IDLE from descriptor:', e);
+                                    }
+                                });
+                            }
+                        } catch (e) { /* ignore */ }
+
+                        return idleAction;
                     }
 
                     // Check if we should create structured animations (intro/loop/outro)
