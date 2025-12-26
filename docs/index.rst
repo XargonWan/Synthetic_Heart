@@ -43,6 +43,7 @@ getting started.
    ai_diary_personal_memory
    vrm_animations
    animation_system
+   webui_debug
    interfaces
    interface_path
    matrix_interface

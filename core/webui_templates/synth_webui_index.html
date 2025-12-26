@@ -1672,6 +1672,8 @@
     </style>
 </head>
 <body>
+    <!-- WEB_DEBUG marker (server-injected via %%WEB_DEBUG%%); used to enable local-only debug tooling in the WebUI. -->
+    <div id="synth-debug" data-debug-enabled="%%WEB_DEBUG%%" style="display:none"></div>
     <header class="top-bar">
         <div class="brand">
             <img src="%%LOGO_URL%%" alt="SyntH logo" />
@@ -2815,6 +2817,12 @@
         let pendingAnimationCommands = []; // Queue for animation commands received before handler is ready
         let pendingAnimationTimeout = null; // Timeout for processing pending animations
         let animationHandler = null; // Global animation handler, initialized when VRM loads
+        // WEB_DEBUG local-only pause: when enabled, ignore remote animation/action_state updates.
+        // Preloads are still accepted so cache stays warm.
+        window.__synth_web_debug_enabled = window.__synth_web_debug_enabled || false;
+        window.__synth_debug_pause_all = window.__synth_debug_pause_all || false;
+        window.__synth_debug_last_remote = window.__synth_debug_last_remote || { animation: null, animation_state: null, action_state: null };
+        window.__synth_debug_last_remote_at = window.__synth_debug_last_remote_at || { animation: 0, animation_state: 0, action_state: 0 };
         // Queue preload requests received before VRM/AnimationHandler is ready.
         window.__synth_pending_preloads = window.__synth_pending_preloads || {};
         // Phase priorities mirrored from server-side ActionStateManager
@@ -5718,6 +5726,39 @@
                 const data = JSON.parse(event.data);
                 console.log('[synth_webui] Received WebSocket message:', data);
                 console.log('[synth_webui] Message type:', data.type);
+
+                // WEB_DEBUG local pause gate:
+                // - accept preload_animation always
+                // - ignore everything that would mutate playback/face state
+                // - still remember the last remote payload for resync on resume
+                try {
+                    if (window.__synth_web_debug_enabled && window.__synth_debug_pause_all) {
+                        const t = data && data.type ? String(data.type) : '';
+                        if (t === 'preload_animation') {
+                            // allowed
+                        } else if (t === 'animation' || t === 'animation_state' || t === 'action_state') {
+                            try {
+                                window.__synth_debug_last_remote[t] = data;
+                                window.__synth_debug_last_remote_at[t] = Date.now();
+                            } catch (e) { /* ignore */ }
+
+                            // Keep the canonical snapshots up-to-date for resync.
+                            try {
+                                if ((t === 'animation' || t === 'animation_state') && data) {
+                                    window.__synth_current_animation_state = {
+                                        state: data.state,
+                                        animation: data.animation,
+                                        descriptor: data.descriptor || null
+                                    };
+                                    if (data.animation_state && typeof data.animation_state === 'object') {
+                                        window.__synth_last_rich_animation_state = data.animation_state;
+                                    }
+                                }
+                            } catch (e) { /* ignore */ }
+                            return;
+                        }
+                    }
+                } catch (e) { /* ignore */ }
                 
                 if (data.type === 'session') {
                     sessionId = data.session_id;
@@ -6259,6 +6300,15 @@
                 pendingAnimationCommands.length = 0;
                 console.log('[synth_webui] Processing last pending animation command after VRM load (dropped', Math.max(0, count - 1), '):', last?.state, last?.animation);
                 if (last && last.state && animationHandler) {
+                    // If WEB_DEBUG pause is active, keep the last remote payload for resync but do not apply.
+                    try {
+                        if (window.__synth_web_debug_enabled && window.__synth_debug_pause_all) {
+                            window.__synth_debug_last_remote.animation = last;
+                            window.__synth_debug_last_remote_at.animation = Date.now();
+                            return;
+                        }
+                    } catch (e) { /* ignore */ }
+
                     // If the pending command contained a rich animation_state, forward it first
                     // so local managers (blink/eye/expressions) are configured before playback.
                     try {
@@ -6551,7 +6601,6 @@
             console.log('[synth_webui] VRM loader configured with resource path: /skins/temp/');
         }
     </script>
-    </script>
     <script type="module">
         import * as THREE from 'three';
         import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -6718,6 +6767,23 @@
 
             // Animation handler
             class AnimationHandler {
+                _flushFaceNow() {
+                    // Apply expression weights to the mesh immediately.
+                    // This is important when WEB_DEBUG pause disables VRM.update().
+                    try {
+                        if (!this.vrm) return;
+                        // VRM0
+                        if (this.vrm.blendShapeProxy && typeof this.vrm.blendShapeProxy.update === 'function') {
+                            this.vrm.blendShapeProxy.update();
+                        }
+                        // VRM1
+                        const em = this.vrm.expressionManager || (this.vrm.userData && this.vrm.userData.vrmExpressionManager) || null;
+                        if (em && typeof em.update === 'function') {
+                            em.update();
+                        }
+                    } catch (e) { /* ignore */ }
+                }
+
                 _getFaceController() {
                     try {
                         if (!this.vrm) return null;
@@ -6767,6 +6833,120 @@
                         return 0;
                     } catch (e) {
                         return 0;
+                    }
+                }
+
+                // -----------------------------
+                // WEB_DEBUG: manual overrides (session-local)
+                // -----------------------------
+                setDebugFaceOverride(key, value) {
+                    try {
+                        const k = (key !== undefined && key !== null) ? String(key) : '';
+                        if (!k) return;
+                        if (!this._debugFaceOverrides || typeof this._debugFaceOverrides !== 'object') this._debugFaceOverrides = {};
+                        if (value === null || value === undefined || value === '') {
+                            delete this._debugFaceOverrides[k];
+                            // Best-effort immediate apply (useful during pause).
+                            try {
+                                if (!this._debugFaceDirty || typeof this._debugFaceDirty !== 'object') this._debugFaceDirty = {};
+                                this._debugFaceDirty[k] = null;
+                                if (!this._debugFaceApplyRaf) {
+                                    this._debugFaceApplyRaf = requestAnimationFrame(() => {
+                                        try {
+                                            const dirty = this._debugFaceDirty || {};
+                                            this._debugFaceDirty = {};
+                                            this._debugFaceApplyRaf = 0;
+                                            Object.keys(dirty).forEach((kk) => {
+                                                try {
+                                                    const vv = dirty[kk];
+                                                    if (vv === null || vv === undefined) {
+                                                        try { if (this._expressionState) delete this._expressionState[kk]; } catch (e) { /* ignore */ }
+                                                        this._setFaceValue(kk, 0);
+                                                    } else {
+                                                        try { this._expressionState = this._expressionState || {}; this._expressionState[kk] = vv; } catch (e) { /* ignore */ }
+                                                        this._setFaceValue(kk, vv);
+                                                    }
+                                                } catch (e) { /* ignore */ }
+                                            });
+                                            try { this._flushFaceNow(); } catch (e) { /* ignore */ }
+                                        } catch (e) { /* ignore */ }
+                                    });
+                                }
+                            } catch (e) { /* ignore */ }
+                            return;
+                        }
+                        const v = Math.max(0, Math.min(1, Number(value) || 0));
+                        this._debugFaceOverrides[k] = v;
+
+                        // Throttle immediate face application to avoid stutter while dragging sliders.
+                        try {
+                            if (!this._debugFaceDirty || typeof this._debugFaceDirty !== 'object') this._debugFaceDirty = {};
+                            this._debugFaceDirty[k] = v;
+                            if (!this._debugFaceApplyRaf) {
+                                this._debugFaceApplyRaf = requestAnimationFrame(() => {
+                                    try {
+                                        const dirty = this._debugFaceDirty || {};
+                                        this._debugFaceDirty = {};
+                                        this._debugFaceApplyRaf = 0;
+                                        Object.keys(dirty).forEach((kk) => {
+                                            try {
+                                                const vv = dirty[kk];
+                                                if (vv === null || vv === undefined) {
+                                                    try { if (this._expressionState) delete this._expressionState[kk]; } catch (e) { /* ignore */ }
+                                                    this._setFaceValue(kk, 0);
+                                                } else {
+                                                    try { this._expressionState = this._expressionState || {}; this._expressionState[kk] = vv; } catch (e) { /* ignore */ }
+                                                    this._setFaceValue(kk, vv);
+                                                }
+                                            } catch (e) { /* ignore */ }
+                                        });
+                                        try { this._flushFaceNow(); } catch (e) { /* ignore */ }
+                                    } catch (e) { /* ignore */ }
+                                });
+                            }
+                        } catch (e) { /* ignore */ }
+                    } catch (e) { /* ignore */ }
+                }
+
+                clearDebugFaceOverrides() {
+                    try {
+                        this._debugFaceOverrides = {};
+                    } catch (e) { /* ignore */ }
+                }
+
+                getDebugFaceOverrides() {
+                    try {
+                        return (this._debugFaceOverrides && typeof this._debugFaceOverrides === 'object') ? this._debugFaceOverrides : {};
+                    } catch (e) {
+                        return {};
+                    }
+                }
+
+                setDebugEmotionOverride(name, intensity) {
+                    try {
+                        const k = (name !== undefined && name !== null) ? String(name) : '';
+                        if (!k) return;
+                        if (!this._debugEmotionOverrides || typeof this._debugEmotionOverrides !== 'object') this._debugEmotionOverrides = {};
+                        if (intensity === null || intensity === undefined || intensity === '') {
+                            delete this._debugEmotionOverrides[k];
+                            return;
+                        }
+                        const v = Math.max(0, Math.min(1, Number(intensity) || 0));
+                        this._debugEmotionOverrides[k] = v;
+                    } catch (e) { /* ignore */ }
+                }
+
+                clearDebugEmotionOverrides() {
+                    try {
+                        this._debugEmotionOverrides = {};
+                    } catch (e) { /* ignore */ }
+                }
+
+                getDebugEmotionOverrides() {
+                    try {
+                        return (this._debugEmotionOverrides && typeof this._debugEmotionOverrides === 'object') ? this._debugEmotionOverrides : {};
+                    } catch (e) {
+                        return {};
                     }
                 }
 
@@ -6975,9 +7155,15 @@
                             this._expressionsTicking = true;
                             const tick = (now) => {
                                 try {
-                                    const dt = Math.min(0.1, (now - (this._lastTickTime || now)) / 1000);
-                                    this._lastTickTime = now;
-                                    try { this.applyExpressionsForFrame(this._lastAnimationState, dt); } catch (e) {}
+                                    const paused = !!(window.__synth_web_debug_enabled && window.__synth_debug_pause_all);
+                                    if (paused) {
+                                        // Freeze expression ticking during pause.
+                                        this._lastTickTime = now;
+                                    } else {
+                                        const dt = Math.min(0.1, (now - (this._lastTickTime || now)) / 1000);
+                                        this._lastTickTime = now;
+                                        try { this.applyExpressionsForFrame(this._lastAnimationState, dt); } catch (e) {}
+                                    }
                                 } catch (e) {}
                                 if (this._expressionsTicking) requestAnimationFrame(tick);
                             };
@@ -7035,12 +7221,13 @@
                                 if (section && typeof section.start_frame === 'number' && typeof section.end_frame === 'number') {
                                     const start = section.start_frame;
                                     const end = section.end_frame;
-                                    const span = Math.max(1, end - start);
+                                    // Descriptors use inclusive frame indices.
+                                    const span = Math.max(1, (end - start) + 1);
                                     const tFrames = Math.floor(elapsed * fps);
                                     if (phase === 'loop') {
                                         currentFrame = start + (tFrames % span);
                                     } else {
-                                        currentFrame = start + Math.min(span, tFrames);
+                                        currentFrame = start + Math.min(span - 1, tFrames);
                                     }
                                 } else {
                                     currentFrame = Math.floor(elapsed * fps);
@@ -7072,6 +7259,28 @@
                         // Respect expression priority: higher priority wins on conflicts
                         const exprs = (state.expressions || []).slice().map(e => Object.assign({ priority: 0 }, e));
 
+                        // Emotion state injection: treat state.emotions as a synthetic expression keyed by emotion name.
+                        // This allows persona.json blendshape_map.emotions[...] (or the client fallback presets) to drive face.
+                        try {
+                            const emObj = (state && state.emotions && typeof state.emotions === 'object') ? state.emotions : null;
+                            const valuesObj = (emObj && emObj.values && typeof emObj.values === 'object') ? emObj.values
+                                            : ((emObj && typeof emObj === 'object') ? emObj : null);
+                            if (valuesObj && typeof valuesObj === 'object' && !Array.isArray(valuesObj)) {
+                                const t = {};
+                                Object.keys(valuesObj).forEach((k) => {
+                                    if (!k) return;
+                                    if (/^\d+$/.test(String(k))) return;
+                                    const raw = Number(valuesObj[k]);
+                                    if (!Number.isFinite(raw)) return;
+                                    const v01 = (raw > 1) ? (raw / 10.0) : raw;
+                                    t[String(k)] = Math.max(0, Math.min(1, v01));
+                                });
+                                if (Object.keys(t).length > 0) {
+                                    exprs.push({ targets: t, priority: 15, source: 'emotions_state' });
+                                }
+                            }
+                        } catch (e) { /* ignore */ }
+
                         // Emotion overlay injection (client-side): during the scheduled window,
                         // inject a synthetic expression keyed by emotion name so persona.json
                         // can map it via blendshape_map.emotions[emotion].
@@ -7088,6 +7297,24 @@
                                         t[String(ov.emotion)] = Math.max(0, Math.min(1, Number(ov.intensity) || 0));
                                         exprs.push({ targets: t, priority: (ov.priority || 25), source: 'emotion_overlay' });
                                     }
+                                }
+                            }
+                        } catch (e) { /* ignore */ }
+
+                        // WEB_DEBUG feelings override: inject persistent targets keyed by emotion name.
+                        // Persona can map these emotion keys to actual blendshape presets.
+                        try {
+                            const dbg = (this._debugEmotionOverrides && typeof this._debugEmotionOverrides === 'object') ? this._debugEmotionOverrides : null;
+                            if (dbg) {
+                                const t = {};
+                                Object.keys(dbg).forEach((k) => {
+                                    const v = Number(dbg[k]);
+                                    if (!k) return;
+                                    if (!Number.isFinite(v)) return;
+                                    t[String(k)] = Math.max(0, Math.min(1, v));
+                                });
+                                if (Object.keys(t).length > 0) {
+                                    exprs.push({ targets: t, priority: 100, source: 'debug_emotion_override' });
                                 }
                             }
                         } catch (e) { /* ignore */ }
@@ -7230,6 +7457,91 @@
                                     }
                                 }
 
+                                // Fallback: emotion keys -> viseme presets (when persona.json has no mapping).
+                                // This keeps the system usable even if the persona doesn't define blendshape_map.emotions.
+                                try {
+                                    const raw = String(key || nkey || '').trim();
+                                    const ek = raw.toLowerCase();
+                                    const presetAliases = {
+                                        // common synonyms
+                                        happiness: 'happy',
+                                        joyful: 'joy',
+                                        joyfulness: 'joy',
+                                        smiling: 'happy',
+                                        sadness: 'sad',
+                                        angry: 'anger',
+                                        furious: 'anger',
+                                        rage: 'anger',
+                                        surprised: 'surprise',
+                                        fear: 'scared',
+                                        frightened: 'scared',
+                                        disgusted: 'disgust',
+                                    };
+
+                                    const builtInPresets = {
+                                        // Values are multipliers (0..1) applied to the emotion intensity.
+                                        // Keys are viseme-like names that work with VRM1 presets and can be
+                                        // mapped in persona.json via blendshape_map.visemes.
+                                        happy:    { ee: 0.28, aa: 0.12, oh: 0.06 },
+                                        joy:      { ee: 0.26, aa: 0.10, oh: 0.05 },
+                                        sad:      { oh: 0.16, ih: 0.10, ou: 0.06 },
+                                        anger:    { aa: 0.18, ou: 0.10, ih: 0.06 },
+                                        surprise: { oh: 0.40, aa: 0.10 },
+                                        scared:   { oh: 0.26, ih: 0.14, ee: 0.08 },
+                                        disgust:  { ou: 0.18, ih: 0.10, oh: 0.06 },
+                                        neutral:  { },
+                                    };
+
+                                    const userPresets = (window && window.__synth_emotion_face_presets && typeof window.__synth_emotion_face_presets === 'object')
+                                        ? window.__synth_emotion_face_presets
+                                        : null;
+
+                                    const lookupKey = (userPresets && (userPresets[ek] || userPresets[presetAliases[ek]])) ? (userPresets[ek] ? ek : presetAliases[ek]) : null;
+                                    const preset = (userPresets && lookupKey) ? userPresets[lookupKey]
+                                                 : (builtInPresets[ek] || builtInPresets[presetAliases[ek]] || null);
+
+                                    if (preset && typeof preset === 'object' && Object.keys(preset).length) {
+                                        Object.keys(preset).forEach((bsKey) => {
+                                            const bs = String(bsKey || '').trim();
+                                            const outKey = normalizeKey(bs);
+                                            const mult = Number(preset[bsKey]);
+                                            if (!Number.isFinite(mult)) return;
+                                            const val = Math.max(0, Math.min(1, mult)) * intensity;
+
+                                            const applyOne = (k2) => {
+                                                const kNorm = normalizeKey(String(k2));
+                                                if ((assignedPriority[kNorm] === undefined) || (p > assignedPriority[kNorm])) {
+                                                    desired[kNorm] = Math.max(desired[kNorm] || 0, val);
+                                                    assignedPriority[kNorm] = p;
+                                                }
+                                            };
+
+                                            // Convenience aliases for common "emotion->mouth" shorthand
+                                            // - uu is commonly used for VRM "ou"
+                                            // - ai is approximated via aa + ih
+                                            // - oe is approximated via oh + ee
+                                            if (outKey.toLowerCase() === 'uu') {
+                                                applyOne('uu');
+                                                applyOne('ou');
+                                                return;
+                                            }
+                                            if (outKey.toLowerCase() === 'ai') {
+                                                applyOne('aa');
+                                                applyOne('ih');
+                                                return;
+                                            }
+                                            if (outKey.toLowerCase() === 'oe') {
+                                                applyOne('oh');
+                                                applyOne('ee');
+                                                return;
+                                            }
+
+                                            applyOne(outKey);
+                                        });
+                                        return;
+                                    }
+                                } catch (e) { /* ignore */ }
+
                                 // Fallback: use key as blendshape name
                                 const outKey = nkey || key;
                                 try {
@@ -7300,6 +7612,19 @@
                                     }
                                 }
                             } catch (e) { /* ignore */ }
+                        } catch (e) { /* ignore */ }
+
+                        // WEB_DEBUG facial override: force desired values (wins over descriptors).
+                        try {
+                            const dbg = (this._debugFaceOverrides && typeof this._debugFaceOverrides === 'object') ? this._debugFaceOverrides : null;
+                            if (dbg) {
+                                Object.keys(dbg).forEach((k) => {
+                                    if (!k) return;
+                                    const v = Number(dbg[k]);
+                                    if (!Number.isFinite(v)) return;
+                                    desired[normalizeKey(String(k))] = Math.max(0, Math.min(1, v));
+                                });
+                            }
                         } catch (e) { /* ignore */ }
 
                         // Apply smoothing/interpolation towards desired values
@@ -9709,7 +10034,7 @@
                 async startTemporaryLoop(actionName, animationFile, startFrame, endFrame, fps = 30) {
                     // Create an ephemeral looping action that will override the current animation until cleared
                     try {
-                        console.log(`[AnimationHandler] startTemporaryLoop called: ${actionName}, ${animationFile}, frames ${startFrame}-${endFrame}`);
+                        console.log(`[AnimationHandler] startTemporaryLoop called: ${actionName}, ${animationFile}, frames ${startFrame}-${endFrame} (inclusive)`);
 
                         // Clear existing debug override if present
                         if (this._debugOverride && this._debugOverride.action) {
@@ -9732,11 +10057,16 @@
                             return null;
                         }
 
-                        // Create subclip using frame indices
+                        // Create subclip using frame indices.
+                        // Note: THREE.AnimationUtils.subclip expects an *exclusive* end frame.
+                        // Our UI + descriptors use inclusive end_frame, so we add +1.
                         const tfps = Number.isFinite(fps) ? fps : 30;
                         const subName = `debug:${actionName}:${animationFile || clip.name}:${startFrame}-${endFrame}`;
-                        const loopClip = THREE.AnimationUtils.subclip(clip, subName, Math.max(0, Math.floor(startFrame)), Math.max(1, Math.floor(endFrame)), tfps);
-                        try { loopClip._meta = loopClip._meta || {}; loopClip._meta.loopFrames = { startFrame: startFrame, endFrame: endFrame, fps: tfps }; } catch (e) { /* ignore */ }
+                        const sInc = Math.max(0, Math.floor(Number(startFrame) || 0));
+                        const eInc = Math.max(sInc, Math.floor(Number(endFrame) || 0));
+                        const eExc = Math.max(sInc + 1, eInc + 1);
+                        const loopClip = THREE.AnimationUtils.subclip(clip, subName, sInc, eExc, tfps);
+                        try { loopClip._meta = loopClip._meta || {}; loopClip._meta.loopFrames = { startFrame: sInc, endFrame: eInc, fps: tfps }; } catch (e) { /* ignore */ }
 
                         // Ensure the clip intends to repeat
                         loopClip.loop = THREE.LoopRepeat;
@@ -10265,12 +10595,29 @@
                     try {
                         const stateToStart = desiredState || 'idle';
                         const playOnce = !!(desiredDescriptor && desiredDescriptor.play_once);
-                        await animationHandler.startAction(stateToStart, desiredAnimation || null, playOnce, null, desiredDescriptor || null);
-                        console.log('[synth_webui] Started initial animation state:', stateToStart, desiredAnimation || null);
+
+                        // If WEB_DEBUG pause is active, do not mutate playback; keep state for resync.
+                        if (window.__synth_web_debug_enabled && window.__synth_debug_pause_all) {
+                            try {
+                                window.__synth_debug_last_remote.animation_state = {
+                                    type: 'animation_state',
+                                    state: stateToStart,
+                                    animation: desiredAnimation || null,
+                                    descriptor: desiredDescriptor || null,
+                                    animation_state: window.__synth_last_rich_animation_state || null,
+                                };
+                                window.__synth_debug_last_remote_at.animation_state = Date.now();
+                            } catch (e) { /* ignore */ }
+                        } else {
+                            await animationHandler.startAction(stateToStart, desiredAnimation || null, playOnce, null, desiredDescriptor || null);
+                            console.log('[synth_webui] Started initial animation state:', stateToStart, desiredAnimation || null);
+                        }
                     } catch (e) {
                         console.warn('[synth_webui] Failed to start initial animation state, falling back to idle:', e);
                         try {
-                            await animationHandler.startAction('idle');
+                            if (!(window.__synth_web_debug_enabled && window.__synth_debug_pause_all)) {
+                                await animationHandler.startAction('idle');
+                            }
                         } catch (_e) {
                             // ignore
                         }
@@ -10284,6 +10631,15 @@
                         pendingAnimationCommands.length = 0;
                         console.log('[synth_webui] Processing last pending animation command (dropped', Math.max(0, count - 1), '):', last?.state, last?.animation);
                         if (last && last.state && animationHandler) {
+                            // If WEB_DEBUG pause is active, keep last remote payload for resync but do not apply.
+                            try {
+                                if (window.__synth_web_debug_enabled && window.__synth_debug_pause_all) {
+                                    window.__synth_debug_last_remote.animation = last;
+                                    window.__synth_debug_last_remote_at.animation = Date.now();
+                                    return;
+                                }
+                            } catch (e) { /* ignore */ }
+
                             const animationFileOrUrl = last.animation || null;
                             const lastPlayOnce = (last.descriptor && last.descriptor.play_once) || (last.loop === false);
                             const initialPlayOnce = !!(desiredDescriptor && desiredDescriptor.play_once);
@@ -10485,10 +10841,20 @@
                         }
                     } catch (e) { /* ignore */ }
 
-                    currentVRM.update(delta);
+                    try {
+                        const paused = !!(window.__synth_web_debug_enabled && window.__synth_debug_pause_all);
+                        if (!paused) currentVRM.update(delta);
+                    } catch (e) {
+                        currentVRM.update(delta);
+                    }
                 }
                 if (currentMixer) {
-                    currentMixer.update(delta);
+                    try {
+                        const paused = !!(window.__synth_web_debug_enabled && window.__synth_debug_pause_all);
+                        if (!paused) currentMixer.update(delta);
+                    } catch (e) {
+                        currentMixer.update(delta);
+                    }
                     
                     // Monitor loop status and keep it alive
                     if (animationHandler && animationHandler.currentActionPhase === 'loop') {
@@ -10622,152 +10988,752 @@
             try {
                 const synthDebug = document.getElementById('synth-debug');
                 const debugEnabled = synthDebug && (synthDebug.dataset.debugEnabled === '1' || synthDebug.dataset.debugEnabled === 'true');
+                try { window.__synth_web_debug_enabled = !!debugEnabled; } catch (e) { /* ignore */ }
                 if (debugEnabled) {
-                    console.log('[synth_webui] WEB_DEBUG enabled — injecting animation debug panel');
+                    console.log('[synth_webui] WEB_DEBUG enabled — initializing advanced debug window');
 
-                    // Create draggable debug panel
-                    const panel = document.createElement('div');
-                    panel.id = 'animation-debug-panel';
-                    panel.style.position = 'fixed';
-                    panel.style.right = '18px';
-                    panel.style.bottom = '18px';
-                    panel.style.width = '340px';
-                    panel.style.maxWidth = 'calc(100% - 40px)';
-                    panel.style.zIndex = 99999;
-                    panel.style.background = 'rgba(12,12,12,0.9)';
-                    panel.style.color = '#fff';
-                    panel.style.border = '1px solid rgba(255,255,255,0.06)';
-                    panel.style.padding = '8px';
-                    panel.style.borderRadius = '8px';
-                    panel.style.fontSize = '12px';
-                    panel.style.boxShadow = '0 8px 30px rgba(0,0,0,0.7)';
-                    panel.style.userSelect = 'none';
+                    const clamp01 = (x) => {
+                        const v = Number(x);
+                        if (!Number.isFinite(v)) return 0;
+                        return Math.max(0, Math.min(1, v));
+                    };
 
-                    panel.innerHTML = `
-                        <div id="animation-debug-header" style="display:flex;align-items:center;justify-content:space-between;cursor:move;margin-bottom:6px;">
-                            <div style="font-weight:700;">Animation Debug</div>
-                            <div style="font-size:11px;opacity:0.7">Session only</div>
+                    // UI pause flag is tracked locally.
+                    // The render/WS freeze gates elsewhere still additionally check __synth_web_debug_enabled.
+                    const isPaused = () => !!window.__synth_debug_pause_all;
+
+                    const ensureDock = () => {
+                        let dock = document.getElementById('synth-minimized-stack');
+                        if (dock) return dock;
+                        dock = document.createElement('div');
+                        dock.id = 'synth-minimized-stack';
+                        dock.style.position = 'fixed';
+                        dock.style.right = '18px';
+                        dock.style.bottom = '18px';
+                        dock.style.display = 'flex';
+                        dock.style.flexDirection = 'column';
+                        dock.style.gap = '8px';
+                        dock.style.zIndex = 99999;
+                        dock.style.alignItems = 'flex-end';
+                        document.body.appendChild(dock);
+                        return dock;
+                    };
+
+                    const dock = ensureDock();
+                    // If chat has a restore button, stack it with debug (WEB_DEBUG-only).
+                    try {
+                        if (chatToggleBtn && chatToggleBtn.parentElement !== dock) {
+                            dock.appendChild(chatToggleBtn);
+                            try { chatToggleBtn.style.position = 'static'; chatToggleBtn.style.right = ''; chatToggleBtn.style.bottom = ''; } catch (e) { /* ignore */ }
+                        }
+                    } catch (e) { /* ignore */ }
+
+                    // Build floating debug window
+                    const win = document.createElement('div');
+                    win.id = 'synth-advanced-debug';
+                    win.style.position = 'fixed';
+                    win.style.right = '18px';
+                    win.style.bottom = '86px';
+                    win.style.width = '420px';
+                    win.style.maxWidth = 'calc(100% - 40px)';
+                    win.style.minWidth = '320px';
+                    win.style.height = '520px';
+                    win.style.maxHeight = 'calc(100vh - 140px)';
+                    win.style.minHeight = '240px';
+                    win.style.zIndex = 99998;
+                    win.style.background = 'var(--surface)';
+                    win.style.color = 'var(--text)';
+                    win.style.border = '1px solid var(--border)';
+                    win.style.borderRadius = '12px';
+                    win.style.overflow = 'hidden';
+                    win.style.resize = 'both';
+
+                    win.innerHTML = `
+                        <div id="synth-debug-title-bar" style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 12px;border-bottom:1px solid var(--border);cursor:move;user-select:none;">
+                            <div style="display:flex;flex-direction:column;gap:2px;min-width:0;">
+                                <div style="font-weight:700;">Debug</div>
+                                <div style="font-size:11px;color:var(--text-soft);">Session only · WEB_DEBUG</div>
+                            </div>
+                            <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+                                <button id="synth-debug-pause" class="pill secondary" type="button">Pause</button>
+                                <button id="synth-debug-resync" class="pill secondary" type="button">Resync</button>
+                                <button id="synth-debug-reset" class="pill" type="button">Reset</button>
+                                <button id="synth-debug-minimize" class="pill secondary" type="button">—</button>
+                            </div>
                         </div>
-                        <div id="animation-debug-body" style="display:flex;flex-direction:column;gap:6px;">
-                            <div id="animation-debug-status" style="font-size:12px;line-height:1.1;">
-                                <div>Current: <span id="animation-debug-current">—</span></div>
-                                <div>Phase: <span id="animation-debug-phase">—</span></div>
-                                <div>Frame: <span id="animation-debug-frame">—</span></div>
-                            </div>
+                        <div id="synth-debug-body" style="padding:12px;display:flex;flex-direction:column;gap:12px;overflow:auto;height:calc(100% - 52px);">
 
-                            <div style="display:flex;gap:6px;align-items:center;">
-                                <select id="animation-debug-type" style="flex:1;padding:6px;border-radius:6px;background:#111;border:1px solid rgba(255,255,255,0.06);color:#fff;"></select>
-                                <select id="animation-debug-file" style="flex:2;padding:6px;border-radius:6px;background:#111;border:1px solid rgba(255,255,255,0.06);color:#fff;"></select>
-                            </div>
-
-                            <div style="display:flex;gap:6px;">
-                                <input id="animation-debug-start" type="number" placeholder="start" style="flex:1;padding:6px;border-radius:6px;background:#111;border:1px solid rgba(255,255,255,0.06);color:#fff;" />
-                                <input id="animation-debug-end" type="number" placeholder="end" style="flex:1;padding:6px;border-radius:6px;background:#111;border:1px solid rgba(255,255,255,0.06);color:#fff;" />
-                            </div>
-
-                            <div style="display:flex;gap:6px;">
-                                <button id="animation-debug-start-loop" style="flex:1;padding:6px;border-radius:6px;background:linear-gradient(0deg,#0b7be6,#0b62d7);border:0;color:#fff;">Start Temp Loop</button>
-                                <button id="animation-debug-clear-loop" style="flex:1;padding:6px;border-radius:6px;background:#333;border:1px solid rgba(255,255,255,0.06);color:#fff;">Clear Override</button>
-                            </div>
-
-                            <div style="display:flex;gap:6px;justify-content:space-between;align-items:center;font-size:11px;opacity:0.8;">
-                                <div id="animation-debug-last" style="flex:1">Loaded actions: <span id="animation-debug-loaded">0</span></div>
-                                <div style="display:flex;gap:6px;">
-                                    <button id="animation-debug-refresh-files" style="padding:6px;border-radius:6px;background:#222;border:1px solid rgba(255,255,255,0.03);color:#fff;">Refresh</button>
+                            <div class="card" style="margin:0;">
+                                <h2 style="margin:0 0 8px 0;">Status</h2>
+                                <div style="font-size:12px;color:var(--text-soft);line-height:1.4;">
+                                    <div>Paused: <span id="synth-debug-status-paused">—</span></div>
+                                    <div>Current: <span id="synth-debug-status-current">—</span></div>
+                                    <div>Phase: <span id="synth-debug-status-phase">—</span></div>
+                                    <div>Frame: <span id="synth-debug-status-frame">—</span></div>
+                                    <div>Remote: <span id="synth-debug-status-remote">—</span></div>
                                 </div>
                             </div>
-                        </div>`;
 
-                    document.body.appendChild(panel);
+                            <div class="card" style="margin:0;">
+                                <h2 style="margin:0 0 8px 0;">Loop Override</h2>
+                                <div style="display:flex;gap:8px;align-items:center;">
+                                    <select id="synth-debug-loop-type" style="flex:1;min-width:0;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);"></select>
+                                    <select id="synth-debug-loop-file" style="flex:2;min-width:0;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);"></select>
+                                </div>
+                                <div style="display:flex;gap:8px;margin-top:8px;">
+                                    <input id="synth-debug-loop-start" type="number" placeholder="start" style="flex:1;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);" />
+                                    <input id="synth-debug-loop-end" type="number" placeholder="end" style="flex:1;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);" />
+                                    <input id="synth-debug-loop-fps" type="number" placeholder="fps" style="width:86px;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);" />
+                                </div>
+                                <div style="display:flex;gap:8px;margin-top:8px;">
+                                    <button id="synth-debug-loop-start-btn" class="pill" type="button" style="flex:1;">Start</button>
+                                    <button id="synth-debug-loop-clear-btn" class="pill secondary" type="button" style="flex:1;">Clear</button>
+                                    <button id="synth-debug-loop-refresh" class="pill secondary" type="button">Refresh</button>
+                                </div>
+                                <div style="margin-top:8px;font-size:11px;color:var(--text-soft);">Loaded: <span id="synth-debug-loop-loaded">0</span></div>
+                            </div>
 
-                    // Dragging
+                            <div class="card" style="margin:0;">
+                                <h2 style="margin:0 0 8px 0;">Feelings</h2>
+                                <div id="synth-debug-feelings" style="display:flex;flex-direction:column;gap:8px;"></div>
+                                <div style="display:flex;gap:8px;margin-top:8px;">
+                                    <button id="synth-debug-feelings-clear" class="pill secondary" type="button">Clear Overrides</button>
+                                </div>
+                            </div>
+
+                            <div class="card" style="margin:0;">
+                                <h2 style="margin:0 0 8px 0;">Facial Morphs</h2>
+                                <input id="synth-debug-face-filter" placeholder="filter…" style="width:100%;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);" />
+                                <div id="synth-debug-face-list" style="margin-top:8px;max-height:240px;overflow:auto;display:flex;flex-direction:column;gap:8px;"></div>
+                                <div style="display:flex;gap:8px;margin-top:8px;">
+                                    <button id="synth-debug-face-clear" class="pill secondary" type="button">Clear Overrides</button>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+
+                    document.body.appendChild(win);
+
+                    // Dragging (simple, chat-like)
                     (function makeDraggable(el) {
-                        const header = document.getElementById('animation-debug-header');
-                        let dragging = false, startX = 0, startY = 0, startRight = 0, startBottom = 0;
-                        header.addEventListener('pointerdown', (ev) => { dragging = true; startX = ev.clientX; startY = ev.clientY; startRight = parseFloat(getComputedStyle(el).right); startBottom = parseFloat(getComputedStyle(el).bottom); document.body.style.userSelect = 'none'; });
+                        const header = el.querySelector('#synth-debug-title-bar');
+                        if (!header) return;
+                        let dragging = false;
+                        let startX = 0, startY = 0;
+                        let startRight = 0, startBottom = 0;
+                        header.addEventListener('pointerdown', (ev) => {
+                            try {
+                                // Don't start dragging when the user is clicking controls in the title bar.
+                                const t = ev && ev.target ? ev.target : null;
+                                if (t && typeof t.closest === 'function') {
+                                    if (t.closest('button, input, select, textarea, a')) return;
+                                }
+                                dragging = true;
+                                startX = ev.clientX;
+                                startY = ev.clientY;
+                                const cs = getComputedStyle(el);
+                                startRight = parseFloat(cs.right) || 0;
+                                startBottom = parseFloat(cs.bottom) || 0;
+                                el.setPointerCapture(ev.pointerId);
+                            } catch (e) { /* ignore */ }
+                        });
                         window.addEventListener('pointermove', (ev) => {
                             if (!dragging) return;
-                            const dx = ev.clientX - startX; const dy = ev.clientY - startY;
+                            const dx = ev.clientX - startX;
+                            const dy = ev.clientY - startY;
                             el.style.right = (startRight - dx) + 'px';
                             el.style.bottom = (startBottom - dy) + 'px';
                         });
-                        window.addEventListener('pointerup', () => { dragging = false; document.body.style.userSelect = ''; });
-                    })(panel);
+                        window.addEventListener('pointerup', () => { dragging = false; });
+                    })(win);
 
-                    // Fill action types
+                    // Dock button for minimized state
+                    let debugDockBtn = null;
+                    const ensureDebugDockBtn = () => {
+                        if (debugDockBtn && debugDockBtn.isConnected) return debugDockBtn;
+                        debugDockBtn = document.createElement('button');
+                        debugDockBtn.type = 'button';
+                        debugDockBtn.className = 'pill secondary';
+                        debugDockBtn.textContent = 'Debug';
+                        debugDockBtn.addEventListener('click', () => {
+                            try { win.style.display = ''; } catch (e) { /* ignore */ }
+                            try { if (debugDockBtn && debugDockBtn.parentElement) debugDockBtn.parentElement.removeChild(debugDockBtn); } catch (e) { /* ignore */ }
+                        });
+                        return debugDockBtn;
+                    };
+
+                    const minimizeBtn = win.querySelector('#synth-debug-minimize');
+                    if (minimizeBtn) {
+                        minimizeBtn.addEventListener('click', () => {
+                            try { win.style.display = 'none'; } catch (e) { /* ignore */ }
+                            try { dock.appendChild(ensureDebugDockBtn()); } catch (e) { /* ignore */ }
+                        });
+                    }
+
+                    async function resyncFromBackend() {
+                        try {
+                            if (!animationHandler) return;
+                            if (isPaused()) return;
+
+                            // Apply rich state first if we have it (blink/eye/expressions)
+                            try {
+                                const st = window.__synth_last_rich_animation_state || null;
+                                if (st && typeof animationHandler.applyAnimationState === 'function') {
+                                    animationHandler.applyAnimationState(st);
+                                }
+                            } catch (e) { /* ignore */ }
+
+                            try {
+                                const resp = await fetch('/api/animation_state');
+                                if (resp && resp.ok) {
+                                    const summary = await resp.json();
+                                    if (summary && summary.state) {
+                                        const playOnce = !!(summary.descriptor && summary.descriptor.play_once);
+                                        await animationHandler.startAction(summary.state, summary.animation || null, playOnce, null, summary.descriptor || null);
+                                        return;
+                                    }
+                                }
+                            } catch (e) {
+                                // ignore and fall back
+                            }
+
+                            // Fallback: last remote animation payload
+                            try {
+                                const last = (window.__synth_debug_last_remote && window.__synth_debug_last_remote.animation) ? window.__synth_debug_last_remote.animation : null;
+                                if (last && last.state) {
+                                    const playOnce = (last.descriptor && last.descriptor.play_once) || (last.loop === false);
+                                    if (last.animation_state && typeof animationHandler.applyAnimationState === 'function') {
+                                        animationHandler.applyAnimationState(last.animation_state);
+                                    }
+                                    await animationHandler.startAction(last.state, last.animation || null, !!playOnce, last.play_section || null, last.descriptor || null);
+                                }
+                            } catch (e) { /* ignore */ }
+                        } catch (e) { /* ignore */ }
+                    }
+
+                    const pauseBtn = win.querySelector('#synth-debug-pause');
+                    const resyncBtn = win.querySelector('#synth-debug-resync');
+                    const resetBtn = win.querySelector('#synth-debug-reset');
+
+                    const setPaused = async (paused) => {
+                        try {
+                            window.__synth_debug_pause_all = !!paused;
+                            // Ensure WEB_DEBUG behavior stays enabled while the debug window is used.
+                            window.__synth_web_debug_enabled = true;
+                        } catch (e) { /* ignore */ }
+                        try {
+                            if (animationHandler) {
+                                if (paused) {
+                                    try { if (typeof animationHandler._stopBlinkLoop === 'function') animationHandler._stopBlinkLoop(); } catch (e) { /* ignore */ }
+                                    try { if (typeof animationHandler._stopEyeMovement === 'function') animationHandler._stopEyeMovement(); } catch (e) { /* ignore */ }
+                                } else {
+                                    try { if (animationHandler._blinkAutoEnabled && typeof animationHandler._startBlinkLoop === 'function') animationHandler._startBlinkLoop(); } catch (e) { /* ignore */ }
+                                    try { if (animationHandler._eyeAutoEnabled && typeof animationHandler._startEyeMovement === 'function') animationHandler._startEyeMovement(); } catch (e) { /* ignore */ }
+                                }
+                            }
+                        } catch (e) { /* ignore */ }
+
+                        try {
+                            if (pauseBtn) pauseBtn.textContent = paused ? 'Resume' : 'Pause';
+                        } catch (e) { /* ignore */ }
+                        if (!paused) {
+                            await resyncFromBackend();
+                        }
+                    };
+
+                    if (pauseBtn) {
+                        pauseBtn.addEventListener('click', async () => {
+                            try { await setPaused(!isPaused()); } catch (e) { /* ignore */ }
+                        });
+                    }
+                    if (resyncBtn) {
+                        resyncBtn.addEventListener('click', async () => { await resyncFromBackend(); });
+                    }
+                    if (resetBtn) {
+                        resetBtn.addEventListener('click', async () => {
+                            try { if (animationHandler) { animationHandler.clearDebugFaceOverrides?.(); animationHandler.clearDebugEmotionOverrides?.(); animationHandler.clearTemporaryOverride?.(); } } catch (e) { /* ignore */ }
+                            await setPaused(false);
+                            await resyncFromBackend();
+                        });
+                    }
+
+                    // Loop override controls
                     const types = ['idle','think','talk','write','touch'];
-                    const selType = document.getElementById('animation-debug-type');
-                    const selFile = document.getElementById('animation-debug-file');
-                    const startInput = document.getElementById('animation-debug-start');
-                    const endInput = document.getElementById('animation-debug-end');
+                    const selType = win.querySelector('#synth-debug-loop-type');
+                    const selFile = win.querySelector('#synth-debug-loop-file');
+                    const startInput = win.querySelector('#synth-debug-loop-start');
+                    const endInput = win.querySelector('#synth-debug-loop-end');
+                    const fpsInput = win.querySelector('#synth-debug-loop-fps');
+                    const loadedSpan = win.querySelector('#synth-debug-loop-loaded');
 
-                    for (const t of types) {
-                        const opt = document.createElement('option'); opt.value = t; opt.textContent = t; selType.appendChild(opt);
+                    if (fpsInput) fpsInput.value = '30';
+                    if (selType) {
+                        types.forEach((t) => {
+                            const opt = document.createElement('option');
+                            opt.value = t;
+                            opt.textContent = t;
+                            selType.appendChild(opt);
+                        });
                     }
 
                     async function refreshFilesForType(actionType) {
                         try {
                             const files = animationHandler ? await animationHandler.getAnimationsForType(actionType) : (animationMappings[actionType] || []);
-                            selFile.innerHTML = '';
+                            if (selFile) selFile.innerHTML = '';
                             if (!files || files.length === 0) {
-                                const o = document.createElement('option'); o.value = ''; o.textContent = '— no files —'; selFile.appendChild(o); return;
+                                if (selFile) {
+                                    const o = document.createElement('option');
+                                    o.value = '';
+                                    o.textContent = '— no files —';
+                                    selFile.appendChild(o);
+                                }
+                                if (loadedSpan) loadedSpan.textContent = '0';
+                                return;
                             }
-                            for (const f of files) {
-                                const o = document.createElement('option'); o.value = f; o.textContent = f; selFile.appendChild(o);
-                            }
-                            document.getElementById('animation-debug-loaded').textContent = files.length;
-                        } catch (err) { console.warn('[synth_webui] Failed to refresh debug file list:', err); }
+                            files.forEach((f) => {
+                                const o = document.createElement('option');
+                                o.value = f;
+                                o.textContent = f;
+                                if (selFile) selFile.appendChild(o);
+                            });
+                            if (loadedSpan) loadedSpan.textContent = String(files.length);
+                        } catch (err) {
+                            console.warn('[synth_webui] Failed to refresh debug file list:', err);
+                        }
                     }
 
-                    selType.addEventListener('change', () => refreshFilesForType(selType.value));
-                    document.getElementById('animation-debug-refresh-files').addEventListener('click', () => refreshFilesForType(selType.value));
-
-                    // Start the first refresh for 'think'
-                    (async () => { try { selType.value = 'think'; await refreshFilesForType('think'); } catch (e) { /* ignore */ } })();
-
-                    // Trigger start debug loop button
-                    document.getElementById('animation-debug-start-loop').addEventListener('click', async () => {
+                    const getDescriptorForFile = (file) => {
                         try {
-                            const aType = selType.value;
-                            const aFile = selFile.value || null;
-                            const s = parseInt(startInput.value || '0', 10);
-                            const e = parseInt(endInput.value || '0', 10);
-                            if (!animationHandler) return console.warn('[synth_webui] No animationHandler');
-                            if (!aFile) return alert('Please select an animation file first');
-                            if (!Number.isFinite(s) || !Number.isFinite(e)) return alert('Please enter numeric frame values');
-                            if (e <= s) return alert('end must be > start');
-                            await animationHandler.startTemporaryLoop(aType, aFile, s, e);
-                        } catch (err) { console.warn('[synth_webui] start temp loop error:', err); }
+                            if (!file) return null;
+                            // From handler caches
+                            try {
+                                if (animationHandler && animationHandler.loadedDescriptors) {
+                                    const norm = (typeof animationHandler._normalizeAnimationKey === 'function') ? animationHandler._normalizeAnimationKey(file) : String(file);
+                                    return animationHandler.loadedDescriptors[norm] || animationHandler.loadedDescriptors[file] || null;
+                                }
+                            } catch (e) { /* ignore */ }
+                            // From preloads accumulated before handler exists
+                            try {
+                                if (window.__synth_preloaded_animations && window.__synth_preloaded_animations[file]) return window.__synth_preloaded_animations[file];
+                                if (window.__synth_pending_preloads && window.__synth_pending_preloads[file]) return window.__synth_pending_preloads[file];
+                            } catch (e) { /* ignore */ }
+                            return null;
+                        } catch (e) {
+                            return null;
+                        }
+                    };
+
+                    const computeMaxFramesFromDescriptor = (descriptor) => {
+                        try {
+                            if (!descriptor || typeof descriptor !== 'object') return 0;
+                            const nums = [];
+                            const pushNum = (n) => { if (Number.isFinite(n)) nums.push(Number(n)); };
+                            pushNum(descriptor.max_frames);
+                            pushNum(descriptor.maxFrames);
+                            try { pushNum(descriptor.intro && descriptor.intro.end_frame); } catch (e) { /* ignore */ }
+                            try { pushNum(descriptor.loop && descriptor.loop.end_frame); } catch (e) { /* ignore */ }
+                            try { pushNum(descriptor.outro && descriptor.outro.end_frame); } catch (e) { /* ignore */ }
+                            return nums.length ? Math.max(0, Math.round(Math.max(...nums))) : 0;
+                        } catch (e) {
+                            return 0;
+                        }
+                    };
+
+                    const computeMaxFramesFromClip = (clip, fps) => {
+                        try {
+                            const f = Number(fps);
+                            if (!clip || !Number.isFinite(f) || f <= 0) return 0;
+                            const totalFrames = Math.max(1, Math.round(Number(clip.duration || 0) * f));
+                            // Return max frame index (inclusive)
+                            return Math.max(0, totalFrames - 1);
+                        } catch (e) {
+                            return 0;
+                        }
+                    };
+
+                    const autofillLoopInputs = async () => {
+                        try {
+                            if (!selFile || !startInput || !endInput) return;
+                            const file = selFile.value;
+                            if (!file) return;
+
+                            const descriptor = getDescriptorForFile(file);
+                            const desiredFps = (descriptor && Number.isFinite(Number(descriptor.fps))) ? Number(descriptor.fps) : Number((fpsInput && fpsInput.value) ? fpsInput.value : 30);
+                            const fps = (Number.isFinite(desiredFps) && desiredFps > 0) ? desiredFps : 30;
+                            try { if (fpsInput) fpsInput.value = String(fps); } catch (e) { /* ignore */ }
+
+                            let maxFrameIndex = 0;
+                            try {
+                                if (animationHandler && animationHandler.loadedAnimations) {
+                                    const norm = (typeof animationHandler._normalizeAnimationKey === 'function') ? animationHandler._normalizeAnimationKey(file) : file;
+                                    let clip = animationHandler.loadedAnimations[norm] || animationHandler.loadedAnimations[file] || null;
+                                    if (!clip && typeof animationHandler.preloadAnimation === 'function') {
+                                        try { await animationHandler.preloadAnimation(file, descriptor || null); } catch (e) { /* ignore */ }
+                                        try {
+                                            const p = animationHandler._preloadPromises ? (animationHandler._preloadPromises[norm] || animationHandler._preloadPromises[file]) : null;
+                                            if (p) await p;
+                                        } catch (e) { /* ignore */ }
+                                        clip = animationHandler.loadedAnimations[norm] || animationHandler.loadedAnimations[file] || null;
+                                    }
+                                    maxFrameIndex = computeMaxFramesFromClip(clip, fps);
+                                }
+                            } catch (e) { /* ignore */ }
+                            if (!maxFrameIndex) maxFrameIndex = computeMaxFramesFromDescriptor(descriptor);
+
+                            startInput.value = '0';
+                            endInput.value = String(maxFrameIndex || 0);
+                        } catch (e) { /* ignore */ }
+                    };
+
+                    if (selType) {
+                        selType.addEventListener('change', async () => {
+                            await refreshFilesForType(selType.value);
+                            try { if (selFile) selFile.selectedIndex = 0; } catch (e) { /* ignore */ }
+                            await autofillLoopInputs();
+                        });
+                        try { selType.value = 'think'; } catch (e) { /* ignore */ }
+                        (async () => {
+                            await refreshFilesForType('think');
+                            try { if (selFile) selFile.selectedIndex = 0; } catch (e) { /* ignore */ }
+                            await autofillLoopInputs();
+                        })();
+                    }
+                    const refreshBtn = win.querySelector('#synth-debug-loop-refresh');
+                    if (refreshBtn && selType) refreshBtn.addEventListener('click', async () => {
+                        await refreshFilesForType(selType.value);
+                        try { if (selFile) selFile.selectedIndex = 0; } catch (e) { /* ignore */ }
+                        await autofillLoopInputs();
                     });
 
-                    document.getElementById('animation-debug-clear-loop').addEventListener('click', () => {
-                        try { if (!animationHandler) return; animationHandler.clearTemporaryOverride(); } catch (err) { console.warn('[synth_webui] clear temp loop failed:', err); }
-                    });
+                    if (selFile) {
+                        selFile.addEventListener('change', async () => { await autofillLoopInputs(); });
+                    }
 
-                    // Live updater for current action/frame
-                    const curSpan = document.getElementById('animation-debug-current');
-                    const phaseSpan = document.getElementById('animation-debug-phase');
-                    const frameSpan = document.getElementById('animation-debug-frame');
+                    const loopStartBtn = win.querySelector('#synth-debug-loop-start-btn');
+                    const loopClearBtn = win.querySelector('#synth-debug-loop-clear-btn');
+                    if (loopStartBtn) {
+                        loopStartBtn.addEventListener('click', async () => {
+                            try {
+                                if (!animationHandler) return console.warn('[synth_webui] No animationHandler');
+                                const aType = selType ? selType.value : 'think';
+                                const aFile = (selFile && selFile.value) ? selFile.value : null;
+                                const s = parseInt((startInput && startInput.value) ? startInput.value : '0', 10);
+                                const e = parseInt((endInput && endInput.value) ? endInput.value : '0', 10);
+                                const fps = parseFloat((fpsInput && fpsInput.value) ? fpsInput.value : '30');
+                                if (!aFile) return alert('Please select an animation file first');
+                                if (!Number.isFinite(s) || !Number.isFinite(e)) return alert('Please enter numeric frame values');
+                                if (e <= s) return alert('end must be > start');
+                                await animationHandler.startTemporaryLoop(aType, aFile, s, e, Number.isFinite(fps) ? fps : 30);
+                            } catch (err) { console.warn('[synth_webui] start temp loop error:', err); }
+                        });
+                    }
+                    if (loopClearBtn) {
+                        loopClearBtn.addEventListener('click', () => {
+                            try { if (!animationHandler) return; animationHandler.clearTemporaryOverride(); } catch (err) { console.warn('[synth_webui] clear temp loop failed:', err); }
+                        });
+                    }
+
+                    // Feelings UI
+                    const feelingsHost = win.querySelector('#synth-debug-feelings');
+                    const feelingsClearBtn = win.querySelector('#synth-debug-feelings-clear');
+
+                    const extractEmotionValues = () => {
+                        try {
+                            const em = animationHandler ? (animationHandler._lastEmotions || null) : null;
+                            const values = (em && em.values && typeof em.values === 'object') ? em.values : (em && typeof em === 'object' ? em : null);
+                            if (!values || typeof values !== 'object') return {};
+                            if (Array.isArray(values)) return {};
+                            const out = {};
+                            Object.keys(values).forEach((k) => {
+                                const v = Number(values[k]);
+                                if (!k) return;
+                                if (/^\d+$/.test(String(k))) return;
+                                if (!Number.isFinite(v)) return;
+                                // accept 0..1 or 0..10
+                                out[String(k)] = (v > 1) ? (v / 10.0) : v;
+                            });
+                            return out;
+                        } catch (e) {
+                            return {};
+                        }
+                    };
+
+                    // Feelings UI: avoid rebuilding DOM every tick.
+                    let __dbgFeelingsSig = '';
+                    let __dbgFeelingsRows = new Map();
+
+                    const ensureFeelingsRows = (keys) => {
+                        try {
+                            if (!feelingsHost) return;
+                            const sig = keys.join('|');
+                            if (__dbgFeelingsSig === sig && __dbgFeelingsRows.size) return;
+
+                            __dbgFeelingsSig = sig;
+                            __dbgFeelingsRows = new Map();
+                            feelingsHost.innerHTML = '';
+
+                            if (keys.length === 0) {
+                                const empty = document.createElement('div');
+                                empty.style.fontSize = '12px';
+                                empty.style.color = 'var(--text-soft)';
+                                empty.textContent = '—';
+                                feelingsHost.appendChild(empty);
+                                return;
+                            }
+
+                            keys.forEach((name) => {
+                                const row = document.createElement('div');
+                                row.style.display = 'grid';
+                                row.style.gridTemplateColumns = '1fr 140px 56px';
+                                row.style.alignItems = 'center';
+                                row.style.gap = '8px';
+
+                                const label = document.createElement('div');
+                                label.style.fontSize = '12px';
+                                label.style.color = 'var(--text)';
+                                label.textContent = name;
+
+                                const slider = document.createElement('input');
+                                slider.type = 'range';
+                                slider.min = '0';
+                                slider.max = '1';
+                                slider.step = '0.01';
+                                slider.value = '0';
+
+                                const num = document.createElement('input');
+                                num.type = 'number';
+                                num.min = '0';
+                                num.max = '1';
+                                num.step = '0.01';
+                                num.value = '0';
+                                num.style.padding = '6px';
+                                num.style.borderRadius = '8px';
+                                num.style.background = 'rgba(255,255,255,0.02)';
+                                num.style.border = '1px solid var(--border)';
+                                num.style.color = 'var(--text)';
+
+                                const apply = (v) => {
+                                    const vv = clamp01(v);
+                                    slider.value = String(vv);
+                                    num.value = String(vv);
+                                    try { animationHandler && animationHandler.setDebugEmotionOverride && animationHandler.setDebugEmotionOverride(name, vv); } catch (e) { /* ignore */ }
+                                };
+                                slider.addEventListener('input', () => apply(slider.value));
+                                num.addEventListener('change', () => apply(num.value));
+
+                                row.appendChild(label);
+                                row.appendChild(slider);
+                                row.appendChild(num);
+                                feelingsHost.appendChild(row);
+
+                                __dbgFeelingsRows.set(name, { slider, num });
+                            });
+                        } catch (e) { /* ignore */ }
+                    };
+
+                    const renderFeelings = () => {
+                        try {
+                            if (!feelingsHost) return;
+                            const base = extractEmotionValues();
+                            const overrides = (animationHandler && typeof animationHandler.getDebugEmotionOverrides === 'function') ? animationHandler.getDebugEmotionOverrides() : {};
+                            const keys = Array.from(new Set([...Object.keys(base), ...Object.keys(overrides)])).filter(k => k && !/^\d+$/.test(String(k))).sort();
+                            ensureFeelingsRows(keys);
+                            if (!keys.length) return;
+                            keys.forEach((name) => {
+                                const row = __dbgFeelingsRows.get(name);
+                                if (!row) return;
+                                const override = (overrides && overrides[name] !== undefined) ? clamp01(overrides[name]) : null;
+                                const current = (override !== null) ? override : clamp01(base[name] || 0);
+
+                                // Don't clobber active user edits unless it's an override.
+                                const active = document.activeElement;
+                                const isActive = (active === row.slider || active === row.num);
+                                if (!isActive || override !== null) {
+                                    row.slider.value = String(current);
+                                    row.num.value = String(current);
+                                }
+                            });
+                        } catch (e) { /* ignore */ }
+                    };
+
+                    if (feelingsClearBtn) {
+                        feelingsClearBtn.addEventListener('click', () => {
+                            try { animationHandler && animationHandler.clearDebugEmotionOverrides && animationHandler.clearDebugEmotionOverrides(); } catch (e) { /* ignore */ }
+                            __dbgFeelingsSig = '';
+                            renderFeelings();
+                        });
+                    }
+
+                    // Facial morph UI
+                    const faceFilter = win.querySelector('#synth-debug-face-filter');
+                    const faceList = win.querySelector('#synth-debug-face-list');
+                    const faceClearBtn = win.querySelector('#synth-debug-face-clear');
+
+                    const getFaceKeys = () => {
+                        try {
+                            const caps = window.__synth_vrm_capabilities || null;
+                            const keys = (caps && Array.isArray(caps.expressionKeys)) ? caps.expressionKeys : [];
+                            // Include a few common aliases
+                            const extra = ['blink','blinkLeft','blinkRight','eye_blink_left','eye_blink_right','eyes_closed','eyes.closed','aa','ih','ou','ee','oh'];
+                            return Array.from(new Set([...(keys || []), ...extra].map(String))).filter(Boolean).sort();
+                        } catch (e) {
+                            return [];
+                        }
+                    };
+
+                    let faceRows = [];
+                    const renderFaceList = () => {
+                        try {
+                            if (!faceList) return;
+                            const filter = (faceFilter && faceFilter.value) ? String(faceFilter.value).toLowerCase() : '';
+                            const keys = getFaceKeys().filter((k) => !filter || k.toLowerCase().includes(filter));
+                            const overrides = (animationHandler && typeof animationHandler.getDebugFaceOverrides === 'function') ? animationHandler.getDebugFaceOverrides() : {};
+
+                            faceList.innerHTML = '';
+                            faceRows = [];
+                            if (keys.length === 0) {
+                                const empty = document.createElement('div');
+                                empty.style.fontSize = '12px';
+                                empty.style.color = 'var(--text-soft)';
+                                empty.textContent = '—';
+                                faceList.appendChild(empty);
+                                return;
+                            }
+
+                            keys.forEach((k) => {
+                                const row = document.createElement('div');
+                                row.style.display = 'grid';
+                                row.style.gridTemplateColumns = '1fr 140px 56px 48px';
+                                row.style.alignItems = 'center';
+                                row.style.gap = '8px';
+
+                                const label = document.createElement('div');
+                                label.style.fontSize = '12px';
+                                label.style.color = 'var(--text)';
+                                label.style.overflow = 'hidden';
+                                label.style.textOverflow = 'ellipsis';
+                                label.style.whiteSpace = 'nowrap';
+                                label.title = k;
+                                label.textContent = k;
+
+                                const slider = document.createElement('input');
+                                slider.type = 'range';
+                                slider.min = '0';
+                                slider.max = '1';
+                                slider.step = '0.01';
+                                slider.value = String(clamp01((overrides[k] !== undefined) ? overrides[k] : (animationHandler && animationHandler._getFaceValue ? animationHandler._getFaceValue(k) : 0)));
+
+                                const num = document.createElement('input');
+                                num.type = 'number';
+                                num.min = '0';
+                                num.max = '1';
+                                num.step = '0.01';
+                                num.value = slider.value;
+                                num.style.padding = '6px';
+                                num.style.borderRadius = '8px';
+                                num.style.background = 'rgba(255,255,255,0.02)';
+                                num.style.border = '1px solid var(--border)';
+                                num.style.color = 'var(--text)';
+
+                                const cur = document.createElement('div');
+                                cur.style.fontSize = '11px';
+                                cur.style.color = 'var(--text-soft)';
+                                cur.textContent = '—';
+
+                                const apply = (v) => {
+                                    const vv = clamp01(v);
+                                    slider.value = String(vv);
+                                    num.value = String(vv);
+                                    try { animationHandler && animationHandler.setDebugFaceOverride && animationHandler.setDebugFaceOverride(k, vv); } catch (e) { /* ignore */ }
+                                };
+                                slider.addEventListener('input', () => apply(slider.value));
+                                num.addEventListener('change', () => apply(num.value));
+
+                                row.appendChild(label);
+                                row.appendChild(slider);
+                                row.appendChild(num);
+                                row.appendChild(cur);
+                                faceList.appendChild(row);
+
+                                faceRows.push({ key: k, curEl: cur, sliderEl: slider, numEl: num });
+                            });
+                        } catch (e) { /* ignore */ }
+                    };
+
+                    if (faceFilter) faceFilter.addEventListener('input', () => renderFaceList());
+                    if (faceClearBtn) {
+                        faceClearBtn.addEventListener('click', () => {
+                            try { animationHandler && animationHandler.clearDebugFaceOverrides && animationHandler.clearDebugFaceOverrides(); } catch (e) { /* ignore */ }
+                            renderFaceList();
+                        });
+                    }
+
+                    // Live status updater
+                    const stPaused = win.querySelector('#synth-debug-status-paused');
+                    const stCurrent = win.querySelector('#synth-debug-status-current');
+                    const stPhase = win.querySelector('#synth-debug-status-phase');
+                    const stFrame = win.querySelector('#synth-debug-status-frame');
+                    const stRemote = win.querySelector('#synth-debug-status-remote');
 
                     setInterval(() => {
                         try {
-                            if (!animationHandler || !animationHandler.currentAction) { curSpan.textContent = '—'; phaseSpan.textContent = '—'; frameSpan.textContent = '—'; return; }
-                            const act = animationHandler.currentAction;
-                            const clip = act.getClip ? act.getClip() : null;
-                            curSpan.textContent = (animationHandler.currentActionName || clip?.name || 'unknown');
-                            phaseSpan.textContent = animationHandler.currentActionPhase || (act === animationHandler.currentStructuredAction?.loop ? 'loop' : 'clip');
-                            if (clip && clip._meta?.loopFrames && Number.isFinite(act.time)) {
-                                const lm = clip._meta.loopFrames;
-                                const currentFrame = Math.round(lm.startFrame + act.time * lm.fps);
-                                frameSpan.textContent = `${currentFrame} / ${lm.startFrame}-${lm.endFrame}`;
-                            } else if (clip && Number.isFinite(act.time)) {
-                                // show time in seconds if frames missing
-                                frameSpan.textContent = `${act.time.toFixed(2)}s`;
+                            if (stPaused) stPaused.textContent = isPaused() ? 'yes' : 'no';
+                            if (!animationHandler || !animationHandler.currentAction) {
+                                if (stCurrent) stCurrent.textContent = '—';
+                                if (stPhase) stPhase.textContent = '—';
+                                if (stFrame) stFrame.textContent = '—';
                             } else {
-                                frameSpan.textContent = '—';
+                                const act = animationHandler.currentAction;
+                                const clip = act.getClip ? act.getClip() : null;
+                                if (stCurrent) stCurrent.textContent = (animationHandler.currentActionName || clip?.name || 'unknown');
+                                if (stPhase) stPhase.textContent = animationHandler.currentActionPhase || '—';
+                                if (clip && clip._meta?.loopFrames && Number.isFinite(act.time)) {
+                                    const lm = clip._meta.loopFrames;
+                                    const fps = Number(lm.fps) || 30;
+                                    const span = Math.max(1, (Number(lm.endFrame) - Number(lm.startFrame)) + 1);
+                                    const localFrame = Math.floor(act.time * fps);
+                                    const currentFrame = Number(lm.startFrame) + ((localFrame % span) + span) % span;
+                                    if (stFrame) stFrame.textContent = `${currentFrame}f / ${lm.startFrame}-${lm.endFrame}`;
+                                } else if (clip && Number.isFinite(act.time)) {
+                                    const fps = 30;
+                                    const totalFrames = Math.max(1, Math.round(Number(clip.duration || 0) * fps));
+                                    const maxIdx = Math.max(0, totalFrames - 1);
+                                    const currentFrame = Math.min(maxIdx, Math.max(0, Math.floor(act.time * fps)));
+                                    if (stFrame) stFrame.textContent = `${currentFrame}f / 0-${maxIdx}`;
+                                } else {
+                                    if (stFrame) stFrame.textContent = '—';
+                                }
                             }
-                        } catch (err) { /* ignore */ }
-                    }, 250);
+                            try {
+                                const s = window.__synth_current_animation_state || null;
+                                if (stRemote) stRemote.textContent = (s && (s.state || s.animation)) ? `${s.state || '—'} · ${(s.animation || '—')}` : '—';
+                            } catch (e) { if (stRemote) stRemote.textContent = '—'; }
+
+                            // Try a lazy autofill of loop end if still empty/0 (after preload/handler becomes ready)
+                            try {
+                                if (selFile && endInput && (String(endInput.value || '') === '' || String(endInput.value || '') === '0') && selFile.value) {
+                                    autofillLoopInputs();
+                                }
+                            } catch (e) { /* ignore */ }
+
+                            // refresh feelings + face current values
+                            renderFeelings();
+                            // Update current value cells without clobbering user input
+                            if (animationHandler && faceRows && faceRows.length) {
+                                faceRows.forEach((r) => {
+                                    try {
+                                        const vv = animationHandler._getFaceValue ? animationHandler._getFaceValue(r.key) : 0;
+                                        if (r.curEl) r.curEl.textContent = Number.isFinite(vv) ? vv.toFixed(2) : '—';
+                                    } catch (e) { /* ignore */ }
+                                });
+                            }
+                        } catch (e) { /* ignore */ }
+                    }, 300);
+
+                    // Initial render
+                    renderFeelings();
+                    renderFaceList();
+                    try { if (pauseBtn) pauseBtn.textContent = isPaused() ? 'Resume' : 'Pause'; } catch (e) { /* ignore */ }
                 }
             } catch (err) {
                 console.warn('[synth_webui] Failed to init animation debug panel:', err);
