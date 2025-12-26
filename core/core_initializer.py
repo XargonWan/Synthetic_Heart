@@ -162,6 +162,18 @@ class CoreInitializer:
                 log_debug("[core_initializer] ✅ _initialize_persona_manager() completed")
             except Exception as e:
                 log_warning(f"[core_initializer] Persona manager async init failed: {e}")
+
+            # 4.4. Auto-discover and import interface modules BEFORE loading DB configs
+            # Interface modules register their config variables at import time (via config_registry.get_var).
+            # If we load configs from DB before importing interfaces, interface settings like BOTFATHER_TOKEN
+            # won't be registered yet and therefore won't be loaded.
+            log_info("[core_initializer] Discovering interface modules (pre-config load)...")
+            try:
+                self._discover_interfaces()
+                log_info("[core_initializer] ✅ Interface module discovery completed")
+            except Exception as e:
+                log_error(f"[core_initializer] Error in _discover_interfaces (pre-config load): {e}")
+                self.startup_errors.append(f"Interface discovery (pre-config load) failed: {e}")
             
             # 3.5. Load all configurations from DB AFTER persona manager initialization
             # This ensures SYNTH_NAME, SYNTH_PROFILE, SYNTH_ALIASES have been registered and can be loaded from DB
@@ -211,15 +223,9 @@ class CoreInitializer:
                 self.startup_errors.append(f"Actions block build failed: {e}")
 
             log_info("[core_initializer] 🎯 CHECKPOINT: Actions block completed, proceeding to interface discovery")
-            
-            # 4.5. Auto-discover and import interface modules
-            log_debug("[core_initializer] Auto-discovering interface modules...")
-            try:
-                self._discover_interfaces()
-                log_debug("[core_initializer] Interface discovery completed")
-            except Exception as e:
-                log_error(f"[core_initializer] Error in _discover_interfaces: {e}")
-                self.startup_errors.append(f"Interface discovery failed: {e}")
+
+            # NOTE: Interface modules were already discovered earlier (pre-config load)
+            log_debug("[core_initializer] Interface modules already discovered earlier")
             
             # 6. Initialize interface instances now that config is loaded
             log_info("[core_initializer] Initializing interface instances...")

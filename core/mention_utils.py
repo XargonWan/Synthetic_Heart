@@ -6,55 +6,73 @@ synth_ALIASES_LOWER = [alias.lower() for alias in synth_ALIASES]
 
 
 def get_current_aliases() -> list[str]:
-    """Get the current persona's aliases, falling back to hardcoded ones."""
+    """Return activation aliases merged from persona, config, and fallbacks."""
+    aliases: list[str] = []
+
+    # 1) Persona-derived aliases (if available)
     try:
         from core.persona_manager import get_persona_manager
-        from core.config_manager import config_registry
+
         persona_manager = get_persona_manager()
         current_persona = persona_manager.get_current_persona()
         if current_persona:
-            # Prefer explicit aliases when available
-            persona_aliases = getattr(current_persona, 'aliases', None)
+            persona_aliases = getattr(current_persona, "aliases", None)
             if persona_aliases:
                 log_debug(f"[mention] Loaded aliases from persona: {persona_aliases}")
-                aliases = list(persona_aliases)
-                try:
-                    if current_persona.name and current_persona.name not in aliases:
-                        aliases.append(current_persona.name)
-                except Exception:
-                    pass
-                return aliases
-            # No explicit aliases, but persona name exists: expose it as alias
-            if getattr(current_persona, 'name', None):
-                log_debug(f"[mention] Using persona name as alias: {current_persona.name}")
-                return [current_persona.name]
-
-        # If persona not loaded or aliases empty, try reading from config registry
-        try:
-            # config_registry.get_value may return a JSON string for json types
-            raw = config_registry.get_value("SYNTH_ALIASES", ["SyntH", "Synthetic Heart"], value_type="json")
-            # If it's a string that looks like JSON, try to parse it
-            if isinstance(raw, str):
-                import json
-                try:
-                    parsed = json.loads(raw)
-                    if isinstance(parsed, list):
-                        log_debug(f"[mention] Loaded aliases from config (JSON parsed): {parsed}")
-                        return parsed
-                except Exception:
-                    # Not JSON, fall through
-                    pass
-            if isinstance(raw, list):
-                log_debug(f"[mention] Loaded aliases from config (direct list): {raw}")
-                return raw
-        except Exception as config_e:
-            # If config registry isn't available or value missing, fall back
-            log_debug(f"[mention] Error reading aliases from config registry: {config_e}")
+                aliases.extend(list(persona_aliases))
+            persona_name = getattr(current_persona, "name", None)
+            if persona_name:
+                aliases.append(persona_name)
     except Exception as e:
-        log_debug(f"[mention] Error getting current persona aliases: {e}")
-    # Fallback to hardcoded aliases
-    log_debug(f"[mention] Using fallback aliases: {synth_ALIASES}")
-    return synth_ALIASES
+        log_debug(f"[mention] Error reading persona aliases: {e}")
+
+    # 2) Config-derived aliases (DB/UI) as an additional source of truth
+    try:
+        from core.config_manager import config_registry
+
+        raw = config_registry.get_value(
+            "SYNTH_ALIASES",
+            ["SyntH", "Synthetic Heart"],
+            value_type="json",
+        )
+        if isinstance(raw, str):
+            import json
+
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    log_debug(f"[mention] Loaded aliases from config (JSON parsed): {parsed}")
+                    aliases.extend(parsed)
+            except Exception:
+                pass
+        elif isinstance(raw, list):
+            log_debug(f"[mention] Loaded aliases from config (direct list): {raw}")
+            aliases.extend(raw)
+    except Exception as config_e:
+        log_debug(f"[mention] Error reading aliases from config registry: {config_e}")
+
+    # 3) Always include hardcoded fallback aliases (e.g. 'synth')
+    aliases.extend(synth_ALIASES)
+
+    # De-duplicate while preserving order.
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for alias in aliases:
+        if not alias:
+            continue
+        key = str(alias).strip()
+        if not key:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(key)
+
+    if not deduped:
+        log_debug(f"[mention] Using fallback aliases: {synth_ALIASES}")
+        return synth_ALIASES
+
+    return deduped
 
 
 from core.logging_utils import log_debug, log_info

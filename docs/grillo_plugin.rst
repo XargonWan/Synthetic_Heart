@@ -163,6 +163,17 @@ stop()
 Implementation Details
 ----------------------
 
+History > Grillo Output
+^^^^^^^^^^^^^^^^^^^^^^^
+
+The History > Grillo view is backed by the ``grillo_activity_log`` table.
+
+- ``prompt_text`` stores the beat prompt used to trigger reflection.
+- ``diary_entry_id`` links to the resulting ``ai_diary`` entry (when one is created).
+- ``response_text`` stores the *outbound* message text when a beat triggers a message action
+   (e.g. ``message_telegram_bot``). This ensures Grillo-originated posts still appear under
+   Grillo history even when they are sent through an external interface.
+
 Background Loop
 ^^^^^^^^^^^^^^^
 

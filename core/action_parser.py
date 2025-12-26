@@ -74,6 +74,43 @@ def _maybe_unescape_text_in_payload(payload: dict) -> None:
         return
 
 
+async def _maybe_record_grillo_outbound_message(action_type: str, payload: dict, context: Dict[str, Any]) -> None:
+    """Best-effort: if a message_* action was produced by a Grillo beat, store its outbound text.
+
+    Grillo beats carry an `activity_log_id` in the context dict (see GrilloPlugin._enqueue_with_low_priority).
+    When the LLM decides to send an outbound message (e.g. Telegram), we persist that text to
+    `grillo_activity_log.response_text` so History > Grillo shows what was actually said.
+    """
+    try:
+        if not action_type or not isinstance(action_type, str) or not action_type.startswith("message"):
+            return
+        if not isinstance(payload, dict):
+            return
+        if not isinstance(context, dict):
+            return
+
+        activity_log_id = context.get("activity_log_id") or context.get("grillo_activity_log_id")
+        if not activity_log_id:
+            return
+
+        text = payload.get("text")
+        if not text or not isinstance(text, str):
+            return
+
+        from plugins.grillo_plugin import GrilloPlugin
+
+        if GrilloPlugin is None:
+            return
+        setter = getattr(GrilloPlugin, "set_activity_response_text", None)
+        if not callable(setter):
+            return
+
+        await setter(int(activity_log_id), text, append=True)
+    except Exception as e:
+        # Never fail message sending because of Grillo tracking
+        log_debug(f"[action_parser] Failed to record Grillo outbound message: {e}")
+
+
 ERROR_RETRY_POLICY = {
     "description": (
         "If you receive a system_message of type 'error' with the phrase 'Please repeat your "
@@ -662,6 +699,12 @@ async def _handle_plugin_action(
                     _maybe_unescape_text_in_payload(payload)
                 except Exception:
                     log_debug("[action_parser] Text unescape normalization failed for plugin send_message (non-fatal)")
+
+                # If this outbound message originates from a Grillo beat, store it in grillo_activity_log
+                try:
+                    await _maybe_record_grillo_outbound_message(action_type, payload, context)
+                except Exception:
+                    pass
                 log_info(
                     f"[action_parser] ✉️ Dispatching message action to interface '{plugin_iface}' via send_message"
                 )
@@ -688,6 +731,12 @@ async def _handle_plugin_action(
                     _maybe_unescape_text_in_payload(payload)
                 except Exception:
                     log_debug("[action_parser] Text unescape normalization failed for plugin execute_action (non-fatal)")
+
+                # If this outbound message originates from a Grillo beat, store it in grillo_activity_log
+                try:
+                    await _maybe_record_grillo_outbound_message(action_type, payload, context)
+                except Exception:
+                    pass
                 new_action = {**action, "payload": payload}
                 log_info(
                     f"[action_parser] 🚀 Delegating action to {plugin.__class__.__name__}: type={action_type} interface={plugin_iface}"

@@ -379,6 +379,8 @@ SYNTH_ALIASES = config_registry.get_var(
     group="synth",
     component="persona",
     value_type="json",
+    getter=_get_persona_aliases,
+    setter=_set_persona_aliases,
 )
 
 # Expose the computed full aliases (canonical + persona name + user aliases)

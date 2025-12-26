@@ -329,6 +329,52 @@ class GrilloPlugin(AIPluginBase):
         except Exception as e:
             log_debug(f"[grillo] link_diary_entry_to_activity failed: {e}")
 
+    @classmethod
+    async def set_activity_response_text(
+        cls,
+        activity_log_id: int,
+        response_text: str,
+        *,
+        append: bool = True,
+    ) -> None:
+        """Store outbound text for a Grillo beat in grillo_activity_log.response_text.
+
+        This is used when a beat results in an outward-facing message action
+        (e.g. message_telegram_bot). The beat should still appear under History > Grillo,
+        showing the actual outbound message text.
+        """
+        if not activity_log_id or not response_text:
+            return
+
+        try:
+            from core.db import get_conn_ctx
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    if append:
+                        await cur.execute(
+                            """
+                            UPDATE grillo_activity_log
+                            SET response_text = CASE
+                                WHEN response_text IS NULL OR response_text = '' THEN %s
+                                ELSE CONCAT(response_text, '\n\n', %s)
+                            END
+                            WHERE id=%s
+                            """,
+                            (response_text, response_text, activity_log_id),
+                        )
+                    else:
+                        await cur.execute(
+                            "UPDATE grillo_activity_log SET response_text=%s WHERE id=%s",
+                            (response_text, activity_log_id),
+                        )
+                    try:
+                        await conn.commit()
+                    except Exception:
+                        pass
+        except Exception as e:
+            log_debug(f"[grillo] set_activity_response_text failed: {e}")
+
     async def _reset_beat_pending_after_delay(self):
         await asyncio.sleep(300)
         GrilloPlugin._beat_pending = False
