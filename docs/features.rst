@@ -56,6 +56,16 @@ The Web UI can be installed as a Progressive Web App (PWA) on supported browsers
 
 Known limitations include partial offline behavior (real-time features are limited while offline), varying support for push notifications and background sync across browsers, and occasional install prompt availability depending on the client environment.
 
+Desktop Notifications (Web UI)
+------------------------------
+
+The Web UI can display in-browser desktop notifications when new messages arrive while the tab is in the background.
+
+Notes:
+    - Requires HTTPS (or ``localhost``) due to browser security restrictions.
+    - The browser permission prompt is requested on the first user action that sends a message.
+    - Notifications can be toggled from the Web UI settings.
+
 See ``docs/chat_history.rst`` for how session persistence and archives interact with the Web UI when using PWA mode.
 
 Web UI Chat Archiving

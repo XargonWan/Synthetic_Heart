@@ -2793,6 +2793,7 @@
         console.log('[synth_webui] configGeneralList:', configGeneralList);
         console.log('[synth_webui] configAdvancedList:', configAdvancedList);
         const NOTIFY_KEY = 'synth-webui-notify';
+        const NOTIFY_ASKED_KEY = 'synth-webui-notify-asked';
         const HISTORY_KEY = 'synth-webui-history';
         const TAB_KEY = 'synth-webui-active-tab';
         
@@ -5500,7 +5501,7 @@
             }
         }
 
-        function updateNotifyUI(enabled, silent = false) {
+        function updateNotifyUI(enabled, silent = false, persist = true) {
             notificationsEnabled = enabled && IS_SECURE;
             if (notifyToggle) notifyToggle.checked = notificationsEnabled;
             if (notifyStatus) {
@@ -5510,11 +5511,30 @@
                     notifyStatus.textContent = notificationsEnabled ? 'Enabled' : 'Disabled';
                 }
             }
-            localStorage.setItem(NOTIFY_KEY, notificationsEnabled ? '1' : '0');
+            if (persist) {
+                localStorage.setItem(NOTIFY_KEY, notificationsEnabled ? '1' : '0');
+            }
             if (!silent) {
                 const tone = notificationsEnabled ? 'success' : 'info';
                 const message = notificationsEnabled ? 'Desktop notifications enabled' : 'Desktop notifications disabled';
                 setStatusMessage(message, tone);
+            }
+        }
+
+        function maybeAutoRequestNotifications() {
+            // Browser notification permission requests must be triggered by a user gesture.
+            // We call this from sendMessage() so the prompt is shown only once.
+            if (!IS_SECURE) return;
+            if (!('Notification' in window)) return;
+            try {
+                if (Notification.permission === 'default') {
+                    const asked = localStorage.getItem(NOTIFY_ASKED_KEY) === '1';
+                    if (asked) return;
+                    localStorage.setItem(NOTIFY_ASKED_KEY, '1');
+                    requestNotifications();
+                }
+            } catch (e) {
+                // ignore
             }
         }
 
@@ -5552,15 +5572,17 @@
         });
 
         (function bootstrapNotifications() {
-            const saved = localStorage.getItem(NOTIFY_KEY) === '1';
+            const raw = localStorage.getItem(NOTIFY_KEY);
+            const wantsEnabled = raw === null ? true : (raw === '1');
+
             if (!IS_SECURE) {
-                updateNotifyUI(false, true);
+                updateNotifyUI(false, true, false);
                 return;
             }
-            if (saved && 'Notification' in window && Notification.permission === 'granted') {
-                updateNotifyUI(true, true);
+            if (wantsEnabled && 'Notification' in window && Notification.permission === 'granted') {
+                updateNotifyUI(true, true, false);
             } else {
-                updateNotifyUI(false, true);
+                updateNotifyUI(false, true, false);
             }
         })();
 
@@ -5984,14 +6006,45 @@
                                         source: data.source || 'descriptor_fallback'
                                     };
                                     animationHandler.applyAnimationState(st);
+                                } else if (typeof animationHandler.applyAnimationState === 'function') {
+                                    // No descriptor and no rich payload: ensure we don't keep applying
+                                    // the previous state's expressions (e.g. THINK eyes_closed) while
+                                    // switching to WRITE. This avoids the perception that WRITE is
+                                    // "using the THINK descriptor".
+                                    const nextAction = (data.state || '').toString().toLowerCase();
+                                    const prevAction = (animationHandler.currentActionName || '').toString().toLowerCase();
+                                    if (nextAction && prevAction && nextAction !== prevAction) {
+                                        const phase = (data.play_section != null) ? data.play_section : ((data.loop === false) ? 'clip' : 'loop');
+                                        animationHandler.applyAnimationState({
+                                            action: nextAction,
+                                            phase,
+                                            animation: data.animation || null,
+                                            descriptor: null,
+                                            clip: { fps: 30 },
+                                            timing: { started_at: new Date().toISOString(), time_in_clip: 0.0, current_frame: 0 },
+                                            expressions: [],
+                                            blink: null,
+                                            eye_movement: null,
+                                            lipsync: false,
+                                            priority: (typeof data.priority === 'number') ? data.priority : null,
+                                            source: 'no_descriptor_reset'
+                                        });
+                                    }
                                 }
                             } catch (e) { /* ignore */ }
                         }
-                        console.log('[synth_webui] Calling animationHandler.startAction with:', data.state, data.animation, data.loop, data.descriptor, data.play_section);
                         // Pass full URL/path through; loader can handle both filename and URL.
                         const animationFileOrUrl = data.animation || null;
                         // Determine playOnce from descriptor or loop flag
                         const playOnce = (data.descriptor && data.descriptor.play_once) || (data.loop === false);
+                        console.log('[synth_webui] Calling animationHandler.startAction with:', {
+                            state: data.state,
+                            animation: animationFileOrUrl,
+                            playOnce: !!playOnce,
+                            play_section: data.play_section,
+                            hasDescriptor: !!data.descriptor,
+                            priority: (typeof data.priority === 'number') ? data.priority : null
+                        });
                         // If play_section is specified (intro, loop, or outro), pass it through
                         animationHandler.startAction(data.state, animationFileOrUrl, !!playOnce, data.play_section, data.descriptor || null);
                         // Ensure displayed phase uses ActionState-style names (PHASE_PRIORITIES keys)
@@ -6249,6 +6302,9 @@
                 console.log('[synth_webui] Cannot send message - empty text');
                 return;
             }
+
+            // Request notification permission once, triggered by user action.
+            try { maybeAutoRequestNotifications(); } catch (e) { /* ignore */ }
 
             // Save current chat state before sending message (in case of page refresh)
             try { saveChatState(); } catch (error) { console.error('[synth_webui] Failed to save chat state before sending:', error); }
@@ -7701,7 +7757,8 @@
                             // Also cache under the canonical descriptor URL key used by loadDescriptor()
                             try {
                                 if (typeof animationFile === 'string' && animationFile.includes('/')) {
-                                    const descriptorPath = `${animationFile}.json`;
+                                    const cleanAnim = animationFile.split('?')[0].split('#')[0];
+                                    const descriptorPath = `${cleanAnim}.json`;
                                     this.loadedDescriptors[descriptorPath] = descriptor;
                                 }
                             } catch (e) { /* ignore */ }
@@ -7755,13 +7812,14 @@
                 _normalizeAnimationKey(animationFile) {
                     try {
                         if (!animationFile || typeof animationFile !== 'string') return animationFile;
+                        const clean = animationFile.split('?')[0].split('#')[0];
                         // If backend sends a full URL/path, normalize to the filename.
                         // This matches the filenames returned by /api/animations and used by preloadAllAnimations().
-                        if (animationFile.includes('/')) {
-                            const last = animationFile.split('/').pop() || animationFile;
+                        if (clean.includes('/')) {
+                            const last = clean.split('/').pop() || clean;
                             return decodeURIComponent(last);
                         }
-                        return animationFile;
+                        return clean;
                     } catch (e) {
                         return animationFile;
                     }
@@ -7982,15 +8040,16 @@
                 async loadDescriptor(actionName, animationFile) {
                     console.log(`[AnimationHandler] loadDescriptor called for ${actionName}/${animationFile}`);
                     try {
+                        const cleanAnim = (typeof animationFile === 'string') ? animationFile.split('?')[0].split('#')[0] : animationFile;
                         // Accept either filename (resolved under /skins/<skin>/animations/<state>/)
                         // or full URL/path (descriptor expected at `<anim>.json`).
                         let descriptorPath = null;
-                        if (typeof animationFile === 'string' && (animationFile.includes('/') || animationFile.startsWith('http'))) {
-                            descriptorPath = `${animationFile}.json`;
+                        if (typeof cleanAnim === 'string' && (cleanAnim.includes('/') || cleanAnim.startsWith('http'))) {
+                            descriptorPath = `${cleanAnim}.json`;
                         } else {
                             // Build path to descriptor file: /skins/{skin}/animations/{actionType}/{file}.json
                             const skinName = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
-                            const encodedFile = encodeURIComponent(animationFile + '.json');
+                            const encodedFile = encodeURIComponent(String(cleanAnim) + '.json');
                             descriptorPath = `/skins/${skinName}/animations/${actionName}/${encodedFile}`;
                         }
                         // Cache descriptors (including null when missing) to avoid repeated 404 fetches.
