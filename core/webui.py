@@ -43,6 +43,7 @@ import core.plugin_instance as plugin_instance
 from core import db as core_db
 from core.action_state_manager import get_action_state_manager, AnimationPhase
 from core.animation_handler import AnimationState
+from core.animation_handler import AnimationState
 import mimetypes
 
 
@@ -863,6 +864,27 @@ class SynthWebUIInterface:
             }
         
         log_info(f"{LOG_PREFIX} Broadcasting action state to {len(self.connections)} clients: {message['phase']}")
+
+        # Backend-authoritative animation playback:
+        # whenever the global action phase changes, trigger the AnimationHandler to
+        # play the corresponding logical state. Plugins can override per-state
+        # animations via AnimationHandler registration, but the backend remains the
+        # source of truth for *when* a state starts/ends.
+        try:
+            phase = message.get("phase") or AnimationPhase.IDLE.value
+            phase_to_state = {
+                AnimationPhase.THINKING.value: AnimationState.THINK,
+                AnimationPhase.WRITING.value: AnimationState.WRITE,
+                AnimationPhase.CORRECTING.value: AnimationState.THINK,
+                AnimationPhase.TALKING.value: AnimationState.TALK,
+                AnimationPhase.IDLE.value: AnimationState.IDLE,
+            }
+            anim_state = phase_to_state.get(str(phase), AnimationState.IDLE)
+            if self.animation_handler:
+                # session_id=None broadcasts to all connected WebUI sessions.
+                await self.animation_handler.play_animation(anim_state, session_id=None, loop=True)
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} Failed to trigger animation for action phase change: {exc}")
         
         # Send to all connected clients
         for session_id, websocket in self.connections.items():

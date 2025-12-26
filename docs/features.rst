@@ -81,6 +81,11 @@ Avatar System
 **VRM Avatar Support**
     Synthetic Heart includes a default SyntH avatar for 3D visualization, but users can provide their own VRM avatar files for customization. The system supports animated states including idle, talking, and thinking, reflecting the persona's current activity.
 
+Web UI Animation Sync
+---------------------
+
+The Web UI receives real-time animation commands from the backend. When the global action phase changes (e.g. ``THINKING``, ``WRITING``, ``TALKING``, ``IDLE``), the backend triggers the AnimationHandler to broadcast the corresponding animation state to Web UI clients. This keeps the backend authoritative for animation timing, while still allowing plugins/skins to override which files are used for each logical state.
+
 Plugin Ecosystem
 ----------------
 

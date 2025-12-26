@@ -5813,9 +5813,13 @@
                     console.log('[synth_webui] currentDisplayedActionId=' + currentDisplayedActionId + ', incomingActionId=' + incomingActionId);
 
                     // If we are currently displaying an action (have an action id) and the
-                    // incoming state is for a different action (or idle) with LOWER priority,
+                    // incoming state is for a different action with LOWER priority,
                     // ignore it — this ensures low-priority phases like IDLE won't flash over THINKING.
-                    if (currentDisplayedActionId && incomingActionId !== currentDisplayedActionId && incomingPriority < currentPriority) {
+                    //
+                    // IMPORTANT: Always allow IDLE to apply. Backend transitions to IDLE are
+                    // the authoritative signal that an action ended, and blocking IDLE causes
+                    // the UI to get stuck in THINK/WRITE.
+                    if (incomingPhase !== 'IDLE' && currentDisplayedActionId && incomingActionId !== currentDisplayedActionId && incomingPriority < currentPriority) {
                         console.log('[synth_webui] Lower-priority incoming state', incomingPhase, 'would interrupt', currentDisplayedPhase, '- queuing it to apply after current action finishes');
                         // Rather than dropping it we remember it and apply it when the current
                         // high-priority action completes (especially its outro). This avoids
@@ -5830,6 +5834,14 @@
                     // Accept and apply the incoming state
                     currentDisplayedPhase = incomingPhase;
                     currentDisplayedActionId = incomingActionId;
+
+                    // If we are entering IDLE, clear the displayed action id so subsequent
+                    // transitions are not treated as "different action" forever.
+                    if (incomingPhase === 'IDLE') {
+                        currentDisplayedActionId = null;
+                        try { window.__synth_pending_action_state = null; } catch (e) { /* ignore */ }
+                        try { if (window.__synth_pending_action_state_timeout) { clearTimeout(window.__synth_pending_action_state_timeout); window.__synth_pending_action_state_timeout = null; } } catch (e) { /* ignore */ }
+                    }
 
                     // Keep a numeric priority mirror for animation preemption.
                     try { window.__synth_current_animation_priority = (PHASE_PRIORITIES[incomingPhase] || 0); } catch (e) { /* ignore */ }
@@ -6564,6 +6576,17 @@
             let currentAnimation = null;
             let isProcessing = false;
             let isSpeaking = false;
+            // Flat list of mesh targets for raycasting (avoid recursive traversal per click)
+            let __synthRaycastTargets = [];
+
+            // Screen knock interaction (empty canvas tap)
+            // - Plays a glass knock SFX
+            // - Briefly and subtly glances towards the camera (head/eyes only)
+            // Use WebAudio pre-decoding to avoid click-time MP3 decode stutter.
+            let __synthKnockAudio = null; // legacy fallback
+            let __synthKnockSfx = { buffer: null, loading: null };
+            let __synthLastKnockAt = 0;
+            let __synthKnockLook = { activeUntil: 0, startedAt: 0, durationMs: 520, maxStrength: 0.32 };
 
             const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
             renderer.outputEncoding = THREE.sRGBEncoding;
@@ -6571,6 +6594,30 @@
             const scene = new THREE.Scene();
             const camera = new THREE.PerspectiveCamera(30, canvas.clientWidth / Math.max(1, canvas.clientHeight), 0.1, 20);
             camera.position.set(0, 1.4, 2.2);
+
+            // LookAt targets (we use an explicit Object3D target instead of the camera object)
+            // so we can blend the target position for a subtle “glance”.
+            const __synthLookAtTarget = new THREE.Object3D();
+            const __synthDefaultLookAtTarget = new THREE.Object3D();
+            scene.add(__synthLookAtTarget);
+            scene.add(__synthDefaultLookAtTarget);
+            __synthLookAtTarget.position.set(0, 1.45, 1);
+            __synthDefaultLookAtTarget.position.set(0, 1.45, 1);
+
+            // Cached temps for render-loop math
+            const __synthTmpAvatarPos = new THREE.Vector3();
+            const __synthTmpCamPos = new THREE.Vector3();
+            const __synthTmpForward = new THREE.Vector3();
+            const __synthTmpQuat = new THREE.Quaternion();
+            const __synthTmpDesired = new THREE.Vector3();
+            const __synthTmpDesired2 = new THREE.Vector3();
+            const __synthTmpHeadPos = new THREE.Vector3();
+            const __synthTmpDir = new THREE.Vector3();
+            const __synthTmpUp = new THREE.Vector3(0, 1, 0);
+
+            // Neutral gaze is avatar-forward (does not track the camera).
+            // Knock temporarily blends gaze towards the camera.
+            const __synthNeutralGaze = { yawOffsetRad: 0.0, distance: 2.2 };
 
             const controls = new OrbitControls(camera, canvas);
             controls.enableDamping = true;
@@ -7825,15 +7872,18 @@
                     }
                 }
 
-                async _awaitAnimationReady(actionName, animationFile, timeoutMs = 2000) {
+                async _awaitAnimationReady(actionName, animationFile, timeoutMs = 15000) {
+                    // HARD RULE: never start playback unless the animation is loaded.
+                    // Keep the current animation playing while we load; do not "fail open".
                     try {
-                        if (!animationFile) return;
+                        if (!animationFile) return null;
+                        if (!this.vrm || !this.mixer) return null;
                         if (!this._preloadPromises) this._preloadPromises = {};
                         const normalizedKey = this._normalizeAnimationKey(animationFile);
 
                         let p = this._preloadPromises[normalizedKey] || this._preloadPromises[animationFile] || null;
                         if (!p) {
-                            // No in-flight preload: ensure clip is loaded while current action still plays.
+                            // Ensure the clip is loaded while the current action still plays.
                             p = (async () => await this.loadAnimation(actionName, animationFile))();
                             this._preloadPromises[normalizedKey] = p;
                             try {
@@ -7841,10 +7891,20 @@
                             } catch (e) { /* ignore */ }
                         }
 
-                        const timeout = new Promise((resolve) => setTimeout(resolve, Math.max(250, timeoutMs)));
-                        await Promise.race([p, timeout]);
+                        // Soft watchdog log (doesn't abort): we just don't switch until loaded.
+                        const warnMs = Math.max(500, Math.min(15000, Number(timeoutMs) || 5000));
+                        let warnTimer = null;
+                        try {
+                            warnTimer = setTimeout(() => {
+                                try { console.warn('[AnimationHandler] Still preloading (holding previous animation):', actionName, animationFile); } catch (e) { /* ignore */ }
+                            }, warnMs);
+                        } catch (e) { /* ignore */ }
+
+                        const clip = await p;
+                        try { if (warnTimer) clearTimeout(warnTimer); } catch (e) { /* ignore */ }
+                        return clip || null;
                     } catch (e) {
-                        // Never block playback due to preload errors.
+                        return null;
                     }
                 }
 
@@ -8721,9 +8781,16 @@
                     // "no clip driving bones" gaps and reduces skipped WRITE.
                     try {
                         if (animationFile) {
-                            await this._awaitAnimationReady(actionName, animationFile, 6000);
+                            const clipReady = await this._awaitAnimationReady(actionName, animationFile, 5000);
+                            if (!clipReady) {
+                                console.warn('[AnimationHandler] Cannot play (preload failed). Keeping previous animation:', actionName, animationFile);
+                                return;
+                            }
                         }
-                    } catch (e) { /* ignore */ }
+                    } catch (e) {
+                        console.warn('[AnimationHandler] Cannot play (preload error). Keeping previous animation:', actionName, animationFile, e);
+                        return;
+                    }
 
                     // Guard: if the requested logical action is already active and
                     // no explicit file override is provided, avoid restarting it to
@@ -9916,6 +9983,26 @@
                     currentModel = name;
                     console.log('[synth_webui] currentVRM set:', currentVRM);
 
+                    // Build raycast target list once for this model (meshes only)
+                    try {
+                        __synthRaycastTargets = [];
+                        if (vrm && vrm.scene) {
+                            vrm.scene.traverse((obj) => {
+                                try {
+                                    if (!obj) return;
+                                    const isMesh = !!(obj.isMesh || obj.isSkinnedMesh);
+                                    if (!isMesh) return;
+                                    if (!obj.geometry) return;
+                                    __synthRaycastTargets.push(obj);
+                                } catch (_e) { /* ignore */ }
+                            });
+                        }
+                        console.log('[synth_webui] Raycast targets:', __synthRaycastTargets.length);
+                    } catch (e) {
+                        console.warn('[synth_webui] Failed to build raycast targets:', e);
+                        __synthRaycastTargets = [];
+                    }
+
                     // Detect face/expression capabilities (VRM0 vs VRM1) for case-by-case debugging.
                     try {
                         const hasBlendShapeProxy = !!(vrm && vrm.blendShapeProxy && typeof vrm.blendShapeProxy.setValue === 'function');
@@ -9962,8 +10049,10 @@
 
                     // Configure VRM LookAt to face the camera
                     if (vrm.lookAt) {
-                        vrm.lookAt.target = camera; // Use camera object, not camera.position
-                        console.log('[synth_webui] ✓ VRM LookAt configured to track camera');
+                        // Do not hard-bind LookAt to the camera here. The render loop owns LookAt
+                        // and applies a neutral forward gaze + temporary knock glance.
+                        try { vrm.lookAt.target = __synthLookAtTarget; } catch (_e) { /* ignore */ }
+                        console.log('[synth_webui] ✓ VRM LookAt enabled (render-loop controlled)');
                     } else {
                         console.log('[synth_webui] ⚠️ VRM LookAt not available');
                     }
@@ -10314,10 +10403,88 @@
                 requestAnimationFrame(render);
                 const delta = clock.getDelta();
                 if (currentVRM) {
-                    // Update VRM lookAt to face the camera
-                    if (currentVRM.lookAt) {
-                        currentVRM.lookAt.target = camera; // Use camera object, not camera.position
-                    }
+                    // Update VRM lookAt target.
+                    // Default: look forward (not directly at the camera).
+                    // On knock: briefly blend the target slightly towards the camera for a low-key “notice”.
+                    try {
+                        if (currentVRM.lookAt && currentVRM.scene) {
+                            // Camera world position
+                            camera.getWorldPosition(__synthTmpCamPos);
+
+                            // Compute head/world position (prefer VRM humanoid head bone if available)
+                            let haveHead = false;
+                            try {
+                                const humanoid = currentVRM.humanoid;
+                                const headNode = humanoid && typeof humanoid.getNormalizedBoneNode === 'function'
+                                    ? (humanoid.getNormalizedBoneNode('head') || humanoid.getNormalizedBoneNode('Head'))
+                                    : null;
+                                if (headNode && typeof headNode.getWorldPosition === 'function') {
+                                    headNode.getWorldPosition(__synthTmpHeadPos);
+                                    haveHead = true;
+                                }
+                            } catch (e) { /* ignore */ }
+                            if (!haveHead) {
+                                currentVRM.scene.getWorldPosition(__synthTmpAvatarPos);
+                                __synthTmpHeadPos.copy(__synthTmpAvatarPos);
+                                __synthTmpHeadPos.y += 1.45;
+                            }
+
+                            // Compute avatar-forward using hips bone (more reliable than scene orientation)
+                            let haveHips = false;
+                            try {
+                                const humanoid = currentVRM.humanoid;
+                                const hipsNode = humanoid && typeof humanoid.getNormalizedBoneNode === 'function'
+                                    ? (humanoid.getNormalizedBoneNode('hips') || humanoid.getNormalizedBoneNode('Hips'))
+                                    : null;
+                                if (hipsNode && typeof hipsNode.getWorldQuaternion === 'function') {
+                                    hipsNode.getWorldQuaternion(__synthTmpQuat);
+                                    haveHips = true;
+                                }
+                            } catch (e) { /* ignore */ }
+                            if (!haveHips) {
+                                try { currentVRM.scene.getWorldQuaternion(__synthTmpQuat); } catch (e) { /* ignore */ }
+                            }
+
+                            __synthTmpForward.set(0, 0, -1).applyQuaternion(__synthTmpQuat).normalize();
+                            // slight "avoid eye contact" offset (secondary mood)
+                            __synthTmpForward.applyAxisAngle(__synthTmpUp, __synthNeutralGaze.yawOffsetRad);
+
+                            const headY = __synthTmpHeadPos.y;
+                            const defaultTarget = __synthDefaultLookAtTarget.position;
+                            defaultTarget.copy(__synthTmpHeadPos).add(__synthTmpForward.multiplyScalar(__synthNeutralGaze.distance));
+                            defaultTarget.y = headY;
+
+                            // Knock glance strength: eased 0..1..0 over the window
+                            const now = Date.now();
+                            let strength = 0;
+                            if (__synthKnockLook && __synthKnockLook.activeUntil && now < __synthKnockLook.activeUntil) {
+                                const start = __synthKnockLook.startedAt || (now - 1);
+                                const dur = Math.max(120, Number(__synthKnockLook.durationMs) || 520);
+                                const p = Math.max(0, Math.min(1, (now - start) / dur));
+                                const ease = Math.sin(Math.PI * p);
+                                strength = (Number(__synthKnockLook.maxStrength) || 0.32) * ease;
+                            }
+
+                            const desiredTarget = __synthTmpDesired2.copy(defaultTarget);
+                            if (strength > 0) {
+                                // Compute a camera-facing target at the same distance as neutral gaze.
+                                __synthTmpDir.copy(__synthTmpCamPos).sub(__synthTmpHeadPos);
+                                __synthTmpDir.y *= 0.35;
+                                if (__synthTmpDir.lengthSq() < 1e-6) __synthTmpDir.set(0, 0, -1);
+                                __synthTmpDir.normalize();
+                                __synthTmpDesired.copy(__synthTmpHeadPos).add(__synthTmpDir.multiplyScalar(__synthNeutralGaze.distance));
+                                __synthTmpDesired.y = headY;
+                                desiredTarget.lerp(__synthTmpDesired, strength);
+                            }
+
+                            // Smoothly move our explicit target to avoid snapping.
+                            const dt = Number.isFinite(delta) ? delta : 0.016;
+                            const alpha = 1 - Math.exp(-10 * dt);
+                            __synthLookAtTarget.position.lerp(desiredTarget, alpha);
+                            currentVRM.lookAt.target = __synthLookAtTarget;
+                        }
+                    } catch (e) { /* ignore */ }
+
                     currentVRM.update(delta);
                 }
                 if (currentMixer) {
@@ -10618,6 +10785,88 @@
                     let pointerDownInfo = null;
                     let isDragging = false;
 
+                    function _playScreenKnockSfx() {
+                        try {
+                            const now = Date.now();
+                            // simple debounce to avoid spamming
+                            if (now - (__synthLastKnockAt || 0) < 180) return;
+                            __synthLastKnockAt = now;
+
+                            // Prefer WebAudio (already used elsewhere in the page) for stutter-free playback.
+                            try { ensureAudioContext(true); } catch (_e) { /* ignore */ }
+                            if (audioContext && __synthKnockSfx && __synthKnockSfx.buffer) {
+                                try {
+                                    const src = audioContext.createBufferSource();
+                                    const gain = audioContext.createGain();
+                                    gain.gain.value = 0.55;
+                                    src.buffer = __synthKnockSfx.buffer;
+                                    src.connect(gain);
+                                    gain.connect(audioContext.destination);
+                                    src.start(0);
+                                    return;
+                                } catch (_e) {
+                                    // fall through to HTMLAudio fallback
+                                }
+                            }
+
+                            // Fallback: HTMLAudio (may stutter on first decode on some browsers)
+                            if (!__synthKnockAudio) {
+                                __synthKnockAudio = new Audio('/static/effects/glass-knock-1-189096.mp3');
+                                __synthKnockAudio.preload = 'auto';
+                                __synthKnockAudio.volume = 0.55;
+                                // Best-effort warmup to reduce first-play stutter.
+                                try { __synthKnockAudio.load(); } catch (_e) { /* ignore */ }
+                            }
+                            try { __synthKnockAudio.currentTime = 0; } catch (_e) { /* ignore */ }
+                            const p = __synthKnockAudio.play();
+                            if (p && typeof p.catch === 'function') p.catch(() => {});
+                        } catch (e) {
+                            console.debug('[synth_webui] knock sfx failed:', e);
+                        }
+                    }
+
+                    async function _ensureKnockSfxDecoded() {
+                        try {
+                            if (__synthKnockSfx.buffer) return __synthKnockSfx.buffer;
+                            if (__synthKnockSfx.loading) return await __synthKnockSfx.loading;
+                            try { ensureAudioContext(true); } catch (_e) { /* ignore */ }
+                            if (!audioContext) return null;
+
+                            __synthKnockSfx.loading = (async () => {
+                                const resp = await fetch('/static/effects/glass-knock-1-189096.mp3', { cache: 'force-cache' });
+                                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                                const arr = await resp.arrayBuffer();
+                                const buf = await new Promise((resolve, reject) => {
+                                    try {
+                                        audioContext.decodeAudioData(arr, resolve, reject);
+                                    } catch (e) {
+                                        reject(e);
+                                    }
+                                });
+                                __synthKnockSfx.buffer = buf;
+                                return buf;
+                            })();
+
+                            const out = await __synthKnockSfx.loading;
+                            return out;
+                        } catch (e) {
+                            try { __synthKnockSfx.loading = null; } catch (_e) { /* ignore */ }
+                            return null;
+                        }
+                    }
+
+                    function _triggerSoftLookTowardCamera() {
+                        try {
+                            if (!currentVRM || !camera) return;
+                            const now = Date.now();
+                            __synthKnockLook = __synthKnockLook || { activeUntil: 0, startedAt: 0, durationMs: 520, maxStrength: 0.32 };
+                            if (!Number.isFinite(__synthKnockLook.durationMs)) __synthKnockLook.durationMs = 520;
+                            if (!Number.isFinite(__synthKnockLook.maxStrength)) __synthKnockLook.maxStrength = 0.32;
+                            __synthKnockLook.startedAt = now;
+                            __synthKnockLook.activeUntil = now + __synthKnockLook.durationMs;
+                        } catch (e) { /* ignore */ }
+                    }
+
                     // Map raw node/mesh names to human-friendly body part labels.
                     // Heuristics: strip common suffixes like (merged), baked, numeric suffixes,
                     // then match common tokens via ordered regex rules. Returns { label, confidence }.
@@ -10663,6 +10912,8 @@
                     canvas.addEventListener('pointerdown', (ev) => {
                         pointerDownInfo = { x: ev.clientX, y: ev.clientY, t: Date.now() };
                         isDragging = false;
+                        // User gesture: kick off SFX decode in background to avoid stutter on first knock.
+                        try { _ensureKnockSfxDecoded(); } catch (_e) { /* ignore */ }
                     });
 
                     canvas.addEventListener('pointermove', (ev) => {
@@ -10692,8 +10943,14 @@
                             // geometry or other non-avatar objects which would incorrectly
                             // trigger touch animations when clicking empty space.
                             if (!currentVRM || !currentVRM.scene) return;
-                            const intersects = raycaster.intersectObject(currentVRM.scene, true);
-                            if (!intersects || intersects.length === 0) return;
+                            const targets = (__synthRaycastTargets && __synthRaycastTargets.length) ? __synthRaycastTargets : [currentVRM.scene];
+                            const intersects = raycaster.intersectObjects(targets, false);
+                            if (!intersects || intersects.length === 0) {
+                                // Empty space tap: play knock SFX and turn towards the camera.
+                                _playScreenKnockSfx();
+                                _triggerSoftLookTowardCamera();
+                                return;
+                            }
 
                             const intersect = intersects[0];
                             let node = intersect.object;
