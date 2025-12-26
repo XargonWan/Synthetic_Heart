@@ -6910,7 +6910,22 @@
 
                 clearDebugFaceOverrides() {
                     try {
+                        const prev = (this._debugFaceOverrides && typeof this._debugFaceOverrides === 'object') ? this._debugFaceOverrides : {};
                         this._debugFaceOverrides = {};
+                        try { this._debugFaceDirty = {}; } catch (e) { /* ignore */ }
+                        try { if (this._debugFaceApplyRaf) cancelAnimationFrame(this._debugFaceApplyRaf); } catch (e) { /* ignore */ }
+                        try { this._debugFaceApplyRaf = 0; } catch (e) { /* ignore */ }
+
+                        // Immediately reset any keys that were forced by debug overrides.
+                        try {
+                            Object.keys(prev).forEach((k) => {
+                                if (!k) return;
+                                try { if (this._expressionState) delete this._expressionState[String(k)]; } catch (e) { /* ignore */ }
+                                try { this._setFaceValue(String(k), 0); } catch (e) { /* ignore */ }
+                                try { this._setFaceValue(String(k).replace(/\./g, '_'), 0); } catch (e) { /* ignore */ }
+                            });
+                        } catch (e) { /* ignore */ }
+                        try { this._flushFaceNow(); } catch (e) { /* ignore */ }
                     } catch (e) { /* ignore */ }
                 }
 
@@ -6929,16 +6944,68 @@
                         if (!this._debugEmotionOverrides || typeof this._debugEmotionOverrides !== 'object') this._debugEmotionOverrides = {};
                         if (intensity === null || intensity === undefined || intensity === '') {
                             delete this._debugEmotionOverrides[k];
+                            // Apply immediately (useful during pause or before any animation_state arrives).
+                            try {
+                                if (!this._debugEmotionApplyRaf) {
+                                    this._debugEmotionApplyRaf = requestAnimationFrame(() => {
+                                        try {
+                                            this._debugEmotionApplyRaf = 0;
+                                            const base = this._lastAnimationState || {};
+                                            const st = Object.assign({ expressions: [] }, base);
+                                            if (!st.timing) st.timing = {};
+                                            if (!st.timing.started_at) st.timing.started_at = new Date().toISOString();
+                                            if (!st.clip) st.clip = { fps: 30 };
+                                            try { this.applyExpressionsForFrame(st, 0.033); } catch (e) { /* ignore */ }
+                                            try { this._flushFaceNow(); } catch (e) { /* ignore */ }
+                                        } catch (e) { /* ignore */ }
+                                    });
+                                }
+                            } catch (e) { /* ignore */ }
                             return;
                         }
                         const v = Math.max(0, Math.min(1, Number(intensity) || 0));
                         this._debugEmotionOverrides[k] = v;
+
+                        // Apply immediately (useful during pause or before any animation_state arrives).
+                        try {
+                            if (!this._debugEmotionApplyRaf) {
+                                this._debugEmotionApplyRaf = requestAnimationFrame(() => {
+                                    try {
+                                        this._debugEmotionApplyRaf = 0;
+                                        const base = this._lastAnimationState || {};
+                                        const st = Object.assign({ expressions: [] }, base);
+                                        if (!st.timing) st.timing = {};
+                                        if (!st.timing.started_at) st.timing.started_at = new Date().toISOString();
+                                        if (!st.clip) st.clip = { fps: 30 };
+                                        try { this.applyExpressionsForFrame(st, 0.033); } catch (e) { /* ignore */ }
+                                        try { this._flushFaceNow(); } catch (e) { /* ignore */ }
+                                    } catch (e) { /* ignore */ }
+                                });
+                            }
+                        } catch (e) { /* ignore */ }
                     } catch (e) { /* ignore */ }
                 }
 
                 clearDebugEmotionOverrides() {
                     try {
                         this._debugEmotionOverrides = {};
+                        // Apply immediately so previously-set face values don't linger.
+                        try {
+                            if (!this._debugEmotionApplyRaf) {
+                                this._debugEmotionApplyRaf = requestAnimationFrame(() => {
+                                    try {
+                                        this._debugEmotionApplyRaf = 0;
+                                        const base = this._lastAnimationState || {};
+                                        const st = Object.assign({ expressions: [] }, base);
+                                        if (!st.timing) st.timing = {};
+                                        if (!st.timing.started_at) st.timing.started_at = new Date().toISOString();
+                                        if (!st.clip) st.clip = { fps: 30 };
+                                        try { this.applyExpressionsForFrame(st, 0.25); } catch (e) { /* ignore */ }
+                                        try { this._flushFaceNow(); } catch (e) { /* ignore */ }
+                                    } catch (e) { /* ignore */ }
+                                });
+                            }
+                        } catch (e) { /* ignore */ }
                     } catch (e) { /* ignore */ }
                 }
 
@@ -6961,8 +7028,9 @@
                         this.currentActionName = state.action || this.currentActionName;
                         this.currentActionPhase = state.phase || this.currentActionPhase;
 
-                        // Keep emotions snapshot for downstream consumers
+                        // Keep emotions/feelings snapshot for downstream consumers
                         try { this._lastEmotions = (state && state.emotions) ? state.emotions : null; } catch (e) { this._lastEmotions = null; }
+                        try { this._lastFeelings = (state && state.feelings) ? state.feelings : null; } catch (e) { this._lastFeelings = null; }
 
                         // Emotion overlay: after an action starts, apply the dominant emotion face for
                         // a random duration that scales with intensity. This is action-agnostic because
@@ -7156,8 +7224,13 @@
                             const tick = (now) => {
                                 try {
                                     const paused = !!(window.__synth_web_debug_enabled && window.__synth_debug_pause_all);
-                                    if (paused) {
-                                        // Freeze expression ticking during pause.
+                                    const hasDebugEmotionOverrides = !!(this._debugEmotionOverrides && typeof this._debugEmotionOverrides === 'object' && Object.keys(this._debugEmotionOverrides).length);
+                                    const hasDebugFaceOverrides = !!(this._debugFaceOverrides && typeof this._debugFaceOverrides === 'object' && Object.keys(this._debugFaceOverrides).length);
+                                    const hasDebugLoopOverride = !!(this._debugOverride && this._debugOverride.action);
+                                    const allowOverridesWhilePaused = hasDebugLoopOverride || hasDebugEmotionOverrides || hasDebugFaceOverrides;
+
+                                    if (paused && !allowOverridesWhilePaused) {
+                                        // Freeze expression ticking during pause (standard animations only).
                                         this._lastTickTime = now;
                                     } else {
                                         const dt = Math.min(0.1, (now - (this._lastTickTime || now)) / 1000);
@@ -7190,7 +7263,7 @@
                                 console.debug('[AnimationHandler] applyExpressionsForFrame START', { dt: dt, expressions: exprCount });
                             }
                         } catch (e) { /* ignore logging errors */ }
-                        if (!state || !state.expressions || !Array.isArray(state.expressions)) return;
+                        if (!state) return;
                         if (!this.vrm) return;
                         if (!this._getFaceController()) return;
 
@@ -7257,16 +7330,28 @@
                         };
 
                         // Respect expression priority: higher priority wins on conflicts
-                        const exprs = (state.expressions || []).slice().map(e => Object.assign({ priority: 0 }, e));
+                        const baseExpressions = Array.isArray(state.expressions) ? state.expressions : [];
+                        const exprs = (baseExpressions || []).slice().map(e => Object.assign({ priority: 0 }, e));
 
-                        // Emotion state injection: treat state.emotions as a synthetic expression keyed by emotion name.
+                        // Emotion/Feeling state injection: treat state.emotions/state.feelings as synthetic expressions keyed by name.
                         // This allows persona.json blendshape_map.emotions[...] (or the client fallback presets) to drive face.
                         try {
                             const emObj = (state && state.emotions && typeof state.emotions === 'object') ? state.emotions : null;
                             const valuesObj = (emObj && emObj.values && typeof emObj.values === 'object') ? emObj.values
                                             : ((emObj && typeof emObj === 'object') ? emObj : null);
-                            if (valuesObj && typeof valuesObj === 'object' && !Array.isArray(valuesObj)) {
-                                const t = {};
+                            const t = {};
+                            if (Array.isArray(valuesObj)) {
+                                valuesObj.forEach((it) => {
+                                    try {
+                                        const name = it && (it.type || it.name) ? String(it.type || it.name) : '';
+                                        if (!name) return;
+                                        const raw = Number(it.intensity !== undefined ? it.intensity : it.value);
+                                        if (!Number.isFinite(raw)) return;
+                                        const v01 = (raw > 1) ? (raw / 10.0) : raw;
+                                        t[name] = Math.max(t[name] || 0, Math.max(0, Math.min(1, v01)));
+                                    } catch (e) { /* ignore */ }
+                                });
+                            } else if (valuesObj && typeof valuesObj === 'object') {
                                 Object.keys(valuesObj).forEach((k) => {
                                     if (!k) return;
                                     if (/^\d+$/.test(String(k))) return;
@@ -7275,8 +7360,79 @@
                                     const v01 = (raw > 1) ? (raw / 10.0) : raw;
                                     t[String(k)] = Math.max(0, Math.min(1, v01));
                                 });
-                                if (Object.keys(t).length > 0) {
-                                    exprs.push({ targets: t, priority: 15, source: 'emotions_state' });
+                            }
+                            if (Object.keys(t).length > 0) {
+                                exprs.push({ targets: t, priority: 15, source: 'emotions_state' });
+                            }
+                        } catch (e) { /* ignore */ }
+
+                        try {
+                            const fObj = (state && state.feelings && typeof state.feelings === 'object') ? state.feelings : null;
+                            const valuesObj = (fObj && fObj.values && typeof fObj.values === 'object') ? fObj.values
+                                            : ((fObj && typeof fObj === 'object') ? fObj : null);
+                            const t = {};
+                            if (Array.isArray(valuesObj)) {
+                                valuesObj.forEach((it) => {
+                                    try {
+                                        const name = it && (it.type || it.name) ? String(it.type || it.name) : '';
+                                        if (!name) return;
+                                        const raw = Number(it.intensity !== undefined ? it.intensity : it.value);
+                                        if (!Number.isFinite(raw)) return;
+                                        const v01 = (raw > 1) ? (raw / 10.0) : raw;
+                                        t[name] = Math.max(t[name] || 0, Math.max(0, Math.min(1, v01)));
+                                    } catch (e) { /* ignore */ }
+                                });
+                            } else if (valuesObj && typeof valuesObj === 'object') {
+                                Object.keys(valuesObj).forEach((k) => {
+                                    if (!k) return;
+                                    if (/^\d+$/.test(String(k))) return;
+                                    const raw = Number(valuesObj[k]);
+                                    if (!Number.isFinite(raw)) return;
+                                    const v01 = (raw > 1) ? (raw / 10.0) : raw;
+                                    t[String(k)] = Math.max(0, Math.min(1, v01));
+                                });
+                            }
+                            if (Object.keys(t).length > 0) {
+                                exprs.push({ targets: t, priority: 14, source: 'feelings_state' });
+
+                                // Derive a few basic emotions from common feeling dimensions so the
+                                // built-in emotion->face presets can kick in even without persona mapping.
+                                const derived = {};
+                                const get = (k) => (t[k] !== undefined) ? Number(t[k]) : null;
+                                const valence = get('valence');
+                                const arousal = get('arousal');
+                                const stress = get('stress');
+                                const calm = get('calm');
+
+                                // If valence is 0..1 (0=neg, 1=pos), split around 0.5.
+                                if (Number.isFinite(valence)) {
+                                    const v = Math.max(0, Math.min(1, valence));
+                                    const pos = Math.max(0, (v - 0.5) * 2);
+                                    const neg = Math.max(0, (0.5 - v) * 2);
+                                    if (pos > 0.02) derived['happy'] = Math.max(derived['happy'] || 0, pos);
+                                    if (neg > 0.02) derived['sad'] = Math.max(derived['sad'] || 0, neg);
+                                }
+                                if (Number.isFinite(arousal)) {
+                                    const a = Math.max(0, Math.min(1, arousal));
+                                    // Prefer the common facial morph key name used by many VRM rigs.
+                                    if (a > 0.25) derived['surprised'] = Math.max(derived['surprised'] || 0, (a - 0.25) / 0.75);
+                                }
+                                if (Number.isFinite(stress)) {
+                                    const s = Math.max(0, Math.min(1, stress));
+                                    if (s > 0.05) {
+                                        derived['scared'] = Math.max(derived['scared'] || 0, s);
+                                        // Many rigs expose the facial morph as "angry" rather than "anger".
+                                        derived['angry'] = Math.max(derived['angry'] || 0, s * 0.6);
+                                    }
+                                }
+                                if (Number.isFinite(calm)) {
+                                    const c = Math.max(0, Math.min(1, calm));
+                                    // "relaxed" is a common VRM preset; keep "neutral" too as a fallback.
+                                    if (c > 0.65) derived['relaxed'] = Math.max(derived['relaxed'] || 0, (c - 0.65) / 0.35);
+                                }
+
+                                if (Object.keys(derived).length) {
+                                    exprs.push({ targets: derived, priority: 14.5, source: 'feelings_derived' });
                                 }
                             }
                         } catch (e) { /* ignore */ }
@@ -7462,17 +7618,87 @@
                                 try {
                                     const raw = String(key || nkey || '').trim();
                                     const ek = raw.toLowerCase();
+
+                                    // Prefer driving actual facial expression morphs (happy/angry/sad/surprised/relaxed)
+                                    // when the model exposes them. This is what users expect when moving "feelings" sliders.
+                                    try {
+                                        const caps = (window && window.__synth_vrm_capabilities && typeof window.__synth_vrm_capabilities === 'object') ? window.__synth_vrm_capabilities : null;
+                                        const exprKeys = (caps && Array.isArray(caps.expressionKeys)) ? caps.expressionKeys : [];
+                                        const exprSet = new Set((exprKeys || []).map(k => String(k).toLowerCase()));
+
+                                        const emoAliases = {
+                                            // canonical -> common synonyms
+                                            happiness: 'happy',
+                                            joyful: 'happy',
+                                            joy: 'happy',
+                                            joyfulness: 'happy',
+                                            smiling: 'happy',
+                                            hopeful: 'hope',
+                                            hope: 'hope',
+                                            sadness: 'sad',
+                                            sad: 'sad',
+                                            angry: 'angry',
+                                            anger: 'angry',
+                                            furious: 'angry',
+                                            rage: 'angry',
+                                            surprised: 'surprised',
+                                            surprise: 'surprised',
+                                            fear: 'scared',
+                                            frightened: 'scared',
+                                            scared: 'scared',
+                                            disgusted: 'disgust',
+                                            disgust: 'disgust',
+                                            neutral: 'neutral',
+                                            calm: 'relaxed',
+                                            relaxed: 'relaxed',
+                                        };
+
+                                        const canonical = emoAliases[ek] || ek;
+                                        const faceCandidates = {
+                                            happy: ['happy', 'joy', 'smile', 'smiling'],
+                                            sad: ['sad', 'sorrow'],
+                                            angry: ['angry', 'anger'],
+                                            surprised: ['surprised', 'surprise'],
+                                            scared: ['scared', 'fear'],
+                                            disgust: ['disgust'],
+                                            relaxed: ['relaxed', 'neutral'],
+                                            neutral: ['neutral', 'relaxed'],
+                                            hope: ['happy', 'relaxed', 'neutral'],
+                                        };
+
+                                        const cands = faceCandidates[canonical] || null;
+                                        if (cands && cands.length) {
+                                            // Pick the first available expression key (case-insensitive).
+                                            let picked = null;
+                                            for (const c of cands) {
+                                                if (exprSet.has(String(c).toLowerCase())) { picked = String(c); break; }
+                                            }
+
+                                            // If we found a real morph key, drive it directly.
+                                            if (picked) {
+                                                const outKey = normalizeKey(String(picked));
+                                                if ((assignedPriority[outKey] === undefined) || (p > assignedPriority[outKey])) {
+                                                    desired[outKey] = Math.max(desired[outKey] || 0, intensity);
+                                                    assignedPriority[outKey] = p;
+                                                }
+                                                return;
+                                            }
+                                        }
+                                    } catch (e) { /* ignore */ }
+
                                     const presetAliases = {
                                         // common synonyms
                                         happiness: 'happy',
                                         joyful: 'joy',
                                         joyfulness: 'joy',
                                         smiling: 'happy',
+                                        hopeful: 'hope',
                                         sadness: 'sad',
                                         angry: 'anger',
                                         furious: 'anger',
                                         rage: 'anger',
                                         surprised: 'surprise',
+                                        surprise: 'surprise',
                                         fear: 'scared',
                                         frightened: 'scared',
                                         disgusted: 'disgust',
@@ -7484,6 +7710,8 @@
                                         // mapped in persona.json via blendshape_map.visemes.
                                         happy:    { ee: 0.28, aa: 0.12, oh: 0.06 },
                                         joy:      { ee: 0.26, aa: 0.10, oh: 0.05 },
+                                        // hope is typically a mild positive affect
+                                        hope:     { ee: 0.22, aa: 0.08, oh: 0.04 },
                                         sad:      { oh: 0.16, ih: 0.10, ou: 0.06 },
                                         anger:    { aa: 0.18, ou: 0.10, ih: 0.06 },
                                         surprise: { oh: 0.40, aa: 0.10 },
@@ -10060,10 +10288,25 @@
                         // Create subclip using frame indices.
                         // Note: THREE.AnimationUtils.subclip expects an *exclusive* end frame.
                         // Our UI + descriptors use inclusive end_frame, so we add +1.
-                        const tfps = Number.isFinite(fps) ? fps : 30;
+                        // Use descriptor FPS when available to avoid "range looks ignored" due to FPS mismatches.
+                        let tfps = (Number.isFinite(Number(fps)) && Number(fps) > 0) ? Number(fps) : NaN;
+                        try {
+                            const norm = (typeof this._normalizeAnimationKey === 'function') ? this._normalizeAnimationKey(animationFile) : String(animationFile || '');
+                            const desc = (this.loadedDescriptors && norm) ? (this.loadedDescriptors[norm] || this.loadedDescriptors[animationFile]) : null;
+                            const dfps = desc && Number.isFinite(Number(desc.fps)) ? Number(desc.fps) : NaN;
+                            if (!Number.isFinite(tfps) && Number.isFinite(dfps) && dfps > 0) tfps = dfps;
+                        } catch (e) { /* ignore */ }
+                        if (!Number.isFinite(tfps) || tfps <= 0) tfps = 30;
                         const subName = `debug:${actionName}:${animationFile || clip.name}:${startFrame}-${endFrame}`;
-                        const sInc = Math.max(0, Math.floor(Number(startFrame) || 0));
-                        const eInc = Math.max(sInc, Math.floor(Number(endFrame) || 0));
+                        let sInc = Math.max(0, Math.floor(Number(startFrame) || 0));
+                        let eInc = Math.max(0, Math.floor(Number(endFrame) || 0));
+                        if (eInc < sInc) { const tmp = sInc; sInc = eInc; eInc = tmp; }
+                        // Clamp to clip bounds (inclusive frame index).
+                        try {
+                            const maxFrame = Math.max(0, Math.round(Number(clip.duration || 0) * tfps) - 1);
+                            sInc = Math.max(0, Math.min(maxFrame, sInc));
+                            eInc = Math.max(0, Math.min(maxFrame, eInc));
+                        } catch (e) { /* ignore */ }
                         const eExc = Math.max(sInc + 1, eInc + 1);
                         const loopClip = THREE.AnimationUtils.subclip(clip, subName, sInc, eExc, tfps);
                         try { loopClip._meta = loopClip._meta || {}; loopClip._meta.loopFrames = { startFrame: sInc, endFrame: eInc, fps: tfps }; } catch (e) { /* ignore */ }
@@ -10079,9 +10322,49 @@
                         const prevPhase = this.currentActionPhase;
                         const prevStructured = this.currentStructuredAction;
 
-                        // Fade out current and play debug loop
-                        try { if (this.currentAction && this.currentAction !== loopAction) this.currentAction.fadeOut(0.15); } catch (e) { /* ignore */ }
-                        loopAction.reset(); loopAction.enabled = true; loopAction.paused = false; loopAction.fadeIn(0.15).play();
+                        // DEBUG OVERRIDE: hard cleanup to avoid hybrid blends.
+                        try {
+                            // Stop anything currently playing in the mixer.
+                            if (this.mixer && typeof this.mixer.stopAllAction === 'function') this.mixer.stopAllAction();
+                            // Also stop/disable named actions (structured entries etc.)
+                            try {
+                                const vals = Object.values(this.actions || {});
+                                vals.forEach((a) => {
+                                    try {
+                                        if (!a) return;
+                                        if (a.intro || a.loop || a.outro) {
+                                            [a.intro, a.loop, a.outro].forEach((x) => {
+                                                try { if (x && typeof x.stop === 'function') x.stop(); } catch (e) { /* ignore */ }
+                                                try { if (x) { x.enabled = false; x.paused = true; } } catch (e) { /* ignore */ }
+                                                try { if (x && typeof x.setEffectiveWeight === 'function') x.setEffectiveWeight(0); } catch (e) { /* ignore */ }
+                                            });
+                                        } else {
+                                            try { if (typeof a.stop === 'function') a.stop(); } catch (e) { /* ignore */ }
+                                            try { a.enabled = false; a.paused = true; } catch (e) { /* ignore */ }
+                                            try { if (typeof a.setEffectiveWeight === 'function') a.setEffectiveWeight(0); } catch (e) { /* ignore */ }
+                                        }
+                                    } catch (e) { /* ignore */ }
+                                });
+                            } catch (e) { /* ignore */ }
+                            // Clear any blend leftover on currentAction.
+                            try {
+                                if (this.currentAction) {
+                                    try { if (typeof this.currentAction.stop === 'function') this.currentAction.stop(); } catch (e) { /* ignore */ }
+                                    try { this.currentAction.enabled = false; this.currentAction.paused = true; } catch (e) { /* ignore */ }
+                                    try { if (typeof this.currentAction.setEffectiveWeight === 'function') this.currentAction.setEffectiveWeight(0); } catch (e) { /* ignore */ }
+                                }
+                            } catch (e) { /* ignore */ }
+                            // Reset mixer time so the override starts deterministic.
+                            try { if (this.mixer && typeof this.mixer.setTime === 'function') this.mixer.setTime(0); } catch (e) { /* ignore */ }
+                        } catch (e) { /* ignore */ }
+
+                        // Play debug loop with no crossfade.
+                        loopAction.reset();
+                        loopAction.enabled = true;
+                        loopAction.paused = false;
+                        try { if (typeof loopAction.setEffectiveWeight === 'function') loopAction.setEffectiveWeight(1); } catch (e) { /* ignore */ }
+                        try { if (typeof loopAction.setEffectiveTimeScale === 'function') loopAction.setEffectiveTimeScale(1); } catch (e) { /* ignore */ }
+                        loopAction.play();
 
                         this._debugOverride = { action: loopAction, clip: loopClip, previous: { action: prevAction, phase: prevPhase, structured: prevStructured }, params: { actionName, animationFile, startFrame, endFrame, fps: tfps } };
 
@@ -10105,14 +10388,32 @@
                         const debug = this._debugOverride;
                         console.log('[AnimationHandler] Clearing temporary debug override:', debug);
 
-                        try { if (debug.action) debug.action.fadeOut(0.12); } catch (e) { /* ignore */ }
+                        // Stop everything hard so we don't keep blended weights.
+                        try { if (this.mixer && typeof this.mixer.stopAllAction === 'function') this.mixer.stopAllAction(); } catch (e) { /* ignore */ }
+                        try {
+                            if (debug.action) {
+                                try { if (typeof debug.action.stop === 'function') debug.action.stop(); } catch (e) { /* ignore */ }
+                                try { debug.action.enabled = false; debug.action.paused = true; } catch (e) { /* ignore */ }
+                                try { if (typeof debug.action.setEffectiveWeight === 'function') debug.action.setEffectiveWeight(0); } catch (e) { /* ignore */ }
+                            }
+                        } catch (e) { /* ignore */ }
 
                         // Try to restore prior action
                         const prev = debug.previous || {};
                         setTimeout(() => {
                             try {
+                                // Ensure the mixer is clean before restoring.
+                                try { if (this.mixer && typeof this.mixer.stopAllAction === 'function') this.mixer.stopAllAction(); } catch (e) { /* ignore */ }
+                                try { if (this.mixer && typeof this.mixer.setTime === 'function') this.mixer.setTime(0); } catch (e) { /* ignore */ }
+
                                 if (prev.action) {
-                                    try { prev.action.reset().fadeIn(0.15).play(); } catch (e) { /* ignore */ }
+                                    try {
+                                        prev.action.reset();
+                                        prev.action.enabled = true;
+                                        prev.action.paused = false;
+                                        try { if (typeof prev.action.setEffectiveWeight === 'function') prev.action.setEffectiveWeight(1); } catch (e) { /* ignore */ }
+                                        prev.action.play();
+                                    } catch (e) { /* ignore */ }
                                     this.currentAction = prev.action;
                                     this.currentActionPhase = prev.phase || null;
                                     this.currentStructuredAction = prev.structured || null;
@@ -10123,7 +10424,7 @@
                             } catch (errInner) {
                                 console.warn('[AnimationHandler] Error restoring previous action after clearing debug override:', errInner);
                             }
-                        }, 150);
+                        }, 30);
 
                         // Remove debug override reference
                         delete this._debugOverride;
@@ -10843,7 +11144,8 @@
 
                     try {
                         const paused = !!(window.__synth_web_debug_enabled && window.__synth_debug_pause_all);
-                        if (!paused) currentVRM.update(delta);
+                        const allowWhilePaused = !!(window.__synth_web_debug_enabled && paused && animationHandler && animationHandler._debugOverride && animationHandler._debugOverride.action);
+                        if (!paused || allowWhilePaused) currentVRM.update(delta);
                     } catch (e) {
                         currentVRM.update(delta);
                     }
@@ -10851,7 +11153,8 @@
                 if (currentMixer) {
                     try {
                         const paused = !!(window.__synth_web_debug_enabled && window.__synth_debug_pause_all);
-                        if (!paused) currentMixer.update(delta);
+                        const allowWhilePaused = !!(window.__synth_web_debug_enabled && paused && animationHandler && animationHandler._debugOverride && animationHandler._debugOverride.action);
+                        if (!paused || allowWhilePaused) currentMixer.update(delta);
                     } catch (e) {
                         currentMixer.update(delta);
                     }
@@ -11153,8 +11456,20 @@
                         if (debugDockBtn && debugDockBtn.isConnected) return debugDockBtn;
                         debugDockBtn = document.createElement('button');
                         debugDockBtn.type = 'button';
-                        debugDockBtn.className = 'pill secondary';
-                        debugDockBtn.textContent = 'Debug';
+                        // Match chat bubble styling when minimized.
+                        debugDockBtn.className = 'chat-toggle-btn';
+                        debugDockBtn.textContent = '💻';
+                        debugDockBtn.setAttribute('aria-label', 'Restore debug');
+                        debugDockBtn.title = 'Restore Debug';
+                        try {
+                            // When in the minimized stack, behave as a normal element.
+                            debugDockBtn.style.position = 'static';
+                            debugDockBtn.style.top = '';
+                            debugDockBtn.style.right = '';
+                            debugDockBtn.style.bottom = '';
+                            debugDockBtn.style.left = '';
+                            debugDockBtn.style.zIndex = '';
+                        } catch (e) { /* ignore */ }
                         debugDockBtn.addEventListener('click', () => {
                             try { win.style.display = ''; } catch (e) { /* ignore */ }
                             try { if (debugDockBtn && debugDockBtn.parentElement) debugDockBtn.parentElement.removeChild(debugDockBtn); } catch (e) { /* ignore */ }
@@ -11252,6 +11567,7 @@
                     if (resetBtn) {
                         resetBtn.addEventListener('click', async () => {
                             try { if (animationHandler) { animationHandler.clearDebugFaceOverrides?.(); animationHandler.clearDebugEmotionOverrides?.(); animationHandler.clearTemporaryOverride?.(); } } catch (e) { /* ignore */ }
+                            try { await resetLoopOverrideUI(); } catch (e) { /* ignore */ }
                             await setPaused(false);
                             await resyncFromBackend();
                         });
@@ -11367,13 +11683,9 @@
                                 if (animationHandler && animationHandler.loadedAnimations) {
                                     const norm = (typeof animationHandler._normalizeAnimationKey === 'function') ? animationHandler._normalizeAnimationKey(file) : file;
                                     let clip = animationHandler.loadedAnimations[norm] || animationHandler.loadedAnimations[file] || null;
-                                    if (!clip && typeof animationHandler.preloadAnimation === 'function') {
-                                        try { await animationHandler.preloadAnimation(file, descriptor || null); } catch (e) { /* ignore */ }
-                                        try {
-                                            const p = animationHandler._preloadPromises ? (animationHandler._preloadPromises[norm] || animationHandler._preloadPromises[file]) : null;
-                                            if (p) await p;
-                                        } catch (e) { /* ignore */ }
-                                        clip = animationHandler.loadedAnimations[norm] || animationHandler.loadedAnimations[file] || null;
+                                    if (!clip && typeof animationHandler.loadAnimation === 'function') {
+                                        const actionType = (selType && selType.value) ? selType.value : 'think';
+                                        try { clip = await animationHandler.loadAnimation(actionType, file); } catch (e) { /* ignore */ }
                                     }
                                     maxFrameIndex = computeMaxFramesFromClip(clip, fps);
                                 }
@@ -11439,19 +11751,38 @@
 
                     const extractEmotionValues = () => {
                         try {
-                            const em = animationHandler ? (animationHandler._lastEmotions || null) : null;
-                            const values = (em && em.values && typeof em.values === 'object') ? em.values : (em && typeof em === 'object' ? em : null);
-                            if (!values || typeof values !== 'object') return {};
-                            if (Array.isArray(values)) return {};
                             const out = {};
-                            Object.keys(values).forEach((k) => {
-                                const v = Number(values[k]);
-                                if (!k) return;
-                                if (/^\d+$/.test(String(k))) return;
-                                if (!Number.isFinite(v)) return;
-                                // accept 0..1 or 0..10
-                                out[String(k)] = (v > 1) ? (v / 10.0) : v;
-                            });
+                            const mergeObj = (obj) => {
+                                if (!obj || typeof obj !== 'object') return;
+                                const values = (obj.values && typeof obj.values === 'object') ? obj.values : obj;
+                                if (!values || typeof values !== 'object') return;
+                                if (Array.isArray(values)) {
+                                    values.forEach((it) => {
+                                        try {
+                                            const name = it && (it.type || it.name) ? String(it.type || it.name) : '';
+                                            if (!name) return;
+                                            if (/^\d+$/.test(String(name))) return;
+                                            const raw = Number(it.intensity !== undefined ? it.intensity : it.value);
+                                            if (!Number.isFinite(raw)) return;
+                                            const v01 = (raw > 1) ? (raw / 10.0) : raw;
+                                            const vv = Math.max(0, Math.min(1, v01));
+                                            out[String(name)] = Math.max(out[String(name)] || 0, vv);
+                                        } catch (e) { /* ignore */ }
+                                    });
+                                    return;
+                                }
+                                Object.keys(values).forEach((k) => {
+                                    if (!k) return;
+                                    if (/^\d+$/.test(String(k))) return;
+                                    const v = Number(values[k]);
+                                    if (!Number.isFinite(v)) return;
+                                    const v01 = (v > 1) ? (v / 10.0) : v;
+                                    const vv = Math.max(0, Math.min(1, v01));
+                                    out[String(k)] = Math.max(out[String(k)] || 0, vv);
+                                });
+                            };
+                            mergeObj(animationHandler ? (animationHandler._lastEmotions || null) : null);
+                            mergeObj(animationHandler ? (animationHandler._lastFeelings || null) : null);
                             return out;
                         } catch (e) {
                             return {};
@@ -11536,7 +11867,16 @@
                             if (!feelingsHost) return;
                             const base = extractEmotionValues();
                             const overrides = (animationHandler && typeof animationHandler.getDebugEmotionOverrides === 'function') ? animationHandler.getDebugEmotionOverrides() : {};
-                            const keys = Array.from(new Set([...Object.keys(base), ...Object.keys(overrides)])).filter(k => k && !/^\d+$/.test(String(k))).sort();
+                            // Backend may not send feelings; keep a stable set of keys visible in debug.
+                            const defaultKeys = [
+                                'valence','arousal','stress','calm',
+                                'hope','happy','joy','sad','anger','surprise','scared','disgust','neutral'
+                            ];
+                            const keys = Array.from(new Set([
+                                ...defaultKeys,
+                                ...Object.keys(base),
+                                ...Object.keys(overrides)
+                            ])).filter(k => k && !/^\d+$/.test(String(k))).sort();
                             ensureFeelingsRows(keys);
                             if (!keys.length) return;
                             keys.forEach((name) => {
@@ -11575,7 +11915,9 @@
                             const keys = (caps && Array.isArray(caps.expressionKeys)) ? caps.expressionKeys : [];
                             // Include a few common aliases
                             const extra = ['blink','blinkLeft','blinkRight','eye_blink_left','eye_blink_right','eyes_closed','eyes.closed','aa','ih','ou','ee','oh'];
-                            return Array.from(new Set([...(keys || []), ...extra].map(String))).filter(Boolean).sort();
+                            return Array.from(new Set([...(keys || []), ...extra].map(String)))
+                                .filter((k) => k && !/^\d+$/.test(String(k)))
+                                .sort();
                         } catch (e) {
                             return [];
                         }
@@ -11730,10 +12072,32 @@
                         } catch (e) { /* ignore */ }
                     }, 300);
 
+                    async function resetLoopOverrideUI() {
+                        try {
+                            if (!selType || !selFile) return;
+                            try { selType.value = 'think'; } catch (e) { /* ignore */ }
+                            await refreshFilesForType('think');
+                            try { if (selFile) selFile.selectedIndex = 0; } catch (e) { /* ignore */ }
+                            await autofillLoopInputs();
+                        } catch (e) { /* ignore */ }
+                    }
+
                     // Initial render
                     renderFeelings();
                     renderFaceList();
                     try { if (pauseBtn) pauseBtn.textContent = isPaused() ? 'Resume' : 'Pause'; } catch (e) { /* ignore */ }
+
+                    // VRM capabilities arrive after load: refresh face keys when the avatar loads.
+                    try {
+                        if (!window.__synth_debug_on_vrm_loaded) {
+                            window.__synth_debug_on_vrm_loaded = () => {
+                                try { renderFaceList(); } catch (e) { /* ignore */ }
+                                try { __dbgFeelingsSig = ''; renderFeelings(); } catch (e) { /* ignore */ }
+                                try { autofillLoopInputs(); } catch (e) { /* ignore */ }
+                            };
+                            window.addEventListener('vrmLoaded', window.__synth_debug_on_vrm_loaded);
+                        }
+                    } catch (e) { /* ignore */ }
                 }
             } catch (err) {
                 console.warn('[synth_webui] Failed to init animation debug panel:', err);
