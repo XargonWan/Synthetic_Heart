@@ -24,7 +24,7 @@
         (function(){
             try {
                 const overlay = document.createElement('pre');
-                overlay.id = 'synth-error-overlay';
+                    overlay.id = 'synth-error-overlay'; // This allows persona.json blendshape_map.emotions[...] (or the client fallback presets) to drive face.
                 overlay.style.cssText = 'display:none;position:fixed;left:0;right:0;top:0;max-height:50vh;overflow:auto;z-index:2147483647;background:rgba(0,0,0,0.85);color:#fff;padding:12px;font:12px/1.4 monospace;white-space:pre-wrap;';
                 document.addEventListener('DOMContentLoaded', () => {
                     try { document.body && document.body.appendChild(overlay); } catch (e) {}
@@ -60,122 +60,25 @@
                         if (reason instanceof Error) {
                             return reason.stack || (reason.name + ': ' + reason.message);
                         }
-                        if (reason && typeof reason === 'object') {
-                            if (reason.stack) return String(reason.stack);
-                            if (reason.message) return String(reason.message);
-                            const json = JSON.stringify(reason);
-                            if (json && json !== '{}' && json !== 'null') return json;
-                            return String(reason);
-                        }
-                        return String(reason);
-                    } catch (e) {
-                        return String(reason);
-                    }
-                }
-
-                function showOverlay(msg) {
-                    try {
-                        const isReconnecting = !!(window && window.__synth_is_reconnecting);
-                        const text = String(msg || '');
-                        // During container restarts the page often triggers fetch/websocket transient errors.
-                        // Avoid surfacing a scary overlay for those expected reconnect conditions.
-                        if (isReconnecting && isTransientConnectivityError(text)) {
-                            return;
-                        }
-                        overlay.textContent = '[synth_webui] Runtime error:\n' + text;
-                        overlay.style.display = 'block';
-                    } catch (e) { console.error('[synth_webui] showOverlay failed', e); }
-                }
-
-                window.addEventListener('error', function(ev){
-                    try {
-                        const info = `${ev.message} (${ev.filename}:${ev.lineno}:${ev.colno})\n${ev.error && ev.error.stack ? ev.error.stack : ''}`;
-                        console.error('[synth_webui] window.error', info);
-                        postConsole('error', info);
-                        showOverlay(info);
-                    } catch (e) { console.error('[synth_webui] error handler failed', e); }
-                });
-
-                window.addEventListener('unhandledrejection', function(ev){
-                    try {
-                        const reasonText = formatRejectionReason(ev.reason);
-                        console.error('[synth_webui] unhandledrejection', reasonText);
-                        postConsole('error', 'unhandledrejection: ' + reasonText);
-                        showOverlay(reasonText);
-                    } catch (e) { console.error('[synth_webui] unhandledrejection handler failed', e); }
-                });
-            } catch (e) { console.warn('[synth_webui] Failed to install global error overlay', e); }
-        })();
-
-        // Reset movable windows to safe default positions/sizes
-        function resetWindowPositions(confirmAction = true) {
-            try {
-                if (confirmAction && !confirm('Reset window positions to defaults for desktop and mobile?')) return;
-                const chatEl = document.getElementById('chat');
-                if (!chatEl) return;
-                const isMobile = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768);
-                if (isMobile) {
-                    // Mobile safe: bottom with full-ish width and half viewport height
-                    const left = 16;
-                    const width = Math.max(260, Math.round(window.innerWidth - 32));
-                    const height = Math.round(window.innerHeight * 0.5);
-                    chatEl.style.left = left + 'px';
-                    chatEl.style.top = '';
-                    chatEl.style.bottom = '1rem';
-                    chatEl.style.right = 'auto';
-                    chatEl.style.width = width + 'px';
-                    chatEl.style.height = height + 'px';
-                    chatEl.classList.remove('hidden', 'minimized', 'maximized');
-                    if (chatToggleBtn) chatToggleBtn.style.display = 'none';
-                    // Persist
-                    const device = 'mobile';
-                    const rectPayload = { left, top: null, width, height };
-                    try { localStorage.setItem((sessionId ? `${CHAT_RECT_KEY}-${sessionId}-${device}` : `${CHAT_RECT_KEY}-${device}`), JSON.stringify(rectPayload)); } catch (e) {}
-                    try { localStorage.setItem(CHAT_RECT_KEY, JSON.stringify(rectPayload)); } catch (e) {}
-                    try { saveChatRectToServer(rectPayload); } catch (e) {}
-                    try { localStorage.setItem((sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}-${device}` : `${CHAT_WINDOW_STATE_KEY}-${device}`), 'expanded'); } catch (e) {}
-                    try { saveWindowStateToServer({ window: 'chat', state: 'expanded' }); } catch (e) {}
-                } else {
-                    // Desktop safe: bottom-left with moderate width/height
-                    const width = Math.max(420, Math.round(Math.min(600, window.innerWidth * 0.35)));
-                    const height = Math.round(Math.min(window.innerHeight * 0.6, 800));
-                    const left = Math.max(24, 24);
-                    const top = Math.max(100, Math.round(window.innerHeight - height - 24));
-                    chatEl.style.left = left + 'px';
-                    chatEl.style.top = top + 'px';
-                    chatEl.style.right = 'auto';
-                    chatEl.style.bottom = '';
-                    chatEl.style.width = width + 'px';
-                    chatEl.style.height = height + 'px';
-                    chatEl.classList.remove('hidden', 'minimized', 'maximized');
-                    if (chatToggleBtn) chatToggleBtn.style.display = 'none';
-                    // Persist
-                    const device = 'desktop';
-                    const rectPayload = { left, top, width, height };
-                    try { localStorage.setItem((sessionId ? `${CHAT_RECT_KEY}-${sessionId}-${device}` : `${CHAT_RECT_KEY}-${device}`), JSON.stringify(rectPayload)); } catch (e) {}
-                    try { localStorage.setItem(CHAT_RECT_KEY, JSON.stringify(rectPayload)); } catch (e) {}
-                    try { saveChatRectToServer(rectPayload); } catch (e) {}
-                    try { localStorage.setItem((sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}-${device}` : `${CHAT_WINDOW_STATE_KEY}-${device}`), 'expanded'); } catch (e) {}
-                    try { saveWindowStateToServer({ window: 'chat', state: 'expanded' }); } catch (e) {}
-                }
-                showToast('Window positions reset to defaults', false, 2000);
-            } catch (err) { console.error('[synth_webui] resetWindowPositions failed', err); showToast('Failed to reset window positions', true, 2000); }
-        }
-
-        // Capture beforeinstallprompt to show custom install UI if needed
-        window.addEventListener('beforeinstallprompt', (e) => {
-            e.preventDefault();
-            window.__synthDeferredPrompt = e;
-            console.debug('[synth_webui] beforeinstallprompt captured');
-            // Reveal install button if present
-            const btn = document.getElementById('synth-install-btn');
-            if (btn) { btn.style.display = 'inline-flex'; }
-        });
-
-        // Log installation event and hide install UI when app is installed
-        window.addEventListener('appinstalled', (evt) => {
-            console.debug('[synth_webui] app installed', evt);
-            const btn = document.getElementById('synth-install-btn');
+                                    try {
+                                        // Prefer per-skin persona emotion presets (explicit mapping)
+                                        const personaPresets = (window && window.__synth_emotion_face_presets && typeof window.__synth_emotion_face_presets === 'object') ? window.__synth_emotion_face_presets : null;
+                                        const nameKey = String(raw || ek || '').trim();
+                                        const pEntry = personaPresets && (personaPresets[nameKey] || personaPresets[ek]) ? (personaPresets[nameKey] || personaPresets[ek]) : null;
+                                        if (pEntry && typeof pEntry === 'object') {
+                                            if (pEntry.targets && typeof pEntry.targets === 'object') {
+                                                Object.keys(pEntry.targets).forEach(bs => {
+                                                    try {
+                                                        if ((assignedPriority[bs] === undefined) || (p > assignedPriority[bs])) {
+                                                            desired[bs] = (pEntry.targets[bs] || 0) * intensity;
+                                                            assignedPriority[bs] = p;
+                                                        }
+                                                    } catch (e) { /* ignore */ }
+                                                });
+                                                return;
+                                            }
+                                        }
+                                    } catch (e) { /* ignore */ }
             if (btn) { btn.style.display = 'none'; }
         });
 
@@ -7114,6 +7017,15 @@
                                     console.debug('[AnimationHandler] persona loaded', persona && persona.name ? persona.name : '(unknown)');
                                     const pdefaults = (persona && persona.defaults) ? persona.defaults : {};
 
+                                    // Expose per-persona emotion presets and derive emotions list from mapping
+                                    try {
+                                        // New canonical format: persona.emotions is an object mapping
+                                        if (persona && persona.emotions && typeof persona.emotions === 'object' && !Array.isArray(persona.emotions)) {
+                                            window.__synth_emotion_face_presets = persona.emotions;
+                                            try { window.__synth_persona_emotions_list = Object.keys(persona.emotions); } catch (e) { window.__synth_persona_emotions_list = null; }
+                                        }
+                                    } catch (e) { /* ignore */ }
+
                                     // Apply persona per-animation overrides on the client (hybrid design).
                                     try {
                                         const overrides = (persona && persona.animation_overrides && typeof persona.animation_overrides === 'object') ? persona.animation_overrides : null;
@@ -7334,7 +7246,8 @@
                         const exprs = (baseExpressions || []).slice().map(e => Object.assign({ priority: 0 }, e));
 
                         // Emotion/Feeling state injection: treat state.emotions/state.feelings as synthetic expressions keyed by name.
-                        // This allows persona.json blendshape_map.emotions[...] (or the client fallback presets) to drive face.
+                        // The client will map these names to blendshape targets using the per-persona
+                        // `persona.emotions` mapping exposed by the backend (no legacy fallback required).
                         try {
                             const emObj = (state && state.emotions && typeof state.emotions === 'object') ? state.emotions : null;
                             const valuesObj = (emObj && emObj.values && typeof emObj.values === 'object') ? emObj.values
@@ -7438,8 +7351,8 @@
                         } catch (e) { /* ignore */ }
 
                         // Emotion overlay injection (client-side): during the scheduled window,
-                        // inject a synthetic expression keyed by emotion name so persona.json
-                        // can map it via blendshape_map.emotions[emotion].
+                        // inject a synthetic expression keyed by emotion name; the client will map
+                        // it to blendshape targets using the per-persona `persona.emotions` mapping.
                         try {
                             const ov = this._emotionOverlay || null;
                             const actionKey = (state && state.action) ? String(state.action).toLowerCase() : null;
@@ -7613,162 +7526,9 @@
                                     }
                                 }
 
-                                // Fallback: emotion keys -> viseme presets (when persona.json has no mapping).
-                                // This keeps the system usable even if the persona doesn't define blendshape_map.emotions.
-                                try {
-                                    const raw = String(key || nkey || '').trim();
-                                    const ek = raw.toLowerCase();
-
-                                    // Prefer driving actual facial expression morphs (happy/angry/sad/surprised/relaxed)
-                                    // when the model exposes them. This is what users expect when moving "feelings" sliders.
-                                    try {
-                                        const caps = (window && window.__synth_vrm_capabilities && typeof window.__synth_vrm_capabilities === 'object') ? window.__synth_vrm_capabilities : null;
-                                        const exprKeys = (caps && Array.isArray(caps.expressionKeys)) ? caps.expressionKeys : [];
-                                        const exprSet = new Set((exprKeys || []).map(k => String(k).toLowerCase()));
-
-                                        const emoAliases = {
-                                            // canonical -> common synonyms
-                                            happiness: 'happy',
-                                            joyful: 'happy',
-                                            joy: 'happy',
-                                            joyfulness: 'happy',
-                                            smiling: 'happy',
-                                            hopeful: 'hope',
-                                            hope: 'hope',
-                                            sadness: 'sad',
-                                            sad: 'sad',
-                                            angry: 'angry',
-                                            anger: 'angry',
-                                            furious: 'angry',
-                                            rage: 'angry',
-                                            surprised: 'surprised',
-                                            surprise: 'surprised',
-                                            fear: 'scared',
-                                            frightened: 'scared',
-                                            scared: 'scared',
-                                            disgusted: 'disgust',
-                                            disgust: 'disgust',
-                                            neutral: 'neutral',
-                                            calm: 'relaxed',
-                                            relaxed: 'relaxed',
-                                        };
-
-                                        const canonical = emoAliases[ek] || ek;
-                                        const faceCandidates = {
-                                            happy: ['happy', 'joy', 'smile', 'smiling'],
-                                            sad: ['sad', 'sorrow'],
-                                            angry: ['angry', 'anger'],
-                                            surprised: ['surprised', 'surprise'],
-                                            scared: ['scared', 'fear'],
-                                            disgust: ['disgust'],
-                                            relaxed: ['relaxed', 'neutral'],
-                                            neutral: ['neutral', 'relaxed'],
-                                            hope: ['happy', 'relaxed', 'neutral'],
-                                        };
-
-                                        const cands = faceCandidates[canonical] || null;
-                                        if (cands && cands.length) {
-                                            // Pick the first available expression key (case-insensitive).
-                                            let picked = null;
-                                            for (const c of cands) {
-                                                if (exprSet.has(String(c).toLowerCase())) { picked = String(c); break; }
-                                            }
-
-                                            // If we found a real morph key, drive it directly.
-                                            if (picked) {
-                                                const outKey = normalizeKey(String(picked));
-                                                if ((assignedPriority[outKey] === undefined) || (p > assignedPriority[outKey])) {
-                                                    desired[outKey] = Math.max(desired[outKey] || 0, intensity);
-                                                    assignedPriority[outKey] = p;
-                                                }
-                                                return;
-                                            }
-                                        }
-                                    } catch (e) { /* ignore */ }
-
-                                    const presetAliases = {
-                                        // common synonyms
-                                        happiness: 'happy',
-                                        joyful: 'joy',
-                                        joyfulness: 'joy',
-                                        smiling: 'happy',
-                                        hopeful: 'hope',
-                                        sadness: 'sad',
-                                        angry: 'anger',
-                                        furious: 'anger',
-                                        rage: 'anger',
-                                        surprised: 'surprise',
-                                        surprise: 'surprise',
-                                        fear: 'scared',
-                                        frightened: 'scared',
-                                        disgusted: 'disgust',
-                                    };
-
-                                    const builtInPresets = {
-                                        // Values are multipliers (0..1) applied to the emotion intensity.
-                                        // Keys are viseme-like names that work with VRM1 presets and can be
-                                        // mapped in persona.json via blendshape_map.visemes.
-                                        happy:    { ee: 0.28, aa: 0.12, oh: 0.06 },
-                                        joy:      { ee: 0.26, aa: 0.10, oh: 0.05 },
-                                        // hope is typically a mild positive affect
-                                        hope:     { ee: 0.22, aa: 0.08, oh: 0.04 },
-                                        sad:      { oh: 0.16, ih: 0.10, ou: 0.06 },
-                                        anger:    { aa: 0.18, ou: 0.10, ih: 0.06 },
-                                        surprise: { oh: 0.40, aa: 0.10 },
-                                        scared:   { oh: 0.26, ih: 0.14, ee: 0.08 },
-                                        disgust:  { ou: 0.18, ih: 0.10, oh: 0.06 },
-                                        neutral:  { },
-                                    };
-
-                                    const userPresets = (window && window.__synth_emotion_face_presets && typeof window.__synth_emotion_face_presets === 'object')
-                                        ? window.__synth_emotion_face_presets
-                                        : null;
-
-                                    const lookupKey = (userPresets && (userPresets[ek] || userPresets[presetAliases[ek]])) ? (userPresets[ek] ? ek : presetAliases[ek]) : null;
-                                    const preset = (userPresets && lookupKey) ? userPresets[lookupKey]
-                                                 : (builtInPresets[ek] || builtInPresets[presetAliases[ek]] || null);
-
-                                    if (preset && typeof preset === 'object' && Object.keys(preset).length) {
-                                        Object.keys(preset).forEach((bsKey) => {
-                                            const bs = String(bsKey || '').trim();
-                                            const outKey = normalizeKey(bs);
-                                            const mult = Number(preset[bsKey]);
-                                            if (!Number.isFinite(mult)) return;
-                                            const val = Math.max(0, Math.min(1, mult)) * intensity;
-
-                                            const applyOne = (k2) => {
-                                                const kNorm = normalizeKey(String(k2));
-                                                if ((assignedPriority[kNorm] === undefined) || (p > assignedPriority[kNorm])) {
-                                                    desired[kNorm] = Math.max(desired[kNorm] || 0, val);
-                                                    assignedPriority[kNorm] = p;
-                                                }
-                                            };
-
-                                            // Convenience aliases for common "emotion->mouth" shorthand
-                                            // - uu is commonly used for VRM "ou"
-                                            // - ai is approximated via aa + ih
-                                            // - oe is approximated via oh + ee
-                                            if (outKey.toLowerCase() === 'uu') {
-                                                applyOne('uu');
-                                                applyOne('ou');
-                                                return;
-                                            }
-                                            if (outKey.toLowerCase() === 'ai') {
-                                                applyOne('aa');
-                                                applyOne('ih');
-                                                return;
-                                            }
-                                            if (outKey.toLowerCase() === 'oe') {
-                                                applyOne('oh');
-                                                applyOne('ee');
-                                                return;
-                                            }
-
-                                            applyOne(outKey);
-                                        });
-                                        return;
-                                    }
-                                } catch (e) { /* ignore */ }
+                                // No legacy fallback mapping: the client will not synthesize viseme presets
+                                // automatically when a persona does not declare `persona.emotions`.
+                                try { /* intentionally no-op */ } catch (e) { /* ignore */ }
 
                                 // Fallback: use key as blendshape name
                                 const outKey = nkey || key;
@@ -11867,16 +11627,22 @@
                             if (!feelingsHost) return;
                             const base = extractEmotionValues();
                             const overrides = (animationHandler && typeof animationHandler.getDebugEmotionOverrides === 'function') ? animationHandler.getDebugEmotionOverrides() : {};
-                            // Backend may not send feelings; keep a stable set of keys visible in debug.
-                            const defaultKeys = [
-                                'valence','arousal','stress','calm',
-                                'hope','happy','joy','sad','anger','surprise','scared','disgust','neutral'
-                            ];
-                            const keys = Array.from(new Set([
-                                ...defaultKeys,
-                                ...Object.keys(base),
-                                ...Object.keys(overrides)
-                            ])).filter(k => k && !/^\d+$/.test(String(k))).sort();
+                            // Use persona-provided emotion list as primary debug keys (no legacy fallback)
+                            const personaKeys = (window.__synth_persona_emotions_list && Array.isArray(window.__synth_persona_emotions_list)) ? window.__synth_persona_emotions_list : [];
+                            // Prefer persona-declared emotion keys. If persona defines an emotion list,
+                            // only show those keys (augmented by any overrides present for them).
+                            // If no persona list is available, fall back to showing keys from
+                            // the animation-derived base and any overrides.
+                            const keysSet = new Set();
+                            if (personaKeys && Array.isArray(personaKeys) && personaKeys.length) {
+                                personaKeys.forEach(k => keysSet.add(k));
+                                Object.keys(base).forEach(k => { if (personaKeys.includes(k)) keysSet.add(k); });
+                                Object.keys(overrides).forEach(k => { if (personaKeys.includes(k)) keysSet.add(k); });
+                            } else {
+                                Object.keys(base).forEach(k => keysSet.add(k));
+                                Object.keys(overrides).forEach(k => keysSet.add(k));
+                            }
+                            const keys = Array.from(keysSet).filter(k => k && !/^\d+$/.test(String(k))).sort();
                             ensureFeelingsRows(keys);
                             if (!keys.length) return;
                             keys.forEach((name) => {

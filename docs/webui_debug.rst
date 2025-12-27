@@ -42,12 +42,16 @@ The debug window is designed to help validate VRM animation and facial state.
   - Shows the most recent emotion values seen by the client.
   - You can apply overrides (0..1) for specific emotion keys.
   - Emotion keys are injected as a synthetic expression so they can be mapped via
-    ``persona.json``:
+   - Shows the most recent emotion values seen by the client.
+   - You can apply overrides (0..1) for specific emotion keys.
+   - Emotion keys are injected as a synthetic expression and mapped to face targets by the per-persona
+     ``persona.emotions`` mapping (a dictionary keyed by emotion name).
 
-    - ``blendshape_map.emotions.<emotionName>``
-
-  - If a persona provides no mapping, the client applies a small built-in fallback
-    mapping from common emotions to viseme-style keys (``aa``, ``ih``, ``ou``/``uu``, ``ee``, ``oh``).
+    - If a persona provides no mapping, the debug UI will not apply facial overrides for that key.
+    - When a persona defines an ``emotions`` mapping, the **Feelings** panel will show only those
+      emotion keys (it will not invent or add extra metrics like ``valence``, ``arousal``, or ``stress``).
+      If no persona list is defined, the panel falls back to showing metrics reported by the animation
+      handler (e.g., from LLM tags or diary-derived feelings).
 
 Custom Emotion Face Presets
 ---------------------------

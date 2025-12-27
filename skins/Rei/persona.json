@@ -10,41 +10,20 @@
     "blendshape_map": {
         "eyes.closed": "eyes_closed",
         "mouth.O": "mouth_O",
-        "emotions": {
-            "happy": { "mouth_smile": 1.0, "eyes_smile": 0.6 },
-            "sad": { "mouth_frown": 1.0, "eyes_closed": 0.8 },
-
-            "joy": { "mouth_smile": 1.0, "eyes_smile": 0.6 },
-            "affection": { "mouth_smile": 0.9, "eyes_smile": 0.5 },
-            "satisfaction": { "mouth_smile": 0.8, "eyes_smile": 0.4 },
-            "relief": { "mouth_smile": 0.7, "eyes_smile": 0.35 },
-            "trust": { "mouth_smile": 0.7, "eyes_smile": 0.35 },
-            "serenity": { "mouth_smile": 0.6, "eyes_smile": 0.3 },
-            "calm": { "mouth_smile": 0.5, "eyes_smile": 0.25 },
-
-            "interest": { "eyes_wide": 0.35, "mouth_smile": 0.25 },
-            "curiosity": { "eyes_wide": 0.4, "mouth_smile": 0.2 },
-            "anticipation": { "eyes_wide": 0.35, "mouth_smile": 0.2 },
-            "vigilance": { "eyes_wide": 0.45, "mouth_smile": 0.1 },
-            "excitement": { "eyes_wide": 0.55, "mouth_smile": 0.4 },
-            "determination": { "eyes_wide": 0.35, "mouth_smile": 0.15 },
-            "patience": { "mouth_smile": 0.35, "eyes_smile": 0.15 },
-
-            "sadness": { "mouth_frown": 1.0, "eyes_closed": 0.8 },
-            "disappointment": { "mouth_frown": 0.85, "eyes_closed": 0.55 },
-            "worry": { "mouth_frown": 0.75, "eyes_closed": 0.35 },
-            "frustration": { "mouth_frown": 0.65, "eyes_closed": 0.25 },
-            "impatience": { "mouth_frown": 0.55, "eyes_closed": 0.2 },
-            "confusion": { "eyes_wide": 0.55, "mouth_open": 0.15 }
-        },
         "visemes": {
             "A": { "mouth_A": 1.0 },
             "O": { "mouth_O": 1.0 }
-        },
-        "expressions": {
-            "surprised": { "targets": { "eyes_wide": 0.9, "mouth_open": 0.7 }, "priority": 20 },
-            "look": { "targets": { "eye_look_left": 0.5, "eye_look_right": 0.5, "eye_look_up": 0.3, "eye_look_down": 0.3 }, "priority": 5 }
         }
+    },
+    "emotions": {
+        "angry": { "mouth_frown": 1.0, "brow_down": 0.9 },
+        "happy": { "mouth_smile": 1.0, "eyes_smile": 0.6 },
+        "sad": { "mouth_frown": 1.0, "eyes_closed": 0.8 },
+        "fear": {},
+        "disgust": {},
+        "surprised": { "eyes_wide": 0.9, "mouth_open": 0.7 },
+        "neutral": {},
+        "relaxed": {}
     },
     "emotion_speed": {
         "default": 1.0,

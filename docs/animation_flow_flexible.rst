@@ -290,7 +290,31 @@ When ``animation_state.emotions`` is present, the WebUI may apply a short "emoti
 - apply the corresponding face for a random duration that scales with the emotion intensity
 
 This is intentionally **not** tied to WRITING specifically, because plugins may override or bypass the
-writing phase/action. The mapping is done through ``persona.json`` under ``blendshape_map.emotions``.
+writing phase/action. The mapping is done through ``persona.json`` under the new ``emotions`` mapping.
+
+Per-skin overrides
+^^^^^^^^^^^^^^^^^^^
+
+Skins can optionally expose an ``emotions`` mapping in ``skins/<SkinName>/persona.json`` to
+customize emotion face definitions for that skin. The new compact format uses a mapping keyed
+by emotion name; each value is a flat dictionary of blendshape names to weights. For example::
+
+    "emotions": {
+        "angry": { "mouth_frown": 1.0, "brow_down": 0.9 },
+        "happy": { "mouth_smile": 1.0, "eyes_smile": 0.6 },
+        "sad": { "mouth_frown": 1.0, "eyes_closed": 0.8 }
+    }
+
+Notes:
+
+- The ``emotions`` field is a mapping; UI components derive the exposed emotion list from the
+  mapping keys (no separate list is required).
+- The per-emotion objects contain blendshape -> weight pairs (floats 0.0-1.0). The previous
+  ``targets`` wrapper and ``priority`` field are no longer used in the new format.
+
+The WebUI will expose these presets in ``window.__synth_emotion_face_presets`` and will set
+``window.__synth_persona_emotions_list`` to the list of keys from the mapping for UI components
+(sliders, overlays) to consume.
 
 
 Optional ``animation_state`` payload (facial state)
@@ -445,6 +469,15 @@ Place mappings in ``skins/<skin>/persona.json`` under the ``blendshape_map`` key
       "emotion_speed": { "default": 6.0, "decay": 4.0 }
     }
 
+The map can be minimal: only include the logical keys your skin actually uses (e.g., eyelid closure, mouth O, and the viseme aliases required by your VRM). Example minimal map::
+
+    "blendshape_map": {
+        "eyes.closed": "eyes_closed",
+        "mouth.O": "mouth_O",
+        "visemes": { "A": {"mouth_A": 1.0}, "O": {"mouth_O": 1.0} }
+    }
+
+Do not place per-emotion presets inside ``blendshape_map`` — use the top-level ``emotions`` mapping instead (see section above). Keeping ``blendshape_map`` minimal reduces maintenance and lowers the chance of mismatches between animation descriptors and skin mappings.
 The WebUI will fetch ``/skins/<skin>/persona.json`` and apply the mapping when resolving targets from ``animation_state.expressions``.
 
 Testing & manual QA
