@@ -8,7 +8,7 @@
     }
     ,
     "blendshape_map": {
-        "eyes.closed": "eyes_closed",
+        "eyes_closed": "eyes_closed",
         "mouth.O": "mouth_O",
         "visemes": {
             "A": { "mouth_A": 1.0 },
@@ -17,11 +17,11 @@
     },
     "emotions": {
         "angry": { "mouth_frown": 1.0, "brow_down": 0.9 },
-        "happy": { "mouth_smile": 1.0, "eyes_smile": 0.6 },
-        "sad": { "mouth_frown": 1.0, "eyes_closed": 0.8 },
+        "happy": { "mouth_smile": 0.3, "eyes_smile": 0.6 },
+        "sad": { "mouth_frown": 0.5, "eyes_closed": 0.8 },
         "fear": {},
         "disgust": {},
-        "surprised": { "eyes_wide": 0.9, "mouth_open": 0.7 },
+        "surprised": { "eyes_wide": 0.9, "mouth_open": 0.4 },
         "neutral": {},
         "relaxed": {}
     },
