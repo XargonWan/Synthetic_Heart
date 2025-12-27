@@ -7412,7 +7412,8 @@
                         const isEyesClosedLogicalKey = (k) => {
                             try {
                                 const s = String(k || '');
-                                return /(^|[\._-])eyes([\._-])?closed($|[\._-])|^eyesClosed$/i.test(s) || /^eyes_closed$/i.test(s) || /^eyes\.closed$/i.test(s);
+                                // Match underscore/dash-separated or camelCase variants (no dot variant)
+                                return /(^|[_-])eyes[_-]?closed($|[_-])|^eyesClosed$/i.test(s) || /^eyes_closed$/i.test(s);
                             } catch (e) { return false; }
                         };
 
@@ -7624,9 +7625,9 @@
                             const step = Math.min(1, speed * dt);
                             let next = cur + (tgt - cur) * step;
                             
-                            // Limit eyes.closed to avoid eyelid/cheek clipping when fully closed.
+                            // Limit eyes_closed to avoid eyelid/cheek clipping when fully closed.
                             // 0.85 is intentionally conservative; adjust in persona if needed.
-                            if ((k === 'eyes_closed' || k === 'eyes.closed' || k === 'eyesClosed') && next > 0.85) {
+                            if ((k === 'eyes_closed' || k === 'eyesClosed') && next > 0.85) {
                                 next = 0.85;
                             }
                             
@@ -7791,9 +7792,9 @@
                             const persona = (this._personaCache && this._personaCache[skin]) || null;
                             const blendMap = (persona && persona.blendshape_map) ? persona.blendshape_map : {};
                             const candidates = [];
-                            ['blink','eyes_closed','eyes.close','eyes.closed'].forEach(k => { if (blendMap && blendMap[k]) candidates.push(blendMap[k]); });
+                            ['blink','eyes_closed','eyes.close'].forEach(k => { if (blendMap && blendMap[k]) candidates.push(blendMap[k]); });
                             candidates.push(
-                                'eyes_closed','eyes.closed','eyesClosed','EyesClosed',
+                                'eyes_closed','eyesClosed','EyesClosed',
                                 'blink','Blink','blinkLeft','blinkRight','BlinkLeft','BlinkRight',
                                 'eye_blink_left','eye_blink_right','eyeBlinkLeft','eyeBlinkRight'
                             );
@@ -7823,12 +7824,12 @@
                             const skin = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
                             const persona = (this._personaCache && this._personaCache[skin]) || null;
                             const blendMap = (persona && persona.blendshape_map) ? persona.blendshape_map : {};
-                            ['blink','eyes_closed','eyes.close','eyes.closed'].forEach(k => { if (blendMap && blendMap[k]) candidates.push(blendMap[k]); });
+                            ['blink','eyes_closed','eyes.close'].forEach(k => { if (blendMap && blendMap[k]) candidates.push(blendMap[k]); });
                         } catch (e) { /* ignore */ }
 
                         // Add fallback candidates
                         candidates.push(
-                            'eyes_closed','eyes.closed','eyesClosed','EyesClosed',
+                            'eyes_closed','eyesClosed','EyesClosed',
                             'blink','Blink','blinkLeft','blinkRight','BlinkLeft','BlinkRight',
                             'eye_blink_left','eye_blink_right','eyeBlinkLeft','eyeBlinkRight'
                         );
@@ -7900,7 +7901,7 @@
                         // Candidate keys (try mapped names first)
                         const candidates = [];
                         // check grouped mapping for a 'blink' or 'eyes_closed' mapping
-                        ['blink','eyes_closed','eyes.close','eyes.closed'].forEach(k => { if (blendMap && blendMap[k]) candidates.push(blendMap[k]); });
+                                ['blink','eyes_closed','eyes.close'].forEach(k => { if (blendMap && blendMap[k]) candidates.push(blendMap[k]); });
                         // fallback common names
                         candidates.push(
                             'eyes_closed','blink','Blink',
@@ -7923,7 +7924,7 @@
                                     console.debug(`[AnimationHandler] Aborting blink mid-execution: eyes closed by state (${this._eyesState.source}=${this._eyesState.value.toFixed(2)})`);
                                     return;
                                 }
-                                const eyesClosedCandidates = ['eyes_closed', 'eyes.closed', 'eyesClosed', 'EyesClosed'];
+                                const eyesClosedCandidates = ['eyes_closed', 'eyesClosed', 'EyesClosed'];
                                 for (const candidate of eyesClosedCandidates) {
                                     try {
                                         const eyeValue = this._getFaceValue(candidate);
@@ -11679,8 +11680,19 @@
                         try {
                             const caps = window.__synth_vrm_capabilities || null;
                             const keys = (caps && Array.isArray(caps.expressionKeys)) ? caps.expressionKeys : [];
-                            // Include a few common aliases
-                            const extra = ['blink','blinkLeft','blinkRight','eye_blink_left','eye_blink_right','eyes_closed','eyes.closed','aa','ih','ou','ee','oh'];
+                            // Include a few common aliases and expressive morphs so debug UI exposes
+                            // the typical facial targets used by skins and persona.emotions.
+                            const extra = [
+                                'blink','blinkLeft','blinkRight','eye_blink_left','eye_blink_right',
+                                'eyes_closed','eyesClosed',
+                                // expressive morphs
+                                'eyes_wide','mouth_open','mouth_frown','brow_down','brow_up',
+                                'mouth_smile','eyes_smile','mouth_O',
+                                // basic viseme aliases
+                                'aa','ih','ou','ee','oh',
+                                // look targets
+                                'eye_look_left','eye_look_right','eye_look_up','eye_look_down'
+                            ];
                             return Array.from(new Set([...(keys || []), ...extra].map(String)))
                                 .filter((k) => k && !/^\d+$/.test(String(k)))
                                 .sort();

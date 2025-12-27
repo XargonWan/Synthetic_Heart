@@ -45,7 +45,7 @@ Each `.fbx` animation file should have an optional adjacent descriptor `.fbx.jso
     {
       "start_frame": 0,
       "end_frame": 15,
-      "targets": { "eyes.closed": 0.1, "mouth.O": 0.05 },
+      "targets": { "eyes_closed": 0.1, "mouth.O": 0.05 },
       "priority": 10,
       "source": "server"
     }
@@ -96,7 +96,7 @@ Each `.fbx` animation file should have an optional adjacent descriptor `.fbx.jso
 
 ### Smart Eye-Closed Behavior
 
-When expressions intentionally close the avatar's eyes (via `eyes.closed` blendshape > 0.5):
+When expressions intentionally close the avatar's eyes (via `eyes_closed` blendshape > 0.5):
 - **Blink is automatically suspended** during the eye-closed state
 - **Eye movement (saccades) is automatically suspended** during the eye-closed state
 - **Both automatically resume** when the eyes are reopened by expressions
@@ -109,7 +109,7 @@ New: the WebUI now exposes a rich `eyesState` mechanism and a DOM event `synth_e
 - The handler will lock blinking/eye movement when a persistent source sets `value > 0.5`, and will automatically resume when cleared.
 
 **Implementation:**
-- Execution-time check in `_performBlink()`: skips blink if `eyes.closed > 0.5`
+ - Execution-time check in `_performBlink()`: skips blink if `eyes_closed > 0.5`
 - Frame-time monitoring in `applyExpressionsForFrame()`: monitors eye state every frame and auto-suspends/resumes loops
 
 ### Descriptor Notes
@@ -382,7 +382,7 @@ Place a descriptor next to your FBX file (same name + `.json`), e.g. `Thinking.f
         {
             "start_frame": 0,
             "end_frame": 15,
-            "targets": { "eyes.closed": 0.4, "mouth.O": 0.05 },
+            "targets": { "eyes_closed": 0.4, "mouth.O": 0.05 },
             "source": "server",
             "priority": 10
         }

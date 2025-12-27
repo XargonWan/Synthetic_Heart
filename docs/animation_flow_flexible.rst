@@ -440,7 +440,7 @@ The backend may include an optional ``animation_state`` object in the WebSocket 
         "descriptor": { ... },
         "clip": { "name": "Thinking", "duration": 2.34, "fps": 30 },
         "timing": { "started_at": "2025-12-17T20:00:00Z", "time_in_clip": 1.2, "current_frame": 36 },
-        "expressions": [ { "start_frame":0, "end_frame":15, "targets": { "eyes.closed": 0.1, "mouth.O": 0.02 }, "source": "server", "priority": 10 } ],
+        "expressions": [ { "start_frame":0, "end_frame":15, "targets": { "eyes_closed": 0.1, "mouth.O": 0.02 }, "source": "server", "priority": 10 } ],
         "blink": { "auto": true, "rate_s": 4, "intensity": 0.6 },
         "eye_movement": { "auto": true, "saccade_rate_s": 2 },
         "emotions": { "dominant": "happy", "values": { "happy": 7.5, "calm": 5.2 } },
@@ -472,7 +472,7 @@ Place mappings in ``skins/<skin>/persona.json`` under the ``blendshape_map`` key
 The map can be minimal: only include the logical keys your skin actually uses (e.g., eyelid closure, mouth O, and the viseme aliases required by your VRM). Example minimal map::
 
     "blendshape_map": {
-        "eyes.closed": "eyes_closed",
+        "eyes_closed": "eyes_closed",
         "mouth.O": "mouth_O",
         "visemes": { "A": {"mouth_A": 1.0}, "O": {"mouth_O": 1.0} }
     }

@@ -192,7 +192,7 @@ Each animation file should have a corresponding `.fbx.json` descriptor:
   "play_once": false,
   "lipsync": false,
   "expressions": [
-    { "start_frame": 0, "end_frame": 30, "targets": { "eyes.closed": 0.1 }, "source": "descriptor", "priority": 10 }
+    { "start_frame": 0, "end_frame": 30, "targets": { "eyes_closed": 0.1 }, "source": "descriptor", "priority": 10 }
   ],
   "blink": {
     "auto": true,
@@ -316,13 +316,13 @@ This ensures **zero T-pose** when animations end and smooth transitions back to 
 
 ### Smart Eye-Closed Behavior
 
-When expressions intentionally close the avatar's eyes (via `eyes.closed` blendshape > 0.5), both **blink** and **eye movement (saccades)** are automatically suspended until the eyes are reopened. This prevents conflicting autonomous animations while the avatar has its eyes closed.
+When expressions intentionally close the avatar's eyes (via `eyes_closed` blendshape > 0.5), both **blink** and **eye movement (saccades)** are automatically suspended until the eyes are reopened. This prevents conflicting autonomous animations while the avatar has its eyes closed.
 
 **Two-Layer Implementation:**
 
-1. **Execution-Time Check**: In `_performBlink()` and `_performSaccade()` methods, before executing a blink or saccade, the code checks if `eyes.closed > 0.5`. If true, the action is skipped entirely.
+1. **Execution-Time Check**: In `_performBlink()` and `_performSaccade()` methods, before executing a blink or saccade, the code checks if `eyes_closed > 0.5`. If true, the action is skipped entirely.
 
-2. **Loop-Time Management**: In `applyExpressionsForFrame()`, the system continuously monitors the `eyes.closed` blendshape value every frame:
+2. **Loop-Time Management**: In `applyExpressionsForFrame()`, the system continuously monitors the `eyes_closed` blendshape value every frame:
    - **Eyes close** (value crosses 0.5): Automatically calls `_stopBlinkLoop()` and `_stopEyeMovement()` with debug logging
    - **Eyes reopen** (value drops below 0.5): Automatically calls `_startBlinkLoop()` and `_startEyeMovement()` (if enabled) with debug logging
 
@@ -330,7 +330,7 @@ When expressions intentionally close the avatar's eyes (via `eyes.closed` blends
 > "fintanto che gli occhi sono chiusi bisogna disattivare il blink finchè non venegono riaperti"  
 > (While eyes are closed, blink must be disabled until they are reopened)
 
-This is achieved automatically with no additional configuration needed. Expressions that set `eyes.closed` will trigger automatic suspension of all eye-related autonomous animations.
+This is achieved automatically with no additional configuration needed. Expressions that set `eyes_closed` will trigger automatic suspension of all eye-related autonomous animations.
 
 ---
 
