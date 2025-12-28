@@ -6713,14 +6713,45 @@
                     try {
                         const ctrl = this._getFaceController();
                         if (!ctrl) return false;
-                        ctrl.setValue(key, value);
-                        // Cache last set values so we can read them back consistently across
-                        // VRM0/VRM1 implementations (some do not expose getValue).
-                        try {
-                            if (!this._faceValueCache) this._faceValueCache = {};
-                            this._faceValueCache[key] = value;
-                        } catch (e) { /* ignore */ }
-                        return true;
+
+                        // Try several candidate key variants to maximize the chance of hitting
+                        // the VRM's actual blendshape name. This handles underscore/camel
+                        // variants and dotted logical keys.
+                        const normalizeKeyLocal = (k) => { try { return String(k || '').replace(/\./g, '_'); } catch (e) { return k; } };
+                        const camelToSnake = (s) => {
+                            try { return String(s).replace(/([A-Z])/g, '_$1').toLowerCase(); } catch (e) { return s; }
+                        };
+
+                        const variants = [];
+                        const k0 = String(key || '');
+                        variants.push(k0);
+                        const k1 = normalizeKeyLocal(k0);
+                        if (!variants.includes(k1)) variants.push(k1);
+                        const k2 = camelToSnake(k0);
+                        if (!variants.includes(k2)) variants.push(k2);
+                        const k3 = k0.toLowerCase();
+                        if (!variants.includes(k3)) variants.push(k3);
+
+                        // Also try a normalized form with underscores for camelCase (eyesClosed -> eyes_closed)
+                        const k4 = camelToSnake(k1);
+                        if (!variants.includes(k4)) variants.push(k4);
+
+                        // Attempt to set all candidate keys (best-effort). Some VRM controllers
+                        // will ignore unknown keys; setting multiple keys increases compatibility.
+                        let setAny = false;
+                        for (const kk of variants) {
+                            try {
+                                ctrl.setValue(kk, value);
+                                setAny = true;
+                                // Cache last set value for the concrete key used
+                                try {
+                                    if (!this._faceValueCache) this._faceValueCache = {};
+                                    this._faceValueCache[kk] = value;
+                                } catch (e) { /* ignore */ }
+                            } catch (e) { /* ignore */ }
+                        }
+
+                        return !!setAny;
                     } catch (e) {
                         return false;
                     }
@@ -7224,20 +7255,44 @@
                         const desired = {};
                         const evaluateFrame = (expr) => {
                             try {
-                                // Expressions without explicit bounds are treated as always-on.
-                                if (expr.start_frame === undefined || expr.end_frame === undefined) return true;
-                                // Prefer frame indices if present
-                                if (currentFrame !== null && currentFrame !== undefined) {
-                                    if (expr.start_frame <= currentFrame && currentFrame <= expr.end_frame) return true;
+                                    // Expressions without explicit bounds are treated as always-on.
+                                    // Allow the descriptor to define only start_frame (meaning from that frame to the end)
+                                    if (expr.start_frame === undefined && expr.end_frame === undefined) return true;
+                                    // Only a start_frame: treat as [start_frame .. +inf]
+                                    if (expr.start_frame !== undefined && expr.end_frame === undefined) {
+                                        if (currentFrame !== null && currentFrame !== undefined) {
+                                            return currentFrame >= expr.start_frame;
+                                        }
+                                        // Fall back to time_in_clip using clip fps if provided
+                                        if (timeInClip !== null && state.clip && state.clip.fps) {
+                                            const sf = expr.start_frame / state.clip.fps;
+                                            return (sf <= timeInClip);
+                                        }
+                                        return true;
+                                    }
+                                    // Only an end_frame: treat as [-inf .. end_frame]
+                                    if (expr.start_frame === undefined && expr.end_frame !== undefined) {
+                                        if (currentFrame !== null && currentFrame !== undefined) {
+                                            return currentFrame <= expr.end_frame;
+                                        }
+                                        if (timeInClip !== null && state.clip && state.clip.fps) {
+                                            const ef = expr.end_frame / state.clip.fps;
+                                            return (timeInClip <= ef);
+                                        }
+                                        return true;
+                                    }
+                                    // Prefer frame indices if both bounds are present
+                                    if (currentFrame !== null && currentFrame !== undefined) {
+                                        if (expr.start_frame <= currentFrame && currentFrame <= expr.end_frame) return true;
+                                        return false;
+                                    }
+                                    // Fall back to time_in_clip using clip fps if provided
+                                    if (timeInClip !== null && expr.start_frame !== undefined && expr.end_frame !== undefined && state.clip && state.clip.fps) {
+                                        const sf = expr.start_frame / state.clip.fps;
+                                        const ef = expr.end_frame / state.clip.fps;
+                                        return (sf <= timeInClip && timeInClip <= ef);
+                                    }
                                     return false;
-                                }
-                                // Fall back to time_in_clip using clip fps if provided
-                                if (timeInClip !== null && expr.start_frame !== undefined && expr.end_frame !== undefined && state.clip && state.clip.fps) {
-                                    const sf = expr.start_frame / state.clip.fps;
-                                    const ef = expr.end_frame / state.clip.fps;
-                                    return (sf <= timeInClip && timeInClip <= ef);
-                                }
-                                return false;
                             } catch (e) { return false; }
                         };
 
@@ -11688,14 +11743,17 @@
                                 // expressive morphs
                                 'eyes_wide','mouth_open','mouth_frown','brow_down','brow_up',
                                 'mouth_smile','eyes_smile','mouth_O',
+                                // explicit emotion morphs (some models expose these directly)
+                                'sad',
                                 // basic viseme aliases
                                 'aa','ih','ou','ee','oh',
                                 // look targets
                                 'eye_look_left','eye_look_right','eye_look_up','eye_look_down'
                             ];
-                            return Array.from(new Set([...(keys || []), ...extra].map(String)))
-                                .filter((k) => k && !/^\d+$/.test(String(k)))
-                                .sort();
+                            const rawKeys = Array.from(new Set([...(keys || []), ...extra].map(String)));
+                            // Exclude composite feeling metrics from the granular face morph list
+                            const compositeMetrics = new Set(['valence','arousal','stress','calm','relaxed','neutral']);
+                            return rawKeys.filter((k) => k && !/^\d+$/.test(String(k)) && !compositeMetrics.has(String(k).toLowerCase())).sort();
                         } catch (e) {
                             return [];
                         }

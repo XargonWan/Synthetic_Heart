@@ -218,6 +218,7 @@ Each animation file should have a corresponding `.fbx.json` descriptor:
   - `targets`: Object mapping logical blendshape names to intensity (0.0-1.0), resolved via `persona.json` → `blendshape_map`
   - `priority`: Numeric priority (higher values applied later)
   - `source`: Origin identifier ("descriptor", "server", "persona_override", etc.)
+  - Notes: If **both** `start_frame` and `end_frame` are omitted the expression is treated as always-on. If **only** `start_frame` is provided, the expression will be treated as active from that `start_frame` through the end of the clip (useful to express e.g. eyes closed from a given frame to clip end).
 - `blink`: Controls autonomous blinking behavior during the animation.
   - `auto`: Enable autonomous blinking (default: true)
   - `rate_s`: Average blink rate in seconds (default: 3.5)

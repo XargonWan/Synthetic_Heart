@@ -9,4 +9,15 @@
   "outro": {
     "start_frame": 73
   }
+  ,
+  "expressions": [
+    {
+      "start_frame": 20,
+      "targets": {
+        "eyes_closed": 1.0
+      },
+      "source": "descriptor",
+      "priority": 10
+    }
+  ]
 }
