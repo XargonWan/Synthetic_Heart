@@ -433,6 +433,8 @@ def load_json_instructions() -> str:
                 "Include reply_message_id when replying to specific messages. Use thread_id from input.payload.source.thread_id when present (omit if missing).\n"
                 "RESPONSE FORMAT: {\"actions\": [{\"type\": \"action_name\", \"payload\": { ... }}] }\n"
                 "Key rules: ALWAYS use 'type' and 'payload', one action object per array entry. Do NOT add any text outside the JSON."
+                "Do NOT embed emotion tags, annotations, or bracketed markers inside message text (e.g., '{happy 6.0}')."
+                "If you need to indicate an emotional state, include it as structured data in the JSON (e.g., a 'feelings' object or an action payload) and never inside the plain message content."
         )
         
     # Minify: remove leading/trailing spaces from each line, collapse multiple spaces
@@ -481,6 +483,10 @@ KEY REMINDERS:
 - Each action object MUST contain exactly two keys: "type" and "payload".
 - The "type" value MUST match a name from the 'actions' block supplied in the prompt.
 - Use the provided interface_path from input.payload.source.interface_path when addressing replies.
+
+EMOTIONS & METADATA:
+- Do NOT insert emotional tags, annotations, or bracketed markers inside message text (for example: `{happy 6.0}`).
+- If you need to convey emotion metadata, include it only as structured JSON (e.g., a `feelings` field or an explicit action payload), not inside the user-facing text.
 """
         # Prepend header (with interface name) and return; do NOT minify this text
         return header + base

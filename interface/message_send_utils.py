@@ -531,8 +531,18 @@ async def llm_response_send(bot, chat_id: int, text: str, chunk_size: int = 4000
     except Exception:
         log_debug(f"[llm_response_send] Called with chat_id={chat_id}, kwargs_keys={list(kwargs.keys())}")
 
-    # Log text content for debugging
+    # Log text content for debugging, and detect potential encoding issues (mojibake)
     if text:
+        try:
+            from core.text_utils import looks_like_mojibake, try_recover_mojibake
+            log_debug(f"[llm_response_send] Text repr: {text!r}")
+            if looks_like_mojibake(text):
+                log_warning("[llm_response_send] Potential mojibake detected in LLM output (will forward as-is).")
+                recovered = try_recover_mojibake(text)
+                log_debug(f"[llm_response_send] Mojibake recovery attempt: recovered={recovered!r}")
+        except Exception:
+            log_debug("[llm_response_send] mojibake detection unavailable")
+
         # For JSON content, always log fully without truncation for debugging
         if text.strip().startswith(('{', '[')):
             log_debug(f"[llm_response_send] JSON content ({len(text)} chars, full dump below):\n{text}")

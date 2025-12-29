@@ -692,6 +692,8 @@ class AnimationHandler:
         if "intro" in descriptor and isinstance(descriptor["intro"], dict):
             if "start_frame" in descriptor["intro"] and "end_frame" in descriptor["intro"]:
                 result["has_intro"] = True
+            else:
+                log_warning(f"[AnimationHandler] Descriptor for '{animation_file}' has 'intro' but missing start_frame or end_frame - will treat as non-structured")
         
         if "loop" in descriptor and isinstance(descriptor["loop"], dict):
             if "start_frame" in descriptor["loop"] and "end_frame" in descriptor["loop"]:
@@ -700,6 +702,8 @@ class AnimationHandler:
         if "outro" in descriptor and isinstance(descriptor["outro"], dict):
             if "start_frame" in descriptor["outro"] and "end_frame" in descriptor["outro"]:
                 result["has_outro"] = True
+            else:
+                log_warning(f"[AnimationHandler] Descriptor for '{animation_file}' has 'outro' but missing start_frame or end_frame - will treat as non-structured")
         
         # Validate play_once flag: it conflicts with intro/outro structure
         # (play_once means "play the whole animation once", but intro/outro define

@@ -16,14 +16,14 @@
         }
     },
     "emotions": {
-        "angry": { "mouth_frown": 1.0, "brow_down": 0.9 },
-        "happy": { "mouth_smile": 0.3, "eyes_smile": 0.6 },
-        "sad": { "mouth_frown": 0.5, "eyes_closed": 0.8 },
-        "fear": {},
-        "disgust": {},
-        "surprised": { "eyes_wide": 0.9, "mouth_open": 0.4 },
-        "neutral": {},
-        "relaxed": {}
+        "happy": { "mouth_smile": 0.6, "eyes_smile": 0.5 },
+        "sad": { "mouth_frown": 0.7, "eyes_closed": 0.4 },
+        "surprised": { "eyes_wide": 0.8, "mouth_open": 0.2 },
+        "relaxed": { "eyes_smile": 0.3, "mouth_smile": 0.2 },
+        "angry": { "mouth_frown": 0.9, "brow_down": 0.8 },
+        "fear": { "eyes_wide": 0.7, "mouth_frown": 0.3 },
+        "disgust": { "mouth_frown": 0.4, "eyes_closed": 0.2 },
+        "neutral": {}
     },
     "emotion_speed": {
         "default": 1.0,

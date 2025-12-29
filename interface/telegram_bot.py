@@ -441,6 +441,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = user.full_name
     usertag = f"@{user.username}" if user.username else "(no tag)"
     text = message.text or message.caption or ""
+    # Diagnostic: log raw repr and check for mojibake (double-decoding) patterns
+    try:
+        from core.text_utils import looks_like_mojibake, try_recover_mojibake
+        log_debug(f"[telegram_bot] Incoming text repr: {text!r}")
+        if looks_like_mojibake(text):
+            log_warning(f"[telegram_bot] Potential mojibake detected in incoming message from {username} ({user_id})")
+            recovered = try_recover_mojibake(text)
+            log_debug(f"[telegram_bot] Mojibake recovery attempt: original={text!r} recovered={recovered!r}")
+    except Exception:
+        # Do not fail message processing for diagnostic logging failures
+        log_debug("[telegram_bot] mojibake detection unavailable")
     
     # Log with proper content type
     content_description = ""

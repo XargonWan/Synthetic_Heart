@@ -31,3 +31,10 @@ def test_build_json_prompt_reply_without_text(monkeypatch):
     # For chat-like interfaces we expect an unminified verbose instruction block
     assert "instructions_verbose" in result, "Expected verbose chat instruction for chat interfaces"
     assert "You are participating in a live chat conversation" in result["instructions_verbose"]
+
+
+def test_instructions_prohibit_embedded_emotion_tags():
+    from core.prompt_engine import load_json_instructions
+
+    instructions = load_json_instructions()
+    assert "Do NOT embed emotion tags" in instructions, "Instructions should forbid embedding emotion tags in message text"

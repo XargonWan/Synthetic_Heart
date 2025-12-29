@@ -56,31 +56,27 @@
 
                 function formatRejectionReason(reason) {
                     try {
-                        // NOTE: JSON.stringify(new Error('x')) => "{}" so treat Error specially.
+                        // Error objects: return stack when available for easier debugging
                         if (reason instanceof Error) {
                             return reason.stack || (reason.name + ': ' + reason.message);
                         }
-                                    try {
-                                        // Prefer per-skin persona emotion presets (explicit mapping)
-                                        const personaPresets = (window && window.__synth_emotion_face_presets && typeof window.__synth_emotion_face_presets === 'object') ? window.__synth_emotion_face_presets : null;
-                                        const nameKey = String(raw || ek || '').trim();
-                                        const pEntry = personaPresets && (personaPresets[nameKey] || personaPresets[ek]) ? (personaPresets[nameKey] || personaPresets[ek]) : null;
-                                        if (pEntry && typeof pEntry === 'object') {
-                                            if (pEntry.targets && typeof pEntry.targets === 'object') {
-                                                Object.keys(pEntry.targets).forEach(bs => {
-                                                    try {
-                                                        if ((assignedPriority[bs] === undefined) || (p > assignedPriority[bs])) {
-                                                            desired[bs] = (pEntry.targets[bs] || 0) * intensity;
-                                                            assignedPriority[bs] = p;
-                                                        }
-                                                    } catch (e) { /* ignore */ }
-                                                });
-                                                return;
-                                            }
-                                        }
-                                    } catch (e) { /* ignore */ }
-            if (btn) { btn.style.display = 'none'; }
-        });
+                        // Strings: return as-is
+                        if (typeof reason === 'string') {
+                            return reason;
+                        }
+                        // Fallback to JSON representation
+                        try {
+                            return JSON.stringify(reason);
+                        } catch (e) {
+                            return String(reason);
+                        }
+                    } catch (e) {
+                        return String(reason);
+                    }
+                }
+                // Close the outer try/IIFE for the overlay helpers declared above
+            } catch (e) { /* ignore */ }
+        })();
 
         // Attach click handler to install button (when present)
         document.addEventListener('DOMContentLoaded', () => {
@@ -370,17 +366,18 @@
         }
 
         .chat-resize-handle { position: absolute; background: transparent; /* keep handles slightly above chat */ z-index: 60003; pointer-events: all; }
-        .chat-resize-handle.handle-top, .chat-resize-handle.handle-bottom { height: 8px; left: 8px; right: 8px; cursor: ns-resize; }
-        .chat-resize-handle.handle-left, .chat-resize-handle.handle-right { width: 8px; top: 8px; bottom: 8px; cursor: ew-resize; }
-        .chat-resize-handle.handle-top { top: -4px; }
-        .chat-resize-handle.handle-bottom { bottom: -4px; }
-        .chat-resize-handle.handle-left { left: -4px; }
-        .chat-resize-handle.handle-right { right: -4px; }
-        .chat-resize-handle.handle-tl, .chat-resize-handle.handle-tr, .chat-resize-handle.handle-bl, .chat-resize-handle.handle-br { width: 20px; height: 20px; }
-        .chat-resize-handle.handle-tl { top: -10px; left: -10px; cursor: nwse-resize; }
-        .chat-resize-handle.handle-tr { top: -10px; right: -10px; cursor: nesw-resize; }
-        .chat-resize-handle.handle-bl { bottom: -10px; left: -10px; cursor: nesw-resize; }
-        .chat-resize-handle.handle-br { bottom: -10px; right: -10px; cursor: nwse-resize; }
+        /* Make handles slightly thicker to be easier to grab */
+        .chat-resize-handle.handle-top, .chat-resize-handle.handle-bottom { height: 12px; left: 8px; right: 8px; cursor: ns-resize; }
+        .chat-resize-handle.handle-left, .chat-resize-handle.handle-right { width: 12px; top: 8px; bottom: 8px; cursor: ew-resize; }
+        .chat-resize-handle.handle-top { top: -6px; }
+        .chat-resize-handle.handle-bottom { bottom: -6px; }
+        .chat-resize-handle.handle-left { left: -6px; }
+        .chat-resize-handle.handle-right { right: -6px; }
+        .chat-resize-handle.handle-tl, .chat-resize-handle.handle-tr, .chat-resize-handle.handle-bl, .chat-resize-handle.handle-br { width: 24px; height: 24px; }
+        .chat-resize-handle.handle-tl { top: -12px; left: -12px; cursor: nwse-resize; }
+        .chat-resize-handle.handle-tr { top: -12px; right: -12px; cursor: nesw-resize; }
+        .chat-resize-handle.handle-bl { bottom: -12px; left: -12px; cursor: nesw-resize; }
+        .chat-resize-handle.handle-br { bottom: -12px; right: -12px; cursor: nwse-resize; }
         /* Draggable title bar (drag handle) */
         #chat-title-bar {
             position: absolute;
@@ -3310,6 +3307,71 @@
         }
 
         // Attach handlers for settings controls
+        // Provide a safe fallback implementation for resetWindowPositions so older clients
+        // do not throw ReferenceError when the button is present but function undefined.
+        function resetWindowPositions(promptConfirm) {
+            try {
+                if (promptConfirm) {
+                    try {
+                        if (!window.confirm('Reset window positions to default?')) return;
+                    } catch (e) { /* ignore (non-blocking environments) */ }
+                }
+                if (window.localStorage) {
+                    try {
+                        localStorage.removeItem('windowPositions');
+                        localStorage.removeItem('panelLayout');
+                        localStorage.removeItem('windowLayout');
+                    } catch (e) { /* ignore */ }
+                }
+                // Try to apply default layout via optional hook, otherwise reload page
+                try {
+                    if (typeof window.applyDefaultWindowPositions === 'function') {
+                        window.applyDefaultWindowPositions();
+                        return;
+                    }
+                } catch (e) { console.debug('[synth_webui] applyDefaultWindowPositions failed', e); }
+                try { window.location.reload(); } catch (e) { /* ignore */ }
+            } catch (e) {
+                console.debug('[synth_webui] resetWindowPositions error', e);
+            }
+        }
+
+        // Apply canonical default window positions for chat and debug panels
+        // This ensures reset puts windows back to sensible places (chat bottom-left).
+        window.applyDefaultWindowPositions = function() {
+            try {
+                // Chat defaults: bottom-left with standard margins
+                const chatEl = document.getElementById('chat');
+                if (chatEl) {
+                    chatEl.style.left = '1.5rem';
+                    chatEl.style.bottom = '1.5rem';
+                    chatEl.style.top = 'auto';
+                    chatEl.style.right = 'auto';
+                    // restore sensible width/height defaults
+                    chatEl.style.width = '';
+                    chatEl.style.height = '';
+                }
+                // Debug window default: bottom-right, slightly above chat
+                try {
+                    const dbg = document.querySelector('.synth-debug-window');
+                    if (dbg) {
+                        dbg.style.right = '2.5rem';
+                        dbg.style.bottom = '6.0rem';
+                        dbg.style.left = 'auto';
+                        dbg.style.top = 'auto';
+                    }
+                } catch (e) { /* ignore */ }
+                // Remove persisted chat rects from localStorage so restoreChatState won't reapply old coords
+                try {
+                    const keys = Object.keys(localStorage || {});
+                    keys.forEach(k => {
+                        if (k && k.indexOf && k.indexOf('synth-webui-chat-rect') === 0) {
+                            try { localStorage.removeItem(k); } catch (e) {}
+                        }
+                    });
+                } catch (e) { /* ignore */ }
+            } catch (e) { console.debug('[synth_webui] applyDefaultWindowPositions error', e); }
+        };
         const resetWindowsBtn = document.getElementById('reset-window-positions');
         if (resetWindowsBtn) {
             resetWindowsBtn.addEventListener('click', (ev) => {
@@ -5071,8 +5133,11 @@
                                     const chatEl = document.getElementById('chat');
                                     if (chatEl) chatEl.style.zIndex = CHAT_Z_INDEX;
                                     if (chatToggleBtn) chatToggleBtn.style.zIndex = CHAT_Z_INDEX;
-                                    // Also reduce z-index of resize handles that may float above everything
-                                    document.querySelectorAll('.chat-resize-handle').forEach(h => { h.style.zIndex = String(Number(CHAT_Z_INDEX) + 1); });
+                                    // Keep resize handles above the chat title bar so the top edge remains resizable.
+                                    try {
+                                        const chatEl2 = document.getElementById('chat');
+                                        chatEl2?.querySelectorAll('.chat-resize-handle').forEach(h => { h.style.zIndex = String(Number(CHAT_Z_INDEX) + 30); });
+                                    } catch (e) { /* ignore */ }
                                 } catch (e) { /* ignore */ }
                 } else if (mainNav) {
                     mainNav.style.top = '';
@@ -5081,8 +5146,8 @@
                                     const chatEl = document.getElementById('chat');
                                     if (chatEl) chatEl.style.zIndex = CHAT_Z_INDEX;
                                     if (chatToggleBtn) chatToggleBtn.style.zIndex = String(Number(CHAT_Z_INDEX) + 50);
-                                    // Reset handles to default (keep slightly above chat)
-                                    document.querySelectorAll('.chat-resize-handle').forEach(h => { h.style.zIndex = String(Number(CHAT_Z_INDEX) + 1); });
+                                    // Reset handles (keep them above the chat title bar)
+                                    try { chatEl?.querySelectorAll('.chat-resize-handle').forEach(h => { h.style.zIndex = String(Number(CHAT_Z_INDEX) + 30); }); } catch (e) { /* ignore */ }
                                 } catch (e) { /* ignore */ }
                 }
             } catch (e) { /* ignore */ }
@@ -5947,23 +6012,25 @@
                                 if (hasRichFromDesc && typeof animationHandler.applyAnimationState === 'function') {
                                     const phase = (data.play_section != null) ? data.play_section : ((data.loop === false) ? 'clip' : 'loop');
                                     const fps = (desc && (typeof desc.fps === 'number' || typeof desc.fps === 'string')) ? Number(desc.fps) : 30;
-                                    const st = {
-                                        action: (data.state || '').toString().toLowerCase(),
-                                        phase,
-                                        animation: data.animation || null,
-                                        descriptor: desc,
-                                        clip: { fps: (Number.isFinite(fps) && fps > 0) ? fps : 30 },
-                                        timing: { started_at: new Date().toISOString(), time_in_clip: 0.0, current_frame: 0 },
-                                        expressions: Array.isArray(desc.expressions) ? desc.expressions : null,
-                                        blink: (desc && typeof desc.blink === 'object') ? desc.blink : null,
-                                        eye_movement: (desc && typeof desc.eye_movement === 'object') ? desc.eye_movement : null,
-                                        lipsync: !!(desc && desc.lipsync),
-                                        priority: (typeof data.priority === 'number') ? data.priority : null,
-                                        source: data.source || 'descriptor_fallback'
-                                    };
-                                    animationHandler.applyAnimationState(st);
-                                } else if (typeof animationHandler.applyAnimationState === 'function') {
-                                    // No descriptor and no rich payload: ensure we don't keep applying
+                                    const extra = [
+                                        'blink','blinkLeft','blinkRight','eye_blink_left','eye_blink_right',
+                                        'eyes_closed','eyesClosed',
+                                        // expressive morphs
+                                        'eyes_wide','mouth_open','mouth_frown','brow_down','brow_up',
+                                        'mouth_smile','eyes_smile','mouth_O',
+                                        // basic viseme aliases
+                                        'aa','ih','ou','ee','oh',
+                                        // look targets
+                                        'eye_look_left','eye_look_right','eye_look_up','eye_look_down'
+                                    ];
+
+                                    const rawKeys = Array.from(new Set([...(keys || []), ...extra].map(String)));
+                                    // Exclude composite feeling metrics from the granular face morph list
+                                    const compositeMetrics = new Set(['valence','arousal','stress','calm','relaxed','neutral']);
+                                    // Exclude persona-declared emotion names so they appear only in *Feelings* UI
+                                    const personaEmotionKeys = (window.__synth_persona_emotions_list && Array.isArray(window.__synth_persona_emotions_list)) ? window.__synth_persona_emotions_list : [];
+                                    const personaEmotionKeysLower = personaEmotionKeys.map(k => String(k).toLowerCase());
+                                    return rawKeys.filter((k) => k && !/^\d+$/.test(String(k)) && !compositeMetrics.has(String(k).toLowerCase()) && !personaEmotionKeysLower.includes(String(k).toLowerCase())).sort();
                                     // the previous state's expressions (e.g. THINK eyes_closed) while
                                     // switching to WRITE. This avoids the perception that WRITE is
                                     // "using the THINK descriptor".
@@ -6670,6 +6737,113 @@
 
             // Animation handler
             class AnimationHandler {
+                _normalizeFaceKeyForLookup(k) {
+                    try {
+                        return String(k || '')
+                            .replace(/[\._\-\s]+/g, '')
+                            .toLowerCase();
+                    } catch (e) {
+                        return String(k || '').toLowerCase();
+                    }
+                }
+
+                _getFaceKeyLookup() {
+                    try {
+                        const caps = window.__synth_vrm_capabilities || null;
+                        const keys = (caps && Array.isArray(caps.expressionKeys)) ? caps.expressionKeys : null;
+                        const sig = keys ? `${keys.length}:${String(keys[0] || '')}:${String(keys[keys.length - 1] || '')}` : 'none';
+                        if (this._faceKeyLookup && this._faceKeyLookupSig === sig) return this._faceKeyLookup;
+                        const out = {};
+                        if (keys) {
+                            keys.forEach((kk) => {
+                                try {
+                                    const s = String(kk);
+                                    const n = this._normalizeFaceKeyForLookup(s);
+                                    if (n && !out[n]) out[n] = s;
+                                } catch (e) { /* ignore */ }
+                            });
+                        }
+                        this._faceKeyLookup = out;
+                        this._faceKeyLookupSig = sig;
+                        return out;
+                    } catch (e) {
+                        return this._faceKeyLookup || {};
+                    }
+                }
+
+                _resolveFaceKeys(key) {
+                    try {
+                        const raw = String(key || '');
+                        const norm = this._normalizeFaceKeyForLookup(raw);
+                        const lookup = this._getFaceKeyLookup();
+
+                        const snakeToCamel = (s) => {
+                            try { return String(s).replace(/[_\-]+([a-zA-Z0-9])/g, (_, c) => String(c).toUpperCase()); } catch (e) { return s; }
+                        };
+                        const camelToSnake = (s) => {
+                            try { return String(s).replace(/([A-Z])/g, '_$1').toLowerCase(); } catch (e) { return s; }
+                        };
+
+                        // Explicit aliases for common VRM expression preset names.
+                        const alias = {
+                            // Brows
+                            browdown: ['browDown', 'brow_down'],
+                            browup: ['browUp', 'brow_up'],
+                            // Blinks
+                            eyeblinkleft: ['blinkLeft', 'eyeBlinkLeft', 'eye_blink_left'],
+                            eyeblinkright: ['blinkRight', 'eyeBlinkRight', 'eye_blink_right'],
+                            blinkleft: ['blinkLeft', 'eyeBlinkLeft', 'eye_blink_left'],
+                            blinkright: ['blinkRight', 'eyeBlinkRight', 'eye_blink_right'],
+                            // Look directions
+                            eyelookleft: ['lookLeft', 'eyeLookLeft', 'eye_look_left'],
+                            eyelookright: ['lookRight', 'eyeLookRight', 'eye_look_right'],
+                            eyelookup: ['lookUp', 'eyeLookUp', 'eye_look_up'],
+                            eyelookdown: ['lookDown', 'eyeLookDown', 'eye_look_down'],
+                            lookleft: ['lookLeft', 'eyeLookLeft', 'eye_look_left'],
+                            lookright: ['lookRight', 'eyeLookRight', 'eye_look_right'],
+                            lookup: ['lookUp', 'eyeLookUp', 'eye_look_up'],
+                            lookdown: ['lookDown', 'eyeLookDown', 'eye_look_down'],
+                            // Eyes
+                            eyesclosed: ['eyesClosed', 'eyes_closed'],
+                            eyessmile: ['eyesSmile', 'eyes_smile'],
+                            eyeswide: ['eyesWide', 'eyes_wide'],
+                            // Mouth
+                            mouthopen: ['mouthOpen', 'mouth_open'],
+                            mouthsmile: ['mouthSmile', 'mouth_smile'],
+                            mouthfrown: ['mouthFrown', 'mouth_frown'],
+                            moutho: ['mouthO', 'mouth_O', 'oh'],
+                        };
+
+                        const candidates = [];
+                        const push = (v) => {
+                            const s = String(v || '');
+                            if (!s) return;
+                            if (!candidates.includes(s)) candidates.push(s);
+                        };
+
+                        push(raw);
+                        push(raw.replace(/\./g, '_'));
+                        push(raw.toLowerCase());
+                        push(camelToSnake(raw));
+                        push(snakeToCamel(raw));
+
+                        if (alias[norm]) alias[norm].forEach(push);
+
+                        // Map candidates through capabilities lookup (normalized match).
+                        const resolved = [];
+                        const pushResolved = (v) => { if (v && !resolved.includes(v)) resolved.push(v); };
+                        candidates.forEach((c) => {
+                            pushResolved(c);
+                            const mapped = lookup[this._normalizeFaceKeyForLookup(c)] || null;
+                            if (mapped) pushResolved(mapped);
+                        });
+
+                        return resolved.length ? resolved : candidates;
+                    } catch (e) {
+                        return [String(key || '')];
+                    }
+                }
+
                 _flushFaceNow() {
                     // Apply expression weights to the mesh immediately.
                     // This is important when WEB_DEBUG pause disables VRM.update().
@@ -6714,30 +6888,9 @@
                         const ctrl = this._getFaceController();
                         if (!ctrl) return false;
 
-                        // Try several candidate key variants to maximize the chance of hitting
-                        // the VRM's actual blendshape name. This handles underscore/camel
-                        // variants and dotted logical keys.
-                        const normalizeKeyLocal = (k) => { try { return String(k || '').replace(/\./g, '_'); } catch (e) { return k; } };
-                        const camelToSnake = (s) => {
-                            try { return String(s).replace(/([A-Z])/g, '_$1').toLowerCase(); } catch (e) { return s; }
-                        };
+                        // Resolve the input key to one or more concrete VRM keys.
+                        const variants = this._resolveFaceKeys(key);
 
-                        const variants = [];
-                        const k0 = String(key || '');
-                        variants.push(k0);
-                        const k1 = normalizeKeyLocal(k0);
-                        if (!variants.includes(k1)) variants.push(k1);
-                        const k2 = camelToSnake(k0);
-                        if (!variants.includes(k2)) variants.push(k2);
-                        const k3 = k0.toLowerCase();
-                        if (!variants.includes(k3)) variants.push(k3);
-
-                        // Also try a normalized form with underscores for camelCase (eyesClosed -> eyes_closed)
-                        const k4 = camelToSnake(k1);
-                        if (!variants.includes(k4)) variants.push(k4);
-
-                        // Attempt to set all candidate keys (best-effort). Some VRM controllers
-                        // will ignore unknown keys; setting multiple keys increases compatibility.
                         let setAny = false;
                         for (const kk of variants) {
                             try {
@@ -6747,6 +6900,9 @@
                                 try {
                                     if (!this._faceValueCache) this._faceValueCache = {};
                                     this._faceValueCache[kk] = value;
+                                    // Also cache under the requested key so UI can read it back.
+                                    const req = String(key || '');
+                                    if (req) this._faceValueCache[req] = value;
                                 } catch (e) { /* ignore */ }
                             } catch (e) { /* ignore */ }
                         }
@@ -6760,9 +6916,18 @@
                 _getFaceValue(key) {
                     try {
                         if (!key) return 0;
-                        if (this._faceValueCache && this._faceValueCache[key] !== undefined) {
-                            const v = this._faceValueCache[key];
+                        const k0 = String(key);
+                        if (this._faceValueCache && this._faceValueCache[k0] !== undefined) {
+                            const v = this._faceValueCache[k0];
                             return (typeof v === 'number') ? v : 0;
+                        }
+                        // Try resolved keys (snake/camel/aliases)
+                        const variants = this._resolveFaceKeys(k0);
+                        for (const kk of variants) {
+                            if (this._faceValueCache && this._faceValueCache[kk] !== undefined) {
+                                const v = this._faceValueCache[kk];
+                                return (typeof v === 'number') ? v : 0;
+                            }
                         }
                         return 0;
                     } catch (e) {
@@ -6793,12 +6958,54 @@
                                             Object.keys(dirty).forEach((kk) => {
                                                 try {
                                                     const vv = dirty[kk];
+                                                    // Resolve persona mapping if available
+                                                    const skin = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
+                                                    const persona = (this._personaCache && this._personaCache[skin]) ? this._personaCache[skin] : null;
+                                                    const blendMap = (persona && persona.blendshape_map) ? persona.blendshape_map : {};
+                                                    const nkey = String(kk || '');
+
                                                     if (vv === null || vv === undefined) {
-                                                        try { if (this._expressionState) delete this._expressionState[kk]; } catch (e) { /* ignore */ }
-                                                        this._setFaceValue(kk, 0);
+                                                        // Attempt to clear mapped keys if any
+                                                        const flat = (blendMap && typeof blendMap[nkey] === 'string') ? blendMap[nkey] : null;
+                                                        if (flat) {
+                                                            try { if (this._expressionState) delete this._expressionState[flat]; } catch (e) {}
+                                                            this._setFaceValue(flat, 0);
+                                                        } else {
+                                                            try { if (this._expressionState) delete this._expressionState[nkey]; } catch (e) {}
+                                                            this._setFaceValue(nkey, 0);
+                                                            try { this._setFaceValue(nkey.replace(/\./g,'_'), 0); } catch (e) {}
+                                                        }
                                                     } else {
-                                                        try { this._expressionState = this._expressionState || {}; this._expressionState[kk] = vv; } catch (e) { /* ignore */ }
-                                                        this._setFaceValue(kk, vv);
+                                                        const val = Math.max(0, Math.min(1, Number(vv) || 0));
+                                                        // Flat mapping first
+                                                        const flat = (blendMap && typeof blendMap[nkey] === 'string') ? blendMap[nkey] : ((blendMap && typeof blendMap[nkey.replace(/\./g,'_')] === 'string') ? blendMap[nkey.replace(/\./g,'_')] : null);
+                                                        if (flat) {
+                                                            try { this._expressionState = this._expressionState || {}; this._expressionState[flat] = val; } catch (e) {}
+                                                            this._setFaceValue(flat, val);
+                                                        } else {
+                                                            // Try grouped mappings
+                                                            let applied = false;
+                                                            try {
+                                                                const groups = ['emotions','visemes','expressions'];
+                                                                for (let g of groups) {
+                                                                    const entry = (blendMap[g] && (blendMap[g][nkey] || blendMap[g][nkey.replace(/\./g,'_')])) ? (blendMap[g][nkey] || blendMap[g][nkey.replace(/\./g,'_')]) : null;
+                                                                    if (entry && entry.targets && typeof entry.targets === 'object') {
+                                                                        Object.keys(entry.targets).forEach(bs => {
+                                                                            try {
+                                                                                const v2 = (entry.targets[bs] || 0) * val;
+                                                                                this._expressionState = this._expressionState || {}; this._expressionState[bs] = v2;
+                                                                                this._setFaceValue(bs, v2);
+                                                                            } catch (e) { /* ignore */ }
+                                                                        });
+                                                                        applied = true; break;
+                                                                    }
+                                                                }
+                                                            } catch (e) { /* ignore */ }
+                                                            if (!applied) {
+                                                                try { this._expressionState = this._expressionState || {}; this._expressionState[nkey] = val; } catch (e) {}
+                                                                this._setFaceValue(nkey, val);
+                                                            }
+                                                        }
                                                     }
                                                 } catch (e) { /* ignore */ }
                                             });
@@ -6825,12 +7032,51 @@
                                         Object.keys(dirty).forEach((kk) => {
                                             try {
                                                 const vv = dirty[kk];
+                                                // persona mapping helper
+                                                const skin = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
+                                                const persona = (this._personaCache && this._personaCache[skin]) ? this._personaCache[skin] : null;
+                                                const blendMap = (persona && persona.blendshape_map) ? persona.blendshape_map : {};
+                                                const nkey = String(kk || '');
+
                                                 if (vv === null || vv === undefined) {
-                                                    try { if (this._expressionState) delete this._expressionState[kk]; } catch (e) { /* ignore */ }
-                                                    this._setFaceValue(kk, 0);
+                                                    const flat = (blendMap && typeof blendMap[nkey] === 'string') ? blendMap[nkey] : null;
+                                                    if (flat) {
+                                                        try { if (this._expressionState) delete this._expressionState[flat]; } catch (e) {}
+                                                        this._setFaceValue(flat, 0);
+                                                    } else {
+                                                        try { if (this._expressionState) delete this._expressionState[nkey]; } catch (e) {}
+                                                        this._setFaceValue(nkey, 0);
+                                                        try { this._setFaceValue(nkey.replace(/\./g,'_'), 0); } catch (e) {}
+                                                    }
                                                 } else {
-                                                    try { this._expressionState = this._expressionState || {}; this._expressionState[kk] = vv; } catch (e) { /* ignore */ }
-                                                    this._setFaceValue(kk, vv);
+                                                    const val = Math.max(0, Math.min(1, Number(vv) || 0));
+                                                    const flat = (blendMap && typeof blendMap[nkey] === 'string') ? blendMap[nkey] : ((blendMap && typeof blendMap[nkey.replace(/\./g,'_')] === 'string') ? blendMap[nkey.replace(/\./g,'_')] : null);
+                                                    if (flat) {
+                                                        try { this._expressionState = this._expressionState || {}; this._expressionState[flat] = val; } catch (e) {}
+                                                        this._setFaceValue(flat, val);
+                                                    } else {
+                                                        let applied = false;
+                                                        try {
+                                                            const groups = ['emotions','visemes','expressions'];
+                                                            for (let g of groups) {
+                                                                const entry = (blendMap[g] && (blendMap[g][nkey] || blendMap[g][nkey.replace(/\./g,'_')])) ? (blendMap[g][nkey] || blendMap[g][nkey.replace(/\./g,'_')]) : null;
+                                                                if (entry && entry.targets && typeof entry.targets === 'object') {
+                                                                    Object.keys(entry.targets).forEach(bs => {
+                                                                        try {
+                                                                            const v2 = (entry.targets[bs] || 0) * val;
+                                                                            this._expressionState = this._expressionState || {}; this._expressionState[bs] = v2;
+                                                                            this._setFaceValue(bs, v2);
+                                                                        } catch (e) { /* ignore */ }
+                                                                    });
+                                                                    applied = true; break;
+                                                                }
+                                                            }
+                                                        } catch (e) { /* ignore */ }
+                                                        if (!applied) {
+                                                            try { this._expressionState = this._expressionState || {}; this._expressionState[nkey] = val; } catch (e) {}
+                                                            this._setFaceValue(nkey, val);
+                                                        }
+                                                    }
                                                 }
                                             } catch (e) { /* ignore */ }
                                         });
@@ -7539,10 +7785,14 @@
 
                                 const grouped = (blendMap && typeof blendMap === 'object') ? blendMap : null;
                                 if (grouped) {
-                                    const groups = ['emotions', 'visemes', 'expressions'];
+                                    const groups = ['emotions','visemes','expressions'];
                                     for (let g of groups) {
-                                        const entry = (grouped[g] && grouped[g][key]) ? grouped[g][key]
+                                        let entry = (grouped[g] && grouped[g][key]) ? grouped[g][key]
                                                     : ((grouped[g] && grouped[g][nkey]) ? grouped[g][nkey] : null);
+                                        // Fallback: if persona declares emotion presets, allow those to act like grouped.emotions
+                                        if (!entry && g === 'emotions' && window.__synth_emotion_face_presets && typeof window.__synth_emotion_face_presets === 'object') {
+                                            entry = window.__synth_emotion_face_presets[key] || window.__synth_emotion_face_presets[nkey] || null;
+                                        }
                                         if (entry) {
                                             if (entry.targets && typeof entry.targets === 'object') {
                                                 Object.keys(entry.targets).forEach(bs => {
@@ -7659,14 +7909,67 @@
                         } catch (e) { /* ignore */ }
 
                         // WEB_DEBUG facial override: force desired values (wins over descriptors).
+                        // Try to resolve logical keys via persona mapping when available so
+                        // debug keys like 'eyesClosed' or 'mouth_O' map to real blendshape names.
                         try {
                             const dbg = (this._debugFaceOverrides && typeof this._debugFaceOverrides === 'object') ? this._debugFaceOverrides : null;
                             if (dbg) {
                                 Object.keys(dbg).forEach((k) => {
-                                    if (!k) return;
-                                    const v = Number(dbg[k]);
-                                    if (!Number.isFinite(v)) return;
-                                    desired[normalizeKey(String(k))] = Math.max(0, Math.min(1, v));
+                                    try {
+                                        if (!k) return;
+                                        const rawVal = Number(dbg[k]);
+                                        if (!Number.isFinite(rawVal)) return;
+                                        const v = Math.max(0, Math.min(1, rawVal));
+
+                                        const nkey = normalizeKey(String(k));
+                                        // Try flat mapping from persona blendshape_map
+                                        const flat = (blendMap && typeof blendMap[k] === 'string') ? blendMap[k]
+                                                   : ((blendMap && typeof blendMap[nkey] === 'string') ? blendMap[nkey] : null);
+                                        if (flat) {
+                                            desired[flat] = v;
+                                            assignedPriority[flat] = Math.max(assignedPriority[flat] || 0, 100);
+                                            return;
+                                        }
+
+                                        // Try grouped mappings (emotions/visemes/expressions)
+                                        const grouped = (blendMap && typeof blendMap === 'object') ? blendMap : null;
+                                        if (grouped) {
+                                            const groups = ['emotions','visemes','expressions'];
+                                            for (let g of groups) {
+                                                let entry = (grouped[g] && grouped[g][k]) ? grouped[g][k]
+                                                            : ((grouped[g] && grouped[g][nkey]) ? grouped[g][nkey] : null);
+                                                // Fallback: check persona emotion presets if present
+                                                if (!entry && g === 'emotions' && window.__synth_emotion_face_presets && typeof window.__synth_emotion_face_presets === 'object') {
+                                                    entry = window.__synth_emotion_face_presets[k] || window.__synth_emotion_face_presets[nkey] || null;
+                                                }
+                                                if (entry) {
+                                                    if (entry.targets && typeof entry.targets === 'object') {
+                                                        Object.keys(entry.targets).forEach(bs => {
+                                                            try {
+                                                                const val = (entry.targets[bs] || 0) * v;
+                                                                desired[bs] = Math.max(desired[bs] || 0, val);
+                                                                assignedPriority[bs] = Math.max(assignedPriority[bs] || 0, 100);
+                                                            } catch (e) { /* ignore */ }
+                                                        });
+                                                        return;
+                                                    } else if (typeof entry === 'object') {
+                                                        Object.keys(entry).forEach(bs => {
+                                                            try {
+                                                                const val = (entry[bs] || 0) * v;
+                                                                desired[bs] = Math.max(desired[bs] || 0, val);
+                                                                assignedPriority[bs] = Math.max(assignedPriority[bs] || 0, 100);
+                                                            } catch (e) { /* ignore */ }
+                                                        });
+                                                        return;
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        // Fallback: try to set normalized key directly (existing behavior)
+                                        desired[nkey] = Math.max(0, Math.min(1, v));
+                                        assignedPriority[nkey] = Math.max(assignedPriority[nkey] || 0, 100);
+                                    } catch (e) { /* ignore per-key errors */ }
                                 });
                             }
                         } catch (e) { /* ignore */ }
@@ -9219,7 +9522,11 @@
                                 }
 
                                 // Check if this should be a structured animation
-                                const hasStructuredDescriptor = (actionName !== 'idle') && descriptor && descriptor.intro && descriptor.outro;
+                                // Require both intro and outro to have numeric start/end frame bounds
+                                const hasStructuredDescriptor = (actionName !== 'idle') && descriptor &&
+                                    descriptor.intro && descriptor.outro &&
+                                    (typeof descriptor.intro.start_frame === 'number') && (typeof descriptor.intro.end_frame === 'number') &&
+                                    (typeof descriptor.outro.start_frame === 'number') && (typeof descriptor.outro.end_frame === 'number');
                                 console.log(`[AnimationHandler] hasStructuredDescriptor: ${hasStructuredDescriptor}, hasLoopSection: ${descriptor && descriptor.loop ? 'yes' : 'no'}`);
                                 if (hasStructuredDescriptor && clip && clip.duration && THREE.AnimationUtils && typeof THREE.AnimationUtils.subclip === 'function') {
                                     // Create structured animation (intro/loop/outro)
@@ -11239,32 +11546,50 @@
                         if (!header) return;
                         let dragging = false;
                         let startX = 0, startY = 0;
-                        let startRight = 0, startBottom = 0;
+                        let offsetX = 0, offsetY = 0;
                         header.addEventListener('pointerdown', (ev) => {
                             try {
+                                // Prevent resize handles beneath the title bar from stealing pointer events
+                                try { ev.stopPropagation(); } catch (e) {}
+                                // Respect global active interactions (avoid interfering with chat drag/other resizes)
+                                try { if (window.__synth_active_interaction) return; } catch (e) {}
                                 // Don't start dragging when the user is clicking controls in the title bar.
                                 const t = ev && ev.target ? ev.target : null;
                                 if (t && typeof t.closest === 'function') {
                                     if (t.closest('button, input, select, textarea, a')) return;
                                 }
                                 dragging = true;
+                                const dragPointerId = (ev.pointerId !== undefined) ? ev.pointerId : 'mouse';
+                                try { window.__synth_active_interaction = { type: 'debug_drag', id: dragPointerId }; } catch (e) {}
+                                // Normalize to left/top positioning so drag+resize behave consistently.
+                                const r = el.getBoundingClientRect();
+                                try {
+                                    el.style.left = r.left + 'px';
+                                    el.style.top = r.top + 'px';
+                                    el.style.right = 'auto';
+                                    el.style.bottom = 'auto';
+                                } catch (e) { /* ignore */ }
                                 startX = ev.clientX;
                                 startY = ev.clientY;
-                                const cs = getComputedStyle(el);
-                                startRight = parseFloat(cs.right) || 0;
-                                startBottom = parseFloat(cs.bottom) || 0;
-                                el.setPointerCapture(ev.pointerId);
+                                offsetX = startX - r.left;
+                                offsetY = startY - r.top;
+                                try { header.setPointerCapture && header.setPointerCapture(ev.pointerId); } catch (e) {}
                             } catch (e) { /* ignore */ }
                         });
                         window.addEventListener('pointermove', (ev) => {
                             if (!dragging) return;
-                            const dx = ev.clientX - startX;
-                            const dy = ev.clientY - startY;
-                            el.style.right = (startRight - dx) + 'px';
-                            el.style.bottom = (startBottom - dy) + 'px';
+                            try {
+                                el.style.left = (ev.clientX - offsetX) + 'px';
+                                el.style.top = (ev.clientY - offsetY) + 'px';
+                                el.style.right = 'auto';
+                                el.style.bottom = 'auto';
+                            } catch (e) { /* ignore */ }
                         });
-                        window.addEventListener('pointerup', () => { dragging = false; });
+                        window.addEventListener('pointerup', (ev) => { try { dragging = false; if (window.__synth_active_interaction && window.__synth_active_interaction.type === 'debug_drag') window.__synth_active_interaction = null; } catch (e) {} });
                     })(win);
+
+                    // Add chat-like resize handles for the debug window so resizing anchors work
+                    try { createResizeHandlesForElement(win); } catch (e) { /* ignore */ }
 
                     // Dock button for minimized state
                     let debugDockBtn = null;
@@ -11744,16 +12069,31 @@
                                 'eyes_wide','mouth_open','mouth_frown','brow_down','brow_up',
                                 'mouth_smile','eyes_smile','mouth_O',
                                 // explicit emotion morphs (some models expose these directly)
-                                'sad',
                                 // basic viseme aliases
                                 'aa','ih','ou','ee','oh',
                                 // look targets
                                 'eye_look_left','eye_look_right','eye_look_up','eye_look_down'
                             ];
                             const rawKeys = Array.from(new Set([...(keys || []), ...extra].map(String)));
-                            // Exclude composite feeling metrics from the granular face morph list
+                            // Exclude composite feeling metrics and emotion names from the granular face morph list.
                             const compositeMetrics = new Set(['valence','arousal','stress','calm','relaxed','neutral']);
-                            return rawKeys.filter((k) => k && !/^\d+$/.test(String(k)) && !compositeMetrics.has(String(k).toLowerCase())).sort();
+                            const personaEmotionKeys = (window.__synth_persona_emotions_list && Array.isArray(window.__synth_persona_emotions_list)) ? window.__synth_persona_emotions_list : [];
+                            const personaEmotionKeysLower = personaEmotionKeys.map(k => String(k).toLowerCase());
+                            const compositeEmotions = new Set([
+                                'sad','happy','angry','surprised','relaxed','neutral','scared','fear','disgust','joy','love','smile'
+                            ]);
+                            return rawKeys
+                                .filter((k) => {
+                                    if (!k) return false;
+                                    const s = String(k);
+                                    if (/^\d+$/.test(s)) return false;
+                                    const low = s.toLowerCase();
+                                    if (compositeMetrics.has(low)) return false;
+                                    if (personaEmotionKeysLower.includes(low)) return false;
+                                    if (compositeEmotions.has(low)) return false;
+                                    return true;
+                                })
+                                .sort();
                         } catch (e) {
                             return [];
                         }
@@ -12611,40 +12951,62 @@
             });
         }
 
-        // Chat drag functionality
+        // Chat drag functionality (use pointer events for parity with debug window)
         const chat = document.getElementById('chat');
         const chatTitleBar = document.getElementById('chat-title-bar');
-        
+
         if (chatTitleBar && chat) {
             let isDragging = false;
             let dragOffsetX = 0;
             let dragOffsetY = 0;
-            
-            chatTitleBar.addEventListener('mousedown', (e) => {
+            let chatPointerId = null;
+
+            const chatPointerDown = (e) => {
+                try { e.stopPropagation(); } catch (err) {}
+                // If another interaction is active (resize/other drag), ignore
+                try { if (window.__synth_active_interaction) return; } catch (e) {}
                 isDragging = true;
-                dragOffsetX = e.clientX - chat.offsetLeft;
-                dragOffsetY = e.clientY - chat.offsetTop;
+                chatPointerId = (e.pointerId !== undefined) ? e.pointerId : 'mouse';
+                window.__synth_active_interaction = { type: 'chat_drag', id: chatPointerId };
+                try { chatTitleBar.setPointerCapture && chatTitleBar.setPointerCapture(e.pointerId); } catch (e) {}
+                dragOffsetX = (e.clientX || 0) - chat.offsetLeft;
+                dragOffsetY = (e.clientY || 0) - chat.offsetTop;
                 chatTitleBar.style.cursor = 'grabbing';
-                e.preventDefault();
-            });
-            
-            document.addEventListener('mousemove', (e) => {
-                if (isDragging) {
+                try { chatTitleBar.style.zIndex = String(Number(CHAT_Z_INDEX) + 20); } catch (err) {}
+                try { e.preventDefault(); } catch (e) {}
+            };
+
+            const chatPointerMove = (e) => {
+                if (!isDragging) return;
+                // Only respond to the pointer that started the drag
+                if (chatPointerId !== ((e.pointerId !== undefined) ? e.pointerId : 'mouse')) return;
+                try {
                     chat.style.left = (e.clientX - dragOffsetX) + 'px';
                     chat.style.top = (e.clientY - dragOffsetY) + 'px';
                     chat.style.bottom = 'auto';
                     chat.style.right = 'auto';
-                }
-            });
-            
-            document.addEventListener('mouseup', () => {
-                if (isDragging) {
-                    isDragging = false;
-                    chatTitleBar.style.cursor = 'grab';
-                }
-            });
-            
-            console.log('[chat-control] Chat drag enabled via title-bar');
+                } catch (e) { /* ignore */ }
+            };
+
+            const chatPointerUp = (e) => {
+                if (!isDragging) return;
+                // Clear the drag regardless of pointerId mismatch to avoid stale locks
+                isDragging = false;
+                chatPointerId = null;
+                try { chatTitleBar.releasePointerCapture && chatTitleBar.releasePointerCapture(e.pointerId); } catch (e) {}
+                chatTitleBar.style.cursor = 'grab';
+                try { if (window.__synth_active_interaction && window.__synth_active_interaction.type === 'chat_drag') window.__synth_active_interaction = null; } catch (e) {}
+            };
+
+            // Prefer pointer events, fall back to mouse for older browsers
+            chatTitleBar.addEventListener('pointerdown', chatPointerDown);
+            chatTitleBar.addEventListener('mousedown', (e) => { try { chatPointerDown(e); } catch (err) {} });
+            window.addEventListener('pointermove', chatPointerMove);
+            window.addEventListener('mousemove', chatPointerMove);
+            window.addEventListener('pointerup', chatPointerUp);
+            window.addEventListener('mouseup', chatPointerUp);
+
+            console.log('[chat-control] Chat drag enabled via title-bar (pointer events)');
         }
         
         // Drag is implemented via JavaScript on the title-bar
@@ -12661,26 +13023,43 @@
 
         function createChatResizeHandles() {
             if (!CHAT_RESIZABLE) {
-                console.debug('[chat-control] CHAT_RESIZABLE disabled on this session');
-                return; // Disabled by default to avoid accidental resizing
+                console.debug('[chat-control] CHAT_RESIZABLE disabled on this session - enabling native corner resize for convenience');
+                // Even when custom handles are disabled, allow the user to resize via
+                // the native corner by enabling `resize: both` inline (desktop only).
+                try {
+                    if (!chatElement || /Mobi|Android/i.test(navigator.userAgent)) return;
+                    try { chatElement.style.resize = 'both'; } catch (e) { /* ignore */ }
+                } catch (e) { /* ignore */ }
+                return; // Disabled custom handles, but native resizing left available
             }
             if (!chatElement || /Mobi|Android/i.test(navigator.userAgent)) {
                 console.debug('[chat-control] Chat resize disabled for mobile or missing element');
                 return; // disable on mobile
             }
             // Avoid recreating handles if they already exist
-            if (document.querySelector('.chat-resize-handle')) {
+            // IMPORTANT: scope to chat only. Debug window also uses `.chat-resize-handle`.
+            if (chatElement.querySelector('.chat-resize-handle')) {
                 console.debug('[chat-control] Resize handles already present, skipping creation');
                 return;
             }
             // Restore native resize when enabled so browser resize corners work.
             // Custom handles below still enable resizing from any edge.
             try { chatElement.style.resize = 'both'; } catch (err) { console.debug('[chat-control] failed to set native resize', err); }
+            // Ensure title bar sits above handles to allow dragging without interference
+            try {
+                const header = document.getElementById('chat-title-bar');
+                if (header) {
+                    header.style.zIndex = String(Number(CHAT_Z_INDEX) + 20);
+                    header.style.pointerEvents = 'auto';
+                }
+            } catch (e) { /* ignore */ }
             const sides = ['top','right','bottom','left','tl','tr','bl','br'];
             const handles = {};
             for (const side of sides) {
                 const el = document.createElement('div');
                 el.className = 'chat-resize-handle handle-' + side;
+                // Ensure the handle sits above the title bar so top resize works.
+                try { el.style.zIndex = String(Number(CHAT_Z_INDEX) + 30); } catch (e) { /* ignore */ }
                 chatElement.appendChild(el);
                 handles[side] = el;
             }
@@ -12691,10 +13070,21 @@
             const minWidth = 260, minHeight = 180;
 
             function pointerDownHandler(side, ev) {
+                // Respect global active interactions to avoid conflicts with window drags
+                try { if (window.__synth_active_interaction) return; } catch (e) {}
                 ev.preventDefault();
                 resizing = true;
                 startX = ev.clientX; startY = ev.clientY;
                 startRect = chatElement.getBoundingClientRect();
+                // Normalize to left/top based positioning to keep resize direction intuitive
+                try {
+                    chatElement.style.left = startRect.left + 'px';
+                    chatElement.style.top = startRect.top + 'px';
+                    chatElement.style.right = 'auto';
+                    chatElement.style.bottom = 'auto';
+                } catch (e) { /* ignore */ }
+                // Register a global active interaction (resize) so other handlers ignore
+                try { window.__synth_active_interaction = { type: 'resize', id: ev.pointerId || 'mouse', target: chatElement }; } catch (e) {}
                 document.body.style.userSelect = 'none';
             }
 
@@ -12753,6 +13143,7 @@
                 startRect = null;
                 document.body.style.userSelect = '';
                 try { saveChatState(); } catch (e) { /* ignore */ }
+                try { if (window.__synth_active_interaction && window.__synth_active_interaction.type === 'resize') window.__synth_active_interaction = null; } catch (e) {}
             }
 
             let currentResizeSide = null;
@@ -12770,6 +13161,129 @@
             window.addEventListener('mouseup', pointerUpHandler);
 
             console.debug('[chat-control] Created resize handles for sides:', Object.keys(handles));
+        }
+
+        // Generic resize handle creator for arbitrary element (used for debug window)
+        function createResizeHandlesForElement(el) {
+            try {
+                if (!el) return;
+                // Avoid duplicating handles
+                if (el.querySelector('.chat-resize-handle')) return;
+                const sides = ['top','right','bottom','left','tl','tr','bl','br'];
+                const handles = {};
+                for (const side of sides) {
+                    const div = document.createElement('div');
+                    div.className = 'chat-resize-handle handle-' + side;
+                    el.appendChild(div);
+                    handles[side] = div;
+                }
+
+                let resizing = false;
+                let startX = 0, startY = 0, startRect = null;
+                const minWidth = 220, minHeight = 140;
+
+                const pointerDown = (side, ev) => {
+                    // Respect global active interactions (drag) to avoid conflicts
+                    try { if (window.__synth_active_interaction) return; } catch (e) {}
+                    ev.preventDefault();
+                    resizing = true;
+                    startX = ev.clientX; startY = ev.clientY;
+                    startRect = el.getBoundingClientRect();
+                    // Normalize to left/top positioning for the element so resize behaves intuitively
+                    try {
+                        el.style.left = startRect.left + 'px';
+                        el.style.top = startRect.top + 'px';
+                        el.style.right = 'auto';
+                        el.style.bottom = 'auto';
+                    } catch (e) { /* ignore */ }
+                    // Register active interaction so other handlers ignore during resize
+                    try { window.__synth_active_interaction = { type: 'resize', id: ev.pointerId || 'mouse', target: el }; } catch (e) {}
+                    document.body.style.userSelect = 'none';
+                };
+
+                // Clear global active interaction if pointer canceled / page blurred to avoid stale locks
+                try {
+                    window.addEventListener('pointercancel', (ev) => { try { if (window.__synth_active_interaction) window.__synth_active_interaction = null; } catch (e) {} });
+                    window.addEventListener('blur', () => { try { window.__synth_active_interaction = null; } catch (e) {} });
+                    document.addEventListener('visibilitychange', () => { try { if (document.visibilityState !== 'visible') window.__synth_active_interaction = null; } catch (e) {} });
+                } catch (e) { /* ignore */ }
+
+                const pointerMove = (ev) => {
+                    if (!resizing || !startRect) return;
+                    const dx = ev.clientX - startX;
+                    const dy = ev.clientY - startY;
+                    let left = startRect.left; let top = startRect.top; let width = startRect.width; let height = startRect.height;
+                    const side = currentResizeSideForEl;
+                    if (side === 'right') {
+                        width = Math.max(minWidth, startRect.width + dx);
+                    } else if (side === 'left') {
+                        const newWidth = Math.max(minWidth, startRect.width - dx);
+                        left = startRect.left + (startRect.width - newWidth);
+                        width = newWidth;
+                    } else if (side === 'bottom') {
+                        height = Math.max(minHeight, startRect.height + dy);
+                    } else if (side === 'top') {
+                        const newHeight = Math.max(minHeight, startRect.height - dy);
+                        top = startRect.top + (startRect.height - newHeight);
+                        height = newHeight;
+                    } else if (side === 'br') {
+                        width = Math.max(minWidth, startRect.width + dx);
+                        height = Math.max(minHeight, startRect.height + dy);
+                    } else if (side === 'bl') {
+                        const newWidth = Math.max(minWidth, startRect.width - dx);
+                        left = startRect.left + (startRect.width - newWidth);
+                        width = newWidth;
+                        height = Math.max(minHeight, startRect.height + dy);
+                    } else if (side === 'tr') {
+                        width = Math.max(minWidth, startRect.width + dx);
+                        const newHeight = Math.max(minHeight, startRect.height - dy);
+                        top = startRect.top + (startRect.height - newHeight);
+                        height = newHeight;
+                    } else if (side === 'tl') {
+                        const newWidth = Math.max(minWidth, startRect.width - dx);
+                        left = startRect.left + (startRect.width - newWidth);
+                        width = newWidth;
+                        const newHeight = Math.max(minHeight, startRect.height - dy);
+                        top = startRect.top + (startRect.height - newHeight);
+                        height = newHeight;
+                    }
+                    el.style.left = left + 'px';
+                    el.style.top = top + 'px';
+                    el.style.width = width + 'px';
+                    el.style.height = height + 'px';
+                    el.style.right = 'auto'; el.style.bottom = 'auto';
+                };
+
+                const pointerUp = () => {
+                    if (!resizing) return;
+                    resizing = false; startRect = null; document.body.style.userSelect = '';
+                    try { saveChatState(); } catch (e) {}
+                    try { if (window.__synth_active_interaction && window.__synth_active_interaction.type === 'resize') window.__synth_active_interaction = null; } catch (e) {}
+                };
+
+                let currentResizeSideForEl = null;
+                for (const side of Object.keys(handles)) {
+                    const h = handles[side];
+                    if (h.addEventListener) {
+                        h.addEventListener('pointerdown', (ev) => { currentResizeSideForEl = side; pointerDown(side, ev); });
+                        h.addEventListener('mousedown', (ev) => { currentResizeSideForEl = side; pointerDown(side, ev); });
+                    }
+                }
+                window.addEventListener('pointermove', pointerMove);
+                window.addEventListener('mousemove', pointerMove);
+                window.addEventListener('pointerup', pointerUp);
+                window.addEventListener('mouseup', pointerUp);
+                // Ensure that if this element has a draggable title bar, it sits above the
+                // resize handles so pointerdown on the title bar is not captured by them.
+                try {
+                    const headerEl = el.querySelector('#synth-debug-title-bar') || el.querySelector('.title-bar') || el.querySelector('.window-title');
+                    if (headerEl) {
+                        // Keep header above handles (handles default to ~60003). Use a slightly higher value.
+                        headerEl.style.zIndex = String(60020);
+                        headerEl.style.pointerEvents = 'auto';
+                    }
+                } catch (e) { /* ignore */ }
+            } catch (e) { console.debug('[synth_webui] createResizeHandlesForElement failed', e); }
         }
 
         // Immediately create handles if enabled on load
@@ -12790,7 +13304,7 @@
                     CHAT_RESIZABLE = false;
                     try { chatElement.style.resize = 'none'; } catch (e) {}
                     // Remove existing handles
-                    document.querySelectorAll('.chat-resize-handle').forEach(h => h.remove());
+                    try { chatElement.querySelectorAll('.chat-resize-handle').forEach(h => h.remove()); } catch (e) {}
                 }
             } catch (e) { console.debug('[synth_webui] setChatResizable failed', e); }
         }

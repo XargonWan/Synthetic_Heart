@@ -219,6 +219,30 @@ async def test_get_current_animation(animation_handler, mock_webui):
     """Test getting current animation file."""
     assert animation_handler.get_current_animation() is None
 
+    def test_incomplete_intro_outro_warns():
+        ah = AnimationHandler()
+        # intro without start_frame, outro without end_frame
+        desc = {
+            'intro': {'end_frame': 10},
+            'loop': {'start_frame': 11, 'end_frame': 20},
+            'outro': {'start_frame': 21}
+        }
+        # Should not raise, but return has_intro=False, has_outro=False
+        res = ah._analyze_animation_structure(desc, 'incomplete.fbx')
+        assert res['has_intro'] is False
+        assert res['has_outro'] is False
+
+
+    def test_thinking_descriptor_classified_as_loop():
+        from core.animation_handler import AnimationHandler
+        ah = AnimationHandler()
+        # Ensure search paths include the skins/Rei animations directory
+        ah.set_animation_search_paths([str(ah.SKIN_DEFAULT_ANIMATIONS_DIR)])
+        variants = ah.get_animation_variants('think')
+        # Our Thinking.fbx should be discovered and classified as loop variant
+        found = any('Thinking.fbx' == a for a in variants.get('loop', []))
+        assert found, f"Thinking.fbx not found in loop variants: {variants}"
+
 
 @pytest.mark.asyncio
 async def test_state_summary_callback_registered_and_called():

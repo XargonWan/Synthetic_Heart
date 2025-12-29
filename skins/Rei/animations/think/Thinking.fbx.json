@@ -1,13 +1,15 @@
 {
   "intro": {
+    "start_frame": 0,
     "end_frame": 70
   },
   "loop": {
     "start_frame": 71,
-    "end_frame": 72
+    "end_frame": 140
   },
   "outro": {
-    "start_frame": 73
+    "start_frame": 141,
+    "end_frame": 180
   }
   ,
   "expressions": [
