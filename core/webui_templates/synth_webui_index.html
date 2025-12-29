@@ -12962,6 +12962,20 @@
             let chatPointerId = null;
 
             const chatPointerDown = (e) => {
+                // Don't start a drag when interacting with buttons/controls in the title bar.
+                // Otherwise `preventDefault` / pointer-capture can kill the click.
+                try {
+                    const target = e?.target;
+                    if (target && typeof target.closest === 'function') {
+                        if (target.closest('.chat-controls, button, input, textarea, select, option, a, label')) {
+                            return;
+                        }
+                    }
+                } catch (err) { /* ignore */ }
+                // Only primary button / primary pointer
+                try {
+                    if (e && typeof e.button === 'number' && e.button !== 0) return;
+                } catch (err) { /* ignore */ }
                 try { e.stopPropagation(); } catch (err) {}
                 // If another interaction is active (resize/other drag), ignore
                 try { if (window.__synth_active_interaction) return; } catch (e) {}
