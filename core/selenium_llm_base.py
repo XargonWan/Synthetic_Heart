@@ -2232,6 +2232,108 @@ class SeleniumLLMBase(AIPluginBase):
             log_warning(f"[{self.component_name}] Error checking login status: {e}, assuming not logged in")
             return False
 
+    # === NEW: LOGIN FLOW HELPERS ===
+
+    async def ensure_selkies_running(self) -> bool:
+        """Check if Selkies CLI is available in PATH.
+
+        This is a lightweight check used before attempting to orchestrate
+        the login flow. It does not attempt to start Selkies services.
+        """
+        try:
+            import shutil
+            path = shutil.which("selkies")
+            if path:
+                log_debug(f"[selenium] Selkies binary found at: {path}")
+                return True
+            else:
+                log_debug("[selenium] Selkies binary not found in PATH")
+                return False
+        except Exception as e:
+            log_warning(f"[selenium] Error while checking Selkies availability: {e}")
+            return False
+
+    async def check_login_state(self) -> dict:
+        """Check and return the current login state for this engine.
+
+        Returns a dict: { 'logged_in': bool, 'login_state': 'logged'|'unlogged'|'unknown' }
+        If the state changes, notifies via the notify function if set.
+        """
+        try:
+            if self.driver is None:
+                state = {"logged_in": False, "login_state": "unknown"}
+            else:
+                try:
+                    logged = bool(self.is_user_logged_in())
+                    state = {"logged_in": logged, "login_state": ("logged" if logged else "unlogged")}
+                except Exception as e:
+                    log_warning(f"[selenium] Error while evaluating login state: {e}")
+                    state = {"logged_in": False, "login_state": "unknown"}
+
+            # Notify if changed from previous known state
+            prev = getattr(self, "_last_login_state", None)
+            if prev != state:
+                self._last_login_state = state
+                msg = f"🔐 Login state for {getattr(self, 'component_name', 'selenium')} changed: {state['login_state']}"
+                log_info(f"[selenium] {msg}")
+                if getattr(self, "notify_fn", None):
+                    try:
+                        self.notify_fn(msg)
+                    except Exception:
+                        # Fallback: ignore notifier exceptions
+                        pass
+
+            return state
+        except Exception as e:
+            log_warning(f"[selenium] Unexpected error checking login state: {e}")
+            return {"logged_in": False, "login_state": "unknown"}
+
+    async def start_login_flow(self, timeout: int = 30) -> dict:
+        """Start a non-blocking login flow for the engine.
+
+        - Optionally ensures Selkies availability (best-effort).
+        - Creates/obtains the shared driver and navigates to the service homepage.
+        - Returns an initial state dict (see check_login_state()).
+        """
+        try:
+            # Check Selkies availability but don't fail hard if missing
+            selkies_ok = await self.ensure_selkies_running()
+            if not selkies_ok:
+                log_debug("[selenium] Selkies not available - continuing without it (Chromium may still be opened)")
+
+            # Ensure driver is created (shared driver helper handles locking)
+            try:
+                driver = await asyncio.wait_for(self._get_shared_driver(), timeout=min(timeout, 60))
+                self.driver = driver
+            except Exception as e:
+                log_error(f"[selenium] Failed to create/open browser for login flow: {e}")
+                return {"logged_in": False, "login_state": "unknown", "error": str(e)}
+
+            # Navigate to service URL if present
+            try:
+                if self.service_url:
+                    log_debug(f"[selenium] Navigating to service URL for login: {self.service_url}")
+                    try:
+                        driver.get(self.service_url)
+                    except Exception as e:
+                        log_warning(f"[selenium] Navigation to {self.service_url} failed: {e}")
+            except Exception:
+                pass
+
+            # Small delay to allow page to load
+            try:
+                await asyncio.sleep(1)
+            except Exception:
+                pass
+
+            # Evaluate login state and return
+            state = await self.check_login_state()
+            return state
+
+        except Exception as e:
+            log_error(f"[selenium] start_login_flow failed: {e}")
+            return {"logged_in": False, "login_state": "unknown", "error": str(e)}
+
     # === COMMON LIFECYCLE METHODS ===
 
     async def start(self):

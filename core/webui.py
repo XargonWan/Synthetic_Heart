@@ -255,6 +255,8 @@ class SynthWebUIInterface:
         self.app.get("/api/debug/db_pool")(self.db_pool_debug)
         self.app.post("/api/config")(self.update_config_entry)
         self.app.post("/api/components/llm")(self.set_llm_engine)
+        # Login control for Selenium-based LLM engines
+        self.app.post("/api/components/llm/login")(self.llm_login)
         self.app.get("/api/logchat/info")(self.get_logchat_info)
         self.app.get("/api/diary")(self.diary_summary)
         self.app.post("/api/diary/archive")(self.archive_diary_entries)
@@ -3432,6 +3434,27 @@ class SynthWebUIInterface:
                     log_warning(f"{LOG_PREFIX} error reading action types for engine {engine_name}: {exc}")
 
             meta = self._get_component_meta(engine_name)
+            # Attempt to include login info for Selenium-based engines without inducing side-effects
+            login_state = "unknown"
+            logged_in = False
+            try:
+                from core.selenium_llm_base import SeleniumLLMBase
+                if instance is not None and isinstance(instance, SeleniumLLMBase):
+                    # If the driver isn't initialized, avoid creating it just to check login
+                    if getattr(instance, 'driver', None) is None:
+                        login_state = "unknown"
+                        logged_in = False
+                    else:
+                        try:
+                            logged_in = bool(instance.is_user_logged_in())
+                            login_state = "logged" if logged_in else "unlogged"
+                        except Exception:
+                            login_state = "unknown"
+                            logged_in = False
+            except Exception:
+                # If SeleniumLLMBase is not importable, just skip enrichment
+                pass
+
             llm_engines.append(
                 {
                     "name": engine_name,
@@ -3442,6 +3465,8 @@ class SynthWebUIInterface:
                     "status": meta["status"],
                     "details": meta["details"],
                     "error": meta["error"],
+                    "login_state": login_state,
+                    "logged_in": logged_in,
                     "actions": actions,
                 }
             )
@@ -3595,6 +3620,65 @@ class SynthWebUIInterface:
             raise HTTPException(status_code=500, detail=f"Failed to activate LLM '{name}'") from exc
 
         return JSONResponse({"status": "ok", "active": name})
+
+    async def llm_login(self, request: Request):
+        """Start the login flow for a Selenium-based LLM engine (non-blocking).
+
+        Expects JSON: { "name": "selenium_chatgpt" }
+        """
+        try:
+            data = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+
+        name = str(data.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Missing 'name'")
+
+        try:
+            from core.llm_registry import get_llm_registry
+            registry = get_llm_registry()
+            engine = registry.get_engine(name)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} unable to access LLM registry: {exc}")
+            raise HTTPException(status_code=500, detail="Unable to access LLM registry") from exc
+
+        if not engine:
+            raise HTTPException(status_code=404, detail=f"LLM engine '{name}' not loaded")
+
+        try:
+            from core.selenium_llm_base import SeleniumLLMBase
+            if not isinstance(engine, SeleniumLLMBase):
+                raise HTTPException(status_code=400, detail=f"LLM engine '{name}' is not Selenium-based")
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=400, detail=f"LLM engine '{name}' is not Selenium-based")
+
+        try:
+            # Fire-and-forget the login flow so the endpoint is non-blocking
+            try:
+                task = asyncio.create_task(engine.start_login_flow())
+                log_info(f"{LOG_PREFIX} Started login flow for LLM '{name}' (task: {task})")
+            except RuntimeError:
+                # If event loop is not running or other issues, try scheduling differently
+                loop = asyncio.get_event_loop()
+                loop.create_task(engine.start_login_flow())
+
+            # Return immediate status (do not wait for the login to complete)
+            current_logged = False
+            try:
+                current_logged = bool(getattr(engine, 'is_user_logged_in') and engine.is_user_logged_in())
+            except Exception:
+                current_logged = False
+
+            return JSONResponse({"status": "ok", "name": name, "action": "started", "logged_in": current_logged})
+
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to start login flow for '{name}': {exc}")
+            raise HTTPException(status_code=500, detail=f"Failed to start login flow for '{name}': {exc}") from exc
 
     async def reload_component(self, request: Request):
         """Reload a specific component (interface or plugin)."""

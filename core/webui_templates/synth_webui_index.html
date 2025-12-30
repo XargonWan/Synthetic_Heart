@@ -2594,6 +2594,20 @@
                 <h2>LLM Engines</h2>
                 <div id="components-llm">
                 <div class="meta" id="components-llm-summary">Loading…</div>
+
+                <!-- LLM engine quick controls: engine selector + login -->
+                <div class="meta" id="components-llm-controls" style="display:flex; gap:10px; align-items:center; margin-top:10px;">
+                    <select id="llm-engine-select" style="padding:6px; background:var(--background); color:var(--text); border:1px solid #444; border-radius:6px;">
+                        <option value="">Select LLM engine…</option>
+                    </select>
+                    <div id="llm-engine-info" class="meta" style="min-width:160px;">
+                        <span id="llm-engine-model">model: –</span>
+                        &nbsp;•&nbsp;
+                        <span id="llm-engine-login-state">state: –</span>
+                    </div>
+                    <button id="llm-login-btn" class="pill">Login</button>
+                </div>
+
                 <div class="components-list" id="components-llm-list"></div>
                 </div>
             </article>
@@ -3890,6 +3904,90 @@
             const activeInfo = engines.find((engine) => engine?.active);
             const activeDisplay = activeInfo?.display_name || data?.active || '';
             renderComponentGroup(componentsLLMList, engines, 'LLM engines', { emphasiseActive: true, openFirst: true });
+            // Populate the quick selector controls
+            try {
+                populateLLMControls(engines);
+            } catch (e) {
+                console.error('[synth_webui] populateLLMControls error', e);
+            }
+        }
+
+        function populateLLMControls(engines) {
+            const select = document.getElementById('llm-engine-select');
+            const modelSpan = document.getElementById('llm-engine-model');
+            const stateSpan = document.getElementById('llm-engine-login-state');
+            const loginBtn = document.getElementById('llm-login-btn');
+            if (!select || !modelSpan || !stateSpan || !loginBtn) return;
+
+            // Clear existing options (except the placeholder)
+            const placeholder = select.querySelector('option[value=""]');
+            select.innerHTML = '';
+            if (placeholder) select.appendChild(placeholder);
+
+            engines.forEach((eng) => {
+                const opt = document.createElement('option');
+                opt.value = eng.name || '';
+                opt.textContent = eng.display_name || eng.name;
+                opt.dataset.model = eng?.model || (eng?.interface_limits?.model_name || '');
+                opt.dataset.loginState = eng?.login_state || 'unknown';
+                opt.dataset.loggedIn = !!eng?.logged_in;
+                select.appendChild(opt);
+            });
+
+            // If an active engine exists, preselect it
+            const active = engines.find(e => e?.active);
+            if (active) {
+                select.value = active.name || '';
+                modelSpan.textContent = `model: ${active.model || (active?.interface_limits?.model_name || '–')}`;
+                stateSpan.textContent = `state: ${active.login_state || 'unknown'}`;
+            } else {
+                modelSpan.textContent = 'model: –';
+                stateSpan.textContent = 'state: –';
+            }
+
+            // Selection change updates info
+            select.onchange = () => {
+                const sel = select.selectedOptions[0];
+                if (!sel) return;
+                modelSpan.textContent = `model: ${sel.dataset.model || '–'}`;
+                stateSpan.textContent = `state: ${sel.dataset.loginState || 'unknown'}`;
+            };
+
+            // Login button handler
+            loginBtn.onclick = async () => {
+                const engineName = select.value;
+                if (!engineName) {
+                    setStatusMessage('Select an engine before attempting to login', 'warn');
+                    return;
+                }
+
+                loginBtn.disabled = true;
+                const original = loginBtn.textContent;
+                loginBtn.textContent = 'Starting…';
+                try {
+                    const res = await fetch('/api/components/llm/login', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name: engineName })
+                    });
+
+                    if (res.ok) {
+                        const data = await res.json();
+                        setStatusMessage(`Login flow started for ${engineName}`, 'success');
+                        // Refresh components after a short delay to pick up status changes
+                        setTimeout(() => { refreshComponents(true); }, 1200);
+                    } else {
+                        const text = await res.text();
+                        setStatusMessage(`Login failed: ${res.status} ${text}`, 'error');
+                    }
+                } catch (err) {
+                    console.error('[synth_webui] Login request error', err);
+                    setStatusMessage('Login request failed', 'error');
+                } finally {
+                    loginBtn.disabled = false;
+                    loginBtn.textContent = original;
+                }
+            };
         }
 
         function renderComponents(data) {
