@@ -82,13 +82,19 @@ from core.logging_utils import log_debug, log_info
 async def get_bot_username(bot):
     """Get the bot's username from the bot instance."""
     try:
+        # Handle different bot shapes (Telegram, Discord, etc.)
+        # 1) direct attribute (some wrappers expose .username)
         if hasattr(bot, 'username'):
             return bot.username
-        elif hasattr(bot, 'get_me'):
+        # 2) classic Telegram-like Bot with get_me()
+        if hasattr(bot, 'get_me'):
             me = await bot.get_me()
             return getattr(me, 'username', None)
-        else:
-            return None
+        # 3) discord.py Client/Cog exposes .user with .name and .id
+        if hasattr(bot, 'user') and getattr(bot, 'user') is not None:
+            user = getattr(bot, 'user')
+            return getattr(user, 'name', None) or getattr(user, 'username', None)
+        return None
     except Exception as e:
         log_debug(f"[mention] Error getting bot username: {e}")
         return None
@@ -182,7 +188,17 @@ async def is_message_for_bot(
                 return True, None
             
             # Check if reply is to bot by ID
-            if reply_id and hasattr(bot, 'id') and reply_id == bot.id:
+            # Support different bot shapes: bot.id or bot.user.id (discord.py)
+            bot_id = None
+            try:
+                if hasattr(bot, 'id'):
+                    bot_id = getattr(bot, 'id')
+                elif hasattr(bot, 'user') and getattr(bot, 'user') is not None:
+                    bot_id = getattr(bot.user, 'id', None)
+            except Exception:
+                bot_id = None
+
+            if reply_id and bot_id and reply_id == bot_id:
                 log_debug("[mention] match_reason=reply_id")
                 log_debug("[mention] ✅ Reply to bot message (ID match) - PRIORITY 2 - message is for bot")
                 return True, None
