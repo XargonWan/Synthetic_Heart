@@ -85,15 +85,18 @@ The project ships with an **Ollama-compatible interface** (`interface/ollama_com
    <img src="docs/res/quickstart.png" alt="SyntH Home Screenshot" style="max-width: 700px; border-radius: 8px; margin: 16px 0;" />
 </div>
 
-0. [OPTIONAL] Copy `.env.example` to `.env` to customize the deployment.
-1. Start the stack:
+1. Clone this repository or simply download the composer file and the skins folder (see the note below).
+2. [OPTIONAL] Copy `.env.example` to `.env` to customize the deployment.
+3. Start the stack:
    ```bash
    docker compose up -d
    ```
-2. Connect to the WebUI via https (default port is 8001)
-3. Once in the WebUI navigate to components and select the desired LLM Engine.
-4. If using the Selenium engine (such as ChatGPT or Gemini), don't forget to press the Login button and log into the web interface.
+4. Connect to the WebUI via https (default port is 8001)
+5. Once in the WebUI navigate to components and select the desired LLM Engine.
+6. If using the Selenium engine (such as ChatGPT or Gemini), don't forget to press the Login button and log into the web interface.
 From there you can login.
+
+**NOTE:** skins folder is optional if the user is not interested in edit them. In this case, however, the mount point for the skins folder on the docker compose should be commented out, else an empty skin folder will be mounted overriding the included one.
 
 See the [documentation](https://synthetic-heart.readthedocs.io) for installation details, advanced features and contribution guidelines.
 
