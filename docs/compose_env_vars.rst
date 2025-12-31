@@ -35,7 +35,7 @@ DISPLAY_WIDTH, DISPLAY_HEIGHT
 SYNTH_WEBUI_HTTP_PORT, SYNTH_WEBUI_HTTPS_PORT
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 - **Purpose**: Ports used by the Synthetic Heart Web UI (HTTP/HTTPS).
-- **Default**: HTTP 8000, HTTPS 8001 (compose fallback); web UI has additional internal defaults in code.
+- **Default**: HTTP 8001, HTTPS 8000 (compose fallback); web UI has additional internal defaults in code.
 - **Recommendation**: Keep defaults locally; set explicit values in multi-service hosts or when port conflicts exist.
 
 SYNTH_WEBUI_HOST

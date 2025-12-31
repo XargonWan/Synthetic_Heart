@@ -129,10 +129,10 @@ def get_max_diary_chars(interface_name: str = None, current_prompt_length: int =
             try:
                 from core.selenium_llm_base import get_active_selenium_limits
                 selenium_limits = get_active_selenium_limits()
-                max_selenium_chars = selenium_limits.get("max_prompt_chars", 128000)
+                max_selenium_chars = selenium_limits.get("max_prompt_chars", 128001)
                 return max_selenium_chars
             except Exception:
-                return 128000  # Safe fallback
+                return 128001  # Safe fallback
         
         registry = get_llm_registry()
         engine = registry.get_engine(active_llm)
@@ -141,16 +141,16 @@ def get_max_diary_chars(interface_name: str = None, current_prompt_length: int =
             engine = registry.load_engine(active_llm)
         
         # Try to get limits from active Selenium LLM engine first
-        max_prompt_chars = 128000  # Safe fallback default
+        max_prompt_chars = 128001  # Safe fallback default
         try:
             from core.selenium_llm_base import get_active_selenium_limits
             selenium_limits = get_active_selenium_limits()
-            max_prompt_chars = selenium_limits.get("max_prompt_chars", 128000)
+            max_prompt_chars = selenium_limits.get("max_prompt_chars", 128001)
         except Exception:
             # If not a Selenium engine, try to get from the engine itself
             if engine and hasattr(engine, 'get_interface_limits'):
                 limits = engine.get_interface_limits()
-                max_prompt_chars = limits.get("max_prompt_chars", 128000)
+                max_prompt_chars = limits.get("max_prompt_chars", 128001)
         
         # Check if this is a memory-focused operation (e.g., Grillo memory consolidation beat)
         maximize_diary = False
@@ -170,7 +170,7 @@ def get_max_diary_chars(interface_name: str = None, current_prompt_length: int =
         return max(diary_allocation, 5000)  # Minimum 5k chars
     except Exception as e:
         log_warning(f"[ai_diary] Error calculating diary limit: {e}")
-        return 8000  # Fallback
+        return 8001  # Fallback
 
 
 async def _run_sync_async(coro):

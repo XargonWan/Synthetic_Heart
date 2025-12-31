@@ -4,11 +4,13 @@ services:
     image: xargonwan/synthetic_heart:${IMAGE_VERSION:-latest}
     container_name: synth
     hostname: synthetic-heart
-    env_file:
-      - .env
+    # Enable this if you're using a .env file for environment variables
+    # Even in the services below
+    # env_file:
+    #   - .env
     ports:
       # Port used for the Synthetic Heart WebUI
-      - "${SYNTH_WEBUI_HTTPS_PORT:-8001}:${SYNTH_WEBUI_HTTPS_PORT:-8001}"
+      - "${SYNTH_WEBUI_HTTPS_PORT:-8000}:${SYNTH_WEBUI_HTTPS_PORT:-8000}"
       # Port used for Selkies (Web Desktop) HTTPS - This is shown via Login button for Selenium based LLMs
       - "${SELKIES_HTTPS_PORT:-3000}:3001"
       # Port used for Ollama integration.
@@ -39,8 +41,9 @@ services:
     container_name: synth-db
     hostname: synth-db
     image: mariadb:11
-    env_file:
-      - .env
+    # Enable this if you're using a .env file for environment variables
+    # env_file:
+    #   - .env
     ports:
       - "${EXT_DB_PORT:-3306}:3306"
     environment:
@@ -61,8 +64,9 @@ services:
     container_name: synth-db-backup
     image: tiredofit/db-backup
     platform: ${PLATFORM_BACKUP:-linux/amd64}
-    env_file:
-      - .env
+    # Enable this if you're using a .env file for environment variables
+    # env_file:
+    #   - .env
     depends_on:
       - synth-db
     environment:

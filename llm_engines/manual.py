@@ -20,7 +20,7 @@ import time
 # Note: max_prompt_chars will be read from the active LLM engine at runtime
 # This is just a safe fallback if the active LLM isn't available
 MANUAL_CONFIG = {
-    "max_prompt_chars": 128000,   # Fallback - will be overridden by active LLM engine limits
+    "max_prompt_chars": 128001,   # Fallback - will be overridden by active LLM engine limits
     "max_response_chars": 4000,
     "supports_images": False,
     "supports_functions": False,
@@ -60,7 +60,7 @@ def get_interface_limits() -> dict:
     try:
         from core.selenium_llm_base import get_active_selenium_limits
         selenium_limits = get_active_selenium_limits()
-        max_prompt_chars = selenium_limits.get("max_prompt_chars", 128000)
+        max_prompt_chars = selenium_limits.get("max_prompt_chars", 128001)
         llm_name = selenium_limits.get("llm_name", "unknown")
         log_info(f"[manual] Interface limits from active Selenium engine ({llm_name}): max_prompt_chars={max_prompt_chars}")
     except Exception as e:
@@ -117,7 +117,7 @@ class ManualAIPlugin(AIPluginBase):
         try:
             from core.selenium_llm_base import get_active_selenium_limits
             selenium_limits = get_active_selenium_limits()
-            max_prompt_chars = selenium_limits.get("max_prompt_chars", 128000)
+            max_prompt_chars = selenium_limits.get("max_prompt_chars", 128001)
             llm_name = selenium_limits.get("llm_name", "unknown")
             log_info(f"[manual] Interface limits from active Selenium engine ({llm_name}): max_prompt_chars={max_prompt_chars}")
         except Exception as e:

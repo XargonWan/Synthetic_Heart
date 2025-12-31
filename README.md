@@ -91,7 +91,7 @@ The project ships with an **Ollama-compatible interface** (`interface/ollama_com
    ```bash
    docker compose up -d
    ```
-4. Connect to the WebUI via https (default port is 8001)
+4. Connect to the WebUI via https (default port is 8000)
 5. Once in the WebUI navigate to components and select the desired LLM Engine.
 6. If using the Selenium engine (such as ChatGPT or Gemini), don't forget to press the Login button and log into the web interface.
 From there you can login.

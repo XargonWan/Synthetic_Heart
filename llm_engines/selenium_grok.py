@@ -25,10 +25,10 @@ DEFAULT_MODEL = "grok-beta"
 
 # Grok-specific model limits (character context limits)
 MODEL_LIMITS_MAP = {
-    "grok-beta": 128000,           # Grok: 128k tokens context (~400k characters)
-    "grok-vision-beta": 128000,    # Grok Vision: 128k tokens context (~400k characters)
+    "grok-beta": 128001,           # Grok: 128k tokens context (~400k characters)
+    "grok-vision-beta": 128001,    # Grok Vision: 128k tokens context (~400k characters)
     "unlogged": 21500,             # Limited context for free tier
-    "default": 128000              # Safe default for unknown models
+    "default": 128001              # Safe default for unknown models
 }
 
 class SeleniumGrokPlugin(SeleniumLLMBase):

@@ -515,7 +515,7 @@ class SeleniumLLMBase(AIPluginBase):
 
         # Model management - to be set by subclasses
         # model_limits_map: Dict[model_name] -> max_chars
-        # Example: {"gpt-4o": 128000, "gpt-4": 8000, "default": 128000}
+        # Example: {"gpt-4o": 128001, "gpt-4": 8001, "default": 128001}
         self.model_limits_map: dict = {}
         
         # model_config_var: name of the config variable that holds the current model name

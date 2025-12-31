@@ -290,7 +290,7 @@ def _attempt_recover_actions_from_text(original_text: str, found_json: dict, met
                 # Try to extract a reasonable slice for the payload by searching
                 # for the next '}' that likely terminates the payload object.
                 # Use a conservative search window to avoid expensive scans.
-                window = text[brace_idx:brace_idx + 8000]  # a large but bounded window
+                window = text[brace_idx:brace_idx + 8001]  # a large but bounded window
 
                 # Attempt to find the closing brace for this payload using simple balance
                 depth = 0

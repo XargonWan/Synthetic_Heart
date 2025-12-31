@@ -59,7 +59,7 @@ This guide outlines the typical steps to run **Synthetic Heart** using Docker. s
 
       docker compose up -d
 
-#. Open the WebUI in your browser via HTTPS (default host port is ``8001``).
+#. Open the WebUI in your browser via HTTPS (default host port is ``8000``).
    Once in the WebUI navigate to **Components** and select the desired LLM
    Engine. If using a Selenium-based engine (e.g., ChatGPT or Gemini), press
    the **Login** button for that engine and complete the provider login flow
