@@ -1,7 +1,7 @@
 services:
 
   synth:
-    image: xargonwan/synthetic_heart:${IMAGE_VERSION:-latest}
+    image: xargonwan/synthetic_heart:${IMAGE_VERSION:-latest-develop}
     container_name: synth
     hostname: synthetic-heart
     # Enable this if you're using a .env file for environment variables
