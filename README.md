@@ -85,14 +85,15 @@ The project ships with an **Ollama-compatible interface** (`interface/ollama_com
    <img src="docs/res/quickstart.png" alt="SyntH Home Screenshot" style="max-width: 700px; border-radius: 8px; margin: 16px 0;" />
 </div>
 
-1. Copy `.env.example` to `.env` and fill the required values.
-2. Start the stack:
+0. [OPTIONAL] Copy `.env.example` to `.env` to customize the deployment.
+1. Start the stack:
    ```bash
-   docker compose up
+   docker compose up -d
    ```
-3. If using the Selenium engine with ChatGPT or Gemini, open `http://<host>:5006` and log into the web interface. You might want to send a message to the bot to trigger a browser session if you're unsure.
+2. Connect to the WebUI via https (default port is 8001)
+3. Once in the WebUI navigate to components and select the desired LLM Engine.
+4. If using the Selenium engine (such as ChatGPT or Gemini), don't forget to press the Login button and log into the web interface.
 From there you can login.
-4. If you want the Web UI to serve HTTPS you can enable TLS by setting `SYNTH_WEBUI_TLS=1` in your `.env` file. In development this will generate a self-signed certificate under `/config/ssl` if not provided.
 
 See the [documentation](https://synthetic-heart.readthedocs.io) for installation details, advanced features and contribution guidelines.
 

@@ -45,6 +45,7 @@ getting started.
    animation_system
    webui_debug
    interfaces
+   compose_env_vars
    interface_path
    matrix_interface
    config_management

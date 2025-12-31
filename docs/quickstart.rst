@@ -15,7 +15,7 @@ Chromium Synth browser to log in and use those web services.
 Steps:
 
 1. Open the Selkies desktop in your browser. By default Selkies runs on
-   https://<host>:3000 (HTTPS) or http://<host>:3001 (HTTP) — the exact ports
+   https://<host>:3001 (HTTPS) or http://<host>:3000 (HTTP) — the exact ports
    are configurable via the environment variables `SELKIES_HTTPS_PORT` and
    `SELKIES_HTTP_PORT` (check `docker-compose.yml` or your environment).
 
@@ -49,20 +49,22 @@ Security & operational notes:
 This guide outlines the typical steps to run **Synthetic Heart** using Docker. synth is a modular AI system that automatically discovers and loads components (interfaces, plugins, and LLM engines) at startup.
 
 #. Copy ``.env.example`` to ``.env`` and adjust values as needed. Important
-   variables include ``BOTFATHER_TOKEN`` for Telegram, database credentials for
-   persistent features, and ``TRAINER_IDS`` for security. The optional
-   ``NOTIFY_ERRORS_TO_INTERFACES`` mapping (e.g. ``telegram_bot:123456``)
-   defines where error notifications are sent.
+   variables include database credentials for persistent features and
+   ``TRAINER_IDS`` for security. The optional ``NOTIFY_ERRORS_TO_INTERFACES``
+   mapping (e.g. ``telegram_bot:123456``) defines where error notifications
+   are sent.
 #. Build and start the services:
 
    .. code-block:: bash
 
-      docker compose up
+      docker compose up -d
 
-#. The system will automatically discover and load all available components from
-   the ``interface/``, ``plugins/``, and ``llm_engines/`` directories.
-#. Open the web interface at ``http://<host>:5006`` to perform the initial
-   ChatGPT login if you plan to use the ``selenium_chatgpt`` engine.
+#. Open the WebUI in your browser via HTTPS (default host port is ``8001``).
+   Once in the WebUI navigate to **Components** and select the desired LLM
+   Engine. If using a Selenium-based engine (e.g., ChatGPT or Gemini), press
+   the **Login** button for that engine and complete the provider login flow
+   in the browser that opens (Selkies/Chromium may be used to perform the
+   login if available).
 
 Database backups are written hourly to ``./backups/``. To tear down the
 containers, press :kbd:`Ctrl+C` or run ``docker compose down``.

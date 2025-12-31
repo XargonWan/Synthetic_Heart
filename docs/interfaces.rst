@@ -108,6 +108,8 @@ The web interface provides browser-based access:
     SYNTH_WEBUI_HTTP_PORT=8000
     SYNTH_WEBUI_HTTPS_PORT=8001
 
+See also: :doc:`compose_env_vars` for a complete list of Compose variables, defaults and recommendations.
+
 **Features:**
 
 - Modern web interface

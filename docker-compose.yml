@@ -7,33 +7,26 @@ services:
     env_file:
       - .env
     ports:
-      - "${SELKIES_HTTPS_PORT:-3000}:3000"
-      - "${SELKIES_HTTP_PORT:-3001}:3001"
-      - "${CLI_SERVER_PORT:-5555}:5555"
-      - "${SYNTH_WEBUI_HTTP_PORT:-8000}:${SYNTH_WEBUI_HTTP_PORT:-8000}"
-      - "${SYNTH_WEBUI_HTTPS_PORT:-8001}:${SYNTH_WEBUI_HTTPS_PORT:-8001}
+      # Port used for the Synthetic Heart WebUI
+      - "${SYNTH_WEBUI_HTTPS_PORT:-8001}:${SYNTH_WEBUI_HTTPS_PORT:-8001}"
+      # Port used for Selkies (Web Desktop) HTTPS - This is shown via Login button for Selenium based LLMs
+      - "${SELKIES_HTTPS_PORT:-3000}:3001"
+      # Port used for Ollama integration.
+      # NOTE: if you have an ollama server running locally, change this port to avoid conflicts.
       - "${OLLAMA_PORT:-11434}:11434"
     volumes:
-      - synth_data:/config
-      - ./skins:/app/skins
-      - ./logs:/app/logs
-      - .env:/app/.env:ro
+      - synth_data:/config  # Persistent data storage
+      - ./skins:/app/skins  # Custom skins, please download the skins from 
+      - ./logs:/app/logs    # Application logs
     environment:
-      - WEBVIEW_PORT=${WEBVIEW_PORT:-5006}
-      - WEBVIEW_HOST=${WEBVIEW_HOST:-localhost}
-      - SYNTH_WEBUI_HTTP_PORT=${SYNTH_WEBUI_HTTP_PORT:-8000}
-      - SYNTH_WEBUI_HTTPS_PORT=${SYNTH_WEBUI_HTTPS_PORT:-8001}
-      - SYNTH_WEBUI_HOST=${SYNTH_WEBUI_HOST:-0.0.0.0}
+      # Timezone setting, if unset will be UTC and the Synth will think it's UTC
+      - TZ=${TZ:-Asia/Tokyo}
+      # This container don't need root access, so we set PUID and PGID to non-root user
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
-      - DISPLAY_WIDTH=${DISPLAY_WIDTH:-1280}
-      - DISPLAY_HEIGHT=${DISPLAY_HEIGHT:-720}
+      # Web Desktop root credentials
       - ROOT_PASSWORD=${ROOT_PASSWORD:-"password"}
-      - TZ=${TZ:-Asia/Tokyo}
-      - SECURE_CONNECTION=${SECURE_CONNECTION:-1}
-      - SYNTH_WEBUI_TLS=${SYNTH_WEBUI_TLS:-${SECURE_CONNECTION:-1}}
-      - DB_HOST=${DB_HOST:-synth-db}
-      - CLI_SERVER_PORT=${CLI_SERVER_PORT:-5555}
+      # Optional runtime variables (check wiki for details)
     restart: unless-stopped
     stdin_open: true
     tty: true
@@ -75,12 +68,12 @@ services:
     environment:
       DB_TYPE: mysql
       DB_HOST: ${DB_HOST:-synth-db}
-      DB_NAME: ${DB_NAME:-rekku}
-      DB_USER: ${DB_USER:-rekku}
-      DB_PASS: ${DB_PASS:-rekku}
+      DB_NAME: ${DB_NAME:-synth}
+      DB_USER: ${DB_USER:-synth}
+      DB_PASS: ${DB_PASS:-synth}
       DB_DUMP_FREQ: 60
       DB_CLEANUP_TIME: 1440
-      CONTAINER_TIMEZONE: Asia/Tokyo
+      CONTAINER_TIMEZONE: ${TZ:-UTC}
       COMPRESSION: GZ
       DB_DUMP_TARGET: /backup
     volumes:
