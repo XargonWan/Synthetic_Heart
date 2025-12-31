@@ -165,6 +165,12 @@ docker exec synth-dev tail -f /app/logs/synth.log | grep -E "execute_action|sche
 - The `schedule_message` action requires: `text` (message content) and `send_in` (delay like "10 seconds", "5 minutes", "1 hour")
 - Monitor logs to verify the action execution pipeline
 
+Selkies TLS note
+-----------------
+- By default Selkies serves HTTP on container port **3000** and HTTPS on container port **3001**.
+- In development we expose host port `${SELKIES_HTTPS_PORT:-3000}` to container **3001** for TLS, and `${SELKIES_HTTP_PORT:-3000}` to container **3000** for plain HTTP. If you changed the compose mapping, ensure the host port is mapped to the matching container port (3001 for HTTPS).
+- Selkies expects TLS certificates to be available in `/config/ssl/cert.pem` and `/config/ssl/cert.key`. The dev image includes self-signed certs under `/config/ssl` so HTTPS should work out-of-the-box when the compose mapping is correct.
+
 ---
 
 ## Animation System (AnimationHandler & VRM Integration)
@@ -374,3 +380,4 @@ The documentation must be written in English and in ReadTheDocs format.
 * No direct, hardcoded coupling between the core and any specific plugin/interface/engine.
 * Validation rules are auto-discovered from `get_supported_actions()` methods.
 * Every time you edit a python file use `python3 -m py_compile` against it. If you edited more than one please check them in a single command to save time and user interaction.
+* Never use `git add` or `git commit`, thatś the human developer's role

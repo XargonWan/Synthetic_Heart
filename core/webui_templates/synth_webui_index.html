@@ -2597,8 +2597,7 @@
 
                 <!-- LLM engine quick controls: engine selector + login -->
                 <div class="meta" id="components-llm-controls" style="display:flex; gap:10px; align-items:center; margin-top:10px;">
-                    <select id="llm-engine-select" style="padding:6px; background:var(--background); color:var(--text); border:1px solid #444; border-radius:6px;">
-                        <option value="">Select LLM engine…</option>
+                    <select id="llm-engine-select" style="padding:10px 14px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; min-width:360px; font-size:1rem;">
                     </select>
                     <div id="llm-engine-info" class="meta" style="min-width:160px;">
                         <span id="llm-engine-model">model: –</span>
@@ -2722,7 +2721,8 @@
         const LOG_BUFFER_LIMIT = 2000;
         const IS_SECURE = window.isSecureContext || window.location.protocol === 'https:' || window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
         let ws = null;
-        let sessionId = null;
+        // Expose sessionId as a true global var so other scripts can reference it
+        var sessionId = window.sessionId = window.sessionId || null;
         let notificationsEnabled = false;
         let audioContext = null;
         let historyBuffer = [];
@@ -3621,6 +3621,8 @@
                 if (!res.ok) throw new Error('HTTP ' + res.status);
                 const payload = await res.json();
                 await refreshComponents(true);
+                // Refresh configuration too, as active LLM change affects exposed vars
+                await refreshConfig(true);
                 const activeName = payload?.active || label;
                 setStatusMessage(`LLM switched to ${activeName}`, 'success');
                 if (trigger) {
@@ -3739,6 +3741,13 @@
                     }
                 }
 
+                // Attach actions container to the summary so it appears next to the title
+                summary.appendChild(summaryActions);
+
+                // Attach the constructed summary to the details element so it is shown
+                // as the visible title (without this, the browser shows the default "Details").
+                details.appendChild(summary);
+
                 if (emphasiseActive && item?.name && !item?.active) {
                     const btn = document.createElement('button');
                     btn.className = 'pill secondary';
@@ -3760,65 +3769,20 @@
                 }
 
                 // Add Reload button for interfaces, plugins, and LLM engines
-                if (componentType && ((componentType === 'interface' || componentType === 'plugin' || componentType === 'LLM engines') && item?.name)) {
+                if (componentType && (componentType === 'interface' || componentType === 'plugin' || componentType === 'LLM engines') && item?.name) {
                     const reloadBtn = document.createElement('button');
                     reloadBtn.className = 'pill secondary';
                     reloadBtn.type = 'button';
                     reloadBtn.textContent = '🔄 Reload';
-                    reloadBtn.title = `Reload ${componentType.replace(' engines', '')} ${displayName}`;
                     reloadBtn.addEventListener('click', (event) => {
                         event.preventDefault();
                         event.stopPropagation();
-                        reloadComponent(componentType === 'LLM engines' ? 'llm' : componentType, item.name, displayName, reloadBtn);
+                        reloadComponent(componentType === 'LLM engines' ? 'llm' : componentType, item.name, displayName, reloadBtn).catch(() => {
+                            reloadBtn.disabled = false;
+                            reloadBtn.textContent = '🔄 Reload';
+                        });
                     });
                     summaryActions.appendChild(reloadBtn);
-                }
-
-                if (summaryActions.childElementCount) {
-                    summary.appendChild(summaryActions);
-                }
-
-                details.appendChild(summary);
-
-                if (item?.description) {
-                    const desc = document.createElement('p');
-                    desc.className = 'component-description';
-                    desc.textContent = item.description;
-                    details.appendChild(desc);
-                }
-
-                // Add "Open Desktop" button for external URLs (like Selkies)
-                if (item?.is_external) {
-                    // For Selkies, dynamically construct URL using current hostname
-                    let targetUrl = item.url;
-                    if (item.name === 'selkies_desktop' && item.selkies_protocol && item.selkies_port) {
-                        const currentHost = window.location.hostname;
-                        targetUrl = `${item.selkies_protocol}://${currentHost}:${item.selkies_port}`;
-                    }
-                    
-                    if (targetUrl) {
-                        const openButtonWrapper = document.createElement('div');
-                        openButtonWrapper.style.cssText = 'margin-top: 1rem; display: flex; gap: 0.5rem; align-items: center;';
-                        
-                        const openBtn = document.createElement('button');
-                        openBtn.className = 'pill';
-                        openBtn.type = 'button';
-                        openBtn.textContent = '🖥️ Open Desktop';
-                        openBtn.style.cssText = 'font-size: 1rem; padding: 0.5rem 1rem;';
-                        openBtn.addEventListener('click', (event) => {
-                            event.preventDefault();
-                            event.stopPropagation();
-                            window.open(targetUrl, '_blank', 'noopener,noreferrer');
-                        });
-                        
-                        const urlHint = document.createElement('small');
-                        urlHint.style.cssText = 'color: var(--text-muted); font-size: 0.85rem;';
-                        urlHint.textContent = `Opens ${targetUrl}`;
-                        
-                        openButtonWrapper.appendChild(openBtn);
-                        openButtonWrapper.appendChild(urlHint);
-                        details.appendChild(openButtonWrapper);
-                    }
                 }
 
                 if (item?.details) {
@@ -3903,7 +3867,15 @@
             const engines = Array.isArray(data?.engines) ? data.engines : [];
             const activeInfo = engines.find((engine) => engine?.active);
             const activeDisplay = activeInfo?.display_name || data?.active || '';
-            renderComponentGroup(componentsLLMList, engines, 'LLM engines', { emphasiseActive: true, openFirst: true });
+            // Render only the active/loaded engine as a card to avoid duplicating the list
+            componentsLLMList.innerHTML = '';
+            // Do not render a duplicated active engine header under the selector.
+            // The selector itself already shows model and login state; keep the components list concise.
+            if (!activeInfo) {
+                componentsLLMList.innerHTML = '<div class="meta">No active LLM engine loaded. Use the selector to load one.</div>';
+            } else {
+                componentsLLMList.innerHTML = '';
+            }
             // Populate the quick selector controls
             try {
                 populateLLMControls(engines);
@@ -3919,10 +3891,12 @@
             const loginBtn = document.getElementById('llm-login-btn');
             if (!select || !modelSpan || !stateSpan || !loginBtn) return;
 
-            // Clear existing options (except the placeholder)
-            const placeholder = select.querySelector('option[value=""]');
+            // Clear existing options and populate with engines (no placeholder option)
             select.innerHTML = '';
-            if (placeholder) select.appendChild(placeholder);
+
+            // Make the select more prominent
+            select.style.cssText = 'padding:8px 10px; border-radius:8px; border:2px solid var(--primary); background:var(--background); color:var(--text); font-weight:600; min-width:260px;';
+            select.setAttribute('aria-label', 'Select LLM engine');
 
             engines.forEach((eng) => {
                 const opt = document.createElement('option');
@@ -3931,15 +3905,24 @@
                 opt.dataset.model = eng?.model || (eng?.interface_limits?.model_name || '');
                 opt.dataset.loginState = eng?.login_state || 'unknown';
                 opt.dataset.loggedIn = !!eng?.logged_in;
+                if (eng?.active) {
+                    opt.dataset.active = 'true';
+                    opt.selected = true;
+                }
                 select.appendChild(opt);
             });
 
-            // If an active engine exists, preselect it
+            // If an active engine exists, preselect it; otherwise preselect the first engine
             const active = engines.find(e => e?.active);
             if (active) {
                 select.value = active.name || '';
                 modelSpan.textContent = `model: ${active.model || (active?.interface_limits?.model_name || '–')}`;
                 stateSpan.textContent = `state: ${active.login_state || 'unknown'}`;
+            } else if (engines.length) {
+                select.selectedIndex = 0;
+                const first = engines[0];
+                modelSpan.textContent = `model: ${first?.model || (first?.interface_limits?.model_name || '–')}`;
+                stateSpan.textContent = `state: ${first?.login_state || 'unknown'}`;
             } else {
                 modelSpan.textContent = 'model: –';
                 stateSpan.textContent = 'state: –';
@@ -3953,9 +3936,15 @@
                 stateSpan.textContent = `state: ${sel.dataset.loginState || 'unknown'}`;
             };
 
-            // Login button handler
+            // Login button handler (robust: fallback to active engine if none selected)
             loginBtn.onclick = async () => {
-                const engineName = select.value;
+                // Prefer selected engine; fallback to the active engine option
+                let engineName = select.value;
+                if (!engineName) {
+                    const activeOpt = select.querySelector('option[selected]') || select.querySelector('option[data-active="true"]');
+                    if (activeOpt) engineName = activeOpt.value;
+                }
+
                 if (!engineName) {
                     setStatusMessage('Select an engine before attempting to login', 'warn');
                     return;
@@ -3964,18 +3953,83 @@
                 loginBtn.disabled = true;
                 const original = loginBtn.textContent;
                 loginBtn.textContent = 'Starting…';
+
+                // Try to open Selkies immediately (best-effort) so user can interactively log in
+                // Prefer HTTPS if Selkies exposes an HTTPS port (SELKIES_HTTPS_PORT); fall back to HTTP only
+                // when HTTPS is not available. Do not rely on the web page protocol.
                 try {
+                    const selkRes = await fetch('/api/selkies');
+                    if (selkRes.ok) {
+                        const selk = await selkRes.json();
+                        let protocol = null;
+                        let port = null;
+                        if (selk && selk.https_port) {
+                            protocol = 'https';
+                            port = selk.https_port;
+                        } else if (selk && selk.http_port) {
+                            protocol = 'http';
+                            port = selk.http_port;
+                        }
+
+                        if (protocol && port) {
+                            // If Selkies reports a loopback (127.0.0.1 or localhost) we must
+                            // convert it to the current page host so the desktop URL is
+                            // reachable from the browser outside the container.
+                            let host = selk.host || location.hostname;
+                            if (host === '127.0.0.1' || host === 'localhost') {
+                                host = location.hostname;
+                            }
+
+                            // Robust open: try the preferred protocol/port first, but if the
+                            // network/TLS handshake fails, fall back to the other protocol.
+                            const tryOpen = async (proto, p) => {
+                                const testUrl = `${proto}://${host}:${p}/`;
+                                // Attempt a quick fetch to detect TLS/network failures. Use
+                                // mode:'no-cors' so the fetch won't be blocked by CORS, but
+                                // network errors (including TLS handshake errors) will still
+                                // reject the promise.
+                                try {
+                                    const controller = new AbortController();
+                                    const timeout = setTimeout(() => controller.abort(), 2000);
+                                    await fetch(testUrl, { method: 'GET', mode: 'no-cors', signal: controller.signal });
+                                    clearTimeout(timeout);
+                                    // If fetch did not throw, assume reachable
+                                    window.open(testUrl, '_blank', 'noopener,noreferrer');
+                                    return true;
+                                } catch (err) {
+                                    return false;
+                                }
+                            };
+
+                            (async () => {
+                                let preferredProto = protocol;
+                                let preferredPort = port;
+                                let otherProto = (protocol === 'https' ? 'http' : 'https');
+                                let otherPort = (protocol === 'https' ? selk.http_port : selk.https_port) || null;
+
+                                // First try preferred
+                                let ok = await tryOpen(preferredProto, preferredPort);
+                                if (!ok && otherPort) {
+                                    await tryOpen(otherProto, otherPort);
+                                }
+                            })();
+                        }
+                    }
+                } catch (openErr) {
+                    console.debug('[synth_webui] Could not open Selkies desktop automatically:', openErr);
+                }
+
+                try {
+                    console.debug('[synth_webui] Starting login for', engineName);
                     const res = await fetch('/api/components/llm/login', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ name: engineName })
+                        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: engineName })
                     });
 
                     if (res.ok) {
-                        const data = await res.json();
+                        try { await res.json(); } catch (_) {}
                         setStatusMessage(`Login flow started for ${engineName}`, 'success');
-                        // Refresh components after a short delay to pick up status changes
-                        setTimeout(() => { refreshComponents(true); }, 1200);
+                        // Poll login state for a limited time to update the UI
+                        pollLoginState(engineName, 20 /*seconds*/);
                     } else {
                         const text = await res.text();
                         setStatusMessage(`Login failed: ${res.status} ${text}`, 'error');
@@ -3988,6 +4042,58 @@
                     loginBtn.textContent = original;
                 }
             };
+        }
+
+        async function pollLoginState(engineName, maxSeconds = 20) {
+            const start = Date.now();
+            const intervalMs = 1500;
+            const select = document.getElementById('llm-engine-select');
+            const stateSpan = document.getElementById('llm-engine-login-state');
+            const modelSpan = document.getElementById('llm-engine-model');
+
+                const stop = () => {
+                    // trigger a full refresh once ended
+                    refreshComponents(true).catch(() => {});
+                    refreshConfig(true).catch(() => {});
+                };
+
+            const attempt = async () => {
+                try {
+                    const res = await fetch('/api/components');
+                    if (!res.ok) throw new Error('HTTP ' + res.status);
+                    const payload = await res.json();
+                    const engines = payload?.llm?.engines || [];
+                    const eng = engines.find(e => e.name === engineName);
+                    if (eng) {
+                        stateSpan.textContent = `state: ${eng.login_state || 'unknown'}`;
+                        modelSpan.textContent = `model: ${eng.model || (eng.interface_limits?.model_name || '–')}`;
+                        // Update select option dataset if present
+                        const opt = select.querySelector(`option[value="${engineName}"]`);
+                        if (opt) {
+                            opt.dataset.loginState = eng.login_state || 'unknown';
+                            opt.dataset.loggedIn = !!eng.logged_in;
+                        }
+
+                        if (eng.logged_in) {
+                            setStatusMessage(`${eng.display_name} logged in`, 'success');
+                            stop();
+                            return;
+                        }
+                    }
+                } catch (err) {
+                    console.error('[synth_webui] pollLoginState error', err);
+                }
+
+                if ((Date.now() - start) / 1000 >= maxSeconds) {
+                    setStatusMessage('Login poll timed out', 'warn');
+                    stop();
+                    return;
+                }
+
+                setTimeout(attempt, intervalMs);
+            };
+
+            attempt();
         }
 
         function renderComponents(data) {
@@ -4841,7 +4947,7 @@
             }
         }
 
-        function renderConfig(data) {
+        function renderConfig(data, componentsPayload) {
             // Query DOM elements here, when they're actually needed
             const configGeneralList = document.getElementById('config-general-list');
             const configAdvancedList = document.getElementById('config-advanced-list');
@@ -4868,6 +4974,26 @@
             configAdvancedList.innerHTML = '';
 
             const items = Array.isArray(data?.items) ? data.items : [];
+            // Determine allowed components (only show configs for actually-loaded components)
+            const allowed = new Set();
+            try {
+                if (componentsPayload) {
+                    // Interfaces
+                    (componentsPayload.interfaces || []).forEach(i => {
+                        if (i?.status === 'success') allowed.add(i.name);
+                    });
+                    // Plugins
+                    (componentsPayload.plugins || []).forEach(p => {
+                        if (p?.status === 'success') allowed.add(p.name);
+                    });
+                    // LLM engines: include only those with loaded=true
+                    (componentsPayload.llm?.engines || []).forEach(e => {
+                        if (e?.loaded) allowed.add(e.name);
+                    });
+                }
+            } catch (e) {
+                console.warn('[synth_webui] renderConfig: failed to determine allowed components', e);
+            }
             console.log('[synth_webui] renderConfig: ' + items.length + ' items to render');
             
             // Extract persona name for alias management
@@ -4912,6 +5038,8 @@
             const groupedByComponent = {};
             normalItems.forEach((item) => {
                 const componentName = item.component || 'core';
+                // If we detected allowed components, skip items for components not loaded
+                if (allowed.size && componentName !== 'core' && !allowed.has(componentName)) return;
                 const componentLabel = item.component_label || componentName;
                 if (!groupedByComponent[componentName]) {
                     groupedByComponent[componentName] = {
@@ -5068,8 +5196,16 @@
                 if (!response.ok) throw new Error(`HTTP ${response.status}`);
                 const payload = await response.json();
                 console.log('[synth_webui] Configuration loaded successfully:', payload);
+                // Fetch component summary to determine which components are actually loaded
+                let componentsPayload = null;
+                try {
+                    const compRes = await fetch('/api/components');
+                    if (compRes.ok) componentsPayload = await compRes.json();
+                } catch (err) {
+                    console.warn('[synth_webui] Unable to fetch components while rendering config', err);
+                }
                 console.log('[synth_webui] About to call renderConfig...');
-                renderConfig(payload);
+                renderConfig(payload, componentsPayload);
                 console.log('[synth_webui] renderConfig called successfully');
                 configLoaded = true;
                 // Dispatch event so other parts of the UI can sync with the loaded config

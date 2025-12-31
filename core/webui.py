@@ -94,8 +94,9 @@ class SynthWebUIInterface:
         self.host = os.getenv('SYNTH_WEBUI_HOST', '0.0.0.0')
         self.log_level = os.getenv('SYNTH_WEBUI_LOG_LEVEL', 'info')
         # TLS / HTTPS configuration
-        # By default, reuse SECURE_CONNECTION if set by the caller (e.g. compose env)
-        self.tls_enabled = os.getenv('SYNTH_WEBUI_TLS', os.getenv('SECURE_CONNECTION', '0')) == '1'
+        # By default expose the WebUI over HTTPS unless explicitly disabled.
+        # This makes the default developer experience minimal and secure.
+        self.tls_enabled = os.getenv('SYNTH_WEBUI_TLS', os.getenv('SECURE_CONNECTION', '1')) == '1'
         self.tls_certfile = os.getenv('SYNTH_WEBUI_CERTFILE', None)
         self.tls_keyfile = os.getenv('SYNTH_WEBUI_KEYFILE', None)
         # Port configuration
@@ -128,14 +129,22 @@ class SynthWebUIInterface:
         # Optional HTTP port to serve plain HTTP alongside HTTPS (useful for dev/testing)
         self.http_port = http_port if (self.tls_enabled and http_port != self.port) else None
         # Selkies desktop ports used for UI hints
+        # Selkies: prefer HTTPS; HTTP port is optional and will only be set
+        # if the environment explicitly defines SELKIES_HTTP_PORT.
         try:
             self.selkies_https_port = int(os.getenv('SELKIES_HTTPS_PORT', '3000'))
         except Exception:
             self.selkies_https_port = 3000
-        try:
-            self.selkies_http_port = int(os.getenv('SELKIES_HTTP_PORT', '3001'))
-        except Exception:
-            self.selkies_http_port = 3001
+
+        if 'SELKIES_HTTP_PORT' in os.environ:
+            try:
+                self.selkies_http_port = int(os.getenv('SELKIES_HTTP_PORT'))
+            except Exception:
+                self.selkies_http_port = None
+        else:
+            self.selkies_http_port = None
+        # Selkies host (allow overriding via env)
+        self.selkies_host = os.getenv('SELKIES_HOST', '127.0.0.1')
         # Log streaming options
         self.log_source_path = None
         self.log_wait_seconds = 20
@@ -181,6 +190,31 @@ class SynthWebUIInterface:
             self.app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
         else:
             log_warning(f"{LOG_PREFIX} static directory not found: {static_dir}", log_file=WEBUI_LOG)
+
+        # Ensure the root path always returns the rendered HTML directly.
+        # In some deployment or hot-reload scenarios a previous handler may
+        # end up returning None (serialized as JSON null). Add a lightweight
+        # middleware that intercepts '/' and returns the rendered index to
+        # guarantee consistent behaviour.
+        try:
+            from starlette.middleware.base import BaseHTTPMiddleware
+
+            class _IndexMiddleware(BaseHTTPMiddleware):
+                async def dispatch(inner_self, request, call_next):
+                    if request.url.path == "/":
+                        log_info(f"{LOG_PREFIX} Index middleware intercepting root request")
+                        try:
+                            content = self._render_index()
+                            log_info(f"{LOG_PREFIX} Index middleware rendered length {len(content)}")
+                            return HTMLResponse(content=content, media_type="text/html")
+                        except Exception as e:
+                            log_error(f"{LOG_PREFIX} Index middleware failed to render index: {e}")
+                            raise
+                    return await call_next(request)
+
+            self.app.add_middleware(_IndexMiddleware)
+        except Exception as e:
+            log_warning(f"{LOG_PREFIX} Failed to add Index middleware: {e}")
         
         # Mount JS directory for Mixamo animations (separate mount to avoid path conflicts)
         js_dir = Path(__file__).resolve().parent.parent / "res" / "synth_webui" / "js"
@@ -276,6 +310,7 @@ class SynthWebUIInterface:
         self.app.get("/api/history/grillo")(self.history_grillo)
         self.app.get("/api/history/chat")(self.history_chat)
         self.app.get("/api/selkies")(self.get_selkies_config)
+        self.app.get("/api/selkies/health")(self.get_selkies_health)
         self.app.get("/api/animations/{skin}/{animation_type}")(self.get_animations_for_type)
         # Provide an internal endpoint implementation that doesn't rely on a
         # bound `get_animation_state` method at init time. This avoids
@@ -456,10 +491,49 @@ class SynthWebUIInterface:
         try:
             html = self._render_index()
             log_info(f"{LOG_PREFIX} Rendered HTML length: {len(html)}")
+            # Return the rendered HTML as an HTMLResponse. Keep this inside
+            # the try-block so exceptions during rendering lead to a 500 and
+            # we never fall through returning None.
+            return HTMLResponse(content=html, media_type="text/html")
         except Exception as exc:
             log_error(f"{LOG_PREFIX} failed to render index: {exc}")
             raise HTTPException(status_code=500, detail="Unable to render Synthetic Heart") from exc
-        return HTMLResponse(content=html)
+
+    async def _probe_selkies_protocol(self) -> dict:
+        """Probe local Selkies ports to determine if HTTPS or HTTP is reachable.
+
+        Returns a dict: { 'protocol': 'https'|'http'|'none', 'details': str }
+        This is a best-effort check intended to improve UI hints; it must not
+        block for long (uses short timeouts).
+        """
+        import ssl
+        import socket
+
+        host = getattr(self, 'selkies_host', '127.0.0.1') or '127.0.0.1'
+        # The container exposes Selkies on container port 3000; prefer that.
+        container_port = 3000
+
+        # Try HTTPS first (TLS handshake)
+        try:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            with socket.create_connection((host, container_port), timeout=1) as sock:
+                with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+                    # If handshake succeeds, we assume HTTPS
+                    return { 'protocol': 'https', 'details': 'TLS handshake succeeded' }
+        except Exception as e:
+            https_err = str(e)
+
+        # Fallback: try plain HTTP
+        try:
+            with socket.create_connection((host, container_port), timeout=1) as sock:
+                # If we connect and receive no TLS error, assume HTTP
+                return { 'protocol': 'http', 'details': 'Plain TCP connect succeeded' }
+        except Exception as e:
+            http_err = str(e)
+
+        return { 'protocol': 'none', 'details': f'https_err={https_err}; http_err={http_err}' }
 
     def _get_chat_resizable(self) -> bool:
         """Return whether chat should be resizable (from config/DB)."""
@@ -1828,10 +1902,27 @@ class SynthWebUIInterface:
 
     async def get_selkies_config(self):
         """Return Selkies configuration for dynamic URL construction."""
-        return JSONResponse({
-            "https_port": self.selkies_https_port,
-            "http_port": self.selkies_http_port
-        })
+        payload = {"https_port": self.selkies_https_port, "host": self.selkies_host}
+        if getattr(self, 'selkies_http_port', None):
+            payload["http_port"] = self.selkies_http_port
+
+        # Best-effort probe to detect which protocol is actually reachable
+        try:
+            probe = await asyncio.get_event_loop().run_in_executor(None, self._probe_selkies_protocol)
+            payload["detected_protocol"] = probe.get('protocol')
+            payload["detected_details"] = probe.get('details')
+        except Exception:
+            payload["detected_protocol"] = 'unknown'
+
+        return JSONResponse(payload)
+
+    async def get_selkies_health(self):
+        """Return a health probe result for Selkies (reachable protocol and details)."""
+        try:
+            probe = await asyncio.get_event_loop().run_in_executor(None, self._probe_selkies_protocol)
+            return JSONResponse({"ok": probe.get('protocol') in ('https', 'http'), **probe})
+        except Exception as exc:
+            return JSONResponse({"ok": False, "protocol": 'none', "details": str(exc)})
 
     async def get_animations_for_type(self, skin: str, animation_type: str):
         """Return list of animation files for a specific skin and animation type.
@@ -3508,11 +3599,18 @@ class SynthWebUIInterface:
             )
 
         # Add Selkies Web Desktop as a special hardcoded component
-        # Use SELKIES_HTTPS_PORT (default 3000) for HTTPS connections
-        # Use SELKIES_HTTP_PORT (default 3001) for HTTP connections
-        # Note: The actual hostname will be resolved client-side in JavaScript
-        selkies_protocol = "https" if os.getenv("SECURE_CONNECTION", "0") == "1" else "http"
-        selkies_port = self.selkies_https_port if selkies_protocol == "https" else self.selkies_http_port
+        # Prefer explicit SELKIES_HTTPS_PORT/SELKIES_HTTP_PORT env vars when deciding protocol
+        # If SELKIES_HTTPS_PORT is set, prefer https regardless of SECURE_CONNECTION value.
+        # This avoids accidental inversion when docker/env mappings differ from runtime.
+        if os.getenv('SELKIES_HTTPS_PORT'):
+            selkies_protocol = 'https'
+            selkies_port = self.selkies_https_port
+        elif os.getenv('SELKIES_HTTP_PORT'):
+            selkies_protocol = 'http'
+            selkies_port = self.selkies_http_port
+        else:
+            selkies_protocol = "https" if os.getenv("SECURE_CONNECTION", "0") == "1" else "http"
+            selkies_port = self.selkies_https_port if selkies_protocol == "https" else self.selkies_http_port
         
         # Mark as dynamic - JavaScript will construct the full URL client-side
         interfaces_data.append(
@@ -3530,6 +3628,17 @@ class SynthWebUIInterface:
                 "selkies_port": selkies_port,
             }
         )
+
+        # Deduplicate interfaces by name to avoid duplicates when modules are scanned multiple times
+        seen = set()
+        deduped_interfaces = []
+        for iface in interfaces_data:
+            if iface["name"] in seen:
+                log_debug(f"[webui] Skipping duplicate interface entry: {iface['name']}")
+                continue
+            seen.add(iface["name"])
+            deduped_interfaces.append(iface)
+        interfaces_data = deduped_interfaces
 
         plugins_data: List[dict] = []
         for name, plugin in sorted(PLUGIN_REGISTRY.items()):
@@ -3558,6 +3667,17 @@ class SynthWebUIInterface:
                     "error": meta["error"],
                 }
             )
+
+        # Deduplicate plugins by name to avoid duplicates in the UI
+        seen_p = set()
+        deduped_plugins = []
+        for p in plugins_data:
+            if p["name"] in seen_p:
+                log_debug(f"[webui] Skipping duplicate plugin entry: {p['name']}")
+                continue
+            seen_p.add(p["name"])
+            deduped_plugins.append(p)
+        plugins_data = deduped_plugins
 
         component_summary = {"success": 0, "failed": 0, "loading": 0}
         try:

@@ -591,6 +591,34 @@ Override methods as needed for your service:
            ".response-choices button",  # Fallback
        ]
 
+Web UI: Login flow endpoint
+---------------------------
+
+The Web UI provides an API to initiate an interactive login flow for Selenium-based
+LLM engines. This is intended to start a browser session (Selkies/Chromium) so a
+user can authenticate via the service's web interface.
+
+Endpoint:
+
+``POST /api/components/llm/login``
+
+Request JSON:
+
+``{ "name": "selenium_chatgpt" }``
+
+Typical success response (acknowledgement, non-blocking):
+
+``{ "status": "ok", "name": "selenium_chatgpt", "action": "started", "logged_in": false }``
+
+Notes:
+
+- The login flow is started asynchronously and the endpoint returns immediately.
+- Selkies availability is checked as a best-effort; absence does not prevent
+    the flow from proceeding where possible, but a helpful error will be returned
+    if the engine is not Selenium-based or not loaded.
+- The client (Web UI) may poll ``GET /api/components`` to detect updates to
+    the engine's ``login_state`` and ``logged_in`` fields.
+
 Step 3: Define Robust Selectors
 ---------------------------------
 

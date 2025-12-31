@@ -52,3 +52,24 @@ def test_llm_login_endpoint_starts_flow(monkeypatch):
     # Give the background task a short moment to run
     time.sleep(0.1)
     assert called["flag"] is True
+
+
+def test_llm_login_endpoint_errors_for_missing_or_non_selenium():
+    webui = SynthWebUIInterface(autostart=False)
+    client = TestClient(webui.app)
+
+    # Unknown engine -> 404
+    resp = client.post('/api/components/llm/login', json={'name': 'no_such_engine'})
+    assert resp.status_code == 404
+
+    # Load a non-selenium engine (manual) and try
+    from core.llm_registry import get_llm_registry
+    registry = get_llm_registry()
+    try:
+        manual = registry.load_engine('manual')
+    except Exception:
+        manual = None
+
+    if manual:
+        resp = client.post('/api/components/llm/login', json={'name': 'manual'})
+        assert resp.status_code == 400
