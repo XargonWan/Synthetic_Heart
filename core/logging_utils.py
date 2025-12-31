@@ -155,14 +155,27 @@ def setup_logging() -> logging.Logger:
             "[%(asctime)s] [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s",
             "%Y-%m-%d %H:%M:%S",
         )
-        fh = RotatingFileHandler(
-            _LOG_FILE, maxBytes=1_000_000, backupCount=3, encoding="utf-8"
-        )
-        fh.setFormatter(formatter)
+        # Always add a stream handler so logs are available on stdout/stderr
         ch = logging.StreamHandler(sys.stdout)
         ch.setFormatter(formatter)
-        logger.addHandler(fh)
         logger.addHandler(ch)
+
+        # Try to add a file handler. If the file handler can't be created
+        # due to permission errors or other IO problems, fallback to stream
+        # logging so the application can still start and emit useful logs.
+        try:
+            fh = RotatingFileHandler(
+                _LOG_FILE, maxBytes=1_000_000, backupCount=3, encoding="utf-8"
+            )
+            fh.setFormatter(formatter)
+            logger.addHandler(fh)
+        except Exception as e:  # pragma: no cover - environment dependent
+            # If file handler fails, write a warning to stdout via stream handler
+            try:
+                logger.warning(f"[logging_utils] Could not open log file '{_LOG_FILE}': {e}. Falling back to stdout")
+            except Exception:
+                # As a last resort print to stdout directly
+                print(f"[logging_utils] Could not open log file '{_LOG_FILE}': {e}. Falling back to stdout", file=sys.stderr)
 
     _logger = logger
     # Log effective logging configuration at startup

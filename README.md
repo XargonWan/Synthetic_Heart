@@ -92,8 +92,12 @@ The project ships with an **Ollama-compatible interface** (`interface/ollama_com
    docker compose up -d
    ```
    
-   > **Note about logs:** The container will now automatically ensure `/app/logs` exists and is writable at startup (it will chown to `PUID:PGID` if available, or relax permissions as a fallback). If you bind-mount `./logs:/app/logs` on systems with SELinux enabled, you may need to append `:Z` to the mount (for example: `./logs:/app/logs:Z`) to allow the container to write logs.
+   > **Note about logs:** The stack now uses a Docker-managed volume for application logs by default (`synth_logs` -> `/app/logs`). This avoids common host-permission problems so a user can run `docker compose up -d` out-of-the-box.
+   > 
+   > If you prefer to store logs on the host, replace the volume mapping in `docker-compose.yml` with a bind-mount (uncomment `./logs:/app/logs`). On systems with SELinux enabled, append `:Z` to the mount (for example: `./logs:/app/logs:Z`).
 4. Connect to the WebUI via https (default port is 8000)
+
+Note: The default compose configuration is now turnkey — the image ships with built-in skins and uses Docker-managed volumes for logs and skins so a fresh clone should work with a single `docker compose up -d` command. The WebUI is served over HTTPS at `https://localhost:8000` by default (a self-signed certificate is generated automatically if none is provided). If the database is initializing the first run, give it a few seconds; the service will retry until the DB is ready.
 5. Once in the WebUI navigate to components and select the desired LLM Engine.
 6. If using the Selenium engine (such as ChatGPT or Gemini), don't forget to press the Login button and log into the web interface.
 From there you can login.

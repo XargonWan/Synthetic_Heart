@@ -35,6 +35,16 @@ fi
 touch "$LOG_DIR/synth.log" 2>/dev/null || true
 chown "${PUID}:${PGID}" "$LOG_DIR/synth.log" 2>/dev/null || true
 
+# Ensure skins directory exists and is accessible (named volumes will be used by default)
+SKINS_DIR="/app/skins"
+mkdir -p "$SKINS_DIR"
+# Try to correct ownership; if it fails, at least relax read/execute perms
+if chown -R "${PUID}:${PGID}" "$SKINS_DIR" 2>/dev/null; then
+    :
+else
+    chmod -R a+rx "$SKINS_DIR" 2>/dev/null || true
+fi
+
 MODE="${1:-run}"
 shift || true
 

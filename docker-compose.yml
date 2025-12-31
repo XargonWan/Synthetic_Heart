@@ -18,16 +18,35 @@ services:
       - "${OLLAMA_PORT:-11434}:11434"
     volumes:
       - synth_data:/config  # Persistent data storage
-      - ./skins:/app/skins  # Custom skins, please download the skins from 
-      - ./logs:/app/logs    # Application logs
+      # Use a Docker-managed volume for skins so the image-provided skins
+      # are available out-of-the-box. If you want to override with a host
+      # folder, uncomment the bind-mount line below.
+      - synth_skins:/app/skins  # Custom skins (docker volume)
+      # - ./skins:/app/skins  # Custom skins (host bind-mount - optional)
+      # By default use a Docker-managed volume for logs to avoid host
+      # permissions issues on first-run. If you prefer to expose logs on
+      # the host, uncomment the following line and remove the
+      # `synth_logs:/app/logs` entry below.
+      # - ./logs:/app/logs    # Application logs (host bind-mount)
+      - synth_logs:/app/logs # Application logs (docker volume)
     environment:
       # Timezone setting, if unset will be UTC and the Synth will think it's UTC
       - TZ=${TZ:-Asia/Tokyo}
       # This container don't need root access, so we set PUID and PGID to non-root user
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
+      # Database connection (point to the docker service 'synth-db' by default)
+      - DB_HOST=${DB_HOST:-synth-db}
+      - DB_PORT=${DB_PORT:-3306}
+      - DB_USER=${DB_USER:-synth}
+      - DB_PASS=${DB_PASS:-synth}
+      - DB_NAME=${DB_NAME:-synth}
+      - DB_ROOT_PASS=${DB_ROOT_PASS:-root}
       # Web Desktop root credentials
       - ROOT_PASSWORD=${ROOT_PASSWORD:-"password"}
+      # WebUI ports and TLS settings (ensure container listens on the mapped ports)
+      - SYNTH_WEBUI_HTTPS_PORT=${SYNTH_WEBUI_HTTPS_PORT:-8000}
+      - SYNTH_WEBUI_HTTP_PORT=${SYNTH_WEBUI_HTTP_PORT:-8080}
       # Optional runtime variables (check wiki for details)
     restart: unless-stopped
     stdin_open: true
@@ -89,6 +108,8 @@ services:
 volumes:
   synth_db_data:
   synth_data:
+  synth_logs:
+  synth_skins:
 
 networks:
   synth_network:
