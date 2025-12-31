@@ -2835,6 +2835,11 @@
             connectionEl.textContent = message;
             connectionEl.dataset.tone = tone;
         }
+        function setStatusMessageHTML(htmlMessage, tone = 'info') {
+            if (!connectionEl) return;
+            connectionEl.innerHTML = htmlMessage;
+            connectionEl.dataset.tone = tone;
+        }
         window.SynthWebUISetStatus = setStatusMessage;
         setStatusMessage('Ready.', 'info');
 
@@ -3954,9 +3959,16 @@
                 const original = loginBtn.textContent;
                 loginBtn.textContent = 'Starting…';
 
-                // Try to open Selkies immediately (best-effort) so user can interactively log in
-                // Prefer HTTPS if Selkies exposes an HTTPS port (SELKIES_HTTPS_PORT); fall back to HTTP only
-                // when HTTPS is not available. Do not rely on the web page protocol.
+                // Try to open Selkies immediately (best-effort) so user can interactively log in.
+                // Important: open a blank window synchronously (user gesture) to avoid popup blockers,
+                // then probe and navigate it asynchronously.
+                let desktopWindow = null;
+                try {
+                    desktopWindow = window.open('about:blank', '_blank', 'noopener,noreferrer');
+                } catch (e) {
+                    desktopWindow = null;
+                }
+
                 try {
                     const selkRes = await fetch('/api/selkies');
                     if (selkRes.ok) {
@@ -3972,51 +3984,37 @@
                         }
 
                         if (protocol && port) {
-                            // If Selkies reports a loopback (127.0.0.1 or localhost) we must
-                            // convert it to the current page host so the desktop URL is
-                            // reachable from the browser outside the container.
                             let host = selk.host || location.hostname;
                             if (host === '127.0.0.1' || host === 'localhost') {
                                 host = location.hostname;
                             }
 
-                            // Robust open: try the preferred protocol/port first, but if the
-                            // network/TLS handshake fails, fall back to the other protocol.
-                            const tryOpen = async (proto, p) => {
-                                const testUrl = `${proto}://${host}:${p}/`;
-                                // Attempt a quick fetch to detect TLS/network failures. Use
-                                // mode:'no-cors' so the fetch won't be blocked by CORS, but
-                                // network errors (including TLS handshake errors) will still
-                                // reject the promise.
-                                try {
-                                    const controller = new AbortController();
-                                    const timeout = setTimeout(() => controller.abort(), 2000);
-                                    await fetch(testUrl, { method: 'GET', mode: 'no-cors', signal: controller.signal });
-                                    clearTimeout(timeout);
-                                    // If fetch did not throw, assume reachable
-                                    window.open(testUrl, '_blank', 'noopener,noreferrer');
-                                    return true;
-                                } catch (err) {
-                                    return false;
+                            const testUrl = `${protocol}://${host}:${port}/`;
+                            try {
+                                const controller = new AbortController();
+                                const timeout = setTimeout(() => controller.abort(), 2000);
+                                await fetch(testUrl, { method: 'GET', mode: 'no-cors', signal: controller.signal });
+                                clearTimeout(timeout);
+                                if (desktopWindow) {
+                                    try { desktopWindow.location = testUrl; } catch (e) { desktopWindow = window.open(testUrl, '_blank', 'noopener,noreferrer'); }
+                                } else {
+                                    const w = window.open(testUrl, '_blank', 'noopener,noreferrer');
+                                    if (!w) {
+                                        // Popup blocked
+                                        setStatusMessageHTML(`Popup blocked. Open Selkies desktop manually: <a href="${testUrl}" target="_blank" rel="noopener">${testUrl}</a>`, 'warn');
+                                        // no manual 'Open Desktop' button; status will show link if popup blocked
+                                    }
                                 }
-                            };
-
-                            (async () => {
-                                let preferredProto = protocol;
-                                let preferredPort = port;
-                                let otherProto = (protocol === 'https' ? 'http' : 'https');
-                                let otherPort = (protocol === 'https' ? selk.http_port : selk.https_port) || null;
-
-                                // First try preferred
-                                let ok = await tryOpen(preferredProto, preferredPort);
-                                if (!ok && otherPort) {
-                                    await tryOpen(otherProto, otherPort);
-                                }
-                            })();
+                            } catch (probeErr) {
+                                try { if (desktopWindow) desktopWindow.close(); } catch (e) { /* ignore */ }
+                                setStatusMessage('Selkies desktop not reachable (check service or port mapping)', 'warn');
+                                // no manual 'Open Desktop' button; status will show link if Selkies not reachable
+                            }
                         }
                     }
                 } catch (openErr) {
                     console.debug('[synth_webui] Could not open Selkies desktop automatically:', openErr);
+                    setStatusMessage('Could not retrieve Selkies info; use the status link to open Selkies manually', 'warn');
                 }
 
                 try {
@@ -4042,6 +4040,8 @@
                     loginBtn.textContent = original;
                 }
             };
+
+            // No explicit 'Open Desktop' button: UI will display a clickable Selkies URL in the status when needed.
         }
 
         async function pollLoginState(engineName, maxSeconds = 20) {
