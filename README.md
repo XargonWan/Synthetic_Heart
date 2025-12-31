@@ -91,6 +91,8 @@ The project ships with an **Ollama-compatible interface** (`interface/ollama_com
    ```bash
    docker compose up -d
    ```
+   
+   > **Note about logs:** The container will now automatically ensure `/app/logs` exists and is writable at startup (it will chown to `PUID:PGID` if available, or relax permissions as a fallback). If you bind-mount `./logs:/app/logs` on systems with SELinux enabled, you may need to append `:Z` to the mount (for example: `./logs:/app/logs:Z`) to allow the container to write logs.
 4. Connect to the WebUI via https (default port is 8000)
 5. Once in the WebUI navigate to components and select the desired LLM Engine.
 6. If using the Selenium engine (such as ChatGPT or Gemini), don't forget to press the Login button and log into the web interface.

@@ -178,3 +178,5 @@ COPY webtop/root /
 # Set permissions for abc user
 # Note: abc user home is /config
 RUN chown -R abc:abc /app
+# Ensure logs folder exists in image and is owned by the runtime user
+RUN mkdir -p /app/logs && chown -R abc:abc /app/logs
