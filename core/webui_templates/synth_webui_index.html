@@ -3960,14 +3960,9 @@
                 loginBtn.textContent = 'Starting…';
 
                 // Try to open Selkies immediately (best-effort) so user can interactively log in.
-                // Important: open a blank window synchronously (user gesture) to avoid popup blockers,
-                // then probe and navigate it asynchronously.
+                // Open the target URL synchronously on the user gesture so the browser navigates
+                // directly to Selkies (avoids leaving a blank about:blank page visible).
                 let desktopWindow = null;
-                try {
-                    desktopWindow = window.open('about:blank', '_blank', 'noopener,noreferrer');
-                } catch (e) {
-                    desktopWindow = null;
-                }
 
                 try {
                     const selkRes = await fetch('/api/selkies');
@@ -3991,24 +3986,28 @@
 
                             const testUrl = `${protocol}://${host}:${port}/`;
                             try {
+                                const w = window.open(testUrl, '_blank', 'noopener');
+                                if (!w) {
+                                    // Popup blocked — show a clickable link in the status
+                                    setStatusMessageHTML(`Popup blocked. Open Selkies desktop manually: <a href="${testUrl}" target="_blank" rel="noopener">${testUrl}</a>`, 'warn');
+                                } else {
+                                    desktopWindow = w;
+                                    console.debug('[synth_webui] Opened Selkies window', testUrl, desktopWindow);
+                                }
+                            } catch (e) {
+                                console.debug('[synth_webui] window.open failed', e);
+                                setStatusMessage('Could not open Selkies desktop automatically', 'warn');
+                            }
+
+                            // Best-effort probe to provide UI hints; do not rely on it for navigation
+                            try {
                                 const controller = new AbortController();
                                 const timeout = setTimeout(() => controller.abort(), 2000);
                                 await fetch(testUrl, { method: 'GET', mode: 'no-cors', signal: controller.signal });
                                 clearTimeout(timeout);
-                                if (desktopWindow) {
-                                    try { desktopWindow.location = testUrl; } catch (e) { desktopWindow = window.open(testUrl, '_blank', 'noopener,noreferrer'); }
-                                } else {
-                                    const w = window.open(testUrl, '_blank', 'noopener,noreferrer');
-                                    if (!w) {
-                                        // Popup blocked
-                                        setStatusMessageHTML(`Popup blocked. Open Selkies desktop manually: <a href="${testUrl}" target="_blank" rel="noopener">${testUrl}</a>`, 'warn');
-                                        // no manual 'Open Desktop' button; status will show link if popup blocked
-                                    }
-                                }
                             } catch (probeErr) {
-                                try { if (desktopWindow) desktopWindow.close(); } catch (e) { /* ignore */ }
+                                // Keep the window open (it may still show a cert prompt or error page)
                                 setStatusMessage('Selkies desktop not reachable (check service or port mapping)', 'warn');
-                                // no manual 'Open Desktop' button; status will show link if Selkies not reachable
                             }
                         }
                     }
