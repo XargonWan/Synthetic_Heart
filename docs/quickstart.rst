@@ -66,6 +66,31 @@ This guide outlines the typical steps to run **Synthetic Heart** using Docker. s
    in the browser that opens (Selkies/Chromium may be used to perform the
    login if available).
 
+.. note::
+
+   **Note about logs:** The stack uses a Docker-managed volume for application
+   logs by default (``synth_logs`` -> ``/app/logs``). This avoids common
+   host-permission problems so a user can run ``docker compose up -d``
+   out-of-the-box. If you prefer to keep logs on the host, replace the
+   volume mapping in ``docker-compose.yml`` with a bind-mount (uncomment
+   ``./logs:/app/logs``). On systems with SELinux enabled, append ``:Z`` to
+   the mount (for example: ``./logs:/app/logs:Z``).
+
+.. note::
+
+   **Skins folder (optional):** The image ships with built-in skins, so the
+   ``skins`` folder is optional for most users. If you do not intend to
+   provide custom skins, comment out the skins bind-mount in the compose file
+   to avoid overriding the included skins with an empty host folder.
+
+.. note::
+
+   **HTTPS & certificates:** The WebUI is served over HTTPS at
+   ``https://localhost:8000`` by default. If no certificate is provided a
+   self-signed certificate will be generated automatically. If the database
+   is initializing on a first run, give the services a few seconds; the
+   service will retry until the DB is ready.
+
 Database backups are written hourly to ``./backups/``. To tear down the
 containers, press :kbd:`Ctrl+C` or run ``docker compose down``.
 

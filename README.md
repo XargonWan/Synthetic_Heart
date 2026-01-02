@@ -104,6 +104,17 @@ From there you can login.
 
 **NOTE:** skins folder is optional if the user is not interested in edit them. In this case, however, the mount point for the skins folder on the docker compose should be commented out, else an empty skin folder will be mounted overriding the included one.
 
+### Customize your Synth
+
+Then you might want to edit the following settings on the WebUI -> Settings:
+- Default Location: your location, so the synth knows where they are, useful for the weather for example
+- Timezone: (if you didn´t do via compose) with your timezone, useful to make the synth aware of what time is actually in your place
+- Trainer Name: your name, else the synth don't know who you are
+- Synth Name: The name of the Synth. To not be mistaken with the name of the skin, that is just a name given to the skin but itś not set as the synth name. A Symnth can be called Kotone and have the skin of Rei for example.
+- Synth Profile: A description of how your synth is, written in second person, check the default one.
+
+Moreover you can add more skins or just upload your vrm model.
+
 See the [documentation](https://synthetic-heart.readthedocs.io) for installation details, advanced features and contribution guidelines.
 
 ## Docker image repository
