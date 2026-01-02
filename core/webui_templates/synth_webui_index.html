@@ -4975,6 +4975,8 @@
             const items = Array.isArray(data?.items) ? data.items : [];
             // Determine allowed components (only show configs for actually-loaded components)
             const allowed = new Set();
+            // Always allow persona configs even if the plugin name differs from the registered key
+            allowed.add('persona');
             try {
                 if (componentsPayload) {
                     // Interfaces
