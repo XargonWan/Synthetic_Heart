@@ -7022,31 +7022,37 @@
                         // Explicit aliases for common VRM expression preset names.
                         const alias = {
                             // Brows
-                            browdown: ['browDown', 'brow_down'],
-                            browup: ['browUp', 'brow_up'],
+                            browdown: ['browDown', 'brow_down', 'BROW_DOWN'],
+                            browup: ['browUp', 'brow_up', 'BROW_UP'],
                             // Blinks
-                            eyeblinkleft: ['blinkLeft', 'eyeBlinkLeft', 'eye_blink_left'],
-                            eyeblinkright: ['blinkRight', 'eyeBlinkRight', 'eye_blink_right'],
-                            blinkleft: ['blinkLeft', 'eyeBlinkLeft', 'eye_blink_left'],
-                            blinkright: ['blinkRight', 'eyeBlinkRight', 'eye_blink_right'],
+                            eyeblinkleft: ['blinkLeft', 'eyeBlinkLeft', 'eye_blink_left', 'BLINK_L'],
+                            eyeblinkright: ['blinkRight', 'eyeBlinkRight', 'eye_blink_right', 'BLINK_R'],
+                            blinkleft: ['blinkLeft', 'eyeBlinkLeft', 'eye_blink_left', 'BLINK_L'],
+                            blinkright: ['blinkRight', 'eyeBlinkRight', 'eye_blink_right', 'BLINK_R'],
                             // Look directions
-                            eyelookleft: ['lookLeft', 'eyeLookLeft', 'eye_look_left'],
-                            eyelookright: ['lookRight', 'eyeLookRight', 'eye_look_right'],
-                            eyelookup: ['lookUp', 'eyeLookUp', 'eye_look_up'],
-                            eyelookdown: ['lookDown', 'eyeLookDown', 'eye_look_down'],
-                            lookleft: ['lookLeft', 'eyeLookLeft', 'eye_look_left'],
-                            lookright: ['lookRight', 'eyeLookRight', 'eye_look_right'],
-                            lookup: ['lookUp', 'eyeLookUp', 'eye_look_up'],
-                            lookdown: ['lookDown', 'eyeLookDown', 'eye_look_down'],
+                            eyelookleft: ['lookLeft', 'eyeLookLeft', 'eye_look_left', 'LOOKLEFT'],
+                            eyelookright: ['lookRight', 'eyeLookRight', 'eye_look_right', 'LOOKRIGHT'],
+                            eyelookup: ['lookUp', 'eyeLookUp', 'eye_look_up', 'LOOKUP'],
+                            eyelookdown: ['lookDown', 'eyeLookDown', 'eye_look_down', 'LOOKDOWN'],
+                            lookleft: ['lookLeft', 'eyeLookLeft', 'eye_look_left', 'LOOKLEFT'],
+                            lookright: ['lookRight', 'eyeLookRight', 'eye_look_right', 'LOOKRIGHT'],
+                            lookup: ['lookUp', 'eyeLookUp', 'eye_look_up', 'LOOKUP'],
+                            lookdown: ['lookDown', 'eyeLookDown', 'eye_look_down', 'LOOKDOWN'],
                             // Eyes
-                            eyesclosed: ['eyesClosed', 'eyes_closed'],
-                            eyessmile: ['eyesSmile', 'eyes_smile'],
-                            eyeswide: ['eyesWide', 'eyes_wide'],
+                            eyesclosed: ['eyesClosed', 'eyes_closed', 'BLINK'],
+                            eyessmile: ['eyesSmile', 'eyes_smile', 'JOY', 'happy'],
+                            eyeswide: ['eyesWide', 'eyes_wide', 'surprised'],
                             // Mouth
-                            mouthopen: ['mouthOpen', 'mouth_open'],
-                            mouthsmile: ['mouthSmile', 'mouth_smile'],
-                            mouthfrown: ['mouthFrown', 'mouth_frown'],
-                            moutho: ['mouthO', 'mouth_O', 'oh'],
+                            mouthopen: ['mouthOpen', 'mouth_open', 'A'],
+                            mouthsmile: ['mouthSmile', 'mouth_smile', 'JOY', 'happy'],
+                            mouthfrown: ['mouthFrown', 'mouth_frown', 'SORROW', 'sad'],
+                            moutho: ['mouthO', 'mouth_O', 'oh', 'O'],
+                            // Emotions (as granular morphs)
+                            sad: ['SORROW', 'sad'],
+                            happy: ['JOY', 'happy'],
+                            surprised: ['surprised'],
+                            relaxed: ['relaxed', 'FUN'],
+                            angry: ['ANGRY', 'angry'],
                         };
 
                         const candidates = [];
@@ -12315,7 +12321,8 @@
                             const personaEmotionKeys = (window.__synth_persona_emotions_list && Array.isArray(window.__synth_persona_emotions_list)) ? window.__synth_persona_emotions_list : [];
                             const personaEmotionKeysLower = personaEmotionKeys.map(k => String(k).toLowerCase());
                             const compositeEmotions = new Set([
-                                'sad','happy','angry','surprised','relaxed','neutral','scared','fear','disgust','joy','love','smile'
+                                'sad','happy','angry','surprised','relaxed','neutral','scared','fear','disgust','joy','love','smile',
+                                'sorrow','fun','joy','anger','fear','disgust','surprise'
                             ]);
                             return rawKeys
                                 .filter((k) => {
@@ -12323,9 +12330,10 @@
                                     const s = String(k);
                                     if (/^\d+$/.test(s)) return false;
                                     const low = s.toLowerCase();
-                                    if (compositeMetrics.has(low)) return false;
-                                    if (personaEmotionKeysLower.includes(low)) return false;
-                                    if (compositeEmotions.has(low)) return false;
+                                    const norm = low.replace(/[\._\-\s]+/g, '');
+                                    if (compositeMetrics.has(low) || compositeMetrics.has(norm)) return false;
+                                    if (personaEmotionKeysLower.includes(low) || personaEmotionKeysLower.includes(norm)) return false;
+                                    if (compositeEmotions.has(low) || compositeEmotions.has(norm)) return false;
                                     return true;
                                 })
                                 .sort();
