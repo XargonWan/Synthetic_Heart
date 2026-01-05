@@ -427,6 +427,7 @@ def load_json_instructions() -> str:
         instructions = (
                 "MASTER INSTRUCTION: Use ONLY actions from the 'actions' block. Never fabricate.\n"
                 "If an action you need is not available, reply with JSON explaining why.\n"
+                "AUTONOMY GUIDELINES: You MAY proactively propose or execute allowed actions when beneficial. When acting autonomously include a brief `meta` object with `autonomous: true` and a short `rationale` explaining why the action is taken. If an action is disallowed, return a JSON proposal describing the need.\n"
                 "RESPOND ONLY WITH VALID JSON. No text before or after.\n"
                 "Use input.interface and input.payload.source.interface_path to route replies.\n"
                 "NEVER use 'target' — always use 'interface_path' in message actions.\n"
