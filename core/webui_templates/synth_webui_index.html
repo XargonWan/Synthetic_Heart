@@ -78,6 +78,9 @@
             } catch (e) { /* ignore */ }
         })();
 
+        // Ensure sessionId global exists early so other modules don't throw reference errors
+        window.sessionId = window.sessionId || null;
+
         // Attach click handler to install button (when present)
         document.addEventListener('DOMContentLoaded', () => {
             const btn = document.getElementById('synth-install-btn');
@@ -4565,26 +4568,27 @@
                 const selected = Array.isArray(item.value) ? item.value.slice() : [];
                 const allOptions = Array.isArray(item.options) ? item.options.slice() : [];
 
+                // Use a custom dropdown instead of relying on <datalist>, because
+                // many browsers won't show datalist suggestions on click.
+                let dropdownOpen = false;
+
                 const chips = document.createElement('div');
                 chips.style.cssText = 'display:flex; flex-wrap:wrap; gap:0.4rem;';
 
-                const datalist = document.createElement('datalist');
-                datalist.id = `datalist-${item.key}`;
-
+                // dropdown placeholder removed — using floating dropdown attached to document.body (created later)
                 const getAvailableOptions = () => {
                     return allOptions
                         .filter(opt => !selected.includes(opt))
                         .sort((a, b) => String(a || '').localeCompare(String(b || '')));
                 };
 
-                const updateDatalist = () => {
-                    datalist.innerHTML = '';
-                    getAvailableOptions().forEach(opt => {
-                        const option = document.createElement('option');
-                        option.value = opt;
-                        datalist.appendChild(option);
-                    });
+                const getFilteredOptions = () => {
+                    const q = String(inputBox?.value || '').trim().toLowerCase();
+                    const base = getAvailableOptions();
+                    if (!q) return base;
+                    return base.filter(opt => String(opt || '').toLowerCase().includes(q));
                 };
+
 
                 const toggleControls = (disable) => {
                     const state = controlLocked || disable;
@@ -4623,12 +4627,112 @@
 
                 const inputBox = document.createElement('input');
                 inputBox.type = 'text';
-                inputBox.list = datalist.id;
                 inputBox.placeholder = 'Select an allowed action';
                 inputBox.autocomplete = 'off';
-                inputBox.style.cssText = 'padding:0.5rem; border-radius:0.35rem; border:1px solid #666; background:#1a1a1a; color:#fff; width:100%;';
+                inputBox.style.cssText = 'padding:0.5rem; border-radius:0.35rem; border:1px solid #666; background:#1a1a1a; color:#fff; width:100%; box-sizing: border-box;';
+                
+                // Floating dropdown attached to body avoiding overflow issues
+                let dropdown = null;
+                
+                const removeDropdown = () => {
+                    if (dropdown) {
+                        try { document.body.removeChild(dropdown); } catch(e){}
+                        dropdown = null;
+                    }
+                };
 
-                const addBtn = document.createElement('button');
+                const createDropdown = () => {
+                    removeDropdown();
+                    dropdown = document.createElement('div');
+                    dropdown.style.cssText = 'position:fixed; z-index:99999; max-height:240px; overflow-y:auto; border:1px solid #444; border-radius:6px; background:#111; box-shadow:0 4px 12px rgba(0,0,0,0.5); font-size:0.9rem; color:#eee;';
+                    // Positioning check
+                    const rect = inputBox.getBoundingClientRect();
+                    dropdown.style.top = (rect.bottom + 2) + 'px';
+                    dropdown.style.left = rect.left + 'px';
+                    dropdown.style.width = rect.width + 'px';
+                    
+                    document.body.appendChild(dropdown);
+                    
+                    // Re-position on scroll/resize
+                    const updatePos = () => {
+                        if (!dropdown) return;
+                        const r = inputBox.getBoundingClientRect();
+                        dropdown.style.top = (r.bottom + 2) + 'px';
+                        dropdown.style.left = r.left + 'px';
+                        dropdown.style.width = r.width + 'px';
+                    };
+                    window.addEventListener('scroll', updatePos, {capture: true, passive: true});
+                    window.addEventListener('resize', updatePos, {passive: true});
+                    
+                    // Cleanup listeners when removed
+                    const originalRemove = dropdown.remove.bind(dropdown);
+                    dropdown.remove = function() {
+                        window.removeEventListener('scroll', updatePos, {capture: true});
+                        window.removeEventListener('resize', updatePos);
+                        originalRemove();
+                    };
+                };
+
+                const renderDropdown = () => {
+                    console.log('[synth_webui] renderDropdown called. Options:', allOptions.length);
+                    if (!dropdown) createDropdown();
+                    
+                    dropdown.innerHTML = '';
+                    const opts = getFilteredOptions();
+                    
+                    if (!opts.length) {
+                        const empty = document.createElement('div');
+                        empty.style.padding = '0.5rem 0.75rem';
+                        empty.style.color = '#888';
+                        empty.style.fontStyle = 'italic';
+                        empty.textContent = 'No matching actions found';
+                        dropdown.appendChild(empty);
+                        return;
+                    }
+
+                    opts.forEach((opt) => {
+                        const item = document.createElement('div');
+                        item.textContent = opt;
+                        item.style.cssText = 'padding:0.5rem 0.75rem; cursor:pointer; border-bottom:1px solid #222;';
+                        item.addEventListener('mouseenter', () => { item.style.background = '#2a2a2a'; });
+                        item.addEventListener('mouseleave', () => { item.style.background = 'transparent'; });
+                        item.addEventListener('mousedown', (e) => { 
+                            // Prevent blur
+                            e.preventDefault(); 
+                        });
+                        item.addEventListener('click', async () => {
+                            inputBox.value = opt;
+                            await addEntry({ allowFreeText: false });
+                            removeDropdown();
+                        });
+                        dropdown.appendChild(item);
+                    });
+                };
+
+                const closeDropdown = () => {
+                    // Small delay to allow click events to process
+                    setTimeout(() => removeDropdown(), 150);
+                };
+
+                const openDropdown = () => {
+                    if (controlLocked) return;
+                    renderDropdown();
+                };
+
+                inputBox.addEventListener('input', () => {
+                    if (!dropdown) createDropdown();
+                    renderDropdown();
+                });
+
+                inputBox.addEventListener('focus', openDropdown);
+                inputBox.addEventListener('click', openDropdown);
+                inputBox.addEventListener('blur', closeDropdown);
+                
+                // Cleanup if the input is removed from DOM (e.g. config refresh)
+                // Use a MutationObserver on the parent inputWrapper to detect removal?
+                // Or just a simple periodic check / weakmap? 
+                // For simplicity, we rely on removeDropdown being called on blur mostly.
+
                 addBtn.type = 'button';
                 addBtn.textContent = 'Add';
                 addBtn.className = 'pill secondary';
@@ -4665,7 +4769,7 @@
                     }
                 };
 
-                const addEntry = async () => {
+                const addEntry = async ({ allowFreeText } = { allowFreeText: false }) => {
                     const candidate = inputBox.value.trim();
                     if (!candidate) return;
                     if (selected.includes(candidate)) {
@@ -4673,7 +4777,7 @@
                         return;
                     }
                     const available = getAvailableOptions();
-                    if (!available.includes(candidate)) {
+                    if (!allowFreeText && !available.includes(candidate)) {
                         showToast('Select a valid action from the list', true);
                         return;
                     }
@@ -4682,7 +4786,7 @@
                     if (saved) {
                         selected.splice(0, selected.length, ...next);
                         inputBox.value = '';
-                        updateDatalist();
+                        renderDropdown();
                         renderChips();
                         inputBox.focus();
                     }
@@ -4693,7 +4797,7 @@
                     const saved = await persistList(next);
                     if (saved) {
                         selected.splice(0, selected.length, ...next);
-                        updateDatalist();
+                        renderDropdown();
                         renderChips();
                         inputBox.focus();
                     }
@@ -4702,22 +4806,54 @@
                 inputBox.addEventListener('keydown', async (event) => {
                     if (event.key === 'Enter') {
                         event.preventDefault();
-                        await addEntry();
+                        await addEntry({ allowFreeText: false });
                         return;
                     }
                     if ((event.key === 'Backspace' || event.key === 'Delete') && !inputBox.value) {
                         if (!selected.length) return;
                         event.preventDefault();
                         await removeEntry(selected[selected.length - 1]);
+                        return;
+                    }
+                    if (event.key === 'Escape') {
+                        closeDropdown();
                     }
                 });
 
+                inputBox.addEventListener('input', () => {
+                    // While typing, keep dropdown up-to-date
+                    renderDropdown();
+                    if (!dropdownOpen) openDropdown();
+                });
+
+                inputBox.addEventListener('focus', () => {
+                    renderDropdown();
+                    openDropdown();
+                });
+
+                inputBox.addEventListener('click', () => {
+                    // Requirement: clicking should show all available options.
+                    renderDropdown();
+                    openDropdown();
+                });
+
+                inputBox.addEventListener('blur', () => {
+                    // Delay close to allow clicking inside the dropdown.
+                    setTimeout(() => {
+                        try {
+                            const active = document.activeElement;
+                            if (container.contains(active)) return;
+                        } catch (e) { /* ignore */ }
+                        closeDropdown();
+                    }, 150);
+                });
+
                 addBtn.addEventListener('click', async () => {
-                    await addEntry();
+                    await addEntry({ allowFreeText: false });
                 });
 
                 toggleControls(false);
-                updateDatalist();
+                renderDropdown();
                 renderChips();
 
                 const controlRow = document.createElement('div');
@@ -4725,8 +4861,17 @@
                 controlRow.appendChild(inputBox);
                 controlRow.appendChild(addBtn);
                 container.appendChild(controlRow);
-                container.appendChild(datalist);
+                container.appendChild(dropdown);
                 container.appendChild(chips);
+
+                // Close dropdown on outside click
+                document.addEventListener('mousedown', (event) => {
+                    try {
+                        if (!dropdownOpen) return;
+                        if (container.contains(event.target)) return;
+                        closeDropdown();
+                    } catch (e) { /* ignore */ }
+                });
 
                 inputWrapper.appendChild(container);
                 row.appendChild(inputWrapper);

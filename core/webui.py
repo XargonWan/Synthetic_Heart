@@ -1916,6 +1916,7 @@ class SynthWebUIInterface:
             # If this is the autonomy whitelist, present unsafe actions as choices
             if entry.get('key') == 'AUTONOMY_ALLOWED_ACTIONS':
                 options = sorted(list(unsafe_actions))
+                log_info(f"{LOG_PREFIX} AUTONOMY_ALLOWED_ACTIONS options populated: {len(options)} actions found. {options}")
             
             # Derive optional subgroup labels for nicer grouping in the UI (e.g. GRILLO_DREAM_* → 'Grillo Dream')
             subgroup = None
