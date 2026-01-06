@@ -266,6 +266,25 @@ Disable Plugin Temporarily
    
    # Beats are now disabled but preserved in database
 
+Dreams (Daily)
+--------------
+
+The Grillo "dream" beat generates a daily creative consolidation of recent experiences:
+
+- **What it does:** once per day (configurable local time), Grillo samples recent chat snippets and stored memories, constructs a compact context labeled as a "dream", and asks the LLM to generate an evocative dream narrative.
+- **Primary outcome:** the LLM should reply with a single JSON action to create a personal diary entry (``create_personal_diary_entry``). The entry is linked to ``grillo_activity_log`` so the dream appears in History > Grillo.
+
+Configuration variables:
+
+- ``GRILLO_DREAM_ENABLED`` (bool, default: ``True``) — enable/disable daily dream generation
+- ``GRILLO_DREAM_TIME`` (string, default: ``"05:00"``) — local time (HH:MM) when the dream job runs daily (uses system TZ / ``TZ`` config)
+- ``GRILLO_DREAM_SAMPLES`` (int, default: ``10``) — number of fragments (mix of chats and memories) to include in the dream prompt
+
+Notes:
+
+- The system stores and schedules events in UTC internally, but dream scheduling is *interpreted in local time* (see ``core.time_zone_utils``). If you set the dream time to 05:00 and your TZ is JST (UTC+9), the plugin calculates the next occurrence in JST and converts appropriately to UTC for scheduling.
+- Prompts are truncated to keep prompt size manageable; the LLM is instructed to RESPOND ONLY WITH VALID JSON and must include the correct action payload.
+
 Future Enhancements
 -------------------
 
