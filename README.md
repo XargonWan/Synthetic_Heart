@@ -56,10 +56,10 @@ Beta, but stable enough for daily use. Development branch gives access to the la
 - Mobile support
 
 <div align="center">
-   <img src="docs/res/screenshots/mobile_home.jpg" alt="SyntH Mobile Home Screenshot" style="max-width: 200px; border-radius: 8px; margin: 8px;" />
-   <img src="docs/res/screenshots/mobile_menu.jpg" alt="SyntH Mobile Menu Screenshot" style="max-width: 200px; border-radius: 8px; margin: 8px;" />
-   <img src="docs/res/screenshots/mobile_archive.jpg" alt="SyntH Mobile Chat Archive Screenshot" style="max-width: 200px; border-radius: 8px; margin: 8px;" />
-   <img src="docs/res/screenshots/mobile_config.jpg" alt="SyntH Mobile Config Screenshot" style="max-width: 200px; border-radius: 8px; margin: 8px;" />
+   <img src="docs/res/screenshots/mobile_home.jpg" alt="SyntH Mobile Home Screenshot" style="max-width: 150px; border-radius: 8px; margin: 8px;" />
+   <img src="docs/res/screenshots/mobile_menu.jpg" alt="SyntH Mobile Menu Screenshot" style="max-width: 150px; border-radius: 8px; margin: 8px;" />
+   <img src="docs/res/screenshots/mobile_archive.jpg" alt="SyntH Mobile Chat Archive Screenshot" style="max-width: 150px; border-radius: 8px; margin: 8px;" />
+   <img src="docs/res/screenshots/mobile_config.jpg" alt="SyntH Mobile Config Screenshot" style="max-width: 150px; border-radius: 8px; margin: 8px;" />
 </div>
 <p align="center" style="font-size: 0.9em; color: #888;">
    <em>* SyntH is fully usable on mobile devices via the WebUI.</em>
@@ -128,7 +128,6 @@ Pull requests are welcome! Everyone is encouraged to submit contributions—espe
 Here are the main improvements and integrations we plan to work on — contributions are welcome:
 
 - [ ] Event system fixes
-- [ ] Enhancements to the WebUI (usability & feature parity)
 - [ ] Global animation engine fixes — make animations always reflect the actual state of the SyntH and their current actions
 - [ ] Helper LLM engine — offload some background/service actions to a dedicated helper model running alongside the user-facing LLM
 - [ ] Memory retagging engine — improve tagging and indexing of memory entries for better recall and context
