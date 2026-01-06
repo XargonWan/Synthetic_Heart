@@ -9,6 +9,26 @@ SERVICE_URL = "https://gemini.google.com"
 MODEL_CONFIG_VAR = "GEMINI_MODEL"
 DEFAULT_MODEL = "2.5-flash"
 
+# Expose GEMINI_MODEL for persistence but keep it hidden until UX is improved
+try:
+    from core.variables_engine import register_exposed_var
+    register_exposed_var(
+        "GEMINI_MODEL",
+        label="Gemini Model",
+        default=DEFAULT_MODEL,
+        value_type=str,
+        ui_type="string",
+        description="Gemini model name used for requests (hidden until model-selection UX is improved).",
+        scope="llm",
+        component="selenium_gemini",
+        tags=["llm_engine"],
+        advanced=True,
+        hidden=True,
+    )
+except Exception:
+    # Fail silently during import-time if variables engine isn't ready
+    pass
+
 # Gemini-specific model limits (character context limits)
 MODEL_LIMITS_MAP = {
     "2.5-flash": 32000,        # Gemini 2.5 Flash: 32k characters practical limit

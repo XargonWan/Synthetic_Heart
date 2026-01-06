@@ -16,6 +16,7 @@ register_exposed_var(
     scope="llm",
     component="selenium_grok",
     tags=["llm_engine"],
+    hidden=True,  # Hide model selection until model-selection UX is improved
 )
 
 # Grok configuration - constants only
