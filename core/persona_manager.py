@@ -317,6 +317,7 @@ SYNTH_AUTONOMY_MODE = config_registry.get_var(
     value_type=str,
     label="Synth Autonomy Mode",
     description="Autonomy level: 'passive' (respond only), 'suggest' (propose actions), 'autonomous' (may execute allowed actions).",
+    constraints={"choices": ["passive", "suggest", "whitelisted", "autonomous"]},
     group="synth",
     component="persona",
 )
@@ -327,6 +328,17 @@ AUTONOMY_ALLOWED_ACTIONS = config_registry.get_var(
     value_type="json",
     label="Autonomy Allowed Actions",
     description="List of action types the synth may execute autonomously when in 'autonomous' mode (example: [\"create_personal_diary_entry\", \"schedule_message\"]).",
+    group="synth",
+    component="persona",
+)
+
+# Global override: opt-in dangerous behavior (not recommended)
+LLM_AUTO_EXECUTE_UNSAFE_ACTIONS = config_registry.get_var(
+    "LLM_AUTO_EXECUTE_UNSAFE_ACTIONS",
+    False,
+    value_type=bool,
+    label="LLM auto-execute unsafe actions",
+    description="Global override to allow execution of actions flagged 'safe': false coming from LLMs (DANGEROUS; opt-in only).",
     group="synth",
     component="persona",
 )

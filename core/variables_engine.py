@@ -345,6 +345,23 @@ def register_all():
         readonly=True,
     )
 
+    # Expose SYNTH_AUTONOMY_MODE as a combobox for better UX (choices shown and selectable)
+    register_exposed_var(
+        "SYNTH_AUTONOMY_MODE",
+        label="Synth Autonomy Mode",
+        default="suggest",
+        value_type=str,
+        ui_type="combobox",
+        description=("Autonomy level: 'passive' (respond only), 'suggest' (propose actions), "
+                     "'whitelisted' (automatically execute ONLY actions listed in AUTONOMY_ALLOWED_ACTIONS), "
+                     "'autonomous' (full autonomy — executes actions without whitelist restrictions; use with caution)."),
+        scope="synth",
+        component="persona",
+        options=["passive", "suggest", "whitelisted", "autonomous"],
+        validator={"choices": ["passive", "suggest", "whitelisted", "autonomous"]},
+        tags=["persona"],
+    )
+
     # --- Core: Trainer IDs ---
     register_exposed_var(
         "TRAINER_IDS",

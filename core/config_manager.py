@@ -266,6 +266,14 @@ class ConfigRegistry:
             )
 
 
+        # Validate constrained choices before applying setter/persisting
+        constraints = definition.constraints or {}
+        if constraints and isinstance(constraints, dict) and "choices" in constraints:
+            choices = constraints.get("choices") or []
+            # Compare using string form to be robust across types
+            if str(new_value) not in choices:
+                raise ValueError(f"Invalid value for '{key}': {new_value!r}. Allowed values: {choices}")
+
         # If definition has a setter, use it instead of persisting to DB
         if definition.setter is not None:
             try:
