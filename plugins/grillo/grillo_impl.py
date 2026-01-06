@@ -36,7 +36,7 @@ class GrilloPlugin(AIPluginBase):
 
     def __init__(self):
         super().__init__()
-        self.beat_interval = int(config_registry.get_value("GRILLO_BEAT_INTERVAL", 1800, value_type=int))
+        self.beat_interval = int(config_registry.get_value("GRILLO_BEAT_INTERVAL", 1800, value_type=int, group="grillo", component="grillo"))
         self.history_evaluator = None
         # Map beat_type -> plugin instance (optional)
         self.beat_plugins: dict[str, object] = {}

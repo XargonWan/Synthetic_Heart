@@ -31,7 +31,7 @@ class GrilloChatObserverPlugin:
             label="Enable Grillo Chat Observer",
             description="Enable periodic chat observation and proposal beat",
             value_type=bool,
-            group="plugins",
+            group="grillo",
             component="grillo_chat_observer",
         )
 
@@ -40,7 +40,7 @@ class GrilloChatObserverPlugin:
             label="Grillo Observer Interval (s)",
             description="Seconds between observer runs (default 3600 = 1 hour)",
             value_type=int,
-            group="plugins",
+            group="grillo",
             component="grillo_chat_observer",
         ))
 
@@ -49,7 +49,7 @@ class GrilloChatObserverPlugin:
             label="Grillo Observer Samples",
             description="Number of recent chat snippets to include in the prompt",
             value_type=int,
-            group="plugins",
+            group="grillo",
             component="grillo_chat_observer",
         ))
 
@@ -58,7 +58,7 @@ class GrilloChatObserverPlugin:
             label="Grillo Observer Propose Only",
             description="When True, the observer will instruct the LLM to propose actions only (no auto-execution)",
             value_type=bool,
-            group="plugins",
+            group="grillo",
             component="grillo_chat_observer",
         )
 

@@ -245,6 +245,19 @@ def _update_persona_configs(persona: 'PersonaData') -> None:
             # Use _serialize_value to safely serialize aliases
             defn.raw_value = config_registry._serialize_value(defn, all_aliases)
             defn.loaded = True
+
+        # Expose likes and dislikes as config values so they are editable in the WebUI
+        if "SYNTH_LIKES" in config_registry._definitions:
+            defn = config_registry._definitions["SYNTH_LIKES"]
+            defn.value = getattr(persona, 'likes', []) or []
+            defn.raw_value = config_registry._serialize_value(defn, defn.value)
+            defn.loaded = True
+
+        if "SYNTH_DISLIKES" in config_registry._definitions:
+            defn = config_registry._definitions["SYNTH_DISLIKES"]
+            defn.value = getattr(persona, 'dislikes', []) or []
+            defn.raw_value = config_registry._serialize_value(defn, defn.value)
+            defn.loaded = True
         
         log_debug(f"[persona_manager] Synced persona configs: name={persona.name}, aliases={len(all_aliases)}")
     except Exception as e:

@@ -32,7 +32,7 @@ class HistoryEvaluatorPlugin(PluginBase):
     def __init__(self, config: Optional[dict] = None):
         super().__init__(config=config)
         try:
-            self.default_entries = int(config_registry.get_value("HISTORY_EVALUATOR_DEFAULT_ENTRIES", 10, value_type=int))
+            self.default_entries = int(config_registry.get_value("HISTORY_EVALUATOR_DEFAULT_ENTRIES", 10, value_type=int, group="grillo", component="history_evaluator"))
         except Exception:
             self.default_entries = 10
 
@@ -113,7 +113,7 @@ class HistoryEvaluatorPlugin(AIPluginBase):
     def __init__(self):
         try:
             self.default_entries = int(
-                config_registry.get_value("HISTORY_EVALUATOR_DEFAULT_ENTRIES", 10, value_type=int)
+                config_registry.get_value("HISTORY_EVALUATOR_DEFAULT_ENTRIES", 10, value_type=int, group="grillo", component="history_evaluator")
             )
         except Exception:
             self.default_entries = 10
@@ -194,7 +194,7 @@ class HistoryEvaluatorPlugin(PluginBase):
     def __init__(self, config: Optional[dict] = None):
         super().__init__(config=config)
         try:
-            self.default_entries = int(config_registry.get_value("HISTORY_EVALUATOR_DEFAULT_ENTRIES", 10, value_type=int))
+            self.default_entries = int(config_registry.get_value("HISTORY_EVALUATOR_DEFAULT_ENTRIES", 10, value_type=int, group="grillo", component="history_evaluator"))
         except Exception:
             self.default_entries = 10
 

@@ -1924,6 +1924,8 @@ class SynthWebUIInterface:
             # Simple prefix-based mapping for known plugin subgroups
             subgroup_map = {
                 "GRILLO_DREAM_": "Grillo Dream",
+                "GRILLO_OBSERVER_": "Grillo Observer",
+                "HISTORY_EVALUATOR_": "History Evaluator",
                 "GRILLO_": "Grillo",
                 "SYNTH_": "Persona",
             }

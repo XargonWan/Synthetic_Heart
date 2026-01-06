@@ -279,6 +279,9 @@ Configuration variables:
 - ``GRILLO_DREAM_ENABLED`` (bool, default: ``True``) — enable/disable daily dream generation
 - ``GRILLO_DREAM_TIME`` (string, default: ``"05:00"``) — local time (HH:MM) when the dream job runs daily (uses system TZ / ``TZ`` config)
 - ``GRILLO_DREAM_SAMPLES`` (int, default: ``10``) — number of fragments (mix of chats and memories) to include in the dream prompt
+- ``HISTORY_EVALUATOR_DEFAULT_ENTRIES`` (int, default: ``10``) — default number of history entries considered by the History Evaluator plugin
+
+UI: These variables are exposed in the WebUI under **Configurations → Grillo** (they are visible by default, not in the Advanced subsection). Other Grillo-related plugin settings (e.g. ``GRILLO_OBSERVER_*``) appear under **Configurations → Grillo → Grillo Observer** and History Evaluator settings appear under **Configurations → Grillo → History Evaluator**.
 
 Notes:
 
