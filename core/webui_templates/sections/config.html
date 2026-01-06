@@ -27,7 +27,7 @@
                     <!-- Plugin/component sections will be loaded here -->
                 </div>
 
-                <article class="card warning-card config-accordion" id="config-advanced-card">
+                <article class="card warning-card config-accordion collapsed" id="config-advanced-card">
                     <div class="accordion-header" onclick="this.parentElement.classList.toggle('collapsed')">
                         <div class="warning-header">
                             <div class="warning-icon">🚨</div>
@@ -116,6 +116,16 @@
                 display: flex;
                 align-items: center;
                 gap: 0.5rem;
+            }
+
+            /* Subgroup header inside component cards (e.g., Grillo Dream) */
+            .config-subgroup {
+                margin: 0.5rem 0 0.25rem 0;
+                font-size: 0.95rem;
+                font-weight: 700;
+                color: var(--primary);
+                border-left: 3px solid rgba(255,255,255,0.06);
+                padding-left: 0.7rem;
             }
             
             .config-section {

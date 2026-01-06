@@ -98,16 +98,19 @@ LLM_MODE = config_registry.get_var(
 
 # === Persistent LLM mode ===
 
-# Exposed configuration for active LLM (hidden from UI - set via Components tab)
+# Exposed configuration for active LLM (managed via Components tab). We'll register a
+# visible choice list later once the available engines are enumerated.
 # NOTE: Do NOT use "bootstrap" tag - this config MUST be loaded from DB
+# Placeholder registration kept to ensure key exists during import; we'll re-register
+# with choices after enumerating available engines further down.
 ACTIVE_LLM = config_registry.get_var(
     "ACTIVE_LLM",
     "selenium_chatgpt",
     label="Active LLM",
-    description="The currently active LLM engine. Set via the Components tab in the Web UI.",
+    description="The currently active LLM engine. Synced with the Components tab.",
     group="core",
     component="core",
-    hidden=True,  # Hidden from UI config - only set via Components tab
+    hidden=True,  # Temporarily hidden until we re-register with choices
 )
 
 async def get_active_llm():
@@ -379,6 +382,18 @@ def list_available_llms():
         for fname in os.listdir(engines_dir)
         if fname.endswith(".py") and not fname.startswith("__")
     )
+
+# Make ACTIVE_LLM visible in the Settings UI as a choice/combo, synced with available engines
+# We cannot re-register the key (it already exists), so update the internal definition if present.
+try:
+    choices = list_available_llms()
+    existing = config_registry._definitions.get('ACTIVE_LLM')
+    if existing:
+        existing.hidden = False
+        existing.description = "The currently active LLM engine. Synced with the Components tab."
+        existing.constraints = {'choices': choices}
+except Exception as e:
+    log_warning(f"[config] Could not populate ACTIVE_LLM choices: {e}")
 
 # === Global model management ===
 MODEL_FILE = os.path.join(os.path.dirname(__file__), "model_config.json")

@@ -322,15 +322,40 @@ SYNTH_AUTONOMY_MODE = config_registry.get_var(
     component="persona",
 )
 
-AUTONOMY_ALLOWED_ACTIONS = config_registry.get_var(
-    "AUTONOMY_ALLOWED_ACTIONS",
-    [],
-    value_type="json",
-    label="Autonomy Allowed Actions",
-    description="List of action types the synth may execute autonomously when in 'autonomous' mode (example: [\"create_personal_diary_entry\", \"schedule_message\"]).",
-    group="synth",
-    component="persona",
-)
+# AUTONOMY_ALLOWED_ACTIONS is registered as an exposed variable so the Web UI
+# can present it as a configurable multi-selection list whose options are
+# dynamically populated with actions flagged as unsafe (requires explicit
+# opt-in to allow autonomous execution).
+try:
+    from core.variables_engine import register_exposed_var
+
+    register_exposed_var(
+        "AUTONOMY_ALLOWED_ACTIONS",
+        label="Autonomy Allowed Actions",
+        default=[],
+        value_type="json",
+        ui_type="combobox",
+        description=(
+            "List of action types the synth may execute autonomously when in 'whitelisted' or 'autonomous' modes. "
+            "Options are dynamically populated with actions that are flagged as 'unsafe' and require explicit allowance. Example: [\"create_personal_diary_entry\"]"
+        ),
+        scope="synth",
+        component="persona",
+    )
+except Exception:
+    # Fallback for environments where variables_engine isn't available yet
+    AUTONOMY_ALLOWED_ACTIONS = config_registry.get_var(
+        "AUTONOMY_ALLOWED_ACTIONS",
+        [],
+        value_type="json",
+        label="Autonomy Allowed Actions",
+        description=(
+            "List of action types the synth may execute autonomously when in 'whitelisted' or 'autonomous' modes. "
+            "Options are dynamically populated with actions that are flagged as 'unsafe' and require explicit allowance."
+        ),
+        group="synth",
+        component="persona",
+    )
 
 # Global override: opt-in dangerous behavior (not recommended)
 LLM_AUTO_EXECUTE_UNSAFE_ACTIONS = config_registry.get_var(

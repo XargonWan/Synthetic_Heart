@@ -1856,6 +1856,51 @@ class SynthWebUIInterface:
     async def config_summary(self):
         definitions = config_registry.export_definitions()
         items = []
+
+        # Precompute all actions flagged as unsafe by registered components so
+        # AUTONOMY_ALLOWED_ACTIONS can be presented as a choices list.
+        unsafe_actions = set()
+        try:
+            from core.core_initializer import PLUGIN_REGISTRY, INTERFACE_REGISTRY
+            from core.llm_registry import get_llm_registry
+            # Plugins
+            for plugin in PLUGIN_REGISTRY.values():
+                try:
+                    if hasattr(plugin, 'get_supported_actions'):
+                        sup = plugin.get_supported_actions() or {}
+                        for k, v in sup.items():
+                            if isinstance(v, dict) and v.get('safe') is False:
+                                unsafe_actions.add(k)
+                except Exception:
+                    pass
+            # Interfaces
+            for interface in INTERFACE_REGISTRY.values():
+                try:
+                    if hasattr(interface, 'get_supported_actions'):
+                        sup = interface.get_supported_actions() or {}
+                        for k, v in sup.items():
+                            if isinstance(v, dict) and v.get('safe') is False:
+                                unsafe_actions.add(k)
+                except Exception:
+                    pass
+            # LLM engines
+            try:
+                llmreg = get_llm_registry()
+                for name in llmreg.get_available_engines():
+                    try:
+                        inst = llmreg.get_engine(name)
+                        if inst and hasattr(inst, 'get_supported_actions'):
+                            sup = inst.get_supported_actions() or {}
+                            for k, v in sup.items():
+                                if isinstance(v, dict) and v.get('safe') is False:
+                                    unsafe_actions.add(k)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        except Exception:
+            unsafe_actions = set()
+
         for entry in definitions:
             # Skip bootstrap-tagged items (not meant for UI)
             if "bootstrap" in entry.get("tags", []):
@@ -1867,7 +1912,25 @@ class SynthWebUIInterface:
             exposed_def = exposed_vars.get_definition(entry["key"])
             ui_type = exposed_def.ui_type if exposed_def else entry.get("ui_type", "string")
             options = exposed_def.options if exposed_def else []
+
+            # If this is the autonomy whitelist, present unsafe actions as choices
+            if entry.get('key') == 'AUTONOMY_ALLOWED_ACTIONS':
+                options = sorted(list(unsafe_actions))
             
+            # Derive optional subgroup labels for nicer grouping in the UI (e.g. GRILLO_DREAM_* → 'Grillo Dream')
+            subgroup = None
+            key = entry["key"]
+            # Simple prefix-based mapping for known plugin subgroups
+            subgroup_map = {
+                "GRILLO_DREAM_": "Grillo Dream",
+                "GRILLO_": "Grillo",
+                "SYNTH_": "Persona",
+            }
+            for prefix, label in subgroup_map.items():
+                if key.startswith(prefix):
+                    subgroup = label
+                    break
+
             items.append(
                 {
                     "key": entry["key"],
@@ -1878,6 +1941,7 @@ class SynthWebUIInterface:
                     "group": entry["group"],
                     "component": entry["component"],
                     "component_label": component_label,
+                    "subgroup": subgroup,
                     "advanced": entry["advanced"],
                     "sensitive": entry["sensitive"],
                     "env_override": entry["env_override"],

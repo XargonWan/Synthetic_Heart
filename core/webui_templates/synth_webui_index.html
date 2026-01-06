@@ -4557,6 +4557,186 @@
                 
                 inputWrapper.appendChild(input);
                 
+            } else if (item.ui_type === 'tag-combobox') {
+                const container = document.createElement('div');
+                container.style.cssText = 'display:flex; flex-direction:column; gap:0.5rem;';
+
+                const controlLocked = item.env_override || !item.editable;
+                const selected = Array.isArray(item.value) ? item.value.slice() : [];
+                const allOptions = Array.isArray(item.options) ? item.options.slice() : [];
+
+                const chips = document.createElement('div');
+                chips.style.cssText = 'display:flex; flex-wrap:wrap; gap:0.4rem;';
+
+                const datalist = document.createElement('datalist');
+                datalist.id = `datalist-${item.key}`;
+
+                const getAvailableOptions = () => {
+                    return allOptions
+                        .filter(opt => !selected.includes(opt))
+                        .sort((a, b) => String(a || '').localeCompare(String(b || '')));
+                };
+
+                const updateDatalist = () => {
+                    datalist.innerHTML = '';
+                    getAvailableOptions().forEach(opt => {
+                        const option = document.createElement('option');
+                        option.value = opt;
+                        datalist.appendChild(option);
+                    });
+                };
+
+                const toggleControls = (disable) => {
+                    const state = controlLocked || disable;
+                    inputBox.disabled = state;
+                    addBtn.disabled = state;
+                };
+
+                const renderChips = () => {
+                    chips.innerHTML = '';
+                    if (!selected.length) {
+                        const helper = document.createElement('span');
+                        helper.className = 'meta';
+                        helper.textContent = 'No actions selected yet';
+                        chips.appendChild(helper);
+                        return;
+                    }
+                    selected.forEach((value) => {
+                        const chip = document.createElement('div');
+                        chip.style.cssText = 'background: rgba(255,255,255,0.04); padding: 0.35rem 0.6rem; border-radius: 999px; display:flex; gap:0.5rem; align-items:center;';
+                        const lbl = document.createElement('span');
+                        lbl.textContent = value;
+                        const rem = document.createElement('button');
+                        rem.type = 'button';
+                        rem.textContent = '×';
+                        rem.className = 'pill';
+                        rem.style.cssText = 'padding: 0.15rem 0.5rem;';
+                        rem.disabled = controlLocked;
+                        rem.addEventListener('click', async () => {
+                            await removeEntry(value);
+                        });
+                        chip.appendChild(lbl);
+                        chip.appendChild(rem);
+                        chips.appendChild(chip);
+                    });
+                };
+
+                const inputBox = document.createElement('input');
+                inputBox.type = 'text';
+                inputBox.list = datalist.id;
+                inputBox.placeholder = 'Select an allowed action';
+                inputBox.autocomplete = 'off';
+                inputBox.style.cssText = 'padding:0.5rem; border-radius:0.35rem; border:1px solid #666; background:#1a1a1a; color:#fff; width:100%;';
+
+                const addBtn = document.createElement('button');
+                addBtn.type = 'button';
+                addBtn.textContent = 'Add';
+                addBtn.className = 'pill secondary';
+
+                const persistList = async (nextList) => {
+                    if (controlLocked) return false;
+                    toggleControls(true);
+                    try {
+                        const res = await fetch('/api/config', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ key: item.key, value: nextList }),
+                        });
+                        const payload = await res.json().catch(() => ({}));
+                        if (!res.ok) {
+                            showToast('Failed to update allowed actions', true);
+                            console.error('[synth_webui] AUTONOMY_ALLOWED_ACTIONS update failed', res.status, payload);
+                            return false;
+                        }
+                        item.value = nextList;
+                        if (payload.requires_reload && payload.component) {
+                            const message = payload.message || `Configuration updated. Component '${payload.component}' should be reloaded.`;
+                            showReloadPrompt(payload.component, message, inputBox);
+                        } else {
+                            showToast('Settings saved');
+                        }
+                        return true;
+                    } catch (error) {
+                        console.error('[synth_webui] Error updating AUTONOMY_ALLOWED_ACTIONS:', error);
+                        showToast('Error saving settings', true);
+                        return false;
+                    } finally {
+                        toggleControls(false);
+                    }
+                };
+
+                const addEntry = async () => {
+                    const candidate = inputBox.value.trim();
+                    if (!candidate) return;
+                    if (selected.includes(candidate)) {
+                        inputBox.value = '';
+                        return;
+                    }
+                    const available = getAvailableOptions();
+                    if (!available.includes(candidate)) {
+                        showToast('Select a valid action from the list', true);
+                        return;
+                    }
+                    const next = [...selected, candidate];
+                    const saved = await persistList(next);
+                    if (saved) {
+                        selected.splice(0, selected.length, ...next);
+                        inputBox.value = '';
+                        updateDatalist();
+                        renderChips();
+                        inputBox.focus();
+                    }
+                };
+
+                const removeEntry = async (value) => {
+                    const next = selected.filter((itemValue) => itemValue !== value);
+                    const saved = await persistList(next);
+                    if (saved) {
+                        selected.splice(0, selected.length, ...next);
+                        updateDatalist();
+                        renderChips();
+                        inputBox.focus();
+                    }
+                };
+
+                inputBox.addEventListener('keydown', async (event) => {
+                    if (event.key === 'Enter') {
+                        event.preventDefault();
+                        await addEntry();
+                        return;
+                    }
+                    if ((event.key === 'Backspace' || event.key === 'Delete') && !inputBox.value) {
+                        if (!selected.length) return;
+                        event.preventDefault();
+                        await removeEntry(selected[selected.length - 1]);
+                    }
+                });
+
+                addBtn.addEventListener('click', async () => {
+                    await addEntry();
+                });
+
+                toggleControls(false);
+                updateDatalist();
+                renderChips();
+
+                const controlRow = document.createElement('div');
+                controlRow.style.cssText = 'display:flex; gap:0.5rem; align-items:center;';
+                controlRow.appendChild(inputBox);
+                controlRow.appendChild(addBtn);
+                container.appendChild(controlRow);
+                container.appendChild(datalist);
+                container.appendChild(chips);
+
+                inputWrapper.appendChild(container);
+                row.appendChild(inputWrapper);
+                if (item.description) {
+                    const description = document.createElement('div');
+                    description.className = 'config-description';
+                    description.textContent = item.description;
+                    row.appendChild(description);
+                }
+                return row;
             } else if (item.key === 'REACT_WHEN_MENTIONED') {
                 const emojiContainer = document.createElement('div');
                 emojiContainer.style.cssText = 'display: flex; flex-direction: column; gap: 0.5rem;';
@@ -5101,7 +5281,26 @@
                 
                 const content = document.createElement('div');
                 content.className = 'accordion-content config-list';
+                // Render items grouped by optional subgroup (e.g., 'Grillo Dream')
+                // Sort by subgroup then label so related items stay together
+                group.items.sort((a,b) => {
+                    const sa = a.subgroup || '';
+                    const sb = b.subgroup || '';
+                    if (sa === sb) return (a.label || '').localeCompare(b.label || '');
+                    return sa.localeCompare(sb);
+                });
+
+                let currentSub = null;
                 group.items.forEach((item) => {
+                    // If the item declares a subgroup header, insert a small header block
+                    if (item.subgroup && item.subgroup !== currentSub) {
+                        currentSub = item.subgroup;
+                        const subHeading = document.createElement('h4');
+                        subHeading.className = 'config-subgroup';
+                        subHeading.textContent = item.subgroup;
+                        content.appendChild(subHeading);
+                    }
+
                     const row = createConfigRow(item);
                     if (row) {
                         content.appendChild(row);
@@ -5127,8 +5326,22 @@
                 });
                 
                 Object.entries(advancedByComponent).forEach(([componentName, group]) => {
-                    // Advanced items are already under Advanced card; no additional accordion here
+                    // Advanced items are already under Advanced card; render with subgroup support
+                    group.items.sort((a,b) => {
+                        const sa = a.subgroup || '';
+                        const sb = b.subgroup || '';
+                        if (sa === sb) return (a.label || '').localeCompare(b.label || '');
+                        return sa.localeCompare(sb);
+                    });
+                    let currentSub = null;
                     group.items.forEach((item) => {
+                        if (item.subgroup && item.subgroup !== currentSub) {
+                            currentSub = item.subgroup;
+                            const subHeading = document.createElement('h4');
+                            subHeading.className = 'config-subgroup';
+                            subHeading.textContent = item.subgroup;
+                            configAdvancedList.appendChild(subHeading);
+                        }
                         const row = createConfigRow(item);
                         if (row) {
                             configAdvancedList.appendChild(row);
