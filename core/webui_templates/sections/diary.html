@@ -331,6 +331,12 @@
             .chat-text {
                 flex: 1;
                 line-height: 1.5;
+                /* Limit visible height to ~5 lines and allow internal scrolling */
+                max-height: calc(1.5em * 5);
+                overflow-y: auto;
+                white-space: pre-wrap;
+                word-break: break-word;
+                padding-right: 0.25rem;
             }
 
             .chat-time {
@@ -692,10 +698,7 @@
             }
 
             function renderChatMessage(msg) {
-                const timestamp = new Date(msg.timestamp).toLocaleString('en-US', { 
-                    hour: '2-digit', 
-                    minute: '2-digit' 
-                });
+                const timestamp = formatTimestamp(msg.timestamp);
                 
                 return `
                     <div class="chat-message">
@@ -752,10 +755,23 @@
 
             function formatTimestamp(isoString) {
                 // Converte timestamp ISO (UTC) in formato locale leggibile
+                // Se il server manda un ISO string senza offset, assumiamo che sia UTC e aggiungiamo la Z
                 if (!isoString) return 'Unknown time';
                 try {
-                    const date = new Date(isoString);
-                    return date.toLocaleString();
+                    let s = String(isoString);
+                    if (!s.endsWith('Z') && !/[+-]\d{2}:\d{2}$/.test(s)) {
+                        s = s + 'Z';
+                    }
+                    const date = new Date(s);
+                    return date.toLocaleString('it-IT', {
+                        year: 'numeric',
+                        month: '2-digit',
+                        day: '2-digit',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        second: '2-digit',
+                        hour12: false
+                    });
                 } catch (e) {
                     return isoString;
                 }

@@ -1426,6 +1426,19 @@
                 z-index: 10050;
                 position: fixed;
             }
+            /* Make icons slightly smaller on mobile and constrain their box */
+            .nav-btn .icon,
+            .sub-nav-btn .icon,
+            .chat-toggle-btn,
+            .chat-toggle-btn .icon {
+                font-size: 0.95rem;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                width: 1.4em;
+                height: 1.4em;
+                line-height: 1;
+            }
             /* Remove header bottom border and any subtle divider so the 3D view is flush with the header */
             header.top-bar { border-bottom: none; box-shadow: none; }
 
@@ -2089,6 +2102,12 @@
             .chat-text {
                 flex: 1;
                 line-height: 1.5;
+                /* Limit visible height to ~5 lines and allow internal scrolling */
+                max-height: calc(1.5em * 5);
+                overflow-y: auto;
+                white-space: pre-wrap;
+                word-break: break-word;
+                padding-right: 0.25rem;
             }
 
             .chat-time {
@@ -2500,11 +2519,15 @@
             }
 
             function formatTimestamp(isoString) {
-                // Il timestamp viene già ricevuto in timezone locale dal server
-                // Non fare doppia conversione, semplicemente formatta
+                // Normalizza e converte un timestamp ISO (UTC o con offset) in formato locale leggibile
                 if (!isoString) return 'Unknown time';
                 try {
-                    const date = new Date(isoString);
+                    let s = String(isoString);
+                    if (!s.endsWith('Z') && !/[+-]\d{2}:\d{2}$/.test(s)) {
+                        // Se manca l'offset, assumiamo UTC e aggiungiamo Z
+                        s = s + 'Z';
+                    }
+                    const date = new Date(s);
                     // Formatta come locale senza offset
                     return date.toLocaleString('it-IT', {
                         year: 'numeric',
@@ -13322,7 +13345,7 @@
                             ${entry.interaction_summary ? `<div class="diary-entry-meta"><strong>Interaction:</strong> ${escapeHtml(entry.interaction_summary)}</div>` : ''}
                             ${usersText ? `<div class="diary-entry-meta"><strong>Involved users:</strong> ${escapeHtml(usersText)}</div>` : ''}
                             <div class="diary-entry-meta">
-                                <span>${new Date(entry.timestamp).toLocaleString()}</span>
+                                <span>${formatTimestamp(entry.timestamp)}</span>
                                 ${entry.interface ? `<span>• ${entry.interface}</span>` : ''}
                                 ${entry.chat_id ? `<span>• Chat ${entry.chat_id}</span>` : ''}
                                 ${entry.id ? `<span>• ID: ${entry.id}</span>` : ''}
@@ -14079,8 +14102,7 @@
                 // Left section: date/time + name
                 const left = document.createElement('div'); left.style.display='flex'; left.style.flexDirection='column';
                 const dt = document.createElement('div');
-                const d = arch.created_at ? new Date(arch.created_at) : new Date();
-                dt.textContent = d.toLocaleString();
+                dt.textContent = formatTimestamp(arch.created_at || new Date().toISOString());
                 dt.style.fontSize = '0.85rem'; dt.style.opacity = 0.85;
                 const nameDiv = document.createElement('div'); nameDiv.style.fontWeight='600'; nameDiv.style.cursor='pointer';
                 nameDiv.textContent = arch.name || 'Chat';

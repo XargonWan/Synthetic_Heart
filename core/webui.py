@@ -2745,7 +2745,7 @@ class SynthWebUIInterface:
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     query = f"""
-                        SELECT interface_path, sender_name, LEFT(message_text, 500) as message_text, timestamp
+                        SELECT interface_path, sender_name, message_text, timestamp
                         FROM chat_history_cache
                         WHERE {where_clause}
                         ORDER BY timestamp {order}
@@ -2765,7 +2765,7 @@ class SynthWebUIInterface:
                         messages.append({
                             "interface_path": row[0],
                             "sender_name": row[1],
-                            "message_text": row[2],  # Truncated
+                            "message_text": row[2],
                             "timestamp": timestamp_str
                         })
             
