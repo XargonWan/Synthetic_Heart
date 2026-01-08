@@ -580,11 +580,26 @@
                     const response = await fetch(`/api/history/grillo?${params}`);
                     const data = await response.json();
 
-                    if (data.success && data.entries.length > 0) {
-                        content.innerHTML = data.entries.map(entry => renderGrilloEntry(entry)).join('');
-                        renderPagination('grillo', data.page, data.total_pages, data.total_count);
+                    if (data.success) {
+                        // Populate beat-type selector if empty and server provided beat_types
+                        const beatSelect = document.getElementById('history-grillo-beat-type');
+                        if (beatSelect && beatSelect.options.length === 1 && data.beat_types) {
+                            data.beat_types.forEach(bt => {
+                                const option = document.createElement('option');
+                                option.value = bt;
+                                option.textContent = bt.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+                                beatSelect.appendChild(option);
+                            });
+                        }
+
+                        if (data.entries && data.entries.length > 0) {
+                            content.innerHTML = data.entries.map(entry => renderGrilloEntry(entry)).join('');
+                            renderPagination('grillo', data.page, data.total_pages, data.total_count);
+                        } else {
+                            content.innerHTML = '<div class="empty-state"><div class="icon">🦗</div><p>No grillo activity found</p></div>';
+                        }
                     } else {
-                        content.innerHTML = '<div class="empty-state"><div class="icon">🦗</div><p>No grillo activity found</p></div>';
+                        content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load grillo activity</p></div>';
                     }
                 } catch (error) {
                     console.error('Failed to load grillo history:', error);

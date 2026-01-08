@@ -2686,6 +2686,15 @@ class SynthWebUIInterface:
                             "diary_content": row[6]
                         })
             
+            # Lazy-load list of available beat types (for populating the UI selector)
+            beat_types = []
+            if page == 1 and not beat_type_filter:
+                async with get_conn_ctx() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute("SELECT DISTINCT beat_type FROM grillo_activity_log ORDER BY beat_type LIMIT 100")
+                        rows_bt = await cur.fetchall()
+                        beat_types = [row[0] for row in rows_bt]
+
             # Estimate total
             total_count = offset + len(rows) + (per_page if has_more else 0)
             total_pages = (total_count + per_page - 1) // per_page
@@ -2693,6 +2702,7 @@ class SynthWebUIInterface:
             return JSONResponse({
                 "success": True,
                 "entries": entries,
+                "beat_types": beat_types,
                 "page": page,
                 "per_page": per_page,
                 "total_count": total_count,
