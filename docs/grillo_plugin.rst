@@ -81,6 +81,36 @@ The interval can be changed at runtime without restarting:
    from core.config_manager import config_registry
    config_registry.set_value("GRILLO_BEAT_INTERVAL", 3600)  # 1 hour
 
+**New Variable:** ``GRILLO_SUPPRESS_INACTIVE``
+
+- **Default:** True
+- **Type:** Boolean
+- **Group:** ``grillo``
+- **Component:** ``grillo_plugin``
+- **Description:** When enabled, Grillo-originated outbound messages will be suppressed when the last message in the target thread was authored by the synth (to avoid duplicate messages/spam). This can be toggled at runtime for controlled rollout.
+
+**Metric / Auditability:**
+
+- ``GrilloPlugin.suppressed_count`` (in-memory counter) tracks suppressed outbound messages and mirrors the persistent count on the activity row.
+- The ``grillo_activity_log`` table now has a new ``suppressed_count`` column (INT DEFAULT 0) that is incremented (best-effort) when an outbound beat is suppressed. When suppression occurs and an originating ``activity_log`` row exists, the activity row will be annotated with a short ``[suppressed: reason]`` note so the History > Grillo view can show why the beat didn't post.
+
+Database Migration
+^^^^^^^^^^^^^^^^^^
+
+If you are upgrading an existing deployment, run the following migration against your synth database (adjust for your tooling):
+
+.. code-block:: sql
+
+   ALTER TABLE grillo_activity_log ADD COLUMN suppressed_count INT DEFAULT 0;
+
+Run this migration in a maintenance window; the operation is fast and safe but requires DB write permissions.
+
+
+.. code-block:: python
+
+   from core.config_manager import config_registry
+   config_registry.set_value("GRILLO_BEAT_INTERVAL", 3600)  # 1 hour
+
 Priority System
 ---------------
 
@@ -257,6 +287,22 @@ Disable Plugin Temporarily
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 .. code-block:: bash
+
+
+Running Tests
+^^^^^^^^^^^^^
+
+For reliable test execution, run the test suite inside a Python virtual environment (venv):
+
+.. code-block:: bash
+
+   python -m venv venv
+   source venv/bin/activate
+   pip install -r requirements.txt
+   pytest tests/test_grillo_prevent_duplicates.py -q
+
+This avoids contaminating the global Python environment and ensures deterministic dependency versions.
+
 
    # Move to plugins_dev to disable
    mv plugins/grillo_plugin.py plugins_dev/

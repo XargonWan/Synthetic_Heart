@@ -250,3 +250,59 @@ async def get_cache_stats() -> dict:
     except Exception as e:
         log_error(f"[chat_history_cache] Failed to get cache stats: {e}")
         return {}
+
+
+async def get_last_message(interface_path: str):
+    """Return the last message for an interface_path, preferring in-memory context and falling back to persisted cache.
+
+    Returns a dict with keys similar to load_chat_history rows (sender_name, sender_id, text, timestamp, interface_path) or None.
+    """
+    if not interface_path:
+        return None
+
+    try:
+        # Check in-memory context first
+        from core.chat_context_manager import get_or_create_chat_context
+
+        ctx = get_or_create_chat_context(interface_path)
+        # If context has entries, prefer the last one
+        if ctx and len(ctx) > 0:
+            last = ctx[-1]
+            # If it's already a dict from cached history, return as-is
+            if isinstance(last, dict):
+                return last
+            # Otherwise try to extract common fields from message-like object
+            try:
+                text = getattr(last, 'text', None) or (last.get('text') if isinstance(last, dict) else None)
+                user = getattr(last, 'from_user', None) or (last.get('from_user') if isinstance(last, dict) else None)
+                sender_name = None
+                sender_id = None
+                if user:
+                    sender_name = getattr(user, 'username', None) or getattr(user, 'full_name', None)
+                    sender_id = getattr(user, 'id', None)
+                # Fallback fields
+                if not sender_name and isinstance(last, dict):
+                    sender_name = last.get('sender_name') or last.get('username')
+                    sender_id = sender_id or last.get('sender_id') or last.get('user_id')
+
+                return {
+                    'sender_name': sender_name,
+                    'sender_id': sender_id,
+                    'text': text,
+                    'timestamp': getattr(last, 'timestamp', None) or (last.get('timestamp') if isinstance(last, dict) else None),
+                    'interface_path': interface_path,
+                }
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Fallback: persisted cache
+    try:
+        hist = await load_chat_history(interface_path)
+        if hist and len(hist) > 0:
+            return list(hist)[-1]
+    except Exception:
+        pass
+
+    return None

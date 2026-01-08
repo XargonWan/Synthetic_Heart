@@ -33,6 +33,8 @@ class GrilloPlugin(AIPluginBase):
     _scheduler_running = False
     _scheduler_task: Optional[asyncio.Task] = None
     _beat_pending = False
+    # Metric: number of suppressed outbound messages due to duplicate protection
+    suppressed_count: int = 0
 
     def __init__(self):
         super().__init__()
@@ -145,18 +147,82 @@ class GrilloPlugin(AIPluginBase):
             '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content":"your reflection"}}]}'
         )
 
+    async def _is_public_active_chat(self, chat_path: str) -> bool:
+        """Return True if chat_path should be considered public (eligible for grillo prompts).
+
+        Rules:
+        - Exclude trainer private chats (as defined in the interface registry)
+        - Exclude webui interfaces (synth/webui)
+        - Exclude chats where last message is from the synth (sender_id == 'self' or obvious synth names)
+        """
+        try:
+            if not chat_path:
+                return False
+            parts = chat_path.split('/')
+            interface_name = parts[0] if len(parts) > 0 else None
+            chat_id = parts[1] if len(parts) > 1 else None
+
+            # Exempt webui
+            if interface_name and interface_name.lower() in ("synth_webui", "webui"):
+                return True
+
+            # Exempt trainer private chats
+            try:
+                from core.interfaces_registry import get_interface_registry
+                registry = get_interface_registry()
+                if interface_name and chat_id and chat_id.isdigit():
+                    try:
+                        if registry.is_trainer(interface_name, int(chat_id)):
+                            return True
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # If last message author is synth, mark as inactive
+            try:
+                from core.chat_history_cache import get_last_message
+                last = await get_last_message(chat_path)
+                if last:
+                    sender_id = last.get('sender_id')
+                    sender_name = (last.get('sender_name') or "").lower()
+                    if str(sender_id) == 'self' or any(k in sender_name for k in ("rekku", "synth", "bot", "auto_response", "autoreply")):
+                        return False
+            except Exception:
+                # If we cannot determine, play safe and treat as public
+                return True
+
+            return True
+        except Exception:
+            return True
+
     async def _create_memory_consolidation_prompt(self) -> str:
         # Try to include a short history snippet from evaluator
         history_snippet = None
         if self.history_evaluator:
             try:
                 import core.recent_chats as recent_chats
-                last = await recent_chats.get_last_active_chats_verbose(1)
+                # Try a few recent chats and pick the first public/active one
+                last = await recent_chats.get_last_active_chats_verbose(5)
                 if last:
-                    chat_id, _ = last[0]
-                    chat_path = recent_chats.get_chat_path(chat_id) or f"telegram_bot/{chat_id}"
-                    if chat_path:
-                        history_snippet = await self.history_evaluator.evaluate_history(chat_path, entries=5)
+                    for chat_id, _ in last:
+                        chat_path = recent_chats.get_chat_path(chat_id) or f"telegram_bot/{chat_id}"
+                        if not chat_path:
+                            continue
+                        # Skip chats where last message is synth unless exempt
+                        try:
+                            ok = await self._is_public_active_chat(chat_path)
+                            if not ok:
+                                continue
+                        except Exception:
+                            pass
+                        # Use first eligible chat
+                        try:
+                            history_snippet = await self.history_evaluator.evaluate_history(chat_path, entries=5)
+                            if history_snippet:
+                                break
+                        except Exception:
+                            continue
             except Exception:
                 pass
         base = "[G.R.I.L.L.O. Memory Consolidation]\n\n"
@@ -181,12 +247,25 @@ class GrilloPlugin(AIPluginBase):
         if self.history_evaluator:
             try:
                 import core.recent_chats as recent_chats
-                last = await recent_chats.get_last_active_chats_verbose(1)
+                # Try multiple recent chats and pick the first public/active one
+                last = await recent_chats.get_last_active_chats_verbose(5)
                 if last:
-                    chat_id, _ = last[0]
-                    chat_path = recent_chats.get_chat_path(chat_id) or f"telegram_bot/{chat_id}"
-                    if chat_path:
-                        history_snippet = await self.history_evaluator.evaluate_history(chat_path, entries=3)
+                    for chat_id, _ in last:
+                        chat_path = recent_chats.get_chat_path(chat_id) or f"telegram_bot/{chat_id}"
+                        if not chat_path:
+                            continue
+                        try:
+                            ok = await self._is_public_active_chat(chat_path)
+                            if not ok:
+                                continue
+                        except Exception:
+                            pass
+                        try:
+                            history_snippet = await self.history_evaluator.evaluate_history(chat_path, entries=3)
+                            if history_snippet:
+                                break
+                        except Exception:
+                            continue
             except Exception:
                 pass
         intro = "[G.R.I.L.L.O. Curiosity Exploration]\n\n"
@@ -374,6 +453,51 @@ class GrilloPlugin(AIPluginBase):
                         pass
         except Exception as e:
             log_debug(f"[grillo] set_activity_response_text failed: {e}")
+
+    @classmethod
+    async def record_suppressed_event(cls, activity_log_id: Optional[int] = None, reason: str = "") -> None:
+        """Record a suppressed outbound message and attempt to annotate the originating activity log.
+
+        This increments an in-memory counter and (best-effort) appends a note to the
+        originating grillo_activity_log row so the UI can show why a beat didn't post.
+        """
+        try:
+            cls.suppressed_count = (getattr(cls, "suppressed_count", 0) or 0) + 1
+            if activity_log_id:
+                try:
+                    # Annotate the activity row with a suppression note
+                    await cls.set_activity_response_text(activity_log_id, f"[suppressed: {reason}]", append=True)
+                except Exception as e:
+                    log_debug(f"[grillo] record_suppressed_event failed to update activity log: {e}")
+
+            # Best-effort: increment persistent counter in DB if available
+            try:
+                from core.db import get_conn_ctx
+
+                async with get_conn_ctx() as conn:
+                    async with conn.cursor() as cur:
+                        # Atomically increment suppressed_count and optionally append a note
+                        await cur.execute(
+                            """
+                            UPDATE grillo_activity_log
+                            SET suppressed_count = COALESCE(suppressed_count, 0) + 1,
+                                response_text = CASE
+                                    WHEN response_text IS NULL OR response_text = '' THEN %s
+                                    ELSE CONCAT(response_text, '\n\n', %s)
+                                END
+                            WHERE id=%s
+                            """,
+                            (f"[suppressed: {reason}]", f"[suppressed: {reason}]", int(activity_log_id)),
+                        )
+                        try:
+                            await conn.commit()
+                        except Exception:
+                            pass
+            except Exception as e:
+                # DB may be unavailable (aiomysql missing or DB down) — this is best-effort
+                log_debug(f"[grillo] record_suppressed_event DB update skipped: {e}")
+        except Exception as e:
+            log_debug(f"[grillo] record_suppressed_event unexpected error: {e}")
 
     async def _reset_beat_pending_after_delay(self):
         await asyncio.sleep(300)

@@ -40,6 +40,8 @@ CREATE TABLE IF NOT EXISTS grillo_activity_log (
     diary_entry_id INT,
     executed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     metadata JSON,
+    -- Persistent counter for how many times an outbound beat was suppressed
+    suppressed_count INT DEFAULT 0,
     INDEX idx_executed_at (executed_at DESC),
     INDEX idx_beat_type (beat_type),
     INDEX idx_diary_entry (diary_entry_id),
