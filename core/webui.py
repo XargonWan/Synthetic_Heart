@@ -551,20 +551,29 @@ class SynthWebUIInterface:
     def _dt_to_utc_iso(self, dt: "datetime | None") -> "str | None":
         """Serialize a datetime as an explicit UTC ISO string.
 
-        IMPORTANT: MariaDB DATETIME columns are timezone-naive. In this
-        deployment the DB server/session time can be local (e.g. JST). If we
-        incorrectly assume naive == UTC, the browser will render times shifted
-        into the future/past.
+        By default we treat timezone-naive datetimes coming from the DB as UTC
+        (attach timezone.utc) to avoid double-shifting when the DB already
+        stores UTC timestamps. If you run in an environment where naive
+        datetimes are local (e.g. DB session timezone is JST), set the
+        environment variable `WEBUI_DB_NAIVE_IS_UTC=0` to revert to the
+        legacy behaviour (assume naive == local timezone).
         """
         if not dt:
             return None
 
         from datetime import timezone
+        import os
 
+        # If the datetime is naive, decide whether to treat it as UTC or local
         if dt.tzinfo is None:
-            from core.time_zone_utils import get_local_timezone
-
-            dt = dt.replace(tzinfo=get_local_timezone())
+            naive_is_utc = os.getenv('WEBUI_DB_NAIVE_IS_UTC', '1').lower() in ('1', 'true', 'yes')
+            if naive_is_utc:
+                # Attach UTC tzinfo (do not convert) to preserve the original instant
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                # Legacy behaviour: assume naive datetimes are in the local timezone
+                from core.time_zone_utils import get_local_timezone
+                dt = dt.replace(tzinfo=get_local_timezone())
 
         return dt.astimezone(timezone.utc).isoformat()
 
