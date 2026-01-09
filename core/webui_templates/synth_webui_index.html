@@ -2443,15 +2443,23 @@
                     const data = await response.json();
 
                     if (data.success) {
-                        // Populate beat-type selector if empty and server provided beat_types
+                        // Populate beat-type selector with server-provided beat_types, merging with existing options
                         const beatSelect = document.getElementById('history-grillo-beat-type');
-                        if (beatSelect && beatSelect.options.length === 1 && data.beat_types) {
+                        if (beatSelect && data.beat_types) {
+                            const existing = new Set(Array.from(beatSelect.options).map(o => o.value));
                             data.beat_types.forEach(bt => {
+                                const trimmed = String(bt).trim();
+                                if (!trimmed || existing.has(trimmed)) return;
                                 const option = document.createElement('option');
-                                option.value = bt;
-                                option.textContent = bt.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+                                option.value = trimmed;
+                                option.textContent = trimmed.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
                                 beatSelect.appendChild(option);
+                                existing.add(trimmed);
                             });
+                            // Sort options while preserving the first 'All Beat Types' option
+                            const opts = Array.from(beatSelect.options).slice(1);
+                            opts.sort((a,b) => a.textContent.localeCompare(b.textContent));
+                            opts.forEach(o => beatSelect.appendChild(o));
                         }
 
                         if (data.entries && data.entries.length > 0) {

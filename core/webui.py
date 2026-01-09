@@ -2700,9 +2700,11 @@ class SynthWebUIInterface:
             if page == 1 and not beat_type_filter:
                 async with get_conn_ctx() as conn:
                     async with conn.cursor() as cur:
-                        await cur.execute("SELECT DISTINCT beat_type FROM grillo_activity_log ORDER BY beat_type LIMIT 100")
+                        # Fetch a large set of distinct beat types for the UI filter
+                        await cur.execute("SELECT DISTINCT beat_type FROM grillo_activity_log ORDER BY beat_type LIMIT 1000")
                         rows_bt = await cur.fetchall()
-                        beat_types = [row[0] for row in rows_bt]
+                        # Normalize by trimming whitespace and ignore NULLs
+                        beat_types = [row[0].strip() for row in rows_bt if row[0] and str(row[0]).strip()]
 
             # Estimate total
             total_count = offset + len(rows) + (per_page if has_more else 0)
