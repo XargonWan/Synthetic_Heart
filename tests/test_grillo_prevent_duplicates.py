@@ -21,20 +21,19 @@ async def test_grillo_suppresses_when_last_is_synth(monkeypatch):
     # Ensure INTERFACE_REGISTRY has a fake telegram handler
     monkeypatch.setitem(core_init.INTERFACE_REGISTRY, 'telegram_bot', fake)
 
-    # Prepare in-memory context for the target interface_path
-    ctx = get_or_create_chat_context('telegram_bot/123/2')
+    # Prepare in-memory context for the target interface_path (public group style id)
+    ctx = get_or_create_chat_context('telegram_bot/-100123/2')
     ctx.clear()
     # Append a synth/self message as last
-    ctx.append({'sender_name': 'self', 'sender_id': 'self', 'text': 'I already said that', 'timestamp': '2026-01-08T00:00:00Z', 'interface_path': 'telegram_bot/123/2'})
+    ctx.append({'sender_name': 'self', 'sender_id': 'self', 'text': 'I already said that', 'timestamp': '2026-01-08T00:00:00Z', 'interface_path': 'telegram_bot/-100123/2'})
 
     plugin = MessagePlugin()
-    action = {'type': 'message_telegram_bot', 'payload': {'text': 'Hello again', 'interface_path': 'telegram_bot/123/2'}}
+    action = {'type': 'message_telegram_bot', 'payload': {'text': 'Hello again', 'interface_path': 'telegram_bot/-100123/2'}}
 
     await plugin.execute_action(action, context={'grillo_beat': True, 'activity_log_id': 1}, bot=None, original_message=None)
 
-    # Fake handler should not have been called
-    assert fake.calls == [], "Grillo should not send when last message is from synth"
-
+    # Fake handler should not have been called for public chat
+    assert fake.calls == [], "Grillo should not send when last message in a public chat is from synth"
 
 @pytest.mark.asyncio
 async def test_grillo_obeys_toggle_and_allows_when_disabled(monkeypatch):
@@ -74,9 +73,10 @@ async def test_suppressed_increments_counter(monkeypatch):
     fake = FakeHandler()
     monkeypatch.setitem(core_init.INTERFACE_REGISTRY, 'telegram_bot', fake)
 
-    ctx = get_or_create_chat_context('telegram_bot/123/2')
+    # Use a public-style chat id so suppression applies
+    ctx = get_or_create_chat_context('telegram_bot/-100123/2')
     ctx.clear()
-    ctx.append({'sender_name': 'self', 'sender_id': 'self', 'text': 'I already said that', 'timestamp': '2026-01-08T00:00:00Z', 'interface_path': 'telegram_bot/123/2'})
+    ctx.append({'sender_name': 'self', 'sender_id': 'self', 'text': 'I already said that', 'timestamp': '2026-01-08T00:00:00Z', 'interface_path': 'telegram_bot/-100123/2'})
 
     # Ensure suppression is enabled
     import core.config_manager as cm
@@ -94,12 +94,89 @@ async def test_suppressed_increments_counter(monkeypatch):
     GrilloPlugin.suppressed_count = 0
 
     plugin = MessagePlugin()
-    action = {'type': 'message_telegram_bot', 'payload': {'text': 'Hello again', 'interface_path': 'telegram_bot/123/2'}}
+    action = {'type': 'message_telegram_bot', 'payload': {'text': 'Hello again', 'interface_path': 'telegram_bot/-100123/2'}}
 
     await plugin.execute_action(action, context={'grillo_beat': True, 'activity_log_id': 4}, bot=None, original_message=None)
 
     assert GrilloPlugin.suppressed_count == 1, "Suppressed counter should increment when a duplicate is suppressed"
 
+
+@pytest.mark.asyncio
+async def test_webui_allows_even_if_last_is_synth(monkeypatch):
+    fake = FakeHandler()
+    monkeypatch.setitem(core_init.INTERFACE_REGISTRY, 'synth_webui', fake)
+
+    # prepare in-memory context for the webui target
+    ctx = get_or_create_chat_context('synth_webui/session-1')
+    ctx.clear()
+    ctx.append({'sender_name': 'self', 'sender_id': 'self', 'text': 'I already said that', 'timestamp': '2026-01-08T00:00:00Z', 'interface_path': 'synth_webui/session-1'})
+
+    plugin = MessagePlugin()
+    action = {'type': 'message_synth_webui', 'payload': {'text': 'Hello webui', 'interface_path': 'synth_webui/session-1'}}
+
+    await plugin.execute_action(action, context={'grillo_beat': True, 'activity_log_id': 10}, bot=None, original_message=None)
+
+    # Because webui is exempted, message should be sent
+    assert len(fake.calls) == 1
+    assert fake.calls[0][0]['text'] == 'Hello webui'
+
+
+@pytest.mark.asyncio
+async def test_trainer_allows_even_if_last_is_synth(monkeypatch):
+    fake = FakeHandler()
+    monkeypatch.setitem(core_init.INTERFACE_REGISTRY, 'telegram_bot', fake)
+
+    # prepare in-memory context for the trainer chat
+    ctx = get_or_create_chat_context('telegram_bot/31321637')
+    ctx.clear()
+    ctx.append({'sender_name': 'self', 'sender_id': 'self', 'text': 'I already said that', 'timestamp': '2026-01-08T00:00:00Z', 'interface_path': 'telegram_bot/31321637'})
+
+    # Monkeypatch interfaces_registry.get_interface_registry().is_trainer to return True
+    import core.interfaces_registry as ir
+    class DummyRegistry:
+        def is_trainer(self, interface_name, chat_id):
+            return True
+    monkeypatch.setattr(ir, 'get_interface_registry', lambda: DummyRegistry())
+
+    plugin = MessagePlugin()
+    action = {'type': 'message_telegram_bot', 'payload': {'text': "Hello trainer", 'interface_path': 'telegram_bot/31321637'}}
+
+    await plugin.execute_action(action, context={'grillo_beat': True, 'activity_log_id': 11}, bot=None, original_message=None)
+
+    # Because trainer chat is exempted, message should be sent
+    assert len(fake.calls) == 1
+    assert fake.calls[0][0]['text'] == 'Hello trainer'
+
+
+@pytest.mark.asyncio
+async def test_private_chat_allows_when_last_is_synth(monkeypatch):
+    """Private chats should not be suppressed even if the last message is from synth."""
+    fake = FakeHandler()
+    monkeypatch.setitem(core_init.INTERFACE_REGISTRY, 'telegram_bot', fake)
+
+    ctx = get_or_create_chat_context('telegram_bot/123/2')
+    ctx.clear()
+    ctx.append({'sender_name': 'self', 'sender_id': 'self', 'text': 'I already said that', 'timestamp': '2026-01-08T00:00:00Z', 'interface_path': 'telegram_bot/123/2'})
+
+    # Ensure suppression is enabled
+    import core.config_manager as cm
+    orig_get = cm.config_registry.get_value
+
+    def fake_get_true(key, default, **kwargs):
+        if key == 'GRILLO_SUPPRESS_INACTIVE':
+            return True
+        return orig_get(key, default, **kwargs)
+
+    monkeypatch.setattr(cm.config_registry, 'get_value', fake_get_true)
+
+    plugin = MessagePlugin()
+    action = {'type': 'message_telegram_bot', 'payload': {'text': 'Hello private', 'interface_path': 'telegram_bot/123/2'}}
+
+    await plugin.execute_action(action, context={'grillo_beat': True, 'activity_log_id': 20}, bot=None, original_message=None)
+
+    # Because the chat is private, the message should be sent despite last-from-synth
+    assert len(fake.calls) == 1
+    assert fake.calls[0][0]['text'] == 'Hello private'
 
 @pytest.mark.asyncio
 async def test_record_suppressed_updates_db(monkeypatch):
@@ -129,7 +206,7 @@ async def test_record_suppressed_updates_db(monkeypatch):
         async def __aexit__(self, exc_type, exc, tb):
             pass
 
-        async def cursor(self):
+        def cursor(self):
             return self.cur
 
         async def commit(self):

@@ -171,32 +171,83 @@ class MessagePlugin:
 
                     from core.chat_history_cache import get_last_message
                     target_interface_path = rebuilt_interface_path or interface_path or f"{interface_name}/{target}"
-                    last = await get_last_message(target_interface_path)
-                    if last:
-                        sender_id = last.get("sender_id") or last.get("user_id") or ""
-                        sender_name = (last.get("sender_name") or last.get("username") or "").lower()
-                        # Consider 'self' and obvious bot names as synth-origin
-                        if str(sender_id) == "self" or any(k in sender_name for k in ("rekku", "synth", "bot", "auto_response", "autoreply")):
-                            if not suppress_enabled:
-                                log_debug("[message_plugin] Grillo suppression disabled via config 'GRILLO_SUPPRESS_INACTIVE'; allowing send")
-                            else:
-                                log_info(f"[message_plugin] Skipping Grillo outbound message to {target_interface_path} because last message was from synth ({sender_name}/{sender_id})")
-                                # Record suppression in Grillo activity log if available (best-effort)
+
+                    # Exempt webui and trainer 1:1 chats from suppression checks (synth should be able to write)
+                    try:
+                        parts = (target_interface_path or "").split('/')
+                        maybe_interface = parts[0] if parts else None
+                        maybe_chat_id = parts[1] if len(parts) > 1 else None
+                        # Exempt webui-like interfaces
+                        if maybe_interface and maybe_interface.lower() in ("synth_webui", "webui"):
+                            log_debug(f"[message_plugin] Bypassing Grillo suppression for webui interface: {target_interface_path}")
+                        else:
+                            # Check trainer exemption
+                            try:
+                                from core.interfaces_registry import get_interface_registry
+                                registry = get_interface_registry()
+                                if maybe_interface and maybe_chat_id and maybe_chat_id.lstrip('-').isdigit():
+                                    try:
+                                        if registry.is_trainer(maybe_interface, int(maybe_chat_id)):
+                                            log_debug(f"[message_plugin] Bypassing Grillo suppression for trainer chat: {target_interface_path}")
+                                            bypass_trainer = True
+                                        else:
+                                            bypass_trainer = False
+                                    except Exception:
+                                        bypass_trainer = False
+                                else:
+                                    bypass_trainer = False
+                            except Exception:
+                                bypass_trainer = False
+
+                            if not bypass_trainer:
+                                # Determine whether the target chat is public. We apply suppression ONLY for public chats
+                                is_public = False
                                 try:
-                                    activity_log_id = context.get("activity_log_id") or context.get("grillo_activity_log_id")
-                                    if activity_log_id:
-                                        from plugins.grillo.grillo_impl import GrilloPlugin
-                                        if hasattr(GrilloPlugin, "set_activity_response_text"):
-                                            await GrilloPlugin.set_activity_response_text(int(activity_log_id), "[suppressed duplicate message by grillo]", append=True)
-                                        # Increment suppression metric/counter if plugin exposes it
+                                    if maybe_interface == 'telegram_bot' and maybe_chat_id:
                                         try:
-                                            if hasattr(GrilloPlugin, "record_suppressed_event"):
-                                                await GrilloPlugin.record_suppressed_event(activity_log_id=activity_log_id, reason="last_message_from_synth")
+                                            cid = int(maybe_chat_id)
+                                            if cid < 0:
+                                                is_public = True
                                         except Exception:
-                                            pass
+                                            # If not parseable, default to non-public
+                                            is_public = False
+                                    elif maybe_interface in ('discord', 'reddit', 'matrix') and maybe_chat_id:
+                                        # For channel-based interfaces assume public unless proven otherwise
+                                        is_public = True
                                 except Exception:
-                                    pass
-                                return
+                                    is_public = False
+
+                                if not is_public:
+                                    log_debug(f"[message_plugin] Target chat {target_interface_path} considered non-public; bypassing grillo duplicate suppression")
+                                else:
+                                    last = await get_last_message(target_interface_path)
+                                    if last:
+                                        sender_id = last.get("sender_id") or last.get("user_id") or ""
+                                        sender_name = (last.get("sender_name") or last.get("username") or "").lower()
+                                        # Consider 'self' and obvious bot names as synth-origin
+                                        if str(sender_id) == "self" or any(k in sender_name for k in ("rekku", "synth", "bot", "auto_response", "autoreply")):
+                                            if not suppress_enabled:
+                                                log_debug("[message_plugin] Grillo suppression disabled via config 'GRILLO_SUPPRESS_INACTIVE'; allowing send")
+                                            else:
+                                                log_info(f"[message_plugin] Skipping Grillo outbound message to {target_interface_path} because last message was from synth ({sender_name}/{sender_id})")
+                                                # Record suppression in Grillo activity log if available (best-effort)
+                                                try:
+                                                    activity_log_id = context.get("activity_log_id") or context.get("grillo_activity_log_id")
+                                                    if activity_log_id:
+                                                        from plugins.grillo.grillo_impl import GrilloPlugin
+                                                        if hasattr(GrilloPlugin, "set_activity_response_text"):
+                                                            await GrilloPlugin.set_activity_response_text(int(activity_log_id), "[suppressed duplicate message by grillo]", append=True)
+                                                        # Increment suppression metric/counter if plugin exposes it
+                                                        try:
+                                                            if hasattr(GrilloPlugin, "record_suppressed_event"):
+                                                                await GrilloPlugin.record_suppressed_event(activity_log_id=activity_log_id, reason="last_message_from_synth")
+                                                        except Exception:
+                                                            pass
+                                                except Exception:
+                                                    pass
+                                                return
+                    except Exception as e:
+                        log_debug(f"[message_plugin] Failed to evaluate grillo duplicate suppression: {e}")
                 except Exception as e:
                     log_debug(f"[message_plugin] Failed to evaluate grillo duplicate suppression: {e}")
             await handler.send_message(send_payload, original_message)

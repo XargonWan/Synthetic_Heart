@@ -894,10 +894,10 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
             correction_payload["system_message"]["required_format"] = {
                 "actions": [
                     {
-                        "type": "message_telegram_bot",
+                        "type": "message_<interface>_bot",
                         "payload": {
                             "text": "Your message content here (optional - only if you want to reply to user)",
-                            "interface_path": f"telegram_bot/{chat_id or '-1003098886330'}/{payload_thread_id if payload_thread_id is not None else ''}"
+                            "interface_path": f"<interface_name>/{chat_id or '<chat_id>'}/{payload_thread_id if payload_thread_id is not None else ''}"
                         }
                     }
                 ]

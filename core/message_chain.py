@@ -277,13 +277,31 @@ async def handle_incoming_message(bot, message: Optional[SimpleNamespace], text:
                 # Log for debugging purposes
                 if source == "llm" or getattr(message, "from_llm", False):
                     has_user_response = False
+                    # Determine current set of message action types from config (dynamic)
+                    try:
+                        from core.config_manager import config_registry
+                        MESSAGE_ACTION_TYPES = config_registry.get_var(
+                            "MESSAGE_ACTION_TYPES",
+                            ["message_telegram_bot", "message_discord_bot", "message_ollama_serve", "message_synth_webui"],
+                            label="Message action types",
+                            description="List of action types considered as outbound user messages.",
+                            group="core",
+                            component="message_chain",
+                        )
+                        current_message_action_types = list(MESSAGE_ACTION_TYPES.value) if hasattr(MESSAGE_ACTION_TYPES, 'value') else list(MESSAGE_ACTION_TYPES)
+                    except Exception:
+                        current_message_action_types = ["message_telegram_bot", "message_discord_bot", "message_ollama_serve", "message_synth_webui"]
+
                     if isinstance(actions, list):
                         for action in actions:
-                            action_name = action.get('action') if isinstance(action, dict) else None
-                            if action_name in ['message_telegram_bot', 'message_discord_bot', 'message_ollama_serve']:
+                            # Support both 'action' and 'type' keys
+                            action_name = None
+                            if isinstance(action, dict):
+                                action_name = action.get('action') or action.get('type')
+                            if action_name in current_message_action_types:
                                 has_user_response = True
                                 break
-                    
+
                     if not has_user_response:
                         log_debug('[message_chain] LLM chose not to send user message (diary/internal only)')
                     else:

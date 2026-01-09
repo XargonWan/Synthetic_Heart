@@ -2512,7 +2512,7 @@ class SynthWebUIInterface:
                     if not include_archived:
                         # Get approximate count using LIMIT + 1 trick (faster than COUNT)
                         query = f"""
-                            SELECT id, LEFT(content, 200) as content, LEFT(personal_thought, 100) as personal_thought, 
+                            SELECT id, content as content, personal_thought as personal_thought, 
                                    timestamp, interaction_summary, 
                                    JSON_EXTRACT(emotions, '$[0].type') as primary_emotion,
                                    JSON_LENGTH(involved_users) as user_count
@@ -2541,7 +2541,7 @@ class SynthWebUIInterface:
                         # With archived: use simpler UNION but with LIMIT push-down
                         query = f"""
                             SELECT * FROM (
-                                (SELECT id, LEFT(content, 200) as content, LEFT(personal_thought, 100) as personal_thought, 
+                                (SELECT id, content as content, personal_thought as personal_thought, 
                                        timestamp, interaction_summary,
                                        JSON_EXTRACT(emotions, '$[0].type') as primary_emotion,
                                        JSON_LENGTH(involved_users) as user_count,
@@ -2551,7 +2551,7 @@ class SynthWebUIInterface:
                                 ORDER BY timestamp {order}
                                 LIMIT {per_page * 2})
                                 UNION ALL
-                                (SELECT id, LEFT(content, 200), LEFT(personal_thought, 100), 
+                                (SELECT id, content as content, personal_thought as personal_thought, 
                                        timestamp, interaction_summary,
                                        JSON_EXTRACT(emotions, '$[0].type'),
                                        JSON_LENGTH(involved_users),
@@ -2581,8 +2581,8 @@ class SynthWebUIInterface:
                         
                         entries.append({
                             "id": row[0],
-                            "content": row[1],  # Already truncated by LEFT()
-                            "personal_thought": row[2],  # Already truncated
+                            "content": row[1],
+                            "personal_thought": row[2],
                             "timestamp": timestamp_str,
                             "interaction_summary": row[4],
                             "primary_emotion": row[5],  # Single emotion instead of array
@@ -2652,11 +2652,11 @@ class SynthWebUIInterface:
                     query = f"""
                         SELECT g.id,
                                g.beat_type,
-                               LEFT(g.prompt_text, 300) as prompt_text,
-                               LEFT(g.response_text, 500) as response_text,
+                               g.prompt_text as prompt_text,
+                               g.response_text as response_text,
                                g.diary_entry_id,
                                g.executed_at,
-                               LEFT(d.content, 500) as diary_content
+                               d.content as diary_content
                         FROM grillo_activity_log g
                         LEFT JOIN ai_diary d ON g.diary_entry_id = d.id
                         WHERE {where_clause}
