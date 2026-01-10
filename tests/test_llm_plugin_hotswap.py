@@ -80,7 +80,7 @@ async def test_llm_plugin_worker_task_waiting():
     
     mock_task.side_effect = task_completion
     
-    with patch('core.llm_registry.get_llm_registry') as mock_registry:
+    with patch('core.plugin_instance.get_llm_registry') as mock_registry:
         mock_registry_instance = Mock()
         mock_new_plugin = Mock()
         mock_new_plugin.__class__.__module__ = "llm_engines.selenium_chatgpt"
@@ -95,5 +95,23 @@ async def test_llm_plugin_worker_task_waiting():
     initial_plugin.cleanup.assert_called_once()
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+@pytest.mark.asyncio
+async def test_hotswap_raises_if_start_fails_when_ensured():
+    """When ensuring start during hot-swap, failures in start() should propagate."""
+    # Do not rely on initial 'manual' plugin presence to avoid DB/import side-effects
+    with patch('core.plugin_instance.get_llm_registry') as mock_registry:
+        mock_registry_instance = Mock()
+        # Plugin whose start() raises
+        async def failing_start():
+            raise Exception("startboom")
+
+        mock_new_plugin = Mock()
+        mock_new_plugin.__class__.__module__ = "llm_engines.selenium_chatgpt"
+        mock_new_plugin.start = failing_start
+
+        mock_registry_instance.load_engine = Mock(return_value=mock_new_plugin)
+        mock_registry.return_value = mock_registry_instance
+
+        with pytest.raises(Exception):
+            # ensure_started=True should await start and propagate
+            await load_plugin("selenium_chatgpt", ensure_started=True, start_timeout=1.0)
