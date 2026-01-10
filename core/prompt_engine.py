@@ -368,6 +368,23 @@ async def search_memories(tags=None, scope=None, limit=5):
                     if isinstance(mem, str) and len(mem) > 400:
                         mem = mem[:400] + "..."
                     memories.append(mem)
+
+                # Also search ai_diary for context_tags to include diary entries in memories
+                try:
+                    diary_query = f"SELECT DISTINCT content FROM ai_diary WHERE json_valid(context_tags) AND ({conditions}) ORDER BY timestamp DESC LIMIT %s"
+                    diary_params = [json_dumps(tag) for tag in tags]
+                    diary_params.append(limit)
+                    await cur.execute(diary_query, diary_params)
+                    rows2 = await cur.fetchall()
+                    for r in rows2:
+                        mem = r[0]
+                        if isinstance(mem, str) and len(mem) > 400:
+                            mem = mem[:400] + "..."
+                        memories.append(mem)
+                except Exception:
+                    # If ai_diary search fails, ignore and continue with memories only
+                    pass
+
                 log_debug(f"[search_memories] Retrieved {len(memories)} memories, ~{sum(len(str(m)) for m in memories)} chars total")
                 return memories
         except Exception as e:

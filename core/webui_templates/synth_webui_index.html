@@ -746,6 +746,9 @@
             flex-direction: column;
             gap: 0.75rem;
         }
+        .component-action-controls { margin-top: 8px; display:flex; flex-direction:column; gap:8px; }
+        .component-action-payload { width:100%; min-height:56px; font-family: monospace; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg); }
+        .component-action-result { white-space: pre-wrap; font-family: monospace; }
         details.component-item {
             background: rgba(255, 255, 255, 0.04);
             border: 1px solid var(--border);
@@ -4009,6 +4012,71 @@
                             });
                             li.appendChild(meta);
                         }
+
+                        // --- Run controls: Allow triggering this action from the UI
+                        const controls = document.createElement('div');
+                        controls.className = 'component-action-controls';
+                        // Provide a small JSON payload editor so operators can customize runs
+                        const payloadInput = document.createElement('textarea');
+                        payloadInput.className = 'component-action-payload';
+                        payloadInput.placeholder = '{"cycles":1, "dry_run": true}';
+                        // If the action exposes optional fields, provide a helpful default
+                        try {
+                            const opts = Array.isArray(action?.optional_fields) ? action.optional_fields : [];
+                            const defaultPayload = {};
+                            if (opts.includes('cycles')) defaultPayload.cycles = 1;
+                            if (opts.includes('dry_run')) defaultPayload.dry_run = true;
+                            if (Object.keys(defaultPayload).length) payloadInput.value = JSON.stringify(defaultPayload);
+                        } catch (e) {
+                            // ignore
+                        }
+                        payloadInput.style.cssText = 'width:100%; min-height:56px; font-family: monospace; margin-top:8px; padding:8px;';
+
+                        const runBtn = document.createElement('button');
+                        runBtn.className = 'pill primary';
+                        runBtn.type = 'button';
+                        runBtn.textContent = 'Run';
+
+                        const resultPre = document.createElement('pre');
+                        resultPre.className = 'component-action-result';
+                        resultPre.style.cssText = 'display:none; margin-top:8px; padding:8px; background:var(--bg-muted); overflow:auto; max-height:240px;';
+
+                        runBtn.addEventListener('click', async (ev) => {
+                            ev.preventDefault(); ev.stopPropagation();
+                            runBtn.disabled = true; const prev = runBtn.textContent; runBtn.textContent = 'Running…';
+                            // Parse payload JSON (fallback to {} on parse error)
+                            let payload = {};
+                            try { payload = payloadInput.value ? JSON.parse(payloadInput.value) : {}; } catch (err) { payload = {}; }
+                            try {
+                                const res = await fetch('/api/components/run', {
+                                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ component: item.name, action: action.name, payload: payload })
+                                });
+                                if (res.ok) {
+                                    let json = null;
+                                    try { json = await res.json(); } catch (e) { json = { text: await res.text() }; }
+                                    resultPre.style.display = 'block';
+                                    resultPre.textContent = JSON.stringify(json, null, 2);
+                                    setStatusMessage(`Action '${action.name}' scheduled for ${item.display_name || item.name}`, 'success');
+                                } else {
+                                    const text = await res.text();
+                                    resultPre.style.display = 'block';
+                                    resultPre.textContent = `Error ${res.status}: ${text}`;
+                                    setStatusMessage('Action failed', 'error');
+                                }
+                            } catch (e) {
+                                resultPre.style.display = 'block';
+                                resultPre.textContent = `Request failed: ${e}`;
+                                setStatusMessage('Action request error', 'error');
+                            } finally {
+                                runBtn.disabled = false; runBtn.textContent = prev;
+                            }
+                        });
+
+                        controls.appendChild(payloadInput);
+                        controls.appendChild(runBtn);
+                        controls.appendChild(resultPre);
+                        li.appendChild(controls);
 
                         list.appendChild(li);
                     });

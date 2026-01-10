@@ -291,6 +291,8 @@ class SynthWebUIInterface:
         self.app.post("/api/components/llm")(self.set_llm_engine)
         # Login control for Selenium-based LLM engines
         self.app.post("/api/components/llm/login")(self.llm_login)
+        # Run component actions on demand (e.g., Run Now button)
+        self.app.post("/api/components/run")(self.run_component)
         self.app.get("/api/logchat/info")(self.get_logchat_info)
         self.app.get("/api/diary")(self.diary_summary)
         self.app.post("/api/diary/archive")(self.archive_diary_entries)
@@ -3887,6 +3889,57 @@ class SynthWebUIInterface:
         except Exception as exc:
             log_error(f"{LOG_PREFIX} Failed to start login flow for '{name}': {exc}")
             raise HTTPException(status_code=500, detail=f"Failed to start login flow for '{name}': {exc}") from exc
+
+    async def run_component(self, request: Request):
+        """Run a component/plugin action on demand.
+
+        Expected JSON: { "name": "component_name", "action": "action_name", "payload": { ... } }
+        """
+        try:
+            data = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+
+        name = str(data.get("name") or data.get("component") or "").strip()
+        action = str(data.get("action") or "run_now")
+        payload = data.get("payload") or {}
+
+        if not name:
+            raise HTTPException(status_code=400, detail="Missing 'name' / 'component' field")
+
+        try:
+            from core.core_initializer import PLUGIN_REGISTRY, INTERFACE_REGISTRY
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Unable to access registries: {exc}")
+            raise HTTPException(status_code=500, detail="Unable to access component registry") from exc
+
+        component = PLUGIN_REGISTRY.get(name) or INTERFACE_REGISTRY.get(name)
+        if component is None:
+            raise HTTPException(status_code=404, detail=f"Component '{name}' not found")
+
+        # Prefer standardized run_action method
+        if hasattr(component, "run_action"):
+            try:
+                result = component.run_action(action, payload, context=data.get("context"))
+                if asyncio.iscoroutine(result):
+                    result = await result
+                return JSONResponse({"status": "ok", "result": result})
+            except Exception as exc:
+                log_error(f"{LOG_PREFIX} Component run_action failed for {name}: {exc}")
+                raise HTTPException(status_code=500, detail=f"Component run_action failed: {exc}") from exc
+
+        # Fallback to common method names
+        for method_name in ("run_now", "run_once", "execute_now"):
+            if hasattr(component, method_name):
+                try:
+                    meth = getattr(component, method_name)
+                    result = meth(payload) if not asyncio.iscoroutinefunction(meth) else await meth(payload)
+                    return JSONResponse({"status": "ok", "result": result})
+                except Exception as exc:
+                    log_error(f"{LOG_PREFIX} Component {method_name} failed for {name}: {exc}")
+                    raise HTTPException(status_code=500, detail=f"Component {method_name} failed: {exc}") from exc
+
+        raise HTTPException(status_code=400, detail="Component does not support run_action or run_now")
 
     async def reload_component(self, request: Request):
         """Reload a specific component (interface or plugin)."""
