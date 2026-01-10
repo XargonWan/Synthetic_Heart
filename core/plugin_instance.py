@@ -16,7 +16,7 @@ from core.mention_utils import is_message_for_bot
 # Plugin managed centrally in initialize_core_components
 plugin = None
 
-async def load_plugin(name: str, notify_fn=None):
+async def load_plugin(name: str, notify_fn=None, *, ensure_started: bool = False, start_timeout: float = 30.0):
     global plugin
 
     # 🔁 If already loaded but different, replace it or update notify_fn
@@ -117,18 +117,59 @@ async def load_plugin(name: str, notify_fn=None):
                     loop = asyncio.get_running_loop()
                 except RuntimeError:
                     loop = None
+
                 if loop and loop.is_running():
-                    loop.create_task(start_fn())
-                    log_debug("[plugin] Plugin start executed on running loop.")
+                    if ensure_started:
+                        # Await the coroutine start to ensure plugin initialized properly
+                        try:
+                            log_debug("[plugin] Awaiting async plugin start (ensure_started=True)")
+                            await asyncio.wait_for(start_fn(), timeout=start_timeout)
+                            log_debug("[plugin] ✅ Async plugin start awaited and completed")
+                        except asyncio.TimeoutError:
+                            log_error(f"[plugin] ❌ Async plugin start timed out after {start_timeout}s")
+                            raise
+                        except Exception as e:
+                            log_error(f"[plugin] ❌ Async plugin start failed: {e}", e)
+                            raise
+                    else:
+                        # Schedule start as background task but attach callback to handle exceptions
+                        task = loop.create_task(start_fn())
+
+                        def _on_start_done(t):
+                            try:
+                                exc = t.exception()
+                                if exc:
+                                    log_error(f"[plugin] Async plugin start failed: {exc}")
+                                else:
+                                    log_debug("[plugin] Async plugin start completed successfully")
+                            except asyncio.CancelledError:
+                                log_warning("[plugin] Async plugin start task was cancelled")
+                            except Exception as e:
+                                log_error(f"[plugin] Error handling plugin start completion: {e}")
+
+                        task.add_done_callback(_on_start_done)
+                        log_debug("[plugin] Plugin start scheduled on running loop.")
                 else:
+                    if ensure_started:
+                        # We cannot await start() without a running loop in this context
+                        log_error("[plugin] ❌ Cannot ensure async plugin start: no running event loop available")
+                        raise RuntimeError("No running event loop to await plugin start")
                     log_debug(
                         "[plugin] No running loop; plugin start will be invoked later."
                     )
             else:
-                start_fn()
-                log_debug("[plugin] Plugin start executed.")
+                # Synchronous start
+                if ensure_started:
+                    start_fn()
+                    log_debug("[plugin] ✅ Synchronous plugin start executed (ensure_started=True)")
+                else:
+                    start_fn()
+                    log_debug("[plugin] Plugin start executed.")
         except Exception as e:
             log_error(f"[plugin] Error during plugin start: {e}", e)
+            if ensure_started:
+                # Propagate errors when the caller requested a guaranteed start
+                raise
 
     # Default model
     if hasattr(plugin, "get_supported_models"):

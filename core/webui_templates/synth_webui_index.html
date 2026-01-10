@@ -3783,7 +3783,11 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ name }),
                 });
-                if (!res.ok) throw new Error('HTTP ' + res.status);
+                if (!res.ok) {
+                    const errPayload = await res.json().catch(() => ({}));
+                    const detail = errPayload?.detail ? String(errPayload.detail) : null;
+                    throw new Error(detail || ('HTTP ' + res.status));
+                }
                 const payload = await res.json();
                 await refreshComponents(true);
                 // Refresh configuration too, as active LLM change affects exposed vars
@@ -3796,7 +3800,8 @@
                 }
             } catch (error) {
                 console.error('[synth_webui] Unable to switch LLM', error);
-                setStatusMessage('Unable to switch LLM engine', 'error');
+                const msg = (error && error.message) ? String(error.message) : 'Unable to switch LLM engine';
+                setStatusMessage(`Unable to switch LLM engine: ${msg}`, 'error');
                 if (trigger) {
                     try { trigger.disabled = false; trigger.textContent = prevText; } catch (e) {}
                 }
