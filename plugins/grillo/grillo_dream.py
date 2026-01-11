@@ -205,6 +205,7 @@ class GrilloDreamPlugin:
                     "grillo_beat": True,
                     "beat_type": "dream",
                     "activity_log_id": activity_log_id,
+                    "grillo_fragments": fragments,
                 }
 
                 item = {
@@ -247,12 +248,16 @@ class GrilloDreamPlugin:
                         # take up to 2 messages per chat (most recent)
                         taken = 0
                         for msg in reversed(list(messages)):
-                            text = msg.get('text') if isinstance(msg, dict) else None
+                            if not isinstance(msg, dict):
+                                continue
+                            text = msg.get('text')
+                            sender = msg.get('sender_name') or msg.get('sender_id') or "unknown"
+                            timestamp = msg.get('timestamp') or ""
                             if text:
                                 snippet = text.strip()
                                 if len(snippet) > 300:
                                     snippet = snippet[:300] + "..."
-                                fragments.append(f"(chat:{chat_path}) {snippet}")
+                                fragments.append(f"(chat:{chat_path} | sender:{sender} | {timestamp}) {snippet}")
                                 taken += 1
                             if taken >= 2 or len(fragments) >= limit:
                                 break
@@ -309,6 +314,8 @@ class GrilloDreamPlugin:
 
         instructions = (
             "\n\nINSTRUCTIONS:\n"
+            "- Before generating the dream, check the fragments above for similar concepts. If you (the assistant) or the synth already authored a similar sentiment or message, avoid repeating it—do not reproduce duplicate material.\n"
+            "- Treat messages authored by the synth (e.g., 'Rekku', 'G.R.I.L.L.O.' or other system agents) as existing content to consider when checking for duplicates.\n"
             "- Generate a single, cohesive dream narrative (approx 150-400 words).\n"
             "- RESPOND ONLY WITH VALID JSON following the exact format below (no prose outside JSON):\n"
             "{\"actions\": [{\"type\": \"create_personal_diary_entry\", \"payload\": {\"content\": \"...\"}}], \"meta\": {\"autonomous\": true, \"rationale\": \"Daily dream consolidation\"}}\n"

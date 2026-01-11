@@ -30,10 +30,18 @@ with Image.open(SRC) as img:
         top = (h - min_side) // 2
         img = img.crop((left, top, left + min_side, top + min_side))
 
+    # Reduce artwork slightly and center it on a transparent canvas to avoid clipping
+    SCALE = 0.88  # scale factor (88% -> ~12% padding)
     for size in (180, 192, 512):
-        out = img.resize((size, size), Image.LANCZOS)
+        inner = int(size * SCALE)
+        # Resize the artwork smaller, keeping aspect ratio
+        inner_img = img.resize((inner, inner), Image.LANCZOS)
+        # Create transparent canvas and paste centered
+        canvas = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+        offset = ((size - inner) // 2, (size - inner) // 2)
+        canvas.paste(inner_img, offset, inner_img)
         out_path = BASE / f'synth_icon_{size}.png'
-        out.save(out_path, format='PNG')
+        canvas.save(out_path, format='PNG')
         print('Wrote', out_path)
 
 print('Icons generated. Add them to your Docker image or bind-mount /config/static as needed.')
