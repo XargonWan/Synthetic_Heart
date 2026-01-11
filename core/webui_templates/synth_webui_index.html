@@ -4098,12 +4098,22 @@
                 stateSpan.textContent = 'state: –';
             }
 
-            // Selection change updates info
-            select.onchange = () => {
+            // Selection change updates info AND switches LLM if a different engine is selected
+            select.onchange = async () => {
                 const sel = select.selectedOptions[0];
                 if (!sel) return;
+                
+                const selectedName = select.value;
+                const selectedDisplay = sel.textContent;
+                
+                // Update display info
                 modelSpan.textContent = `model: ${sel.dataset.model || '–'}`;
                 stateSpan.textContent = `state: ${sel.dataset.loginState || 'unknown'}`;
+                
+                // If the selected engine is not marked as active, switch to it
+                if (sel.dataset.active !== 'true') {
+                    await switchLLM(selectedName, null, selectedDisplay);
+                }
             };
 
             // Login button handler (robust: fallback to active engine if none selected)
