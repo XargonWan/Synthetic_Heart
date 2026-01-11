@@ -159,6 +159,7 @@ class GrilloChatObserverPlugin:
                     "grillo_beat": True,
                     "beat_type": "observer",
                     "activity_log_id": activity_log_id,
+                    "grillo_snippets": fragments,
                 }
 
                 await message_queue.enqueue_low_priority(None, message, context_memory=context, interface_id='grillo', original_message=None)
@@ -184,12 +185,16 @@ class GrilloChatObserverPlugin:
                     # take up to 2 recent messages per chat
                     taken = 0
                     for msg in reversed(list(messages)):
-                        text = msg.get('text') if isinstance(msg, dict) else None
+                        if not isinstance(msg, dict):
+                            continue
+                        text = msg.get('text')
+                        sender = msg.get('sender_name') or msg.get('sender_id') or "unknown"
+                        timestamp = msg.get('timestamp') or ""
                         if text:
                             snippet = text.strip()
                             if len(snippet) > 300:
                                 snippet = snippet[:300] + "..."
-                            snippets.append(f"(chat:{chat_path}) {snippet}")
+                            snippets.append(f"(chat:{chat_path} | sender:{sender} | {timestamp}) {snippet}")
                             taken += 1
                         if taken >= 2 or len(snippets) >= limit:
                             break
@@ -227,6 +232,8 @@ class GrilloChatObserverPlugin:
 
         instructions = (
             "\n\nINSTRUCTIONS:\n"
+            "- Before deciding to write a message or propose a communication, check the chat snippets above for similar messages or concepts. If you (the assistant) or the synth already authored a similar message, do NOT repeat it—avoid producing duplicate messages or proposals.\n"
+            "- Treat messages authored by the synth (e.g., 'Rekku', 'G.R.I.L.L.O.' or other system agents) as existing proposals to consider when checking for duplicates.\n"
             "- For each useful suggestion produce one action in the 'actions' array, e.g. {\"type\": \"message_telegram_bot\", \"payload\": {...}, \"safe\": true}.\n"
             "- RESPOND ONLY WITH VALID JSON (no extra text).\n"
         )

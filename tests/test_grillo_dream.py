@@ -13,6 +13,8 @@ async def test_build_dream_prompt_contains_instructions():
     assert "Fragments:" in prompt
     assert "create_personal_diary_entry" in prompt
     assert '"autonomous": true' in prompt
+    # deduplication instruction should be present
+    assert 'check the fragments' in prompt.lower() or 'avoid repeating' in prompt.lower() or 'do not repeat' in prompt.lower()
 
 
 @pytest.mark.asyncio
@@ -65,8 +67,9 @@ async def test_collect_fragments_with_mocks(monkeypatch):
     fragments = await p._collect_fragments(4)
     assert isinstance(fragments, list)
     assert len(fragments) <= 4
-    # fragments should contain markers like (chat: or (memory)
+    # fragments should contain markers like (chat: or (memory) and include sender metadata
     assert any(f.startswith("(chat:") or f.startswith("(memory)") for f in fragments)
+    assert any('sender:' in f or 'sender:' in f for f in fragments)
 
 
 def test_seconds_until_next_run_returns_int():
