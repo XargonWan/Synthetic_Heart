@@ -254,7 +254,7 @@ class GrilloCompactorPlugin:
         return max(0, int(delta))
 
     async def _run_one_compaction_cycle(self, dry_run: bool = False, marker: str | None = None):
-        """Select candidate memories, chunk them into windows, run clustering+compaction on each window.
+        """Select candidate memories, chunk them into windows, run clustering+compaction on the first valid window.
 
         If `dry_run=True`, do not persist changes and return proposed cluster results.
         """
@@ -264,34 +264,34 @@ class GrilloCompactorPlugin:
             from core.llm_registry import get_llm_registry
             from core.config import get_active_llm
 
-            cutoff = f"%s"
             age_days = self.age_days
             limit = max(1, int(self.batch_size))
 
-            async with get_conn_ctx() as conn:
-                async with conn.cursor() as cur:
-                    # Fetch candidate older diary entries (ordered oldest first)
-                    # Use `context_tags` from `ai_diary` as `tags`. Support optional `marker` filter on tags.
-                    if marker:
-                        # JSON_CONTAINS requires the searched value to be valid JSON string (e.g. '"food"')
-                        await cur.execute(
-                            "SELECT id, content, context_tags as tags, timestamp FROM ai_diary WHERE timestamp < DATE_SUB(NOW(), INTERVAL %s DAY) AND JSON_CONTAINS(context_tags, %s) ORDER BY timestamp ASC LIMIT %s",
-                            (age_days, json.dumps(marker), limit),
-                        )
-                    else:
-                        await cur.execute(
-                            "SELECT id, content, context_tags as tags, timestamp FROM ai_diary WHERE timestamp < DATE_SUB(NOW(), INTERVAL %s DAY) ORDER BY timestamp ASC LIMIT %s",
-                            (age_days, limit),
-                        )
-                    candidates = await cur.fetchall()
+            offset = 0
+            processed_any = False
+            dry_results = [] if dry_run else None
 
-            if not candidates:
-                log_debug("[grillo_compactor] No candidate memories found for compaction")
-                return False
+            while True:
+                async with get_conn_ctx() as conn:
+                    async with conn.cursor() as cur:
+                        # Fetch candidate older diary entries (ordered oldest first), with pagination via OFFSET
+                        if marker:
+                            await cur.execute(
+                                "SELECT id, content, context_tags as tags, timestamp FROM ai_diary WHERE timestamp < DATE_SUB(NOW(), INTERVAL %s DAY) AND JSON_CONTAINS(context_tags, %s) ORDER BY timestamp ASC LIMIT %s OFFSET %s",
+                                (age_days, json.dumps(marker), limit, offset),
+                            )
+                        else:
+                            await cur.execute(
+                                "SELECT id, content, context_tags as tags, timestamp FROM ai_diary WHERE timestamp < DATE_SUB(NOW(), INTERVAL %s DAY) ORDER BY timestamp ASC LIMIT %s OFFSET %s",
+                                (age_days, limit, offset),
+                            )
+                        candidates = await cur.fetchall()
 
-            # Group candidates into temporal windows of window_days
-            chunks: List[list] = []
-            try:
+                if not candidates:
+                    # No more candidates available
+                    log_debug("[grillo_compactor] No candidate memories found for compaction (after pagination)")
+                    break
+
                 # Normalize rows into dicts for easier handling (include tags)
                 norm = []
                 for r in candidates:
@@ -317,7 +317,7 @@ class GrilloCompactorPlugin:
 
                     norm.append({'id': rid, 'content': content or '', 'timestamp': ts, 'tags': tags_parsed})
 
-                # If the earliest candidates are untagged, skip forward until the first tagged memory
+                # If the earliest candidates are untagged, skip entire batch and continue to next
                 first_tagged_idx = None
                 for i, e in enumerate(norm):
                     if e.get('tags'):
@@ -325,65 +325,69 @@ class GrilloCompactorPlugin:
                         break
 
                 if first_tagged_idx is None:
-                    # No tagged candidates in this batch -> nothing to do
-                    log_debug("[grillo_compactor] No tagged candidate memories in this batch; skipping compaction")
-                    return False
+                    # No tagged candidates in this batch -> skip entire batch and continue with next offset
+                    log_info(f"[grillo_compactor] Skipping entire batch of {len(norm)} untagged candidate(s); moving to next batch (offset {offset})")
+                    offset += len(norm)
+                    continue
 
                 if first_tagged_idx > 0:
                     skipped_ids = [e.get('id') for e in norm[:first_tagged_idx]]
                     log_info(f"[grillo_compactor] Skipping {len(skipped_ids)} leading untagged candidate(s): {skipped_ids}")
                     norm = norm[first_tagged_idx:]
 
-
                 # Build windows
-                i = 0
-                while i < len(norm):
-                    start_ts = norm[i]['timestamp']
-                    try:
-                        if isinstance(start_ts, str):
-                            start_dt = datetime.fromisoformat(start_ts)
-                        else:
-                            start_dt = start_ts
-                    except Exception:
-                        start_dt = datetime.now(timezone.utc)
-                    window = [norm[i]]
-                    j = i + 1
-                    while j < len(norm):
+                chunks: List[list] = []
+                try:
+                    i = 0
+                    while i < len(norm):
+                        start_ts = norm[i]['timestamp']
                         try:
-                            other_ts = norm[j]['timestamp']
-                            if isinstance(other_ts, str):
-                                other_dt = datetime.fromisoformat(other_ts)
+                            if isinstance(start_ts, str):
+                                start_dt = datetime.fromisoformat(start_ts)
                             else:
-                                other_dt = other_ts
+                                start_dt = start_ts
                         except Exception:
-                            other_dt = start_dt
-                        if (other_dt - start_dt).days < self.window_days:
-                            window.append(norm[j])
-                            j += 1
-                        else:
-                            break
-                    chunks.append(window)
-                    i = j
-            except Exception as e:
-                log_debug(f"[grillo_compactor] Failed to build time windows: {e}")
-                # Fallback: single chunk equals all candidates
-                chunks = [ [{'id': (r.get('id') if isinstance(r, dict) else r[0]), 'content': (r.get('content') if isinstance(r, dict) else r[1]), 'timestamp': (r.get('timestamp') if isinstance(r, dict) else r[3])} for r in candidates] ]
+                            start_dt = datetime.now(timezone.utc)
+                        window = [norm[i]]
+                        j = i + 1
+                        while j < len(norm):
+                            try:
+                                other_ts = norm[j]['timestamp']
+                                if isinstance(other_ts, str):
+                                    other_dt = datetime.fromisoformat(other_ts)
+                                else:
+                                    other_dt = other_ts
+                            except Exception:
+                                other_dt = start_dt
+                            if (other_dt - start_dt).days < self.window_days:
+                                window.append(norm[j])
+                                j += 1
+                            else:
+                                break
+                        chunks.append(window)
+                        i = j
+                except Exception as e:
+                    log_debug(f"[grillo_compactor] Failed to build time windows: {e}")
+                    # Fallback: single chunk equals all candidates
+                    chunks = [ [{'id': (r.get('id') if isinstance(r, dict) else r[0]), 'content': (r.get('content') if isinstance(r, dict) else r[1]), 'timestamp': (r.get('timestamp') if isinstance(r, dict) else r[3])} for r in norm] ]
 
-            # Process each chunk independently
-            dry_results = [] if dry_run else None
-            for window in chunks:
-                if not window:
-                    continue
-                # Run clustering+compaction on this window
-                ret = await self._cluster_and_compact_batch(window, dry_run=dry_run)
-                if dry_run and isinstance(ret, dict) and ret.get('dry_run'):
-                    dry_results.extend(ret.get('results') or [])
+                # Process each chunk independently and stop after processing a valid batch
+                for window in chunks:
+                    if not window:
+                        continue
+                    # Run clustering+compaction on this window
+                    ret = await self._cluster_and_compact_batch(window, dry_run=dry_run)
+                    if dry_run and isinstance(ret, dict) and ret.get('dry_run'):
+                        dry_results.extend(ret.get('results') or [])
+                    processed_any = True
+
+                # After processing a batch with tags, stop (we only process the first valid batch in this cycle)
+                break
 
             if dry_run:
                 return {'dry_run': True, 'results': dry_results}
 
-            return True
-
+            return True if processed_any else False
         except Exception as exc:
             log_error(f"[grillo_compactor] Unexpected error in cycle: {exc}")
             return False
@@ -405,10 +409,14 @@ class GrilloCompactorPlugin:
             id_to_content = {}
             for r in batch:
                 rid = r.get('id') if isinstance(r, dict) else r[0]
+                # Normalize id to int to avoid mismatches between LLM source_ids and DB ids
+                try:
+                    rid_int = int(rid)
+                except Exception:
+                    rid_int = rid
                 content = r.get('content') if isinstance(r, dict) else r[1]
-                id_to_content[rid] = content or ""
-                entries.append({"id": rid, "content": (content[:1200] if content else "")})
-
+                id_to_content[rid_int] = content or ""
+                entries.append({"id": rid_int, "content": (content[:1200] if content else "")})
             header = (
                 "COMPACT MEMORIES: You will receive a list of memory entries (each has id and content).\n"
                 "Do NOT invent facts not present in the inputs. Your task: cluster entries that are semantically related, and for each cluster decide if it should be compacted.\n"
@@ -434,11 +442,19 @@ class GrilloCompactorPlugin:
             # Call LLM
             active_llm = await get_active_llm()
             registry = get_llm_registry()
-            try:
-                engine = registry.get_engine(active_llm)
-            except Exception as e:
-                log_error(f"[grillo_compactor] Could not get active LLM engine '{active_llm}': {e}")
-                return False
+            engine = registry.get_engine(active_llm)
+            if engine is None:
+                try:
+                    engine = registry.load_engine(active_llm)
+                except Exception as e:
+                    log_error(f"[grillo_compactor] Could not load active LLM engine '{active_llm}': {e}")
+                    # Try a safe fallback to the bundled 'manual' engine
+                    try:
+                        engine = registry.load_engine('manual')
+                        log_info("[grillo_compactor] Fallback to 'manual' LLM engine succeeded")
+                    except Exception as e2:
+                        log_error(f"[grillo_compactor] Fallback to manual engine failed: {e2}")
+                        return False
 
             # Generate response
             try:
