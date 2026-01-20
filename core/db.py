@@ -40,23 +40,40 @@ def _read_db_config():
     """Return DB_HOST, DB_PORT, DB_USER, DB_PASS, DB_NAME reading from
     config_registry when available, otherwise from environment or defaults.
     """
+    # DB connection settings must be environment-driven.
+    # If a previous run persisted an incorrect DB_HOST (e.g. "localhost") into
+    # config_registry/DB, preferring that value can lock the system out of DB.
+    env_host = os.getenv('DB_HOST')
+    env_port = os.getenv('DB_PORT')
+    env_user = os.getenv('DB_USER')
+    env_pass = os.getenv('DB_PASS')
+    env_name = os.getenv('DB_NAME')
+
+    # Start from env (or hard defaults if env is missing)
+    host = env_host or 'localhost'
     try:
-        # Prefer config_registry values if accessible
-        host = config_registry.get_value('DB_HOST', os.getenv('DB_HOST', 'localhost'))
-        port = int(config_registry.get_value('DB_PORT', int(os.getenv('DB_PORT', 3306))))
-        user = config_registry.get_value('DB_USER', os.getenv('DB_USER', 'synth'))
-        passwd = config_registry.get_value('DB_PASS', os.getenv('DB_PASS', 'synth'))
-        dbname = config_registry.get_value('DB_NAME', os.getenv('DB_NAME', 'synth'))
+        port = int(env_port) if env_port is not None else 3306
     except Exception:
-        # Fall back to environment or defaults if config_registry is not ready
-        host = os.getenv('DB_HOST', 'localhost')
-        try:
-            port = int(os.getenv('DB_PORT', '3306'))
-        except Exception:
-            port = 3306
-        user = os.getenv('DB_USER', 'synth')
-        passwd = os.getenv('DB_PASS', 'synth')
-        dbname = os.getenv('DB_NAME', 'synth')
+        port = 3306
+    user = env_user or 'synth'
+    passwd = env_pass or 'synth'
+    dbname = env_name or 'synth'
+
+    # Allow config_registry to fill only the missing pieces (never override env)
+    try:
+        if env_host is None:
+            host = config_registry.get_value('DB_HOST', host)
+        if env_port is None:
+            port = int(config_registry.get_value('DB_PORT', port))
+        if env_user is None:
+            user = config_registry.get_value('DB_USER', user)
+        if env_pass is None:
+            passwd = config_registry.get_value('DB_PASS', passwd)
+        if env_name is None:
+            dbname = config_registry.get_value('DB_NAME', dbname)
+    except Exception:
+        pass
+
     return host, port, user, passwd, dbname
 
 # Test di connessione con retry e logging dettagliato

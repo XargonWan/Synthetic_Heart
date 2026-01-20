@@ -118,8 +118,6 @@ class AutoResponseSystem:
                 return
 
             # Enqueue the LLM request
-            import json
-
             await enqueue(
                 interface,
                 mock_message,
