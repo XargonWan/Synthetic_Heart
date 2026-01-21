@@ -15,6 +15,7 @@ Schema (summary):
 - tags: list of strings (required when mode == "tags")
 - query: string (required when mode == "free")
 - max_results: integer (optional, overrides global limit)
+- time_window: string or object (optional) — relative string like "yesterday", "last week", "48 hours", an ISO interval string like "2026-01-10/2026-01-12", or an object with explicit "start"/"end" ISO datetimes or "duration" (see below)
 
 Example payloads:
 
