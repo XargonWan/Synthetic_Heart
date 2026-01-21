@@ -1181,7 +1181,6 @@ def load_unminified_chat_instruction(interface_name: str | None = None) -> str:
 
         base = """
     This means your replies must be short, concise, and suitable for a chat UI.
-This means your replies must be short, concise, and suitable for a chat UI.
 
 CONCISE RULES:
 - Keep user-facing messages short and to the point.
@@ -1212,8 +1211,10 @@ KEY REMINDERS:
 - Use the provided interface_path from input.payload.source.interface_path when addressing replies.
 
 EMOTIONS & METADATA:
+- Every message MUST include a `feelings` field in the response JSON describing the emotions that the message generated in the synth (the responder). The `feelings` field must be an object mapping emotion names to numeric intensity values from 0.0 to 10.0 (for example: "feelings": {"happy": 2.5, "curiosity": 4.0}).
+- Use only canonical emotion keys (for example: angry, disgust, fear, happy, neutral, relaxed, sad, surprised, curiosity, gratitude, empathy, trust). Include zero values for emotions that are not present, or include only emotions with non-zero intensity—both are acceptable as long as the format is respected.
 - Do NOT insert emotional tags, annotations, or bracketed markers inside message text (for example: `{happy 6.0}`).
-- If you need to convey emotion metadata, include it only as structured JSON (e.g., a `feelings` field or an explicit action payload), not inside the user-facing text.
+- If additional emotion metadata is required, include it only as structured JSON (e.g., additional fields alongside `feelings` or within an explicit action payload), never inside the user-facing text.
 """
         # Prepend header (with interface name) and return; do NOT minify this text
         return header + base
