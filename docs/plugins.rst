@@ -27,6 +27,8 @@ Available Action Plugins
 
 * ``ai_diary`` – Personal memory system for synth. Records conversations, thoughts, and emotions. See :doc:`ai_diary_personal_memory` for details.
 * ``bio_manager`` – Manage persistent user biographies. Uses database settings ``DB_HOST``, ``DB_USER``, ``DB_PASS`` and ``DB_NAME``.
+* ``get_logs`` – Return the last N lines from a log file (default: ``synth.log``, default lines: 30). Useful to provide the LLM or operators with recent runtime output for diagnostics.
+* ``search_logs`` – Search logs for keywords or regular expressions (queries can be a string or list). Optional parameters: ``regex`` (bool), ``context`` (surrounding lines), ``lines`` (how many tail lines to search). Results are delivered back to the invoking interface.
 
 Bio Manager Plugin
 ------------------

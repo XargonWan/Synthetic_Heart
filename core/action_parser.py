@@ -743,15 +743,13 @@ async def _handle_plugin_action(
                 )
                 log_debug(f"[action_parser] 📦 Action payload: {payload}")
 
-                result = plugin.execute_action(
-                    new_action, context, bot, original_message
-                )
+                result = plugin.execute_action(new_action, context, bot, original_message)
                 if inspect.iscoroutine(result):
-                    await result
+                    result = await result
                 log_info(
                     f"[action_parser] ✅ Successfully executed action via {plugin_iface}"
                 )
-                return None
+                return result
             except Exception as e:
                 log_error(
                     f"[action_parser] ❌ Error executing {action_type} with {plugin.__class__.__name__}: {repr(e)}"
@@ -789,6 +787,19 @@ async def run_action(action: Any, context: Dict[str, Any], bot, original_message
         return {"error": error_msg}
 
     action_interface = action.get("interface")
+
+    # Preflight safety: prevent preflight-run actions from performing side-effects.
+    # When preflight=True in context we only allow read-only/search actions (e.g., memory_search).
+    try:
+        if isinstance(context, dict) and bool(context.get('preflight')):
+            PRELIGHT_BLOCKED_ACTIONS = {"create_personal_diary_entry", "create_diary_entry"}
+            if action_type in PRELIGHT_BLOCKED_ACTIONS:
+                log_info(f"[action_parser] ⚠️ Skipping action '{action_type}' during preflight to avoid side-effects")
+                return {"skipped_due_to_preflight": True, "action": action}
+    except Exception:
+        # Fail-safe: if anything goes wrong, proceed with normal execution
+        pass
+
     log_info(f"[action_parser] 🚀 Executing action: type={action_type}, interface={action_interface}")
 
     # Use plugin system for all action types (including messages)

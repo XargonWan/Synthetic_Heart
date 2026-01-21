@@ -51,6 +51,7 @@ from selenium.common.exceptions import (
     NoSuchElementException,
     TimeoutException,
     ElementNotInteractableException,
+    ElementClickInterceptedException,
     SessionNotCreatedException,
     WebDriverException,
     StaleElementReferenceException,
@@ -59,6 +60,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from urllib3.exceptions import ReadTimeoutError
 from core.transport_layer import llm_to_interface
+from core.variables_engine import exposed_vars
 
 # Local functions and classes
 from core.logging_utils import log_debug, log_error, log_warning, log_info, _LOG_DIR
@@ -287,6 +289,25 @@ class SeleniumLLMBase(AIPluginBase):
     _global_ref_count = 0
 
     @classmethod
+    def _driver_is_usable(cls, driver: Optional[webdriver.Remote]) -> bool:
+        """Best-effort check to detect when the user closed the visible browser.
+
+        In webtop setups the Chromium window can be closed manually; Selenium will then
+        often keep a stale driver object that raises on access or reports no windows.
+        """
+        if driver is None:
+            return False
+        try:
+            handles = driver.window_handles
+            if not handles:
+                return False
+            # Touch a cheap property to detect invalid session
+            _ = driver.current_url
+            return True
+        except Exception:
+            return False
+
+    @classmethod
     async def _get_global_shared_driver(cls) -> webdriver.Remote:
         """Get the single global shared driver instance."""
         async with cls._global_driver_lock:
@@ -310,8 +331,30 @@ class SeleniumLLMBase(AIPluginBase):
                 cls._global_ref_count += 1
                 log_debug(f"[selenium] 🌍 Reusing global driver (ref count: {cls._global_ref_count})")
 
-                # Always ensure single window for global driver
-                await asyncio.to_thread(cls._ensure_single_window, cls._global_shared_driver)
+                # If the user closed the visible browser window, the driver becomes stale.
+                # Detect it and recreate automatically so the system can recover.
+                usable = await asyncio.to_thread(cls._driver_is_usable, cls._global_shared_driver)
+                if not usable:
+                    log_warning("[selenium] 🪟 Global driver is not usable (window closed / invalid session). Recreating...")
+                    try:
+                        cls._global_shared_driver.quit()
+                    except Exception as e:
+                        log_warning(f"[selenium] Error quitting stale global driver: {e}")
+                    cls._global_shared_driver = None
+
+                    try:
+                        cls._global_shared_driver = await asyncio.wait_for(
+                            asyncio.to_thread(cls._create_shared_driver),
+                            timeout=120,
+                        )
+                        cls._global_ref_count = 1
+                        log_info(f"[selenium] 🌍 Global driver recreated with {len(cls._global_shared_driver.window_handles)} window(s)")
+                    except asyncio.TimeoutError:
+                        log_error("[selenium] 🔴 Driver recreation timed out after 120s")
+                        raise Exception("Selenium driver recreation timeout - browser failed to initialize")
+                else:
+                    # Always ensure single window for global driver
+                    await asyncio.to_thread(cls._ensure_single_window, cls._global_shared_driver)
 
             return cls._global_shared_driver
 
@@ -1425,6 +1468,91 @@ class SeleniumLLMBase(AIPluginBase):
             log_debug(f"[selenium] Modal dismissal check failed: {e}")
             return False
 
+    def _resolve_click_interception(self, driver, target_element) -> bool:
+        """Try to resolve common causes of ElementClickInterceptedException.
+
+        Strategies:
+        - Use plugin-provided modal dismissal selectors
+        - Locate common overlay elements and try to close them or remove them via JS
+        - Send ESC key to dismiss dialogs
+        - As last resort, remove overlay nodes via JS
+        - If any strategy succeeds and the target becomes clickable, return True
+        """
+        try:
+            # 1) Try plugin-provided modal dismissal
+            try:
+                modal_selectors = self.selectors.get('modal_dismissal', []) or []
+                if modal_selectors:
+                    dismissed = self._dismiss_modal_with_selectors(driver, modal_selectors)
+                    if dismissed:
+                        time.sleep(0.2)
+                        return True
+            except Exception:
+                pass
+
+            # 2) Look for common overlay/modal elements and attempt close
+            overlay_selectors = ["[role='dialog']", ".modal", ".overlay", ".modal-backdrop", ".backdrop", "[data-testid='modal']"]
+            for sel in overlay_selectors:
+                try:
+                    overlays = driver.find_elements(By.CSS_SELECTOR, sel)
+                    for overlay in overlays:
+                        try:
+                            if not overlay.is_displayed():
+                                continue
+                            # Try finding a close button inside
+                            try:
+                                close_btns = overlay.find_elements(By.CSS_SELECTOR, "button[aria-label*='Close'], button.close, .close, button[aria-label*='Chiudi']")
+                                for cb in close_btns:
+                                    try:
+                                        driver.execute_script("arguments[0].click();", cb)
+                                        time.sleep(0.2)
+                                        log_debug(f"[selenium] Clicked overlay close button for selector {sel}")
+                                        return True
+                                    except Exception:
+                                        continue
+                            except Exception:
+                                pass
+
+                            # Send ESC key to body
+                            try:
+                                body = driver.find_element(By.TAG_NAME, 'body')
+                                body.send_keys(Keys.ESCAPE)
+                                time.sleep(0.2)
+                                log_debug("[selenium] Sent ESC key to dismiss overlay")
+                                # If overlay is gone, return True
+                                if not overlay.is_displayed():
+                                    return True
+                            except Exception:
+                                pass
+
+                            # As a last resort try to remove the node via JS
+                            try:
+                                driver.execute_script("arguments[0].parentNode.removeChild(arguments[0]);", overlay)
+                                time.sleep(0.2)
+                                log_debug(f"[selenium] Removed overlay element via JS for selector {sel}")
+                                return True
+                            except Exception:
+                                pass
+
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+
+            # 3) If still blocked, try clicking via ActionChains at element center
+            try:
+                actions = ActionChains(driver)
+                actions.move_to_element(target_element).click().perform()
+                time.sleep(0.1)
+                log_debug("[selenium] Clicked target element via ActionChains as last resort")
+                return True
+            except Exception:
+                log_debug("[selenium] ActionChains click failed")
+
+            return False
+        except Exception as e:
+            log_debug(f"[selenium] resolve_click_interception failed: {e}")
+            return False
     
     def _get_response_selectors(self) -> list:
         """Get the CSS selectors for extracting response text.
@@ -2010,6 +2138,30 @@ class SeleniumLLMBase(AIPluginBase):
                         log_debug("[selenium] Send button clicked successfully")
                     except Exception as click_error:
                         log_debug(f"[selenium] Send button click failed: {click_error}")
+                        # If the click was intercepted, try to resolve common overlay/modal issues
+                        intercepted = False
+                        try:
+                            if isinstance(click_error, ElementClickInterceptedException) or 'element click intercepted' in str(click_error).lower():
+                                intercepted = True
+                        except Exception:
+                            pass
+
+                        if intercepted:
+                            log_warning("[selenium] Click intercepted - attempting to resolve overlays and retry")
+                            try:
+                                resolved = self._resolve_click_interception(self.driver, send_button)
+                                if resolved:
+                                    log_info("[selenium] Overlay resolution succeeded, retrying click")
+                                    try:
+                                        send_button.click()
+                                        log_debug("[selenium] Send button clicked after overlay resolution")
+                                    except Exception as final_click_error:
+                                        log_debug(f"[selenium] Final click after resolution failed: {final_click_error}")
+                                else:
+                                    log_warning("[selenium] Overlay resolution did not succeed")
+                            except Exception as resolve_err:
+                                log_debug(f"[selenium] Overlay resolution raised an error: {resolve_err}")
+
                         log_debug("[selenium] Attempting fallback: JavaScript click on button")
                         try:
                             # Try JavaScript click
@@ -2017,10 +2169,18 @@ class SeleniumLLMBase(AIPluginBase):
                             log_debug("[selenium] Send button clicked via JavaScript")
                         except Exception as js_click_error:
                             log_debug(f"[selenium] JavaScript click also failed: {js_click_error}")
-                            # Final fallback to keyboard shortcut (Ctrl+Return or Cmd+Return)
-                            log_debug("[selenium] Final fallback: using Ctrl+Return keyboard shortcut")
+                            # Final fallback to keyboard shortcut (Ctrl+Return or Cmd+Return) and Enter
+                            log_debug("[selenium] Final fallback: using Ctrl+Return keyboard shortcut and Enter")
                             textarea.click()
-                            textarea.send_keys(Keys.CONTROL, Keys.RETURN)
+                            try:
+                                textarea.send_keys(Keys.CONTROL, Keys.RETURN)
+                                log_debug("[selenium] Sent Ctrl+Return")
+                            except Exception:
+                                try:
+                                    textarea.send_keys(Keys.RETURN)
+                                    log_debug("[selenium] Sent Enter")
+                                except Exception as e:
+                                    log_debug(f"[selenium] Keyboard send also failed: {e}")
                 else:
                     log_debug("[selenium] Send button is disabled, trying keyboard shortcut (Ctrl+Return)")
                     from selenium.webdriver.common.keys import Keys
@@ -2031,7 +2191,15 @@ class SeleniumLLMBase(AIPluginBase):
                 log_debug("[selenium] No send button found, using Ctrl+Return keyboard shortcut")
                 from selenium.webdriver.common.keys import Keys
                 textarea.click()
-                textarea.send_keys(Keys.CONTROL, Keys.RETURN)
+                try:
+                    textarea.send_keys(Keys.CONTROL, Keys.RETURN)
+                    log_debug("[selenium] Sent Ctrl+Return as fallback")
+                except Exception:
+                    try:
+                        textarea.send_keys(Keys.RETURN)
+                        log_debug("[selenium] Sent Enter as fallback")
+                    except Exception as e:
+                        log_debug(f"[selenium] Keyboard fallback also failed: {e}")
             
             log_debug(f"[selenium] Send action completed, waiting for confirmation")
 
@@ -2113,12 +2281,120 @@ class SeleniumLLMBase(AIPluginBase):
             return True  # Prompt was sent successfully
         
         except Exception as e:
+            # Capture a screenshot for post-mortem analysis
+            try:
+                ts = int(time.time())
+                path = f"/tmp/selenium_send_failure_{ts}.png"
+                try:
+                    self.driver.save_screenshot(path)
+                    log_info(f"[selenium] Screenshot of failure saved: {path}")
+                except Exception as sc_err:
+                    log_debug(f"[selenium] Could not save screenshot: {sc_err}")
+            except Exception:
+                path = None
+
             log_error(f"[selenium] Failed to send prompt: {e}")
+
+            # Notify user/monitoring that a send failure happened
+            try:
+                # Use configured fallback message (exposed variable) if available
+                try:
+                    failed_text = exposed_vars.get_value('FAILED_MESSAGE_TEXT') or "😵"
+                except Exception:
+                    failed_text = "😵"
+
+                log_warning(f"[selenium][send_failure] Sending fallback message to originating interface: url={getattr(self.driver, 'current_url', 'unknown')} screenshot={path}")
+
+                # Attempt to deliver the fallback message to the originating interface/chat (preferred)
+                try:
+                    meta = getattr(self, '_current_request_meta', None)
+                    if meta and (meta.get('bot') or meta.get('chat_id') or meta.get('interface_path')):
+                        bot = meta.get('bot')
+                        chat_id = meta.get('chat_id')
+                        interface = meta.get('interface')
+
+                        # Schedule llm_to_interface asynchronously on the main loop
+                        try:
+                            loop = asyncio.get_event_loop()
+                            if loop.is_running():
+                                loop.create_task(llm_to_interface(bot, chat_id, text=failed_text, interface=interface, interface_path=meta.get('interface_path')))
+                                log_debug("[selenium][send_failure] Scheduled fallback message via llm_to_interface (create_task)")
+                            else:
+                                asyncio.run_coroutine_threadsafe(llm_to_interface(bot, chat_id, text=failed_text, interface=interface, interface_path=meta.get('interface_path')), loop)
+                                log_debug("[selenium][send_failure] Scheduled fallback message via run_coroutine_threadsafe")
+                        except Exception as e_schedule:
+                            log_debug(f"[selenium][send_failure] Could not schedule llm_to_interface: {e_schedule}")
+                            # Fallback to trainer notification if scheduling fails
+                            if getattr(self, '_notify_fn', None):
+                                try:
+                                    self._notify_fn(failed_text)
+                                except Exception:
+                                    pass
+                    else:
+                        # No originating interface metadata available - fall back to trainer notification
+                        if getattr(self, '_notify_fn', None):
+                            try:
+                                self._notify_fn(failed_text)
+                            except Exception:
+                                pass
+                except Exception as e_deliver:
+                    log_debug(f"[selenium][send_failure] Error delivering fallback message: {e_deliver}")
+                    if getattr(self, '_notify_fn', None):
+                        try:
+                            self._notify_fn(failed_text)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            # Try engine-specific UI reset hook to allow the engine to recover (e.g., open new chat)
+            try:
+                hook = getattr(self, '_engine_ui_reset_hook', None)
+                if callable(hook):
+                    try:
+                        hook_res = hook(None)
+                        if isinstance(hook_res, str) and hook_res.startswith('❌'):
+                            # Propagate the hook's retry indicator up the chain
+                            return hook_res
+                    except Exception as hook_err:
+                        log_debug(f"[selenium] _engine_ui_reset_hook call failed: {hook_err}")
+            except Exception:
+                pass
+
+            # Re-raise to let upper layers handle retries/logic
             raise
 
     def get_supported_models(self):
         """Get supported models (to be overridden by subclasses)."""
         return []
+
+    async def _send_error_message(self, bot, message):
+        """Send a friendly fallback message to the originating interface/chat when the engine fails.
+
+        This is called by the transport layer corrector when the LLM fails to produce
+        a valid response after repeated attempts. It will use the `FAILED_MESSAGE_TEXT`
+        exposed variable as the message content and route it to the originating interface
+        or fall back to trainer notification if no interface info is available.
+        """
+        try:
+            try:
+                failed_text = exposed_vars.get_value('FAILED_MESSAGE_TEXT') or "😵"
+            except Exception:
+                failed_text = "😵"
+
+            chat_id = getattr(message, 'chat_id', None)
+            interface = getattr(message, 'interface', None) or getattr(message, 'interface_path', None)
+
+            await llm_to_interface(bot, chat_id, text=failed_text, interface=interface, interface_path=getattr(message, 'interface_path', None))
+            log_debug("[selenium] _send_error_message delivered fallback message to interface")
+        except Exception as e:
+            log_debug(f"[selenium] _send_error_message failed to deliver to interface: {e}")
+            # Fallback to trainer notification
+            try:
+                if getattr(self, '_notify_fn', None):
+                    self._notify_fn(failed_text)
+            except Exception:
+                pass
 
     def _get_model_char_limit(self, model_name: str) -> int:
         """Get character limit for a specific model.
@@ -2443,8 +2719,23 @@ class SeleniumLLMBase(AIPluginBase):
         The response will then be passed to message_chain.handle_incoming_message()
         for validation, correction, and action execution. This ensures all LLM responses
         are properly validated through the central message chain, not sent directly to interfaces.
+
+        We also populate `_current_request_meta` for the duration of this request so
+        lower-level error handlers (e.g., send failures) can deliver fallback
+        messages to the originating interface/chat instead of notifying the trainer.
         """
         try:
+            # Populate current request meta for error reporting / fallback messaging
+            try:
+                self._current_request_meta = {
+                    'bot': bot,
+                    'message': message,
+                    'interface': getattr(message, 'interface', None) or getattr(message, 'interface_path', None),
+                    'chat_id': getattr(message, 'chat_id', None),
+                    'interface_path': getattr(message, 'interface_path', None),
+                }
+            except Exception:
+                self._current_request_meta = None
             # Check if prompt contains a system_message (correction scenario)
             system_message_dict = None
             prompt_for_llm = prompt
@@ -2568,25 +2859,40 @@ class SeleniumLLMBase(AIPluginBase):
 
 
             # The response will be returned to plugin_instance which passes it to message_chain
-            response = await self.generate_response(messages, pre_reduction_size=pre_reduction_size)
-            
-            # Simply return the response - don't send it directly!
-            # plugin_instance will handle passing it to message_chain for proper validation
-            log_debug(f"[selenium] Response generated ({len(response) if response else 0} chars), returning to plugin_instance for message chain processing")
-            return response
-
+            try:
+                response = await self.generate_response(messages, pre_reduction_size=pre_reduction_size)
+                log_debug(f"[selenium] Response generated ({len(response) if response else 0} chars), returning to plugin_instance for message chain processing")
+                return response
+            except Exception as e:
+                log_error(f"[selenium] Failed to handle incoming message: {e}", e)
+                # Return error message instead of sending directly
+                error_msg = f"❌ Error processing message: {e}"
+                return error_msg
+            finally:
+                # Clear request meta to avoid accidental reuse by unrelated operations
+                try:
+                    self._current_request_meta = None
+                except Exception:
+                    pass
         except Exception as e:
-            log_error(f"[selenium] Failed to handle incoming message: {e}", e)
+            log_error(f"[selenium] Unexpected error in handle_incoming_message: {e}", e)
             # Return error message instead of sending directly
             error_msg = f"❌ Error processing message: {e}"
             return error_msg
-
     async def generate_response(self, messages, pre_reduction_size: int | None = None):
         """Send messages to the LLM engine and receive the response."""
         try:
             # Check if engine was properly initialized
             if not getattr(self, '_initialized', False):
                 return "❌ LLM engine not properly initialized"
+
+            # Record metadata about the current incoming request so failure handlers
+            # can send a fallback message back to the originating interface instead
+            # of notifying the trainer. This is set by the plugin instance via
+            # handle_incoming_message prior to calling generate_response.
+            # Example keys: 'bot', 'message', 'interface', 'chat_id', 'interface_path'
+            if not hasattr(self, '_current_request_meta'):
+                self._current_request_meta = None
 
             log_debug(f"[selenium] generate_response called with {len(messages) if isinstance(messages, list) else 1} message(s)")
             
@@ -2627,9 +2933,23 @@ class SeleniumLLMBase(AIPluginBase):
             # Lazy driver initialization - create only when first actual request comes in
             if self.driver is None:
                 log_info(f"[selenium] 🚀 First use of {self.component_name} - creating shared driver")
-                shared_driver = await self._get_shared_driver()
-                self.driver = shared_driver  # Assign to instance for compatibility
-                log_info(f"[selenium] ✅ Driver ready for {self.component_name}")
+                try:
+                    shared_driver = await self._get_shared_driver()
+                    self.driver = shared_driver  # Assign to instance for compatibility
+                    log_info(f"[selenium] ✅ Driver ready for {self.component_name}")
+                except Exception as driver_err:
+                    # Notify user/admin and return an error early
+                    try:
+                        notify_msg = "Impossibile avviare il browser per il motore LLM (errore Selenium). Controlla i log e riprova."
+                        log_warning(f"[selenium][driver_error] {notify_msg} err={driver_err}")
+                        if getattr(self, '_notify_fn', None):
+                            try:
+                                self._notify_fn(notify_msg)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                    raise driver_err
 
             # Health check: verify driver is still alive
             driver_is_dead = False
@@ -3187,13 +3507,16 @@ class SeleniumLLMBase(AIPluginBase):
             textarea = self._locate_prompt_area(self.driver)
 
             # Send prompt and wait for response
-            if not self._send_prompt_with_confirmation(
+            send_result = self._send_prompt_with_confirmation(
                 textarea,
                 prompt_text,
                 processing_max_wait=processing_max_wait,
                 post_send_confirm_timeout=post_send_confirm_timeout,
-            ):
+            )
+            if send_result is False:
                 return "❌ Failed to send prompt"
+            if isinstance(send_result, str) and send_result.startswith('❌'):
+                return send_result
 
             # Handle response choice if applicable (e.g., ChatGPT offers two responses)
             self._handle_response_choice(self.driver)
@@ -3219,6 +3542,24 @@ class SeleniumLLMBase(AIPluginBase):
                 log_debug(f"[selenium] 📨 FULL LLM RESPONSE ({len(response)} chars):\n{response}")
             else:
                 log_warning("[selenium] Received empty response from LLM")
+
+            # Engine-specific UI reset hook: allow engines to implement a UI-level reset
+            # (e.g., opening a new chat in Gemini) when appropriate. The hook should return
+            # a string starting with '❌' to indicate a retry and cause upper layers to consume
+            # one retry attempt.
+            try:
+                hook_res = None
+                try:
+                    hook = getattr(self, '_engine_ui_reset_hook', None)
+                    if callable(hook):
+                        hook_res = hook(response)
+                except Exception as e:
+                    log_debug(f"[selenium] _engine_ui_reset_hook failed: {e}")
+
+                if isinstance(hook_res, str) and hook_res.startswith('❌'):
+                    return hook_res
+            except Exception:
+                pass
 
             return response
 
