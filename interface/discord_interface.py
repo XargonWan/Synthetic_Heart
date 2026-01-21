@@ -284,12 +284,51 @@ class DiscordInterface:
             )
 
     async def _discord_send(self, channel_id, text, reply_to_message_id=None):
-        """Internal Discord send method."""
+        """Internal Discord send method.
+
+        This method is robust: it will try to resolve the provided numeric id
+        as a channel first (server/channel/thread), and if not found it will
+        attempt to resolve it as a user id and send a direct message (DM).
+        """
         if self.client is None:  # pragma: no cover - safety
             raise RuntimeError("Discord client not initialized")
-        channel = self.client.get_channel(int(channel_id))
-        if channel is None:  # pragma: no cover - invalid channel
+
+        # Try channel first
+        try:
+            channel = self.client.get_channel(int(channel_id))
+        except Exception:
+            channel = None
+
+        if channel is None:
+            # Fallback: try sending as a DM to a user id
+            try:
+                # Try quick local cache first
+                user = None
+                try:
+                    user = self.client.get_user(int(channel_id))
+                except Exception:
+                    user = None
+
+                if user is None:
+                    # Last resort: fetch user from API
+                    try:
+                        user = await self.client.fetch_user(int(channel_id))
+                    except Exception as e:  # pragma: no cover - network dependent
+                        log_debug(f"[discord_interface] fetch_user failed for {channel_id}: {e}")
+                        user = None
+
+                if user is not None:
+                    # If replying to a specific message id was requested, we can't easily
+                    # reply in the same way in a DM, so just send a plain DM message.
+                    log_debug(f"[discord_interface] Sending DM to user {channel_id}")
+                    await user.send(text)
+                    return
+            except Exception as e:  # pragma: no cover - network dependent
+                log_debug(f"[discord_interface] DM send attempt failed for {channel_id}: {e}")
+
+            # If we reach here, both channel and user resolution failed
             raise RuntimeError("Unknown channel")
+
         # If reply to a specific message was requested, try to fetch and reply
         if reply_to_message_id:
             try:
