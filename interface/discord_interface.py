@@ -294,8 +294,15 @@ class DiscordInterface:
             raise RuntimeError("Discord client not initialized")
 
         # Try channel first
+        channel = None
         try:
             channel = self.client.get_channel(int(channel_id))
+            if channel is None:
+                try:
+                    # Fallback to API fetch for DMs or uncached channels
+                    channel = await self.client.fetch_channel(int(channel_id))
+                except Exception:
+                    channel = None
         except Exception:
             channel = None
 
@@ -327,7 +334,7 @@ class DiscordInterface:
                 log_debug(f"[discord_interface] DM send attempt failed for {channel_id}: {e}")
 
             # If we reach here, both channel and user resolution failed
-            raise RuntimeError("Unknown channel")
+            raise RuntimeError(f"Unknown channel or user: {channel_id}")
 
         # If reply to a specific message was requested, try to fetch and reply
         if reply_to_message_id:
@@ -392,7 +399,13 @@ class DiscordInterface:
                 entities = None
 
             # Simple ping check
-            if content.lower() == "ping":
+            # We strip the bot's mention from the content to allow "@Bot ping" to work
+            ping_check_content = content
+            if bot_user and getattr(bot_user, "name", None):
+                mention_text = f"@{bot_user.name}"
+                ping_check_content = ping_check_content.replace(mention_text, "").strip()
+
+            if ping_check_content.lower() == "ping":
                 await self._discord_send(message.channel.id, "pong")
                 return
 
@@ -697,6 +710,5 @@ def get_discord_token() -> str:
 log_info("[discord_interface] Creating Discord interface instance...")
 discord_interface = DiscordInterface(get_discord_token())
 log_info("[discord_interface] Discord interface instance created and registered")
-
 
 

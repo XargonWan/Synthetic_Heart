@@ -562,6 +562,12 @@ class CoreInitializer:
                         log_debug(
                             f"[core_initializer] Plugin {module_name} has no start method"
                         )
+                    
+                    # Track success for WebUI
+                    self.mark_component_success(
+                        plugin_short_name, 
+                        details=f"Loaded from {module_name}"
+                    )
 
                 except Exception as e:
                     log_error(

@@ -1020,13 +1020,12 @@ async def plugin_startup_callback(application):
     # Start any async plugins that were deferred until a loop was available
     await core_initializer.start_pending_async_plugins()
 
-    # Start the queue consumer after the application is ready
-    application.create_task(message_queue.run())
-
 
 # Global variable to track the telegram polling task
 _polling_task = None
 
+
+_bot_started = False  # Guard to prevent double-starting
 
 async def start_bot():
     """Start the Telegram bot application.
@@ -1034,7 +1033,14 @@ async def start_bot():
     This function assumes the core has already been initialized.
     It should be called from TelegramInterface.start() or during autostart.
     """
+    global _bot_started
+    
+    if _bot_started:
+        log_debug("[telegram_bot] start_bot() already called, skipping duplicate startup")
+        return
+    
     log_info("[telegram_bot] start_bot() function called")
+    _bot_started = True
     
     if not BOTFATHER_TOKEN:
         log_warning("[telegram_bot] BOTFATHER_TOKEN not configured - skipping Telegram bot startup")

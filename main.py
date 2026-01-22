@@ -3,6 +3,10 @@ import signal
 import sys
 import subprocess
 import asyncio
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 from core.db import init_db, test_connection, get_conn_ctx
 # from core.blocklist import init_blocklist_table  # Now handled by blocklist plugin
 from core.logging_utils import (
