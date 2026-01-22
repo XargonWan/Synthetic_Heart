@@ -7,7 +7,7 @@ Overview
 The G.R.I.L.L.O. compactor is a nightly background plugin that consolidates older
 memories by tag. It groups memories, asks the active LLM (English prompt) for a
 concise summary and suggested tags/feeling, archives the source memories into
-`compacted_memories` and writes a new single memory with the LLM-provided tags
+`archived_memories` and writes a new single memory with the LLM-provided tags
 and feeling.
 
 Configuration
@@ -36,9 +36,7 @@ Behavior
 Storage
 -------
 
-A new table `compacted_memories` stores the archival summaries and the list of
-source memory IDs. Source memories are deleted from `memories` and a new
-compacted memory is inserted into `memories` with the LLM-provided tags/feeling.
+A new table `archived_memories` stores the archival summaries and the list of source memory IDs. It contains a `notes` JSON field which includes only useful data: an optional `justification` string and an optional `detailed` field with 1-3 short bullet points or a short paragraph intended as memory content. When available, `detailed` is used as the content inserted into `memories` for better context (the `summary` remains a concise title). Source memories are deleted from `ai_diary`/`memories` and a new compacted memory is inserted into `memories` with the LLM-provided `detailed` content, tags and feeling.
 
 Testing
 -------

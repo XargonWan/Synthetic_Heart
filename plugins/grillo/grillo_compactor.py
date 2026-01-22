@@ -3,7 +3,7 @@ plugins/grillo/grillo_compactor.py
 
 Nightly memory compaction plugin for G.R.I.L.L.O.: groups older memories by tag,
 asks the active LLM (English prompt) to synthesize them into a single compacted
-memory, archives source memories into `compacted_memories` and inserts the new
+memory, archives source memories into `archived_memories` and inserts the new
 compacted memory back into `memories` with tags/feeling suggested by the LLM.
 """
 
@@ -88,7 +88,7 @@ class GrilloCompactorPlugin:
             component="grillo_compactor",
         ))
         self.max_summary_chars = int(config_registry.get_value(
-            "GRILLO_COMPACT_MAX_SUMMARY_CHARS", 150,
+            "GRILLO_COMPACT_MAX_SUMMARY_CHARS", 300,
             label="Grillo Compaction Max Summary Chars",
             description="Max allowed chars for a cluster summary",
             value_type=int,
@@ -105,8 +105,8 @@ class GrilloCompactorPlugin:
         ))
         self.allow_recompact = bool(config_registry.get_value(
             "GRILLO_COMPACT_ALLOW_RECOMPACT", True,
-            label="Allow Recompaction of Compacted Memories",
-            description="Allow compacted_memories to be considered in future compaction runs",
+            label="Allow Recompaction of Archived Memories",
+            description="Allow archived_memories to be considered in future compaction runs",
             value_type=bool,
             group="grillo",
             component="grillo_compactor",
@@ -183,6 +183,9 @@ class GrilloCompactorPlugin:
             log_info("[grillo_compactor] Disabled by configuration; not starting scheduler")
             return
 
+        # No automatic DB migrations are performed here. We will write compacted summaries
+        # into the `archived_memories` table (no schema changes or migrations executed).
+
         if GrilloCompactorPlugin._scheduler_task and not GrilloCompactorPlugin._scheduler_task.done():
             log_debug("[grillo_compactor] Scheduler already running")
             return
@@ -190,6 +193,10 @@ class GrilloCompactorPlugin:
         GrilloCompactorPlugin._scheduler_running = True
         GrilloCompactorPlugin._scheduler_task = asyncio.create_task(self._compaction_loop())
         log_info("[grillo_compactor] Scheduler started")
+
+    # No schema migration is performed automatically here as requested by the user.
+    # The plugin will write compacted summaries into `archived_memories` if that table exists.
+    # If it doesn't exist, DB errors will surface and should be handled by the operator (no automatic creation).
 
     async def stop(self):
         GrilloCompactorPlugin._scheduler_running = False
@@ -280,12 +287,24 @@ class GrilloCompactorPlugin:
                                 "SELECT id, content, context_tags as tags, timestamp FROM ai_diary WHERE timestamp < DATE_SUB(NOW(), INTERVAL %s DAY) AND JSON_CONTAINS(context_tags, %s) ORDER BY timestamp ASC LIMIT %s OFFSET %s",
                                 (age_days, json.dumps(marker), limit, offset),
                             )
+                            candidates = await cur.fetchall()
+                            # Fallback: some rows have non-standard context_tags formatting; try LIKE-based search
+                            if not candidates:
+                                try:
+                                    log_debug(f"[grillo_compactor] JSON_CONTAINS returned no results for marker {marker}; trying LIKE fallback")
+                                    await cur.execute(
+                                        "SELECT id, content, context_tags as tags, timestamp FROM ai_diary WHERE timestamp < DATE_SUB(NOW(), INTERVAL %s DAY) AND context_tags LIKE %s ORDER BY timestamp ASC LIMIT %s OFFSET %s",
+                                        (age_days, '%' + str(marker) + '%', limit, offset),
+                                    )
+                                    candidates = await cur.fetchall()
+                                except Exception:
+                                    candidates = []
                         else:
                             await cur.execute(
                                 "SELECT id, content, context_tags as tags, timestamp FROM ai_diary WHERE timestamp < DATE_SUB(NOW(), INTERVAL %s DAY) ORDER BY timestamp ASC LIMIT %s OFFSET %s",
                                 (age_days, limit, offset),
                             )
-                        candidates = await cur.fetchall()
+                            candidates = await cur.fetchall()
 
                 if not candidates:
                     # No more candidates available
@@ -423,14 +442,16 @@ class GrilloCompactorPlugin:
                 "Return ONLY a JSON object with key 'clusters' containing an array of cluster objects. Each cluster must include:\n"
                 "  - cluster_id: integer\n"
                 "  - should_compact: boolean\n"
-                "  - summary: short summary in English\n"
-                "  - summary_chars: integer (length of 'summary')\n"
+                "  - summary: VERY SHORT summary in English (MUST be {max_chars} characters or less!)\n"
+                "  - summary_chars: integer (length of 'summary' - MUST be <= {max_chars})\n"
                 "  - tags: array of strings\n"
                 "  - feeling: short label string\n"
                 "  - source_ids: array of integers (ids from the provided list)\n"
                 "  - confidence: one of [low, medium, high]\n"
                 "  - justification: short text explaining why these entries belong together\n"
-                "Constraints: For clusters with should_compact=true, ensure summary_chars < sum(chars of source contents) and preferably summary_chars <= {max_chars} and summary_chars/sum_chars <= {ratio}. If necessary, provide a 'short_summary' field and set 'shortened': true when you had to shorten.\n"
+                "  - detailed: optional detailed summary (1-3 very short bullet points or a 1-2 sentence paragraph) containing concrete facts that can be used as memory content (e.g., names, outcomes, decisions). This field WILL be used as memory content when present.\n"
+                "CRITICAL CONSTRAINT: summary MUST be {max_chars} characters or fewer. summary_chars MUST be <= {max_chars}. Any summary exceeding this limit will be rejected. Be extremely concise!\n"
+                "IMPORTANT: If you provide both 'summary' and 'detailed', ensure 'detailed' contains factual, concrete points suitable to be stored as a memory.\n"
             ).format(max_chars=self.max_summary_chars, ratio=self.max_summary_ratio)
 
             prompt = {
@@ -488,6 +509,9 @@ class GrilloCompactorPlugin:
                     source_ids = cl.get('source_ids') or []
                     confidence = str(cl.get('confidence') or "low")
                     justification = str(cl.get('justification') or "")
+                    detailed = cl.get('detailed') or cl.get('detailed_summary') or None
+                    if detailed:
+                        detailed = str(detailed).strip()
 
                     # Source ids must be subset of batch ids
                     batch_ids = set(id_to_content.keys())
@@ -512,23 +536,37 @@ class GrilloCompactorPlugin:
                             shortened_ok = False
                             for attempt in range(self.retry_shorten):
                                 try:
+                                    target_chars = min(self.max_summary_chars, total_source_chars - 1)
                                     shorten_prompt = {
-                                        "input": {"type": "shorten_summary", "payload": {"cluster_id": cid, "current_summary": summary, "max_chars": self.max_summary_chars}},
-                                        "instructions": "Produce ONLY a short summary in English with at most {max_chars} characters that preserves the facts from the original summary. Reply ONLY with JSON: {\"short_summary\":\"...\"}".format(max_chars=self.max_summary_chars)
+                                        "input": {"type": "shorten_summary", "payload": {"cluster_id": cid, "current_summary": summary, "max_chars": target_chars}},
+                                        "instructions": f"SHORTEN this summary to EXACTLY {target_chars} characters or fewer. Keep the essential facts. Reply with ONLY JSON: {{\"short_summary\":\"your shortened text here\"}}"
                                     }
                                     resp = await engine.generate_response(shorten_prompt)
                                     parsed_short = extract_json_from_text(resp)
                                     if parsed_short and parsed_short.get('short_summary'):
                                         short_summary = str(parsed_short.get('short_summary'))
-                                        summary_chars = len(short_summary)
-                                        shortened = True
-                                        shortened_ok = True
-                                        summary = short_summary
-                                        break
-                                except Exception:
+                                        new_chars = len(short_summary)
+                                        # Accept if it's actually shorter and within limits
+                                        if new_chars < summary_chars and new_chars <= self.max_summary_chars and new_chars < total_source_chars:
+                                            summary_chars = new_chars
+                                            shortened = True
+                                            shortened_ok = True
+                                            summary = short_summary
+                                            log_debug(f"[grillo_compactor] Cluster {cid} shortened to {new_chars} chars on attempt {attempt+1}")
+                                            break
+                                        elif new_chars < summary_chars:
+                                            # Made progress, update and try again
+                                            summary = short_summary
+                                            summary_chars = new_chars
+                                            log_debug(f"[grillo_compactor] Cluster {cid} partially shortened to {new_chars} chars, retrying...")
+                                except Exception as e:
+                                    log_debug(f"[grillo_compactor] Shorten attempt {attempt+1} failed: {e}")
                                     continue
+                            # Final check: accept if within limits now
+                            if not shortened_ok and summary_chars <= self.max_summary_chars and summary_chars < total_source_chars:
+                                shortened_ok = True
                             if not shortened_ok:
-                                log_info(f"[grillo_compactor] Cluster {cid} summary too long after retries -> skipping compaction")
+                                log_info(f"[grillo_compactor] Cluster {cid} summary too long ({summary_chars} chars, max {self.max_summary_chars}) after retries -> skipping compaction")
                                 accept = False
 
                     if not accept:
@@ -537,23 +575,48 @@ class GrilloCompactorPlugin:
 
                     # If dry_run, collect info and don't persist
                     if dry_run:
-                        proposed_results.append({'cluster_id': cid, 'status': 'ok', 'should_compact': should_compact, 'summary': summary, 'source_ids': source_ids})
+                        proposed_results.append({'cluster_id': cid, 'status': 'ok', 'should_compact': should_compact, 'summary': summary, 'detailed': detailed, 'source_ids': source_ids})
                         continue
 
                     # Persist accepted clusters
                     async with get_conn_ctx() as conn:
                         async with conn.cursor() as cur:
+                            # Consolidate notes JSON: include only useful fields.
+                            notes_obj = {}
+                            if justification:
+                                notes_obj['justification'] = justification
+                            if detailed:
+                                notes_obj['detailed'] = detailed
+                            # Do not store parsing meta by default (it is noisy and usually empty).
+                            # If in future we need it for debugging, add it conditionally and only when useful.
+                            pass
+
+                            notes_value = json.dumps(notes_obj) if notes_obj else None
+                            log_info(f"[grillo_compactor] notes_obj for cluster {cid}: {notes_obj} -> notes_value={notes_value}")
+
                             await cur.execute(
-                                "INSERT INTO compacted_memories (tag, summary, source_ids, source_count, llm_model, confidence, notes, compaction_level, total_source_chars, summary_chars, justification, created_by) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                                (json.dumps(tags) if tags else None, summary, json.dumps(source_ids), len(source_ids), active_llm, confidence, json.dumps({'meta': meta}), 1, total_source_chars, summary_chars, justification, 'grillo_compactor')
+                                "INSERT INTO archived_memories (tag, summary, source_ids, source_count, llm_model, confidence, notes, compaction_level, total_source_chars, summary_chars, created_by) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                                (json.dumps(tags) if tags else None, summary, json.dumps(source_ids), len(source_ids), active_llm, confidence, notes_value, 1, total_source_chars, summary_chars, 'grillo_compactor')
                             )
                             # Move source ai_diary entries into ai_diary_archive (preserve provenance) and delete originals
                             if source_ids:
                                 # Insert into archive (select relevant columns)
-                                await cur.execute(
-                                    "INSERT INTO ai_diary_archive (content, personal_thought, emotions, interaction_summary, timestamp, interface, chat_id, thread_id, user_message, context_tags, involved_users) SELECT content, personal_thought, emotions, interaction_summary, timestamp, interface, chat_id, thread_id, user_message, context_tags, involved_users FROM ai_diary WHERE id IN (" + ",".join(["%s"] * len(source_ids)) + ")",
-                                    tuple(source_ids),
-                                )
+                                try:
+                                    await cur.execute(
+                                        "INSERT INTO ai_diary_archive (content, personal_thought, emotions, interaction_summary, timestamp, interface, chat_id, thread_id, user_message, context_tags, involved_users) SELECT content, personal_thought, emotions, interaction_summary, timestamp, interface, chat_id, thread_id, user_message, context_tags, involved_users FROM ai_diary WHERE id IN (" + ",".join(["%s"] * len(source_ids)) + ")",
+                                        tuple(source_ids),
+                                    )
+                                except Exception as e:
+                                    # Fallback for older schemas where ai_diary_archive doesn't have involved_users
+                                    try:
+                                        log_warning(f"[grillo_compactor] ai_diary_archive insert with involved_users failed: {e}; retrying without involved_users")
+                                        await cur.execute(
+                                            "INSERT INTO ai_diary_archive (content, personal_thought, emotions, interaction_summary, timestamp, interface, chat_id, thread_id, user_message, context_tags) SELECT content, personal_thought, emotions, interaction_summary, timestamp, interface, chat_id, thread_id, user_message, context_tags FROM ai_diary WHERE id IN (" + ",".join(["%s"] * len(source_ids)) + ")",
+                                            tuple(source_ids),
+                                        )
+                                    except Exception as e2:
+                                        # Re-raise so outer handler logs consistently
+                                        raise
                                 # Delete originals from ai_diary
                                 await cur.execute(
                                     "DELETE FROM ai_diary WHERE id IN (" + ",".join(["%s"] * len(source_ids)) + ")",
@@ -561,9 +624,11 @@ class GrilloCompactorPlugin:
                                 )
 
                             # Insert new compacted memory into `memories` via helper
+                            # Store the most useful content in `memories`: prefer 'detailed' if available, otherwise fallback to summary
+                            memory_content = detailed if detailed else summary
                             try:
                                 await insert_memory(
-                                    content=summary,
+                                    content=memory_content,
                                     author="grillo",
                                     source="compaction",
                                     tags=json.dumps(tags) if tags else None,
@@ -575,7 +640,7 @@ class GrilloCompactorPlugin:
                                 log_warning(f"[grillo_compactor] Failed to insert new compacted memory using helper: {e}")
                                 await cur.execute(
                                     "INSERT INTO memories (timestamp, content, author, source, tags, scope, emotion, intensity, emotion_state) VALUES (NOW(), %s, %s, %s, %s, %s, %s, %s, %s)",
-                                    (summary, "grillo", "compaction", json.dumps(tags) if tags else None, None, feeling, None, None),
+                                    (memory_content, "grillo", "compaction", json.dumps(tags) if tags else None, None, feeling, None, None),
                                 )
 
                     proposed_results.append({'cluster_id': cid, 'status': 'persisted', 'source_ids': source_ids})

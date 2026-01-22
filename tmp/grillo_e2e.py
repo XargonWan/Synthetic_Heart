@@ -92,7 +92,7 @@ async def run_compactor(dry_run=True, marker=None):
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        "INSERT INTO compacted_memories (tag, summary, source_ids, source_count, llm_model, confidence, notes, compaction_level, total_source_chars, summary_chars, justification, created_by) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                        "INSERT INTO archived_memories (tag, summary, source_ids, source_count, llm_model, confidence, notes, compaction_level, total_source_chars, summary_chars, created_by) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                         (None, summary, json.dumps(source_ids), len(source_ids), 'manual', 'high', json.dumps({}), 1, total_chars, len(summary), 'auto', 'grillo_compactor')
                     )
                     if source_ids:
@@ -144,7 +144,7 @@ def query_counts(conn):
         total_diary = cur.fetchone()[0]
         cur.execute('SELECT COUNT(*) FROM ai_diary_archive')
         archived = cur.fetchone()[0]
-        cur.execute('SELECT COUNT(*) FROM compacted_memories')
+        cur.execute('SELECT COUNT(*) FROM archived_memories')
         comp = cur.fetchone()[0]
         cur.execute('SELECT COUNT(*) FROM memories')
         mems = cur.fetchone()[0]
@@ -161,10 +161,10 @@ if __name__ == '__main__':
     asyncio.run(run_compactor(dry_run=True))
 
     print('\n--- Persist run (will archive sources and insert compacted memory) ---')
-    # Ensure compacted_memories table exists for this test
+    # Ensure archived_memories table exists for this test
     with conn.cursor() as cur:
         cur.execute('''
-            CREATE TABLE IF NOT EXISTS compacted_memories (
+            CREATE TABLE IF NOT EXISTS archived_memories (
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 tag TEXT,
                 summary TEXT,
@@ -176,7 +176,6 @@ if __name__ == '__main__':
                 compaction_level INT,
                 total_source_chars INT,
                 summary_chars INT,
-                justification TEXT,
                 created_by VARCHAR(255),
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -188,6 +187,6 @@ if __name__ == '__main__':
     total_diary, archived, comp, mems = query_counts(conn)
     print('ai_diary total:', total_diary)
     print('ai_diary_archive total:', archived)
-    print('compacted_memories total:', comp)
+    print('archived_memories total:', comp)
     print('memories total:', mems)
     conn.close()
