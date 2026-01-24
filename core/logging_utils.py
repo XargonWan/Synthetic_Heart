@@ -264,32 +264,10 @@ def _log(level: str, message: str, exc: Optional[Exception] = None, log_file: Op
                         pass  # No event loop available in this context
                     return
             
-            # Fallback to trainer - use any available interface
-            for interface_name, iface in INTERFACE_REGISTRY.items():
-                trainer_id = get_trainer_id(interface_name)
-                if trainer_id and hasattr(iface, 'send_message'):
-                    async def send_to_trainer():
-                        try:
-                            trainer_data = {"text": notification_message, "target": trainer_id}
-                            await iface.send_message(trainer_data)
-                        except Exception:
-                            pass  # Silent failure
-
-                    try:
-                        loop = asyncio.get_running_loop()
-                        if loop and loop.is_running():
-                            loop.create_task(send_to_trainer())
-                        else:
-                            try:
-                                loop = asyncio.get_event_loop()
-                                if not loop.is_closed():
-                                    loop.run_until_complete(send_to_trainer())
-                                # If no running loop, just skip async send in logging context
-                            except RuntimeError:
-                                pass  # No event loop available in this context
-                    except RuntimeError:
-                        pass  # No event loop available in this context
-                    return
+            # NOTE: We intentionally don't fallback to ALL trainers here anymore
+            # to prevent error spam across multiple interfaces. If LogChat is not
+            # configured, errors will only appear in the log file, not in chat.
+            # Users can configure LogChat via /logchat command to receive errors.
                         
         except Exception:
             # Silent failure - no recursive logging

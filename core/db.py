@@ -82,7 +82,7 @@ async def wait_for_db(max_attempts=10, delay=3):
     for attempt in range(1, max_attempts + 1):
         try:
             host, port, user, passwd, dbname = _read_db_config()
-            log_info(f"[db] Attempt {attempt}: connecting to {user}@{host}:{port}/{dbname}")
+            log_debug(f"[db] Attempt {attempt}: connecting to {user}@{host}:{port}/{dbname}")
             conn = await aiomysql.connect(
                 host=host,
                 port=port,
@@ -91,7 +91,7 @@ async def wait_for_db(max_attempts=10, delay=3):
                 db=dbname,
                 autocommit=True,
             )
-            log_info("[db] Successfully connected to the database!")
+            log_debug("[db] Successfully connected to the database!")
             conn.close()
             return True
         except Exception as e:
@@ -253,11 +253,13 @@ async def get_conn() -> aiomysql.Connection:
         raise TimeoutError("Database connection pool exhausted - timeout acquiring connection")
 
     # Set query timeout to prevent long-running queries from holding connections indefinitely
-    try:
-        async with conn.cursor() as cur:
-            await cur.execute("SET SESSION max_execution_time=30000")  # 30 second timeout per query
-    except Exception as e:
-        log_debug(f"[db] Could not set query timeout: {e}")
+    # NOTE: 'max_execution_time' variable is not supported by all MySQL/MariaDB versions/configurations
+    # and caused significant latency/errors. Removed for stability.
+    # try:
+    #     async with conn.cursor() as cur:
+    #         await cur.execute("SET SESSION max_execution_time=30000")
+    # except Exception as e:
+    #     log_debug(f"[db] Could not set query timeout: {e}")
 
     # Track active connections for monitoring/leak detection
     try:

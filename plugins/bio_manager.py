@@ -333,6 +333,12 @@ def _update_json_field(user_id: str, key: str, update_fn: Callable[[Any], Any]) 
 async def _get_bio_light_async(user_id: str) -> dict:
     """Async version of get_bio_light - returns a lightweight bio for the user."""
     try:
+        # Ensure table exists first (async version of _ensure_table)
+        global _table_initialized
+        if not _table_initialized:
+            await init_bio_table()
+            _table_initialized = True
+        
         row = await _fetchone(
             "SELECT known_as, likes, not_likes, feelings, information FROM bio WHERE id=%s",
             (user_id,),

@@ -237,6 +237,11 @@ class CoreInitializer:
             self._register_reload_handlers()
             log_info("[core_initializer] ✅ Reload handlers registered")
 
+            # 6.6. Configure trainer IDs from environment/database configuration
+            log_info("[core_initializer] Configuring trainer IDs from settings...")
+            self._configure_trainer_ids()
+            log_info("[core_initializer] ✅ Trainer IDs configured")
+
             # Note: Startup summary will be displayed by main.py after all interfaces are started
             log_info("[core_initializer] Core initialization completed successfully")
 
@@ -392,14 +397,24 @@ class CoreInitializer:
     def _configure_trainer_ids(self):
         """Configure trainer IDs from environment configuration."""
         from core.interfaces_registry import get_interface_registry
-        from core.config import TRAINER_IDS, get_trainer_id
+        from core.config_manager import config_registry
         
         registry = get_interface_registry()
         
-        # Set trainer IDs from configuration
-        for interface_name, trainer_id in TRAINER_IDS.items():
-            registry.set_trainer_id(interface_name, trainer_id)
-            log_debug(f"[core_initializer] Configured trainer ID {trainer_id} for {interface_name}")
+        # Get TRAINER_IDS from live config registry (includes DB values)
+        trainer_ids_raw = config_registry.get_value("TRAINER_IDS", "")
+        
+        # Parse the trainer IDs string
+        if trainer_ids_raw:
+            for entry in str(trainer_ids_raw).split(","):
+                if ":" in entry:
+                    interface_name, trainer_id_str = entry.split(":", 1)
+                    try:
+                        trainer_id = int(trainer_id_str.strip())
+                        registry.set_trainer_id(interface_name.strip(), trainer_id)
+                        log_debug(f"[core_initializer] Configured trainer ID {trainer_id} for {interface_name.strip()}")
+                    except ValueError as e:
+                        log_warning(f"[core_initializer] Invalid trainer ID format in TRAINER_IDS: {entry} - {e}")
 
     async def _load_llm_engine(self, notify_fn=None):
         """Load the active LLM engine."""

@@ -36,7 +36,20 @@ for i in range(1, 4):
     ALLOWED_FILES.append(f"synth.log.{i}")
 
 
+LOG_ALIASES = {
+    "discord.log": "synth.log",
+    "discord_bot.log": "synth.log",
+    "telegram.log": "synth.log",
+    "telegram_bot.log": "synth.log",
+    "matrix.log": "synth.log",
+}
+
+
 def _resolve_log_path(filename: str) -> str:
+    # Handle aliases
+    if filename in LOG_ALIASES:
+        filename = LOG_ALIASES[filename]
+
     # Security: only allow filenames in ALLOWED_FILES
     if filename not in ALLOWED_FILES:
         raise ValueError(f"Unsupported log file: {filename}")

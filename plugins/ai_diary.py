@@ -86,6 +86,13 @@ def normalize_interface_name(interface: str) -> str:
     normalized = interface_mapping.get(interface.lower(), interface.lower())
     return normalized
 
+# Simple cache for diary limits to avoid repeated heavy LLM lookups
+_diary_limit_cache = {
+    "last_check": 0,
+    "value": None,
+    "interface": None
+}
+
 def get_max_diary_chars(interface_name: str = None, current_prompt_length: int = 0, context_memory: dict = None) -> int:
     """Calculate how many characters can be allocated to diary injection based on active LLM interface limits.
     
@@ -94,6 +101,28 @@ def get_max_diary_chars(interface_name: str = None, current_prompt_length: int =
         current_prompt_length: Current length of the prompt
         context_memory: Context dictionary that may contain maximize_diary flag for memory-focused operations
     """
+    global _diary_limit_cache
+    import time
+    
+    # Check if this is a memory-focused operation (e.g., Grillo memory consolidation beat)
+    maximize_diary = False
+    if context_memory and isinstance(context_memory, dict):
+        maximize_diary = context_memory.get("maximize_diary", False)
+        
+    # Use cached limit if valid (TTL 60s) and not maximized (which needs fresh check)
+    now = time.time()
+    if not maximize_diary and _diary_limit_cache["value"] and \
+       _diary_limit_cache["interface"] == interface_name and \
+       now - _diary_limit_cache["last_check"] < 60:
+         max_prompt_chars = _diary_limit_cache["value"]
+         # Duplicated calculation logic for cache hit
+         diary_percentage = 0.30 # maximize_diary is False here
+         diary_limit = int(max_prompt_chars * diary_percentage)
+         available_space = max_prompt_chars - current_prompt_length
+         diary_allocation = min(diary_limit, max(available_space * 0.5, 5000))
+         log_debug(f"[ai_diary] Using CACHED limit: {max_prompt_chars}")
+         return max(diary_allocation, 5000)
+
     try:
         # Get limits directly from the active LLM engine
         from core.config import get_active_llm
@@ -167,6 +196,12 @@ def get_max_diary_chars(interface_name: str = None, current_prompt_length: int =
         
         mode = "MAXIMIZED (80%)" if maximize_diary else "standard (30%)"
         log_info(f"[ai_diary] Diary allocation {mode}: {diary_allocation} chars (max: {max_prompt_chars}, used: {current_prompt_length})")
+        
+        # Update cache
+        if not maximize_diary:
+            _diary_limit_cache["value"] = max_prompt_chars
+            _diary_limit_cache["interface"] = interface_name
+            _diary_limit_cache["last_check"] = time.time()
         return max(diary_allocation, 5000)  # Minimum 5k chars
     except Exception as e:
         log_warning(f"[ai_diary] Error calculating diary limit: {e}")
@@ -393,9 +428,13 @@ def _run(coro):
             return loop.run_until_complete(coro)
     except RuntimeError:
         # No event loop at all - this is the only safe place to use asyncio.run()
-        return asyncio.run(coro)
+        try:
+            return asyncio.run(coro)
+        except Exception as e:
+            log_error(f"[ai_diary] Error in asyncio.run inside _run: {e}")
+            return None
     except Exception as e:
-        log_debug(f"[ai_diary] Error in _run: {e}")
+        log_error(f"[ai_diary] Unexpected error in _run helper: {e}")
         return None
 
 

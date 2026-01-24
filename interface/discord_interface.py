@@ -272,8 +272,12 @@ class DiscordInterface:
             try:
                 from core.chat_context_manager import save_response_message
                 from core.interface_path_utils import build_interface_path
-                interface_path = build_interface_path('discord_bot', str(channel_id))
-                await save_response_message(interface_path, text)
+                
+                # Use interface_path passed in payload if available (preserves Guild/DM context)
+                # Otherwise fall back to simple channel_id based path
+                save_path = interface_path if 'interface_path' in locals() and interface_path else build_interface_path('discord_bot', str(channel_id))
+                
+                await save_response_message(save_path, text)
             except Exception as e:
                 log_debug(f"[discord_interface] Failed to save response via context_manager: {e}")
             

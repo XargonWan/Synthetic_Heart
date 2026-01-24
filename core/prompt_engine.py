@@ -9,7 +9,9 @@ from core.user_utils import get_user_display_name, get_user_usertag
 from datetime import datetime
 import os
 import random
+import random
 import asyncio
+from core.prompt_engine_helper import free_memory_search
 
 # Default maximum prompt characters (CHARACTERS, NOT TOKENS)
 # This is used as a safe fallback when no LLM engine provides explicit limits.
@@ -96,7 +98,7 @@ MEMORY_SEARCH_PREFLIGHT_POOL_MAX = config_registry.get_var(
 # How long to wait for preflight memory searches before proceeding without memories
 MEMORY_SEARCH_PREFLIGHT_TIMEOUT = config_registry.get_var(
     "MEMORY_SEARCH_PREFLIGHT_TIMEOUT",
-    180,
+    10,
     label="Memory Search Preflight Timeout (s)",
     description="Timeout in seconds to wait for the LLM-driven preflight memory_search or DB free search before proceeding without memories.",
     group="core",
@@ -110,7 +112,7 @@ MEMORY_SEARCH_PREFLIGHT_TIMEOUT = config_registry.get_var(
 # - 'free_db': use the legacy DB-only free search (free_memory_search)
 MEMORY_SEARCH_PREFLIGHT_STRATEGY = config_registry.get_var(
     "MEMORY_SEARCH_PREFLIGHT_STRATEGY",
-    "llm_action",
+    "free_db",
     label="Memory Search Preflight Strategy",
     description="Preflight strategy: 'llm_action' asks the LLM to emit memory_search action; 'free_db' uses DB-only free search.",
     group="core",
@@ -644,9 +646,9 @@ async def build_json_prompt(message, context_memory, interface_name: str | None 
             except Exception:
                 preflight_max = 5
             try:
-                strategy = str(config_registry.get_value("MEMORY_SEARCH_PREFLIGHT_STRATEGY", "llm_action", value_type=str) or "llm_action").strip().lower()
+                strategy = str(config_registry.get_value("MEMORY_SEARCH_PREFLIGHT_STRATEGY", "free_db", value_type=str) or "free_db").strip().lower()
             except Exception:
-                strategy = "llm_action"
+                strategy = "free_db"
 
             preflight_results = []
             # Preflight calls must not block the build; enforce a timeout and fail-safe fallback

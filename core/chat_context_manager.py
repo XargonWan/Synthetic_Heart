@@ -16,6 +16,56 @@ from core.config_manager import config_registry
 _context_memory: Dict[str, deque] = {}
 _initialized = False
 
+# Register configuration variable at module level to ensure visibility
+CONTEXT_LINK_MAP = config_registry.get_var(
+    "CONTEXT_LINK_MAP",
+    default={},
+    label="Context Link Map (JSON)",
+    value_type="json",
+    description="JSON map to link different interface paths to a single context (Unified Lane). Format: {'source_path_or_id': 'target_path'}.",
+    group="core",
+    component="chat_context_manager",
+)
+
+def _resolve_context_path(interface_path: str) -> str:
+    """Resolve interface path to a target path if aliased (Unified Lane)."""
+    try:
+        # Load alias map from config (value_type="json" returns dict/list directly)
+        alias_map = CONTEXT_LINK_MAP.value
+        log_debug(f"[context_manager] Loaded alias_map: {alias_map} (type: {type(alias_map)})")
+
+        if not alias_map:
+            return interface_path
+            
+        if not isinstance(alias_map, dict):
+            log_debug(f"[context_manager] CONTEXT_LINK_MAP is not a dict: {type(alias_map)}")
+            return interface_path
+            
+        # Check for direct match
+        if interface_path in alias_map:
+            target = alias_map[interface_path]
+            log_debug(f"[context_manager] 🔗 Resolved alias: {interface_path} -> {target}")
+            return target
+            
+        # Check for user-id based linking (partial match)
+        # If alias map keys are just user IDs, checks if interface_path ends with that ID
+        # or contains it.
+        # Format expectation: "USER_ID": "MASTER_CONTEXT"
+        parts = interface_path.split('/')
+        if len(parts) >= 2:
+            # Check user ID (usually 2nd part for 1:1 or last part)
+            # Standard path: interface/chat_id/thread_id
+            user_segment = parts[1] # For DMs this is user_id
+            if user_segment in alias_map:
+                target = alias_map[user_segment]
+                log_debug(f"[context_manager] 🔗 Resolved user alias: {interface_path} -> {target}")
+                return target
+
+    except Exception as e:
+        log_warning(f"[context_manager] Error resolving context path: {e}")
+        
+    return interface_path
+
 
 async def initialize_context_manager() -> None:
     """Initialize context manager and load persisted chat history.
@@ -56,6 +106,10 @@ def get_or_create_chat_context(interface_path: str) -> deque:
     Returns:
         A deque with maxlen=CHAT_HISTORY_LIMIT
     """
+    # Resolve aliases first
+    original_path = interface_path
+    interface_path = _resolve_context_path(interface_path)
+    
     if interface_path not in _context_memory:
         # Keep legacy exposed var for backward compatibility, but prefer the
         # unified global verbosity setting.
@@ -111,6 +165,9 @@ async def add_message_to_context(
         timestamp: Optional ISO format timestamp
         **extra_fields: Additional fields to store in context
     """
+    # Resolve aliases first
+    interface_path = _resolve_context_path(interface_path)
+
     # Add to in-memory context
     context = get_or_create_chat_context(interface_path)
     
@@ -135,14 +192,17 @@ async def add_message_to_context(
         # Extract chat_id from interface_path (format: interface/chat_id/thread_id)
         parts = interface_path.split('/')
         chat_id = parts[1] if len(parts) > 1 else interface_path
-        asyncio.create_task(update_chat_activity(
+        # Await the update to ensure it completes before we proceed/shutdown.
+        # This prevents "Event loop is closed" errors during tests/shutdown and ensures
+        # the session list is consistent immediately.
+        await update_chat_activity(
             chat_id=chat_id,
             metadata={
                 'username': sender_name,
                 'user_id': sender_id,
                 'interface_path': interface_path
             }
-        ))
+        )
     except Exception as e:
         log_debug(f"[context_manager] Failed to update chat activity: {e}")
     
@@ -171,6 +231,9 @@ async def load_chat_history(interface_path: str) -> None:
     """
     try:
         from core.chat_history_cache import load_chat_history as cache_load
+        
+        # Resolve aliases first
+        interface_path = _resolve_context_path(interface_path)
         
         history = await cache_load(interface_path)
         context = get_or_create_chat_context(interface_path)
@@ -201,6 +264,9 @@ def clear_chat_context(interface_path: str) -> None:
     Args:
         interface_path: Interface path (e.g., telegram_bot/123456/2)
     """
+    # Resolve aliases first
+    interface_path = _resolve_context_path(interface_path)
+    
     if interface_path in _context_memory:
         _context_memory[interface_path].clear()
         log_debug(f"[context_manager] Cleared context for interface_path {interface_path}")
@@ -238,6 +304,9 @@ async def save_response_message(interface_path: str, message_text: str) -> None:
     """
     if not interface_path or not message_text:
         return
+        
+    # Resolve aliases first
+    interface_path = _resolve_context_path(interface_path)
     
     try:
         from core.chat_history_cache import save_chat_message

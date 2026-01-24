@@ -117,6 +117,17 @@ register_exposed_var(
     advanced=True,
 )
 
+register_exposed_var(
+    "UNIFIED_HISTORY",
+    label="Unified History",
+    default=1,
+    value_type=int,
+    ui_type="bool",
+    description="If enabled, merges all chat streams into the current conversation history (shared brain).",
+    scope="core",
+    component="history_engine",
+)
+
 
 def _get_int(key: str, default: int) -> int:
     try:
@@ -308,7 +319,67 @@ class HistoryEngine:
             except Exception as e:
                 log_debug(f"[history_engine] Failed building history_current_chat: {e}")
 
-        if enable_recent and isinstance(chat_map, dict):
+        # --- Unified History Logic ---
+        unified_mode = _get_bool('UNIFIED_HISTORY', True)
+        
+        if unified_mode:
+            # If unified mode is on, we merge global DB history with in-memory chat logs
+            try:
+                unified_candidates = []
+                
+                # 1. Load global history from DB (persisted truth)
+                try:
+                    from core.chat_history_cache import load_global_chat_history
+                    # Get slightly more than verbosity to ensure we have enough after merging/deduping
+                    db_history = await load_global_chat_history(limit=verbosity * 2 if verbosity > 0 else 20)
+                    unified_candidates.extend(list(db_history))
+                except Exception as db_e:
+                    log_debug(f"[history_engine] Failed to load global chat history: {db_e}")
+                
+                # 2. Collect from in-memory chat map (in case of in-flight messages not yet in DB)
+                if isinstance(chat_map, dict):
+                    for q in chat_map.values():
+                        if isinstance(q, (list, tuple)) or hasattr(q, '__iter__'):
+                           unified_candidates.extend(list(q))
+                
+                # 3. Sort by timestamp
+                def _uni_sort_key(m: Any) -> float:
+                    if not isinstance(m, dict):
+                        return 0.0
+                    ts = m.get('timestamp') or m.get('date')
+                    if isinstance(ts, str):
+                        try:
+                            # Handle both full ISO and basic string formats
+                            normalized_ts = ts.replace('Z', '+00:00')
+                            dt = datetime.fromisoformat(normalized_ts)
+                            return dt.timestamp()
+                        except Exception:
+                            return 0.0
+                    return 0.0
+                
+                if unified_candidates:
+                    unified_candidates.sort(key=_uni_sort_key)
+                
+                # 4. Replace current chat history with unified list
+                history_current_chat = [] 
+                seen_history = set()
+                
+                # Take last N items
+                for m in unified_candidates[-verbosity:] if verbosity > 0 else []:
+                    line = _entry_to_text(m)
+                    # Include interface name in unified mode for clarity if multiparty
+                    # (Optional refinement: prefix with [Interface]?)
+                    # For now keep standard format but deduplication handles exact matches
+                    k = _dedup_key(line)
+                    if k in seen_history:
+                        continue
+                    history_current_chat.append(line)
+                    seen_history.add(k)
+                    
+            except Exception as e:
+                 log_debug(f"[history_engine] Failed building UNIFIED history: {e}")
+
+        if enable_recent and isinstance(chat_map, dict) and not unified_mode:
             try:
                 # "Recent" is global: messages from other chats/threads, excluding the current one.
                 # We best-effort sort by timestamp when possible.

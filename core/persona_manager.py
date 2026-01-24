@@ -67,8 +67,8 @@ def _build_trainer_bio_section() -> str:
 _persona_manager_instance = None
 
 # Canonical alias list used across the UI and trigger checks.
-# Starts with base aliases and will be updated when persona is loaded/changed.
-CANONICAL_ALIASES = ["SyntH", "Synthetic Heart"]
+# Will be updated when persona is loaded/changed.
+CANONICAL_ALIASES = []
 
 # Base SyntH profile template - used everywhere a SyntH identity is described
 # This is the core identity statement that all SyntH personas share
@@ -87,13 +87,15 @@ VALID_EMOTIONS = {
 }
 
 def build_canonical_aliases(persona: Optional['PersonaData']) -> list:
-    """Return canonical alias list: base aliases + persona name + persona.aliases.
+    """Return canonical alias list: persona name + persona.aliases.
 
     This helper centralizes the alias ordering and de-duplication logic so the
     WebUI and runtime trigger checks share a single source of truth.
+    
+    Note: No longer includes hardcoded base aliases - the alias list is fully
+    user-controlled through the WebUI.
     """
-    base = ["SyntH", "Synthetic Heart"]
-    res = list(base)
+    res = []
     try:
         if persona and getattr(persona, 'name', None):
             if persona.name not in res:
@@ -103,8 +105,8 @@ def build_canonical_aliases(persona: Optional['PersonaData']) -> list:
             if a and a not in res:
                 res.append(a)
     except Exception:
-        # Defensive: return at least the base aliases
-        return base
+        # Defensive: return empty list
+        return []
     return res
 
 
@@ -124,10 +126,14 @@ def _get_persona_name():
     return "SyntH"
 
 def _set_persona_name(value):
-    """Set persona name (will be saved when persona is saved)."""
+    """Set persona name and persist to database."""
     if _persona_manager_instance and _persona_manager_instance._current_persona:
         _persona_manager_instance._current_persona.name = value
-        # Note: Saving is handled by the webui or other components when needed
+        # Persist to database immediately
+        try:
+            asyncio.create_task(_persona_manager_instance.save_persona(_persona_manager_instance._current_persona))
+        except Exception as e:
+            log_warning(f"[persona_manager] Failed to persist persona name: {e}")
 
 def _get_persona_profile():
     """Get current persona profile from manager."""
@@ -145,10 +151,14 @@ def _get_persona_profile():
     return SYNTH_BASE_PROFILE_TEMPLATE.format(name="SyntH")
 
 def _set_persona_profile(value):
-    """Set persona profile (will be saved when persona is saved)."""
+    """Set persona profile and persist to database."""
     if _persona_manager_instance and _persona_manager_instance._current_persona:
         _persona_manager_instance._current_persona.profile = value
-        # Note: Saving is handled by the webui or other components when needed
+        # Persist to database immediately
+        try:
+            asyncio.create_task(_persona_manager_instance.save_persona(_persona_manager_instance._current_persona))
+        except Exception as e:
+            log_warning(f"[persona_manager] Failed to persist persona profile: {e}")
 
 def _get_persona_aliases():
     """Get current persona aliases from manager."""
@@ -166,27 +176,33 @@ def _get_persona_aliases():
         global CANONICAL_ALIASES
         CANONICAL_ALIASES = build_canonical_aliases(_persona_manager_instance._current_persona)
         return list(CANONICAL_ALIASES)
-    # Return default aliases if manager not ready
-    return ["SyntH", "Synthetic Heart"]
+    # Return empty list if manager not ready (no hardcoded defaults)
+    return []
 
 def _set_persona_aliases(value):
-    """Set persona aliases (will be saved when persona is saved)."""
+    """Set persona aliases and persist to database."""
     if _persona_manager_instance and _persona_manager_instance._current_persona:
-        # Remove base aliases and persona name from the list to store only additional aliases
-        base_aliases = ["SyntH", "Synthetic Heart"]
-        persona_name = _persona_manager_instance._current_persona.name
+        # Ensure value is a list - don't split strings into characters
+        if value is None:
+            aliases_list = []
+        elif isinstance(value, str):
+            # If it's a single string, wrap in list
+            aliases_list = [value] if value.strip() else []
+        elif isinstance(value, list):
+            aliases_list = value
+        else:
+            aliases_list = list(value) if hasattr(value, '__iter__') else [value]
         
-        filtered_aliases = []
-        for alias in value:
-            if alias not in base_aliases and alias != persona_name:
-                filtered_aliases.append(alias)
-        
-        _persona_manager_instance._current_persona.aliases = filtered_aliases
-        # Note: Saving is handled by the webui or other components when needed
+        _persona_manager_instance._current_persona.aliases = aliases_list
+        # Persist to database immediately
+        try:
+            asyncio.create_task(_persona_manager_instance.save_persona(_persona_manager_instance._current_persona))
+        except Exception as e:
+            log_warning(f"[persona_manager] Failed to persist persona aliases: {e}")
 
 
 def _get_full_aliases():
-    """Return the full canonical aliases list (base + name + user aliases).
+    """Return the full canonical aliases list (name + user aliases).
 
     This function is intended to be used as a `getter` when registering a
     config variable so the Web UI / API can retrieve the computed aliases
@@ -198,6 +214,78 @@ def _get_full_aliases():
     except Exception:
         pass
     return list(CANONICAL_ALIASES)
+
+
+def _get_persona_likes():
+    """Get current persona likes from manager."""
+    global _persona_manager_instance
+    if _persona_manager_instance is None:
+        try:
+            _persona_manager_instance = get_persona_manager()
+        except:
+            pass
+    
+    if _persona_manager_instance and _persona_manager_instance._current_persona:
+        return getattr(_persona_manager_instance._current_persona, 'likes', []) or []
+    return []
+
+
+def _set_persona_likes(value):
+    """Set persona likes and persist to database."""
+    if _persona_manager_instance and _persona_manager_instance._current_persona:
+        # Ensure value is a list - don't split strings into characters
+        if value is None:
+            likes_list = []
+        elif isinstance(value, str):
+            # If it's a single string, wrap in list
+            likes_list = [value] if value.strip() else []
+        elif isinstance(value, list):
+            likes_list = value
+        else:
+            likes_list = list(value) if hasattr(value, '__iter__') else [value]
+        
+        _persona_manager_instance._current_persona.likes = likes_list
+        # Persist to database immediately
+        try:
+            asyncio.create_task(_persona_manager_instance.save_persona(_persona_manager_instance._current_persona))
+        except Exception as e:
+            log_warning(f"[persona_manager] Failed to persist persona likes: {e}")
+
+
+def _get_persona_dislikes():
+    """Get current persona dislikes from manager."""
+    global _persona_manager_instance
+    if _persona_manager_instance is None:
+        try:
+            _persona_manager_instance = get_persona_manager()
+        except:
+            pass
+    
+    if _persona_manager_instance and _persona_manager_instance._current_persona:
+        return getattr(_persona_manager_instance._current_persona, 'dislikes', []) or []
+    return []
+
+
+def _set_persona_dislikes(value):
+    """Set persona dislikes and persist to database."""
+    if _persona_manager_instance and _persona_manager_instance._current_persona:
+        # Ensure value is a list - don't split strings into characters
+        if value is None:
+            dislikes_list = []
+        elif isinstance(value, str):
+            # If it's a single string, wrap in list
+            dislikes_list = [value] if value.strip() else []
+        elif isinstance(value, list):
+            dislikes_list = value
+        else:
+            dislikes_list = list(value) if hasattr(value, '__iter__') else [value]
+        
+        _persona_manager_instance._current_persona.dislikes = dislikes_list
+        # Persist to database immediately
+        try:
+            asyncio.create_task(_persona_manager_instance.save_persona(_persona_manager_instance._current_persona))
+        except Exception as e:
+            log_warning(f"[persona_manager] Failed to persist persona dislikes: {e}")
 
 
 def _get_persona_current_animation():
@@ -424,7 +512,7 @@ except Exception as e:
 
 SYNTH_ALIASES = config_registry.get_var(
     "SYNTH_ALIASES",
-    ["SyntH", "Synthetic Heart"],
+    [],
     label="Synth Aliases",
     description="Alternative names the synth responds to",
     group="synth",
@@ -434,13 +522,37 @@ SYNTH_ALIASES = config_registry.get_var(
     setter=_set_persona_aliases,
 )
 
+SYNTH_LIKES = config_registry.get_var(
+    "SYNTH_LIKES",
+    [],
+    label="Synth Likes",
+    description="List of the synth's likes (used by triggers and persona context)",
+    group="synth",
+    component="persona",
+    value_type="json",
+    getter=_get_persona_likes,
+    setter=_set_persona_likes,
+)
+
+SYNTH_DISLIKES = config_registry.get_var(
+    "SYNTH_DISLIKES",
+    [],
+    label="Synth Dislikes",
+    description="List of the synth's dislikes (used by triggers and persona context)",
+    group="synth",
+    component="persona",
+    value_type="json",
+    getter=_get_persona_dislikes,
+    setter=_set_persona_dislikes,
+)
+
 # Expose the computed full aliases (canonical + persona name + user aliases)
 try:
     SYNTH_FULL_ALIASES = config_registry.get_var(
         "SYNTH_FULL_ALIASES",
-        ["SyntH", "Synthetic Heart"],
+        [],
         label="Synth Full Aliases",
-        description="Canonical alias list (base aliases + current name + additional aliases)",
+        description="Canonical alias list (current name + additional aliases)",
         group="synth",
         component="persona",
         value_type="json",
@@ -450,9 +562,9 @@ except Exception:
     # Fallback: if registration fails, expose a simple placeholder
         SYNTH_FULL_ALIASES = config_registry.get_var(
         "SYNTH_FULL_ALIASES",
-        ["SyntH", "Synthetic Heart"],
+        [],
         label="Synth Full Aliases",
-        description="Canonical alias list (base aliases + current name + additional aliases)",
+        description="Canonical alias list (current name + additional aliases)",
         group="synth",
         component="persona",
         value_type="json",
@@ -475,6 +587,20 @@ if 'SYNTH_CURRENT_ANIMATION' in config_registry._definitions:
     defn = config_registry._definitions['SYNTH_CURRENT_ANIMATION']
     defn.getter = _get_persona_current_animation
     defn.readonly = True
+
+# Attach persona-aware getters/setters to SYNTH_LIKES for proper persistence
+if 'SYNTH_LIKES' in config_registry._definitions:
+    defn = config_registry._definitions['SYNTH_LIKES']
+    defn.getter = _get_persona_likes
+    defn.setter = _set_persona_likes
+    log_debug("[persona_manager] Attached persona getter/setter to SYNTH_LIKES exposed var")
+
+# Attach persona-aware getters/setters to SYNTH_DISLIKES for proper persistence
+if 'SYNTH_DISLIKES' in config_registry._definitions:
+    defn = config_registry._definitions['SYNTH_DISLIKES']
+    defn.getter = _get_persona_dislikes
+    defn.setter = _set_persona_dislikes
+    log_debug("[persona_manager] Attached persona getter/setter to SYNTH_DISLIKES exposed var")
 
 # Update existing config definitions to use dynamic getters/setters
 # Note: update_definition method doesn't exist, relying on initial get_var calls with getters/setters
@@ -664,7 +790,7 @@ class PersonaManager(PluginBase):
                 default_persona = PersonaData(
                     id="default",
                     name="SyntH",
-                    aliases=["SyntH", "Synthetic Heart"],
+                    aliases=[],  # No default aliases - user can set their own
                     profile=SYNTH_BASE_PROFILE_TEMPLATE.format(name="SyntH"),
                     likes=[],
                     dislikes=[],
@@ -1007,14 +1133,32 @@ class PersonaManager(PluginBase):
                     log_warning(f"[persona_manager] Empty profile for '{name}', using template")
                     profile = SYNTH_BASE_PROFILE_TEMPLATE.format(name=name)
 
+
+            # Get likes and dislikes from config registry
+            likes_raw = config_registry.get_value("SYNTH_LIKES", [])
+            dislikes_raw = config_registry.get_value("SYNTH_DISLIKES", [])
+
+            # Helper to parse list-based json config
+            def parse_list_config(raw_val):
+                if isinstance(raw_val, str):
+                    try:
+                        parsed = json.loads(raw_val)
+                        return parsed if isinstance(parsed, list) else []
+                    except (json.JSONDecodeError, TypeError):
+                        return []
+                return raw_val if isinstance(raw_val, list) else []
+
+            likes = [str(x).strip() for x in parse_list_config(likes_raw) if x]
+            dislikes = [str(x).strip() for x in parse_list_config(dislikes_raw) if x]
+
             # Convert to PersonaData
             persona_data = {
                 'id': persona_id,
                 'name': name,
                 'aliases': aliases,
                 'profile': profile,
-                'likes': [],  # Default empty lists - not stored in config
-                'dislikes': [],
+                'likes': likes,
+                'dislikes': dislikes,
                 'interests': [],
                 'emotive_state': [],
                 'current_animation': 'idle',
@@ -1034,6 +1178,31 @@ class PersonaManager(PluginBase):
             # Update config registry directly via _update_persona_configs
             # This syncs both value and raw_value without requiring async calls
             _update_persona_configs(persona)
+
+            # Explicitly persist to database to ensure settings survive restart
+            # The config registry's set_value skips persistence if a setter is defined (which we use),
+            # so we must handle persistence manually here.
+            try:
+                await config_registry._persist_to_db("SYNTH_NAME", str(persona.name))
+                await config_registry._persist_to_db("SYNTH_PROFILE", str(persona.profile))
+                
+                # Use helper to ensure consistent JSON formatting
+                def _to_json(val):
+                    return json.dumps(val) if val is not None else "[]"
+                
+                # SYNTH_ALIASES (canonical list)
+                all_aliases = build_canonical_aliases(persona)
+                await config_registry._persist_to_db("SYNTH_ALIASES", _to_json(all_aliases))
+                
+                # SYNTH_LIKES
+                await config_registry._persist_to_db("SYNTH_LIKES", _to_json(persona.likes))
+                
+                # SYNTH_DISLIKES
+                await config_registry._persist_to_db("SYNTH_DISLIKES", _to_json(persona.dislikes))
+                
+                log_debug(f"[persona_manager] Persisted persona config to DB")
+            except Exception as db_err:
+                log_warning(f"[persona_manager] Failed to persist persona to DB (memory update only): {db_err}")
 
             log_debug(f"[persona_manager] Saved persona {persona.id} to config registry")
             return True

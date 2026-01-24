@@ -53,10 +53,14 @@ class InterfaceRegistry:
         """Get the trainer ID for a specific interface."""
         return self._trainer_ids.get(interface_name)
     
-    def is_trainer(self, interface_name: str, user_id: int) -> bool:
+    def is_trainer(self, interface_name: str, user_id: int | str) -> bool:
         """Check if a user_id is the trainer for a specific interface."""
         trainer_id = self.get_trainer_id(interface_name)
-        return trainer_id is not None and user_id == trainer_id
+        if trainer_id is None:
+            return False
+            
+        # Robust string comparison to handle int/str mismatches
+        return str(user_id).strip() == str(trainer_id).strip()
     
     def get_default_interface(self) -> Optional[str]:
         """Get the name of the first available interface (fallback to webui if any)."""

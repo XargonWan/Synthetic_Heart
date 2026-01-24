@@ -12,8 +12,16 @@ from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.core_initializer import core_initializer, register_plugin
 
 
+
+_recent_chats_table_initialized = False
+
+
 async def init_recent_chats_table():
     """Initialize the recent_chats table if it doesn't exist."""
+    global _recent_chats_table_initialized
+    if _recent_chats_table_initialized:
+        return
+
     async with get_conn_ctx() as conn:
         try:
             async with conn.cursor() as cur:
@@ -30,6 +38,7 @@ async def init_recent_chats_table():
                     """
                 )
                 await conn.commit()
+                _recent_chats_table_initialized = True
         except Exception as e:
             log_error(f"[recent_chats] Failed to initialize table: {e}")
             raise

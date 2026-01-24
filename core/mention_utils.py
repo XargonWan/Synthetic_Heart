@@ -210,11 +210,15 @@ async def is_message_for_bot(
             log_debug("[mention] match_reason=@synth_mention")
             log_debug("[mention] ✅ Explicit @synth mention found - PRIORITY 3 - message is for bot")
             return True, None
-        # Check for bot username if provided
-        if bot_username and f"@{bot_username}" in message_text:
-            log_debug(f"[mention] match_reason=@{bot_username}_mention")
-            log_debug(f"[mention] ✅ Explicit @mention found: @{bot_username} - PRIORITY 3 - message is for bot")
-            return True, None
+        # Check for bot username if provided (case-insensitive)
+        if bot_username:
+            # Normalize both for comparison
+            normalized_msg = message_text.lower()
+            normalized_bot = f"@{bot_username}".lower()
+            if normalized_bot in normalized_msg:
+                log_debug(f"[mention] match_reason=@{bot_username}_mention")
+                log_debug(f"[mention] ✅ Explicit @mention found: @{bot_username} (case-insensitive) - PRIORITY 3 - message is for bot")
+                return True, None
     
     # Priority 4: Check for synth aliases in message text (activation words)
     if message_text:

@@ -166,12 +166,16 @@ async def enqueue(bot, message, context_memory=None, priority: bool = False, int
     chat_id = message.chat_id
     llm_name = plugin.__class__.__module__.split(".")[-1]
 
+    # Skip rate limiting for 1:1 interfaces (WebUI, Ollama) that use skip_mention_check
+    # These are trusted interfaces that shouldn't be rate limited
     if (
-        not is_trainer
+        not skip_mention_check  # Only rate-limit multi-user interfaces
+        and not is_trainer
         and not rate_limit.is_allowed(
             llm_name, user_id, interface_id or "unknown", max_messages, window_seconds, trainer_fraction, consume=False
         )
     ):
+        delay = 300  # 5 minutes delay for rate-limited users
         log_debug(f"[RATE LIMIT] Delaying user {user_id} by {delay} seconds (quota exceeded)")
         item = {
             "bot": bot,
@@ -396,7 +400,7 @@ async def compact_similar_messages(first: dict, limit: int = 5) -> list:
     ts = first["timestamp"]
 
     queue_items = list(_queue._queue)
-    for prio, item in queue_items:
+    for prio, counter, item in queue_items:
         if len(batch) >= limit:
             break
         if (
@@ -405,7 +409,7 @@ async def compact_similar_messages(first: dict, limit: int = 5) -> list:
             and item.get("interface") == interface
             and item["timestamp"] - ts <= 600
         ):
-            _queue._queue.remove((prio, item))
+            _queue._queue.remove((prio, counter, item))
             batch.append(item)
 
     batch.sort(key=lambda x: x["timestamp"])
@@ -503,11 +507,17 @@ async def _consumer_loop() -> None:
 
             # Check if user is trainer for this interface
             registry = get_interface_registry()
-            interface_id = getattr(user_msg, 'interface_id', 'unknown')
+            # Use interface from the queue item (reliable), not from message object (unreliable)
+            interface_id = final.get("interface", "unknown")
             is_trainer = registry.is_trainer(interface_id, user_id)
+            
+            # Check if this is a 1:1 trusted interface (WebUI, Ollama) - skip rate limiting
+            interface_name = interface_id # distinct variable name for clarity, though same value
+            is_trusted_interface = interface_name in ("synth_webui", "ollama_serve")
 
             if (
-                not is_trainer
+                not is_trusted_interface  # Skip rate limiting for 1:1 interfaces
+                and not is_trainer
                 and not rate_limit.is_allowed(
                     llm_name, user_id, interface_id, max_messages, window_seconds, trainer_fraction, consume=True
                 )

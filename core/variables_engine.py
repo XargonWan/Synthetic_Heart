@@ -327,7 +327,7 @@ def register_all():
     register_exposed_var(
         "SYNTH_ALIASES",
         label="Synth Aliases",
-        default=["SyntH", "Synthetic Heart"],
+        default=[],
         value_type="json",
         ui_type="tags",
         description="Alternative names the synth responds to",
@@ -363,10 +363,10 @@ def register_all():
     register_exposed_var(
         "SYNTH_FULL_ALIASES",
         label="Synth Full Aliases",
-        default=["SyntH", "Synthetic Heart"],
+        default=[],
         value_type="json",
         ui_type="tags",
-        description="Canonical alias list (base aliases + current name + additional aliases)",
+        description="Canonical alias list (current name + additional aliases)",
         scope="synth",
         component="persona",
         tags=["persona"],
@@ -737,6 +737,17 @@ def register_all():
         scope="core",
         component="core",
         advanced=True,
+    )
+
+    register_exposed_var(
+        "CONTEXT_LINK_MAP",
+        label="Context Link Map (JSON)",
+        default={},
+        value_type="json",
+        ui_type="json",
+        description="JSON map to link different interface paths to a single context (Unified Lane). Format: {'source_path_or_id': 'target_path'}.",
+        scope="core",
+        component="core",
     )
 
     log_info("[variables_engine] Completed explicit exposed var registrations")

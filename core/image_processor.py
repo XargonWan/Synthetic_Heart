@@ -12,7 +12,7 @@ from core.config_manager import config_registry
 # Register access control configuration
 RESTRICT_ACTIONS = config_registry.get_var(
     "RESTRICT_ACTIONS",
-    "trainer_only",
+    "off",
     label="Restrict Sensitive Content Actions",
     description="Controls who can send images, audio, video, and other sensitive content to the LLM: 'off' (everyone), 'trainer_only' (only trainer), 'deny_all' (nobody including trainer)",
     group="core",
