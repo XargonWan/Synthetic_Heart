@@ -230,8 +230,14 @@ class GrilloPlugin(AIPluginBase):
             base += "History-derived lead-in:\n\n" + history_snippet + "\n\n"
         base += (
             "Synthesize your recent memories and identify recurring patterns.\n"
-            "End with a JSON action to write a diary entry.\n"
-            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content":"your synthesis"}}]}'
+            "Write a concise (1-2 sentence) summary that is specific and informative — not just 'we talked about X'. "
+            "The summary should include: the topic, who raised or asked about it (if known), and the assistant's concrete answer or insight. "
+            "Example: \"We talked about Power Rangers — Jay asked what Super Sentai is, and I explained Super Sentai is the original Japanese series with different stories than Power Rangers.\"\n\n"
+            "Also provide 2-4 short tags (as a JSON array) describing the memory (e.g., [\"power_rangers\", \"sentai\"]).\n"
+            "Return ONLY valid JSON that creates a diary entry using the `create_personal_diary_entry` action. The JSON must look like: \n"
+            "{"
+            '"actions": [{"type": "create_personal_diary_entry", "payload": {"content": "<your concise summary>", "context_tags": ["tag1","tag2"]}}]}
+            "\nDo NOT include any extra text outside the JSON."
         )
         return base
 
