@@ -127,6 +127,16 @@ class GrilloChatObserverPlugin:
                 log_debug("[grillo_chat_observer] Skipping run because disabled")
                 return
 
+            # Only run observer if there are new messages since last check.
+            try:
+                from core.chat_update_checker import check_for_updates_once
+                chk = await check_for_updates_once()
+                if not chk.get('updated'):
+                    log_debug("[grillo_chat_observer] No new messages; skipping observer run")
+                    return
+            except Exception as e:
+                log_debug(f"[grillo_chat_observer] Chat update checker failed; proceeding: {e}")
+
             fragments = await self._collect_recent_snippets(self.samples)
             if not fragments:
                 log_debug("[grillo_chat_observer] No fragments found; skipping")

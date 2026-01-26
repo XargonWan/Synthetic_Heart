@@ -98,3 +98,65 @@ async def test_observer_propose_only_flag_in_prompt(monkeypatch):
     assert 'proposal-only' in captured['text'].lower() or 'proposal' in captured['text'].lower()
     # check deduplication instruction is present
     assert 'check the chat snippets' in captured['text'].lower() or 'avoid producing duplicate' in captured['text'].lower() or 'do not repeat' in captured['text'].lower()
+
+
+@pytest.mark.asyncio
+async def test_observer_runs_when_updates_present(monkeypatch):
+    plugin = gco.GrilloChatObserverPlugin()
+
+    # Make the checker report that there are updates
+    async def fake_check():
+        return {"updated": True, "new_messages": [], "last_checked": "2026-01-01T00:00:00Z"}
+
+    monkeypatch.setattr('plugins.grillo.grillo_chat_observer.check_for_updates_once', fake_check)
+
+    # Spy on collect and enqueue to ensure both are executed
+    called = {}
+
+    async def fake_collect(limit):
+        called['collected'] = True
+        return ["test snippet"]
+
+    plugin._collect_recent_snippets = fake_collect
+
+    async def fake_enqueue(bot, message, context_memory=None, interface_id=None, original_message=None):
+        called['enqueued'] = True
+
+    from core import message_queue
+    monkeypatch.setattr(message_queue, 'enqueue_low_priority', fake_enqueue)
+
+    await plugin._run_observer()
+
+    assert 'collected' in called
+    assert 'enqueued' in called
+
+
+@pytest.mark.asyncio
+async def test_observer_skips_when_no_updates(monkeypatch):
+    plugin = gco.GrilloChatObserverPlugin()
+
+    # Make the checker report that there are NO updates
+    async def fake_check():
+        return {"updated": False, "new_messages": [], "last_checked": "2026-01-01T00:00:00Z"}
+
+    monkeypatch.setattr('plugins.grillo.grillo_chat_observer.check_for_updates_once', fake_check)
+
+    # Spy on collect and enqueue to ensure they are NOT executed
+    called = {}
+
+    async def fake_collect(limit):
+        called['collected'] = True
+        return ["test snippet"]
+
+    plugin._collect_recent_snippets = fake_collect
+
+    async def fake_enqueue(bot, message, context_memory=None, interface_id=None, original_message=None):
+        called['enqueued'] = True
+
+    from core import message_queue
+    monkeypatch.setattr(message_queue, 'enqueue_low_priority', fake_enqueue)
+
+    await plugin._run_observer()
+
+    assert 'collected' not in called
+    assert 'enqueued' not in called

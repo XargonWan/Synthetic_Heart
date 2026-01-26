@@ -257,6 +257,13 @@ class CoreInitializer:
                 await start_pool_cleanup_task()
             except Exception as e:
                 log_warning(f"[core_initializer] Failed to start pool cleanup task: {e}")
+
+            # Start chat update checker service (non-critical)
+            try:
+                from core.chat_update_checker import start_chat_update_checker
+                await start_chat_update_checker()
+            except Exception as e:
+                log_warning(f"[core_initializer] Failed to start chat update checker: {e}")
             
             # Start all registered interfaces
             await self._start_interfaces()
