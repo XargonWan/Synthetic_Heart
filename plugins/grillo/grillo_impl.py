@@ -235,9 +235,8 @@ class GrilloPlugin(AIPluginBase):
             "Example: \"We talked about Power Rangers — Jay asked what Super Sentai is, and I explained Super Sentai is the original Japanese series with different stories than Power Rangers.\"\n\n"
             "Also provide 2-4 short tags (as a JSON array) describing the memory (e.g., [\"power_rangers\", \"sentai\"]).\n"
             "Return ONLY valid JSON that creates a diary entry using the `create_personal_diary_entry` action. The JSON must look like: \n"
-            "{"
-            '"actions": [{"type": "create_personal_diary_entry", "payload": {"content": "<your concise summary>", "context_tags": ["tag1","tag2"]}}]}
-            "\nDo NOT include any extra text outside the JSON."
+            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content": "<your concise summary>", "context_tags": ["tag1","tag2"]}}]}\n'
+            "Do NOT include any extra text outside the JSON."
         )
         return base
 
@@ -508,6 +507,265 @@ class GrilloPlugin(AIPluginBase):
     async def _reset_beat_pending_after_delay(self):
         await asyncio.sleep(300)
         GrilloPlugin._beat_pending = False
+
+    @classmethod
+    async def _ensure_action_execs_table(cls) -> bool:
+        """Best-effort: create the `grillo_action_execs` table if it doesn't exist."""
+        try:
+            from core.db import get_conn_ctx
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS grillo_action_execs (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            activity_log_id INT NOT NULL,
+                            action_index INT NOT NULL,
+                            action_type VARCHAR(150) NOT NULL,
+                            payload JSON,
+                            status ENUM('pending','processed','failed') NOT NULL DEFAULT 'pending',
+                            error_text TEXT,
+                            result JSON,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            INDEX idx_activity_log_id (activity_log_id),
+                            FOREIGN KEY (activity_log_id) REFERENCES grillo_activity_log(id) ON DELETE CASCADE
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+                        """
+                    )
+                    try:
+                        await conn.commit()
+                    except Exception:
+                        pass
+            log_debug("[grillo] ensured grillo_action_execs table exists")
+            return True
+        except Exception as e:
+            log_debug(f"[grillo] ensure_action_execs_table failed: {e}")
+            return False
+
+    @classmethod
+    async def create_action_exec(
+        cls,
+        activity_log_id: int,
+        action_index: int,
+        action_type: str,
+        payload: Optional[dict] = None,
+        status: str = "pending",
+        error_text: Optional[str] = None,
+        result: Optional[dict] = None,
+    ) -> Optional[int]:
+        """Insert an action exec row for Grillo proposals/executions.
+
+        If the table is missing (error 1146), attempt to create it once and retry.
+        """
+        import json
+        from core.db import get_conn_ctx
+
+        for attempt in range(2):
+            try:
+                async with get_conn_ctx() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(
+                            """
+                            INSERT INTO grillo_action_execs
+                            (activity_log_id, action_index, action_type, payload, status, error_text, result)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s)
+                            """,
+                            (
+                                int(activity_log_id),
+                                int(action_index),
+                                action_type[:150] if action_type else "",
+                                json.dumps(payload) if payload is not None else None,
+                                status,
+                                error_text,
+                                json.dumps(result) if result is not None else None,
+                            ),
+                        )
+                        try:
+                            await conn.commit()
+                        except Exception:
+                            pass
+                    return getattr(cur, "lastrowid", None)
+            except Exception as e:
+                msg = str(e) or ""
+                log_debug(f"[grillo] create_action_exec attempt {attempt} failed: {e}")
+                # MySQL error code 1146 indicates missing table
+                if attempt == 0 and ("1146" in msg or "doesn't exist" in msg or "no such table" in msg.lower()):
+                    ok = await cls._ensure_action_execs_table()
+                    if ok:
+                        continue
+                # As a fallback, write to disk so we don't lose proposals
+                try:
+                    exec_obj = {
+                        'activity_log_id': int(activity_log_id),
+                        'action_index': int(action_index),
+                        'action_type': action_type[:150] if action_type else '',
+                        'payload': payload,
+                        'status': status,
+                        'error_text': error_text,
+                        'result': result,
+                        'created_at': None,
+                    }
+                    await cls._fallback_write_action_exec(exec_obj)
+                    log_info(f"[grillo] Persisted action exec to fallback file for activity_id={activity_log_id} idx={action_index}")
+                except Exception as e2:
+                    log_debug(f"[grillo] fallback write failed: {e2}")
+    async def fetch_action_execs(cls, activity_ids: list[int]) -> dict:
+        """Return mapping activity_log_id -> list of action exec dicts.
+
+        Attempts to create the table if missing and retries once.
+        """
+        try:
+            from core.db import get_conn_ctx
+            if not activity_ids:
+                return {}
+        except Exception as e:
+            log_debug(f"[grillo] fetch_action_execs pre-check failed: {e}")
+            return {}
+
+        for attempt in range(2):
+            try:
+                async with get_conn_ctx() as conn:
+                    async with conn.cursor() as cur:
+                        fmt = ",".join(["%s"] * len(activity_ids))
+                        await cur.execute(
+                            f"""
+                            SELECT id, activity_log_id, action_index, action_type, payload, status, error_text, result, created_at
+                            FROM grillo_action_execs
+                            WHERE activity_log_id IN ({fmt})
+                            ORDER BY activity_log_id, action_index ASC
+                            """,
+                            activity_ids,
+                        )
+                        rows = await cur.fetchall()
+                        mapping = {}
+                        import json
+                        for r in rows:
+                            aid = r[1]
+                            payload = None
+                            result = None
+                            try:
+                                payload = json.loads(r[4]) if r[4] else None
+                            except Exception:
+                                payload = None
+                            try:
+                                result = json.loads(r[7]) if r[7] else None
+                            except Exception:
+                                result = None
+                            mapping.setdefault(aid, []).append({
+                                "id": r[0],
+                                "activity_log_id": aid,
+                                "action_index": r[2],
+                                "action_type": r[3],
+                                "payload": payload,
+                                "status": r[5],
+                                "error_text": r[6],
+                                "result": result,
+                                "created_at": r[8].isoformat() if hasattr(r[8], "isoformat") else r[8],
+                            })
+                        return mapping
+            except Exception as e:
+                msg = str(e) or ""
+                log_debug(f"[grillo] fetch_action_execs attempt {attempt} failed: {e}")
+                if attempt == 0 and ("1146" in msg or "doesn't exist" in msg or "no such table" in msg.lower()):
+                    ok = await cls._ensure_action_execs_table()
+                    if ok:
+                        continue
+                # As a fallback, try reading file-based fallback store
+                try:
+                    return await cls._fallback_read_action_execs(activity_ids)
+                except Exception as _:
+                    return {}
+        # Merge with file-based fallback to ensure entries created while DB was down are visible
+        try:
+            fallback_map = await cls._fallback_read_action_execs(activity_ids)
+            for aid, items in fallback_map.items():
+                if aid in mapping:
+                    mapping[aid].extend(items)
+                else:
+                    mapping[aid] = items
+        except Exception:
+            pass
+        return mapping
+
+    @classmethod
+    async def _fallback_write_action_exec(cls, exec_obj: dict) -> None:
+        """Append action exec to a local fallback JSONL file in logs/ if DB unavailable."""
+        try:
+            import json
+            import os
+            path = os.path.join(os.getcwd(), 'logs', 'grillo_action_execs_fallback.jsonl')
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(exec_obj, ensure_ascii=False) + '\n')
+        except Exception as e:
+            log_debug(f"[grillo] _fallback_write_action_exec failed: {e}")
+
+    @classmethod
+    async def _fallback_read_action_execs(cls, activity_ids: list[int]) -> dict:
+        """Read fallback JSONL file and return mapping activity_log_id -> list of execs."""
+        try:
+            import json
+            import os
+            path = os.path.join(os.getcwd(), 'logs', 'grillo_action_execs_fallback.jsonl')
+            if not os.path.exists(path):
+                return {}
+            mapping = {}
+            with open(path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    try:
+                        obj = json.loads(line)
+                        aid = obj.get('activity_log_id')
+                        if aid in activity_ids:
+                            mapping.setdefault(aid, []).append(obj)
+                    except Exception:
+                        continue
+            return mapping
+        except Exception as e:
+            log_debug(f"[grillo] _fallback_read_action_execs failed: {e}")
+            return {}
+
+    @classmethod
+    async def _fallback_write_activity(cls, activity_obj: dict) -> str:
+        """Append a grillo activity to a local fallback JSONL file and return synthetic id."""
+        try:
+            import json
+            import os
+            import time
+            path = os.path.join(os.getcwd(), 'logs', 'grillo_activity_fallback.jsonl')
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            # Ensure activity has an id
+            if 'id' not in activity_obj or not activity_obj.get('id'):
+                activity_obj['id'] = f"fallback-{int(time.time()*1000)}"
+            with open(path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(activity_obj, ensure_ascii=False) + '\n')
+            log_info(f"[grillo] Wrote activity to fallback file id={activity_obj['id']}")
+            return activity_obj['id']
+        except Exception as e:
+            log_debug(f"[grillo] _fallback_write_activity failed: {e}")
+            return ""
+
+    @classmethod
+    async def _fallback_read_activities(cls) -> list:
+        """Read fallback activities file and return list of dicts (most recent first)."""
+        try:
+            import json
+            import os
+            path = os.path.join(os.getcwd(), 'logs', 'grillo_activity_fallback.jsonl')
+            if not os.path.exists(path):
+                return []
+            out = []
+            with open(path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    try:
+                        obj = json.loads(line)
+                        out.append(obj)
+                    except Exception:
+                        continue
+            return out
+        except Exception as e:
+            log_debug(f"[grillo] _fallback_read_activities failed: {e}")
+            return []
 
 
 PLUGIN_CLASS = GrilloPlugin
