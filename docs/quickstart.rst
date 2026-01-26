@@ -30,10 +30,14 @@ This guide outlines the typical steps to run **Synthetic Heart** using Docker. s
    ``https://localhost:8000``.
    Once in the WebUI navigate to **Components** and select the desired LLM
    Engine (`Selenium_Gemini` is suggested).
-   If using a Selenium-based engine (e.g., ChatGPT or Gemini), press
-   the **Login** button for that engine and complete the provider login flow
-   in the browser that opens (Selkies/Chromium may be used to perform the
-   login if available).
+
+5. Configure the LLM Engine:
+   -  If using a Selenium-based engine (e.g., ChatGPT or Gemini), press
+      the **Login** button for that engine and complete the provider login flow
+      in the browser that opens (Selkies/Chromium may be used to perform the
+      login if available).
+   -  If using an API based engine, enter the required API key or credentials
+      in the provided fields (coming soon).
 
 Security & operational notes
 ------------------------------------------------------------------
