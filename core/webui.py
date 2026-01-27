@@ -398,40 +398,15 @@ class SynthWebUIInterface:
         # double-sending by not also broadcasting from a callback.
         log_info(f"{LOG_PREFIX} Animation handler initialized (single websocket sender)", log_file=WEBUI_LOG)
 
-    async def set_animation_state(self, request: Request):
-        """Set the centralized animation state. Expected JSON:
-        {"state": "think|write|idle|talk", "session_id": "...", "loop": true}
-        """
-        data = await request.json()
-        state_str = data.get("state") if isinstance(data, dict) else None
-        if not state_str or not isinstance(state_str, str):
-            raise HTTPException(status_code=400, detail="'state' is required and must be a string")
-        try:
-            state_enum = AnimationState[state_str.upper()]
-        except Exception:
-            raise HTTPException(status_code=400, detail=f"Unknown animation state: {state_str}")
-
-        session_id = data.get("session_id")
-        loop = bool(data.get("loop", True))
-        context_id = data.get("context_id")
-        source = data.get("source")
-
-        try:
-            await self.animation_handler.play_animation(state_enum, session_id=session_id, loop=loop, context_id=context_id, source=source)
-            return JSONResponse({"status": "ok", "state": state_str, "session_id": session_id})
-        except Exception as exc:
-            log_error(f"{LOG_PREFIX} set_animation_state failed: {exc}")
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
-        
         # Initialize global action state manager
         self.action_state_manager = get_action_state_manager()
         # Register callback to broadcast state changes to all WebSocket clients
         self.action_state_manager.register_state_changed_callback(self._broadcast_action_state)
         log_info(f"{LOG_PREFIX} Action state manager initialized with WebSocket broadcast", log_file=WEBUI_LOG)
-        
+
         # Persona manager will be initialized in start() method after core initialization
         self.persona_manager = None
-        
+
         if self.autostart:
             log_info(f"{LOG_PREFIX} Autostart enabled - will start server when event loop is available", log_file=WEBUI_LOG)
             # Don't start server here - it will be started by the main application
@@ -456,6 +431,31 @@ class SynthWebUIInterface:
 
         if self.autostart:
             self._schedule_uploads_cleanup()
+
+    async def set_animation_state(self, request: Request):
+        """Set the centralized animation state. Expected JSON:
+        {"state": "think|write|idle|talk", "session_id": "...", "loop": true}
+        """
+        data = await request.json()
+        state_str = data.get("state") if isinstance(data, dict) else None
+        if not state_str or not isinstance(state_str, str):
+            raise HTTPException(status_code=400, detail="'state' is required and must be a string")
+        try:
+            state_enum = AnimationState[state_str.upper()]
+        except Exception:
+            raise HTTPException(status_code=400, detail=f"Unknown animation state: {state_str}")
+
+        session_id = data.get("session_id")
+        loop = bool(data.get("loop", True))
+        context_id = data.get("context_id")
+        source = data.get("source")
+
+        try:
+            await self.animation_handler.play_animation(state_enum, session_id=session_id, loop=loop, context_id=context_id, source=source)
+            return JSONResponse({"status": "ok", "state": state_str, "session_id": session_id})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} set_animation_state failed: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     # ------------------------------------------------------------------
     # Interface metadata
