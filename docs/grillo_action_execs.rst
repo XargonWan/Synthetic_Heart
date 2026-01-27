@@ -34,6 +34,10 @@ entry returned by `/api/history/grillo`. Each `actions` item contains:
 - result
 - created_at
 
+The History → Grillo UI renders these action entries under each Grillo card,
+including status chips (pending/processed/failed) and payload/result details
+to help monitor post-chain action proposals.
+
 Usage
 -----
 
