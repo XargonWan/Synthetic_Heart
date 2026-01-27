@@ -6,32 +6,37 @@ Quickstart
 
 This guide outlines the typical steps to run **Synthetic Heart** using Docker. synth is a modular AI system that automatically discovers and loads components (interfaces, plugins, and LLM engines) at startup.
 
-1. Clone the repository:
+
+1. **Clone the repository**
 
    .. code-block:: bash
 
       git clone https://github.com/XargonWan/Synthetic_Heart
       cd Synthetic_Heart
 
-2. [OPTIONAL] Copy ``.env.example`` to ``.env`` and adjust values as needed. Important
+
+2. **[OPTIONAL] Environment file setup**
+   Copy ``.env.example`` to ``.env`` and adjust values as needed. Important
    variables include database credentials for persistent features and
    ``TRAINER_IDS`` for security. The optional ``NOTIFY_ERRORS_TO_INTERFACES``
    mapping (e.g. ``telegram_bot:123456``) defines where error notifications
    are sent.
    This step is optional as now everything can be done via WebUI later.
 
-3. Start Synthetic Heart:
+
+3. **Start Synthetic Heart**
 
    .. code-block:: bash
 
       docker compose up -d
 
-4. Open the WebUI in your browser via HTTPS, by default at
-   ``https://localhost:8000``.
+4. **Open the WebUI**
+   Open your browser and navigate to ``https://localhost:8000``.
+   This is the default address; if you set it up on a remote host or changed the port mapping in ``docker-compose.yml``, adjust accordingly.
+
+5. **Configure the LLM Engine**
    Once in the WebUI navigate to **Components** and select the desired LLM
    Engine (`Selenium_Gemini` is suggested).
-
-5. Configure the LLM Engine:
    -  If using a Selenium-based engine (e.g., ChatGPT or Gemini), press
       the **Login** button for that engine and complete the provider login flow
       in the browser that opens (Selkies/Chromium may be used to perform the
@@ -46,9 +51,6 @@ Security & operational notes
   chat endpoints heavily.
 - Check provider terms of service before running automated agents against a
   public LLM web UI.
-
-   :width: 600px
-   :align: center
 
 .. note::
 
