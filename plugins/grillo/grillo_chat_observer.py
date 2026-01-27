@@ -222,6 +222,8 @@ class GrilloChatObserverPlugin:
                     "beat_type": "observer",
                     "activity_log_id": activity_log_id,
                     "grillo_snippets": fragments,
+                    "propose_only": bool(self.propose_only),
+                    "include_memories": True,
                 }
 
                 await message_queue.enqueue_low_priority(None, message, context_memory=context, interface_id='grillo', original_message=None)
@@ -301,12 +303,20 @@ class GrilloChatObserverPlugin:
         if self.propose_only:
             propose_clause += " The actions should be proposals only; do NOT assume automatic execution."
         propose_clause += " Include a top-level boolean 'safe' on each action indicating if you consider it safe to auto-execute."
+        # Additional clarity to encourage spontaneous, non-forced behaviour and richer decisions
 
-        instructions = (
-            "\n\nINSTRUCTIONS:\n"
+        # Use configured synth name in examples to avoid hardcoding 'G.R.I.L.L.O.'
+        synth_name = str(config_registry.get_var("SYNTH_NAME", "SyntH"))
+
+        propose_clause += (f"\n\nNOTE: This is a prompt for analysis and proposals only — NOT an instruction to send messages. "
+            "If you do not have a useful suggestion, return {'actions': []}. "
+            "When proposing actions include a numeric 'confidence' field (0.0-1.0) and a short 'rationale' explaining why. "
+            "If you propose a message, include an 'interface_path' field that identifies the exact chat (for example: 'something_bot/-1003098886330/2'). "
+            "Do NOT assume any specific interface or auto-execution; the synth is free to choose whether to send and where. "
+            "Use the synth's provided memories and recent history when forming proposals and mention which memories you referenced in your 'rationale'."
             "- Before deciding to write a message or propose a communication, check the chat snippets above for similar messages or concepts. If you (the assistant) or the synth already authored a similar message, do NOT repeat it—avoid producing duplicate messages or proposals.\n"
-            "- Treat messages authored by the synth (e.g., 'Rekku', 'G.R.I.L.L.O.' or other system agents) as existing proposals to consider when checking for duplicates.\n"
-            "- For each useful suggestion produce one action in the 'actions' array, e.g. {\"type\": \"message_telegram_bot\", \"payload\": {...}, \"safe\": true}.\n"
+            f"- Treat messages authored by the synth (e.g., '{synth_name}' or other system agents) as existing proposals to consider when checking for duplicates.\n"
+            "- For each useful suggestion produce one action in the 'actions' array, e.g. {\"type\": \"message_something_bot\", \"payload\": {...}, \"safe\": true}.\n"
             "- RESPOND ONLY WITH VALID JSON (no extra text).\n"
         )
 
