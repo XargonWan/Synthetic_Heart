@@ -184,6 +184,12 @@ class GrilloDreamPlugin:
             try:
                 from plugins.grillo.grillo_impl import GrilloPlugin
                 activity_log_id = await GrilloPlugin.create_activity_log(beat_type="dream", prompt_text=prompt)
+                # Definitive logging: include activity id and short prompt snippet for traceability
+                try:
+                    snippet = str(prompt).replace('\n', ' ')[:200]
+                    log_info(f"[grillo_dream] Activity created: GRILLO_ACTIVITY id={activity_log_id} beat=dream samples={len(fragments)} prompt_snippet={snippet}")
+                except Exception:
+                    pass
             except Exception as e:
                 log_debug(f"[grillo_dream] Could not create activity log: {e}")
                 activity_log_id = None

@@ -203,6 +203,13 @@ class GrilloChatObserverPlugin:
             try:
                 from plugins.grillo.grillo_impl import GrilloPlugin
                 activity_log_id = await GrilloPlugin.create_activity_log(beat_type="observer", prompt_text=prompt)
+                # Definitive logging: include activity id and short prompt snippet for traceability
+                try:
+                    snippet = str(prompt).replace('\n', ' ')[:200]
+                    log_info(f"[grillo_chat_observer] Activity created: GRILLO_ACTIVITY id={activity_log_id} beat=observer propose_only={self.propose_only} prompt_snippet={snippet}")
+                except Exception:
+                    # Non-fatal; continue
+                    pass
             except Exception as e:
                 log_debug(f"[grillo_chat_observer] Could not create activity log: {e}")
 
@@ -301,20 +308,20 @@ class GrilloChatObserverPlugin:
         for i, s in enumerate(snippets, 1):
             body += f"{i}. {s}\n"
 
-        propose_clause = "RESPOND WITH VALID JSON: a single object with an 'actions' array."
+        # Ask the LLM to think like a helpful participant: choose which recent message(s) you'd naturally reply to and propose short, human replies.
+        propose_clause = (
+            "Think like a helpful person reading these snippets: which message(s) would you naturally reply to, and what would you say?"
+        )
         if self.propose_only:
-            propose_clause += " The actions should be proposals only; do NOT assume automatic execution."
-        propose_clause += " Include a top-level boolean 'safe' on each action indicating if you consider it safe to auto-execute."
-        # Additional clarity (kept intentionally concise - see OBSERVER_INSTRUCTIONS for full requirements)
+            propose_clause += " Suggested actions should be proposals only (do NOT assume automatic execution)."
+        propose_clause += " Return ONLY a JSON object with an 'actions' array (see examples below)."
 
         # Use configured synth name in examples to avoid hardcoding 'G.R.I.L.L.O.'
         synth_name = str(config_registry.get_var("SYNTH_NAME", "SyntH"))
 
-        # Keep the propose clause short and rely on OBSERVER_INSTRUCTIONS for detailed bullets/examples
-        propose_clause += " See 'Instructions' section below for examples and required JSON format."
-
-        # Use the module-level instructions block so it's easy to maintain and test
-        return header + body + propose_clause + OBSERVER_INSTRUCTIONS
+        # Keep the propose clause short and rely on OBSERVER_INSTRUCTIONS for friendly examples and required JSON format
+        prompt = header + body + propose_clause + OBSERVER_INSTRUCTIONS
+        return prompt
 
 
 PLUGIN_CLASS = GrilloChatObserverPlugin

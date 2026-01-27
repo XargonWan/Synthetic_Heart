@@ -1,12 +1,13 @@
 # Shared instruction block for G.R.I.L.L.O. plugins
 
 GRILLO_INSTRUCTIONS = (
-    "\n\nINSTRUCTIONS:\n"
-    "- Be concise: return only the requested JSON object and avoid extra commentary.\n"
-    "- Ensure each action includes at least \"type\" and \"payload\"; when relevant include \"safe\", \"confidence\" (0.0-1.0) and a brief \"rationale\".\n"
-    "- If you have no useful suggestions, return {\"actions\": []}.\n"
-    "- Do not attempt to auto-execute any action; this prompt is for proposal only.\n"
-    "- Before deciding to write a message or propose a communication, check the chat snippets above for similar messages or concepts. If you (the assistant) or the synth already authored a similar message, do NOT repeat it—avoid producing duplicate messages or proposals.\n"
-    "- Treat messages authored by the synth (e.g., 'SyntH', 'Rekku' or other system agents) as existing proposals to consider when checking for duplicates.\n"
-    "- Examples: return JSON like {\"actions\": []} when there are no suggestions; for a proposed message use e.g. {\"type\": \"message_telegram_bot\", \"payload\": {\"text\": \"Hi\"}, \"safe\": true, \"confidence\": 0.85}.\n"
+    "\n\nINSTRUCTIONS (friendly):\n"
+    "- Read the chat snippets and ask yourself: 'Which message(s) would I naturally reply to, and what would I say?' Answer like a helpful, curious human.\n"
+    "- Return ONLY a single JSON object with an 'actions' array — no extra commentary.\n"
+    "- Prefer short, conversational replies or simple proposals (e.g., reply to a specific message, ask a clarifying question, suggest a follow-up resource).\n"
+    "- Each action should include at least \"type\" and \"payload\"; when useful add \"safe\", \"confidence\" (0.0-1.0) and a short \"rationale\" describing why this would be helpful.\n"
+    "- If there is nothing worth proposing, return {\"actions\": []}.\n"
+    "- Avoid duplicates: if the synth or a user already said something similar in the snippets, do not propose the same message again.\n"
+    "- Keep proposals natural and focused on being helpful or engaging (not a technical audit).\n"
+    "- Examples: return {\"actions\": []} for no suggestions; for a proposed reply use e.g. {\"type\": \"message_telegram_bot\", \"payload\": {\"text\": \"That dream sounds wild — want to tell me more about Luca's part?\"}, \"safe\": true, \"confidence\": 0.9, \"rationale\": \"Encourages continuation of the story\"}.\n"
 )

@@ -38,6 +38,11 @@ The History → Grillo UI renders these action entries under each Grillo card,
 including status chips (pending/processed/failed) and payload/result details
 to help monitor post-chain action proposals.
 
+Note: the Chat Observer prompt is intentionally phrased in a friendly, human
+style: the LLM is asked to think like a helpful participant and suggest what
+message(s) it would naturally reply to (short, conversational proposals), not
+analyze the flow as a technical audit.
+
 Usage
 -----
 
