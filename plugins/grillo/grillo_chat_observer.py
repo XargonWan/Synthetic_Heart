@@ -65,6 +65,11 @@ class GrilloChatObserverPlugin:
         register_plugin("grillo_chat_observer", self)
         log_info("[grillo_chat_observer] Registered GrilloChatObserverPlugin")
 
+        # Track last run timestamp for observer to avoid missing messages even
+        # if the global checker has already consumed them. This is initialized
+        # on start() to the current time to avoid acting on historic messages.
+        self._last_run_ts: float = 0.0
+
         # Config listeners
         config_registry.add_listener("GRILLO_OBSERVER_ENABLED", lambda v: setattr(self, "enabled", bool(v)))
         config_registry.add_listener("GRILLO_OBSERVER_INTERVAL", lambda v: setattr(self, "interval", int(v)))
@@ -88,6 +93,12 @@ class GrilloChatObserverPlugin:
 
         GrilloChatObserverPlugin._scheduler_running = True
         GrilloChatObserverPlugin._scheduler_task = asyncio.create_task(self._observer_loop())
+        # Initialize last run timestamp to now so we don't process old history
+        try:
+            self._last_run_ts = float(datetime.utcnow().timestamp())
+            log_debug(f"[grillo_chat_observer] Initialized last_run_ts={self._last_run_ts}")
+        except Exception:
+            pass
         log_info("[grillo_chat_observer] Scheduler started")
 
     async def stop(self):
@@ -127,15 +138,56 @@ class GrilloChatObserverPlugin:
                 log_debug("[grillo_chat_observer] Skipping run because disabled")
                 return
 
-            # Only run observer if there are new messages since last check.
+            # Only run observer if there are new non-self messages since the
+            # observer's last run. We query the chat_history_cache directly to
+            # avoid races with the global checker (which may consume updates).
             try:
-                from core.chat_update_checker import check_for_updates_once
-                chk = await check_for_updates_once()
-                if not chk.get('updated'):
-                    log_debug("[grillo_chat_observer] No new messages; skipping observer run")
+                from core.db import execute_query
+                # Ensure last_run_ts initialized
+                if not getattr(self, '_last_run_ts', 0.0):
+                    self._last_run_ts = float(datetime.utcnow().timestamp())
+                    log_debug("[grillo_chat_observer] last_run_ts uninitialized – initializing and skipping first run")
                     return
+
+                rows = await execute_query(
+                    """
+                    SELECT COUNT(*) as cnt, MAX(UNIX_TIMESTAMP(timestamp)) as max_ts
+                    FROM chat_history_cache
+                    WHERE UNIX_TIMESTAMP(timestamp) > %s
+                      AND COALESCE(sender_id, '') NOT IN (%s, %s)
+                      AND COALESCE(sender_name, '') NOT IN (%s, %s)
+                    """,
+                    (self._last_run_ts, 'self', 'synth', 'self', 'synth'),
+                )
+
+                cnt = 0
+                max_ts = None
+                if rows and len(rows) > 0:
+                    r = rows[0]
+                    if isinstance(r, dict):
+                        cnt = int(r.get('cnt') or 0)
+                        max_ts = r.get('max_ts')
+                    else:
+                        cnt = int(r[0] or 0)
+                        max_ts = r[1]
+
+                if cnt == 0:
+                    log_debug('[grillo_chat_observer] No new non-self messages since last_run; skipping')
+                    return
+                else:
+                    log_debug(f"[grillo_chat_observer] Found {cnt} new non-self messages since last_run; proceeding")
+
             except Exception as e:
-                log_debug(f"[grillo_chat_observer] Chat update checker failed; proceeding: {e}")
+                log_debug(f"[grillo_chat_observer] Direct DB check failed; falling back to checker: {e}")
+                # Fallback to non-consuming peek
+                try:
+                    from core.chat_update_checker import check_for_updates_once
+                    chk = await check_for_updates_once(consume=False)
+                    if not chk.get('updated'):
+                        log_debug("[grillo_chat_observer] No new messages after fallback; skipping observer run")
+                        return
+                except Exception as e2:
+                    log_debug(f"[grillo_chat_observer] Chat update checker fallback failed; proceeding: {e2}")
 
             fragments = await self._collect_recent_snippets(self.samples)
             if not fragments:
@@ -174,6 +226,16 @@ class GrilloChatObserverPlugin:
 
                 await message_queue.enqueue_low_priority(None, message, context_memory=context, interface_id='grillo', original_message=None)
                 log_info("[grillo_chat_observer] Observer prompt enqueued for LLM processing")
+
+                # Advance observer last-run to avoid reprocessing the same messages
+                try:
+                    if max_ts:
+                        self._last_run_ts = float(max_ts)
+                    else:
+                        self._last_run_ts = float(datetime.utcnow().timestamp())
+                    log_debug(f"[grillo_chat_observer] Updated last_run_ts to {self._last_run_ts}")
+                except Exception:
+                    pass
             except Exception as e:
                 log_error(f"[grillo_chat_observer] Failed to enqueue observer prompt: {e}")
         except Exception as e:

@@ -258,10 +258,20 @@ class CoreInitializer:
             except Exception as e:
                 log_warning(f"[core_initializer] Failed to start pool cleanup task: {e}")
 
-            # Start chat update checker service (non-critical)
+            # Start chat update checker service (non-critical) — only if explicitly configured to auto-start
             try:
-                from core.chat_update_checker import start_chat_update_checker
-                await start_chat_update_checker()
+                from core.config_manager import config_registry
+                auto_start = config_registry.get_value("CHAT_UPDATE_CHECKER_AUTO_START", False,
+                                                     label="Auto-start chat update checker",
+                                                     description="If True, start the chat update checker background loop at core startup",
+                                                     value_type=bool,
+                                                     group="scheduling",
+                                                     component="core")
+                if auto_start:
+                    from core.chat_update_checker import start_chat_update_checker
+                    await start_chat_update_checker()
+                else:
+                    log_debug("[core_initializer] Chat update checker auto-start disabled by config; checker will run on demand only")
             except Exception as e:
                 log_warning(f"[core_initializer] Failed to start chat update checker: {e}")
             

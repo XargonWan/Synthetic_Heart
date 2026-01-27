@@ -13,6 +13,7 @@ Configuration
 
 - ``CHAT_UPDATE_CHECK_INTERVAL`` -- Interval in seconds between checks (default: ``60``).
 - ``CHAT_UPDATE_CHECKER_ENABLED`` -- Enable or disable the periodic checker (default: ``True``).
+- ``CHAT_UPDATE_CHECKER_AUTO_START`` -- If ``True``, the background checker will be started automatically at core initialization. **Default: ``False``**. When ``False``, components should call `check_for_updates_once()` on demand or implement their own per-plugin "since timestamp → now" checks.
 
 API
 ---
