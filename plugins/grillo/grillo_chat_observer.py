@@ -18,6 +18,18 @@ from core.core_initializer import register_plugin
 from core.logging_utils import log_info, log_debug, log_warning, log_error
 from core.config_manager import config_registry
 
+# Module-level constant for observer prompt instructions so it can be reused
+OBSERVER_INSTRUCTIONS = (
+    "\n\nINSTRUCTIONS:\n"
+    "- Be concise: return only the requested JSON object and avoid extra commentary.\n"
+    "- Ensure each action includes at least \"type\" and \"payload\"; when relevant include \"safe\", \"confidence\" (0.0-1.0) and a brief \"rationale\".\n"
+    "- If you have no useful suggestions, return {\"actions\": []}.\n"
+    "- Do not attempt to auto-execute any action; this prompt is for proposal only.\n"
+    "- Before deciding to write a message or propose a communication, check the chat snippets above for similar messages or concepts. If you (the assistant) or the synth already authored a similar message, do NOT repeat it—avoid producing duplicate messages or proposals.\n"
+    "- Treat messages authored by the synth (e.g., 'SyntH', 'Rekku' or other system agents) as existing proposals to consider when checking for duplicates.\n"
+    "- Examples: return JSON like {\"actions\": []} when there are no suggestions; for a proposed message use e.g. {\"type\": \"message_telegram_bot\", \"payload\": {\"text\": \"Hi\"}, \"safe\": true, \"confidence\": 0.85}.\n"
+)
+
 
 class GrilloChatObserverPlugin:
     display_name = "G.R.I.L.L.O. Chat Observer"
@@ -303,24 +315,16 @@ class GrilloChatObserverPlugin:
         if self.propose_only:
             propose_clause += " The actions should be proposals only; do NOT assume automatic execution."
         propose_clause += " Include a top-level boolean 'safe' on each action indicating if you consider it safe to auto-execute."
-        # Additional clarity to encourage spontaneous, non-forced behaviour and richer decisions
+        # Additional clarity (kept intentionally concise - see OBSERVER_INSTRUCTIONS for full requirements)
 
         # Use configured synth name in examples to avoid hardcoding 'G.R.I.L.L.O.'
         synth_name = str(config_registry.get_var("SYNTH_NAME", "SyntH"))
 
-        propose_clause += (f"\n\nNOTE: This is a prompt for analysis and proposals only — NOT an instruction to send messages. "
-            "If you do not have a useful suggestion, return {'actions': []}. "
-            "When proposing actions include a numeric 'confidence' field (0.0-1.0) and a short 'rationale' explaining why. "
-            "If you propose a message, include an 'interface_path' field that identifies the exact chat (for example: 'something_bot/-1003098886330/2'). "
-            "Do NOT assume any specific interface or auto-execution; the synth is free to choose whether to send and where. "
-            "Use the synth's provided memories and recent history when forming proposals and mention which memories you referenced in your 'rationale'."
-            "- Before deciding to write a message or propose a communication, check the chat snippets above for similar messages or concepts. If you (the assistant) or the synth already authored a similar message, do NOT repeat it—avoid producing duplicate messages or proposals.\n"
-            f"- Treat messages authored by the synth (e.g., '{synth_name}' or other system agents) as existing proposals to consider when checking for duplicates.\n"
-            "- For each useful suggestion produce one action in the 'actions' array, e.g. {\"type\": \"message_something_bot\", \"payload\": {...}, \"safe\": true}.\n"
-            "- RESPOND ONLY WITH VALID JSON (no extra text).\n"
-        )
+        # Keep the propose clause short and rely on OBSERVER_INSTRUCTIONS for detailed bullets/examples
+        propose_clause += " See 'Instructions' section below for examples and required JSON format."
 
-        return header + body + propose_clause + instructions
+        # Use the module-level instructions block so it's easy to maintain and test
+        return header + body + propose_clause + OBSERVER_INSTRUCTIONS
 
 
 PLUGIN_CLASS = GrilloChatObserverPlugin

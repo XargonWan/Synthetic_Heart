@@ -102,6 +102,9 @@ async def wait_for_db(max_attempts=10, delay=3):
 
 _db_logging_initialized = False
 
+# Track if we've already warned about unsupported `max_execution_time` so we don't spam logs
+_max_execution_time_unsupported_reported = False
+
 def initialize_db_logging():
     """Log database configuration for debugging purposes."""
     global _db_logging_initialized
@@ -257,7 +260,26 @@ async def get_conn() -> aiomysql.Connection:
         async with conn.cursor() as cur:
             await cur.execute("SET SESSION max_execution_time=30000")  # 30 second timeout per query
     except Exception as e:
-        log_debug(f"[db] Could not set query timeout: {e}")
+        # Some MySQL/MariaDB servers (or older versions) don't support
+        # the `max_execution_time` session variable (error 1193 / "Unknown system variable").
+        # Treat that specific case as informational but warn only once to avoid log spamming.
+        try:
+            msg = str(e)
+            if "Unknown system variable 'max_execution_time'" in msg or "1193" in msg:
+                try:
+                    # report the unsupported-variable condition only the first time
+                    global _max_execution_time_unsupported_reported
+                    if not _max_execution_time_unsupported_reported:
+                        log_warning("[db] DB server does not support session max_execution_time; query timeouts will not be enforced (first occurrence): %s" % msg)
+                        _max_execution_time_unsupported_reported = True
+                except Exception:
+                    # Fallback to debug logging if something goes wrong updating the flag
+                    log_debug(f"[db] Could not set query timeout (ignoring unsupported var): {e}")
+            else:
+                # Other errors are unexpected — log as error so maintainers notice
+                log_error(f"[db] Could not set query timeout: {e}")
+        except Exception:
+            log_error(f"[db] Could not set query timeout: {e}")
 
     # Track active connections for monitoring/leak detection
     try:

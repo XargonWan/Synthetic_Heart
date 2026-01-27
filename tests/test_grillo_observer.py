@@ -42,6 +42,19 @@ async def test_observer_builds_prompt_and_collects(monkeypatch):
     assert called['ctx'].get('grillo_snippets') == ["(chat:telegram_bot/1) Hello world", "(chat:telegram_bot/2) Another message"]
 
 
+def test_build_observer_prompt_returns_string():
+    plugin = gco.GrilloChatObserverPlugin()
+    prompt = plugin._build_observer_prompt(['sample snippet'])
+    assert isinstance(prompt, str)
+    assert 'Snippets:' in prompt
+    assert 'RESPOND WITH VALID JSON' in prompt
+    # Ensure the additional instructions block is present and uses the module-level constant
+    assert 'Instructions:' in prompt
+    assert '{"actions": []}' in prompt  # JSON example with double quotes should be present
+    import plugins.grillo.grillo_chat_observer as gco_mod
+    assert gco_mod.OBSERVER_INSTRUCTIONS in prompt
+
+
 @pytest.mark.asyncio
 async def test_collect_recent_snippets_includes_sender_and_timestamp(monkeypatch):
     plugin = gco.GrilloChatObserverPlugin()
