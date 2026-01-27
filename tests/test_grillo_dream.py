@@ -15,6 +15,9 @@ async def test_build_dream_prompt_contains_instructions():
     assert '"autonomous": true' in prompt
     # deduplication instruction should be present
     assert 'check the fragments' in prompt.lower() or 'avoid repeating' in prompt.lower() or 'do not repeat' in prompt.lower()
+    # Ensure the shared GRILLO_INSTRUCTIONS are included
+    import plugins.grillo.common_instructions as ci
+    assert ci.GRILLO_INSTRUCTIONS.strip()[:40] in prompt
 
 
 @pytest.mark.asyncio
