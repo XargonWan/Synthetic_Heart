@@ -15,6 +15,9 @@ from core.config_manager import config_registry
 from core.db import execute_query
 from core import recent_chats
 
+SELF_SENDER_IDS = {"self", "synth"}
+SELF_SENDER_NAMES = {"self", "synth"}
+
 # Register configuration variables
 CHAT_UPDATE_CHECK_INTERVAL = int(
     config_registry.get_value(
@@ -41,11 +44,11 @@ CHAT_UPDATE_CHECKER_ENABLED = bool(
 
 
 class ChatUpdateChecker:
-    """Service that checks the `recent_chats` last_active values to detect
-    whether new messages arrived since the last check.
+    """Service that checks chat history to detect whether new non-self
+    messages arrived since the last check.
 
-    The checker keeps a last-seen timestamp (max last_active) and optionally
-    returns the list of chats that updated since that timestamp.
+    The checker keeps a last-seen timestamp (max non-self message time) and
+    optionally returns the list of chats that updated since that timestamp.
     """
 
     def __init__(self, interval: Optional[int] = None, enabled: Optional[bool] = None) -> None:
@@ -72,11 +75,18 @@ class ChatUpdateChecker:
         updated = False
 
         try:
-            # Query DB for most recent activity timestamp
-            rows = await execute_query("SELECT MAX(last_active) as max_ts FROM recent_chats")
+            # Query DB for most recent non-self message timestamp
+            rows = await execute_query(
+                """
+                SELECT MAX(UNIX_TIMESTAMP(timestamp)) as max_ts
+                FROM chat_history_cache
+                WHERE COALESCE(sender_id, '') NOT IN (%s, %s)
+                  AND COALESCE(sender_name, '') NOT IN (%s, %s)
+                """,
+                ("self", "synth", "self", "synth"),
+            )
             max_ts = None
             if rows and len(rows) > 0:
-                # rows may be list of tuples or dicts depending on driver; support both
                 r = rows[0]
                 if isinstance(r, dict):
                     max_ts = r.get("max_ts")
@@ -84,13 +94,7 @@ class ChatUpdateChecker:
                     max_ts = r[0]
 
             if max_ts is None:
-                log_debug("[chat_update_checker] No recent_chats rows found (max_ts is None)")
-                # No activity recorded yet
-                # Fall back to counting active chats in memory
-                active = await recent_chats.get_last_active_chats()
-                if len(active) != self._last_count:
-                    updated = True
-                    self._last_count = len(active)
+                log_debug("[chat_update_checker] No non-self chat_history_cache rows found (max_ts is None)")
             else:
                 max_ts_float = float(max_ts)
                 log_debug(f"[chat_update_checker] max_ts={max_ts_float}, last_known={self._last_known_ts}")
@@ -100,19 +104,37 @@ class ChatUpdateChecker:
                     log_debug("[chat_update_checker] Initialized last_known_ts")
                 elif max_ts_float > self._last_known_ts:
                     updated = True
-                    # Get chats that updated since last known ts
+                    # Get chats that updated since last known ts (non-self only)
                     rows2 = await execute_query(
-                        "SELECT chat_id, last_active FROM recent_chats WHERE last_active > %s ORDER BY last_active ASC",
-                        (self._last_known_ts,),
+                        """
+                        SELECT interface_path, sender_name, sender_id, UNIX_TIMESTAMP(timestamp) as ts
+                        FROM chat_history_cache
+                        WHERE UNIX_TIMESTAMP(timestamp) > %s
+                          AND COALESCE(sender_id, '') NOT IN (%s, %s)
+                          AND COALESCE(sender_name, '') NOT IN (%s, %s)
+                        ORDER BY timestamp ASC
+                        """,
+                        (self._last_known_ts, "self", "synth", "self", "synth"),
                     )
+                    log_debug(f"[chat_update_checker] Found {len(rows2) if rows2 else 0} non-self messages since last_known")
                     for r in rows2:
                         if isinstance(r, dict):
-                            chat_id = r.get("chat_id")
-                            last_active = r.get("last_active")
+                            interface_path = r.get("interface_path")
+                            last_active = r.get("ts")
                         else:
-                            chat_id = r[0]
-                            last_active = r[1]
+                            interface_path = r[0]
+                            last_active = r[3]
+
+                        chat_id = interface_path
+                        if isinstance(interface_path, str):
+                            parts = interface_path.split("/")
+                            if len(parts) > 1:
+                                chat_id = parts[1]
                         new_messages.append({"chat_id": chat_id, "last_active": float(last_active)})
+
+                    if not new_messages:
+                        log_debug("[chat_update_checker] No non-self chat messages produced after filtering")
+
                     # Update last_known to the newest timestamp
                     self._last_known_ts = max_ts_float
 
