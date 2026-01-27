@@ -100,6 +100,8 @@ class AnimationHandler:
         self._state_aliases: Dict[str, List[str]] = {}
         # Additional search paths to consider (ordered)
         self._search_paths: List[Path] = []
+        # Temporary search paths managed via uploads/helpers
+        self._temporary_search_paths: List[Path] = []
         
     def set_webui(self, webui: SynthWebUIInterface) -> None:
         """Set or update the WebUI reference.
@@ -362,6 +364,44 @@ class AnimationHandler:
         self._search_paths = list(paths)
         log_debug(f"[AnimationHandler] Animation search paths set: {self._search_paths}")
 
+    def add_temporary_search_path(self, path: Path) -> None:
+        """Add a temporary search path with high priority (prepended)."""
+        try:
+            p = Path(path)
+        except Exception:
+            return
+        if p not in self._search_paths:
+            self._search_paths.insert(0, p)
+        if p not in self._temporary_search_paths:
+            self._temporary_search_paths.append(p)
+        log_debug(f"[AnimationHandler] Added temporary search path: {p}")
+
+    def remove_temporary_search_path(self, path: Path) -> None:
+        """Remove a temporary search path if present."""
+        try:
+            p = Path(path)
+        except Exception:
+            return
+        self._search_paths = [sp for sp in self._search_paths if sp != p]
+        self._temporary_search_paths = [sp for sp in self._temporary_search_paths if sp != p]
+        log_debug(f"[AnimationHandler] Removed temporary search path: {p}")
+
+    def get_animation_search_paths(self) -> List[Path]:
+        """Return a copy of the configured search paths."""
+        return list(self._search_paths)
+
+    def _build_search_url_prefix(self, root: Path) -> str:
+        """Build a URL prefix for a search path.
+
+        If the search path is under the skins directory, expose it as /skins/<relative>.
+        Otherwise, fall back to /animations.
+        """
+        try:
+            rel = root.relative_to(self.SKINS_DIR)
+            return f"/skins/{rel.as_posix()}"
+        except Exception:
+            return f"/{self.ANIMATIONS_BASE_PATH}"
+
     def register_state_animations(self, state: str, animations: Dict[str, List[str]], sequential: bool = False) -> None:
         """Register override animations for a logical state.
 
@@ -372,6 +412,19 @@ class AnimationHandler:
         if sequential:
             self._sequential_states.add(key)
         log_debug(f"[AnimationHandler] Registered override animations for state {key}: {animations}")
+
+    def register_temporary_state_override(self, upload_id: str, state: str, animations: List[str], sequential: bool = False) -> None:
+        """Register a temporary override list for a state (used by uploads).
+
+        This helper mirrors register_state_animations but tags the source in logs.
+        """
+        if not animations:
+            return
+        payload = {"loop": list(animations)}
+        self.register_state_animations(state, payload, sequential=sequential)
+        log_debug(
+            f"[AnimationHandler] Registered temporary override for upload={upload_id} state={state}: {animations}"
+        )
 
     def register_state_aliases(self, aliases: Dict[str, List[str]]) -> None:
         """Register alias names for canonical states (e.g. THINK -> ['thinking','ponder'])."""
@@ -597,7 +650,7 @@ class AnimationHandler:
         for p in (self._search_paths or []):
             try:
                 root = Path(p)
-                url = f"/{self.ANIMATIONS_BASE_PATH}"
+                url = self._build_search_url_prefix(root)
                 if state_folder:
                     search_roots.append((root / state_folder, f"{url}/{state_folder}"))
                 search_roots.append((root, url))

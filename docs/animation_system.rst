@@ -243,6 +243,41 @@ Frontend
         custom: ['CustomAnimation.fbx']  // New animation
     };
 
+Temporary Animation Uploads
+===========================
+
+The WebUI exposes endpoints to upload **temporary** animations that do not modify
+the active persona skin until explicitly promoted. Uploaded files are stored under
+``skins/temp/<upload_id>/animations/<state>/`` with a companion metadata file at
+``skins/temp/<upload_id>/meta.json``.
+
+**Upload flow**
+
+1. Client uploads an FBX/VRMA to ``POST /api/animations/upload``.
+2. The server writes the file to ``skins/temp/<upload_id>/animations/<state>/``.
+3. The ``AnimationHandler`` adds the upload root as a **temporary search path** so
+   the animation can be discovered without touching the active skin.
+
+**Promotion flow**
+
+When you are ready to make the animation permanent, call
+``POST /api/animations/promote`` to copy the upload into
+``skins/<persona>/animations/<state>/``.
+
+**Endpoints**
+
+- ``POST /api/animations/upload`` (multipart)
+- ``GET /api/animations/uploads``
+- ``DELETE /api/animations/uploads/{upload_id}``
+- ``POST /api/animations/promote``
+
+**Notes**
+
+- Temporary uploads are prioritized using search paths; they can be removed at any time.
+- Descriptors can be provided alongside the upload as JSON (`<file>.fbx.json`).
+- Cleanup runs automatically based on ``SYNTH_MATEENGINE_UPLOAD_TTL_DAYS`` (default: 7 days).
+- Promotion is guarded by ``SYNTH_MATEENGINE_PROMOTE_ENABLED=1``.
+
 Integration with Interfaces
 ============================
 

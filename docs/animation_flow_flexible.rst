@@ -431,6 +431,14 @@ Animation State (server → WebUI)
 
 The backend may include an optional ``animation_state`` object in the WebSocket payload. This object provides fine-grained instructions and the current emotional state for client-side facial animation. Example schema (abridged):
 
+Server endpoints
+----------------
+
+- ``GET /api/animation_state`` – Return the current centralized animation state (used by remote clients to sync).
+- ``POST /api/animation_state`` – Request a centralized animation state change. Body: ``{state, session_id?, loop?, context_id?, source?}``.
+
+**Security note:** Accepting remote requests to modify the global animation state can affect how the avatar behaves persistently; the server should apply appropriate access controls (API keys, interface-level trust, or admin confirmation) before honoring requests that alter the central state.
+
 .. code-block:: json
 
     {
