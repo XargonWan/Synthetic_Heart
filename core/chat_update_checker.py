@@ -15,6 +15,9 @@ from core.config_manager import config_registry
 from core.db import execute_query
 from core import recent_chats
 
+SELF_SENDER_IDS = {"self", "synth"}
+SELF_SENDER_NAMES = {"self", "synth"}
+
 # Register configuration variables
 CHAT_UPDATE_CHECK_INTERVAL = int(
     config_registry.get_value(
@@ -41,11 +44,11 @@ CHAT_UPDATE_CHECKER_ENABLED = bool(
 
 
 class ChatUpdateChecker:
-    """Service that checks the `recent_chats` last_active values to detect
-    whether new messages arrived since the last check.
+    """Service that checks chat history to detect whether new non-self
+    messages arrived since the last check.
 
-    The checker keeps a last-seen timestamp (max last_active) and optionally
-    returns the list of chats that updated since that timestamp.
+    The checker keeps a last-seen timestamp (max non-self message time) and
+    optionally returns the list of chats that updated since that timestamp.
     """
 
     def __init__(self, interval: Optional[int] = None, enabled: Optional[bool] = None) -> None:
@@ -56,27 +59,40 @@ class ChatUpdateChecker:
         self._last_checked: float = 0.0
         self._last_count: int = 0
 
-    async def check_for_updates(self) -> Dict[str, Any]:
+    async def check_for_updates(self, consume: bool = True) -> Dict[str, Any]:
         """Public method that returns a dict:
         {
             "updated": bool,
             "new_messages": [ { "chat_id": ..., "last_active": ... }, ... ],
             "last_checked": iso_ts
         }
-        """
-        return await self._check_once()
 
-    async def _check_once(self) -> Dict[str, Any]:
+        If ``consume`` is False, the method performs the same query but DOES NOT
+        update the internal ``_last_known_ts`` value. This is useful for callers
+        (like observers) that want to check for activity without consuming the
+        pending updates so another component (e.g., the periodic background
+        checker) can still see them.
+        """
+        return await self._check_once(consume=consume)
+
+    async def _check_once(self, consume: bool = True) -> Dict[str, Any]:
         now = time.time()
         new_messages: List[Dict[str, Any]] = []
         updated = False
 
         try:
-            # Query DB for most recent activity timestamp
-            rows = await execute_query("SELECT MAX(last_active) as max_ts FROM recent_chats")
+            # Query DB for most recent non-self message timestamp
+            rows = await execute_query(
+                """
+                SELECT MAX(UNIX_TIMESTAMP(timestamp)) as max_ts
+                FROM chat_history_cache
+                WHERE COALESCE(sender_id, '') NOT IN (%s, %s)
+                  AND COALESCE(sender_name, '') NOT IN (%s, %s)
+                """,
+                ("self", "synth", "self", "synth"),
+            )
             max_ts = None
             if rows and len(rows) > 0:
-                # rows may be list of tuples or dicts depending on driver; support both
                 r = rows[0]
                 if isinstance(r, dict):
                     max_ts = r.get("max_ts")
@@ -84,37 +100,89 @@ class ChatUpdateChecker:
                     max_ts = r[0]
 
             if max_ts is None:
-                log_debug("[chat_update_checker] No recent_chats rows found (max_ts is None)")
-                # No activity recorded yet
-                # Fall back to counting active chats in memory
-                active = await recent_chats.get_last_active_chats()
-                if len(active) != self._last_count:
-                    updated = True
-                    self._last_count = len(active)
+                log_debug("[chat_update_checker] No non-self chat_history_cache rows found (max_ts is None)")
             else:
                 max_ts_float = float(max_ts)
                 log_debug(f"[chat_update_checker] max_ts={max_ts_float}, last_known={self._last_known_ts}")
-                if self._last_known_ts == 0.0:
-                    # First run: initialize last_known but do not report updates
-                    self._last_known_ts = max_ts_float
-                    log_debug("[chat_update_checker] Initialized last_known_ts")
-                elif max_ts_float > self._last_known_ts:
-                    updated = True
-                    # Get chats that updated since last known ts
-                    rows2 = await execute_query(
-                        "SELECT chat_id, last_active FROM recent_chats WHERE last_active > %s ORDER BY last_active ASC",
-                        (self._last_known_ts,),
-                    )
-                    for r in rows2:
-                        if isinstance(r, dict):
-                            chat_id = r.get("chat_id")
-                            last_active = r.get("last_active")
-                        else:
-                            chat_id = r[0]
-                            last_active = r[1]
-                        new_messages.append({"chat_id": chat_id, "last_active": float(last_active)})
-                    # Update last_known to the newest timestamp
-                    self._last_known_ts = max_ts_float
+                # Respect consume flag: if consume=True, we update the internal
+                # last_known timestamp (background checker semantics). If
+                # consume=False, perform a non-destructive peek and DO NOT update
+                # the internal state so other callers can still see these events.
+                if consume:
+                    if self._last_known_ts == 0.0:
+                        # First run: initialize last_known but do not report updates
+                        self._last_known_ts = max_ts_float
+                        log_debug("[chat_update_checker] Initialized last_known_ts")
+                    elif max_ts_float > self._last_known_ts:
+                        updated = True
+                        # Get chats that updated since last known ts (non-self only)
+                        rows2 = await execute_query(
+                            """
+                            SELECT interface_path, sender_name, sender_id, UNIX_TIMESTAMP(timestamp) as ts
+                            FROM chat_history_cache
+                            WHERE UNIX_TIMESTAMP(timestamp) > %s
+                              AND COALESCE(sender_id, '') NOT IN (%s, %s)
+                              AND COALESCE(sender_name, '') NOT IN (%s, %s)
+                            ORDER BY timestamp ASC
+                            """,
+                            (self._last_known_ts, "self", "synth", "self", "synth"),
+                        )
+                        log_debug(f"[chat_update_checker] Found {len(rows2) if rows2 else 0} non-self messages since last_known (consume)")
+                        for r in rows2:
+                            if isinstance(r, dict):
+                                interface_path = r.get("interface_path")
+                                last_active = r.get("ts")
+                            else:
+                                interface_path = r[0]
+                                last_active = r[3]
+
+                            chat_id = interface_path
+                            if isinstance(interface_path, str):
+                                parts = interface_path.split("/")
+                                if len(parts) > 1:
+                                    chat_id = parts[1]
+                            new_messages.append({"chat_id": chat_id, "last_active": float(last_active)})
+
+                        if not new_messages:
+                            log_debug("[chat_update_checker] No non-self chat messages produced after filtering (consume)")
+
+                        # Update last_known to the newest timestamp
+                        self._last_known_ts = max_ts_float
+                else:
+                    # Non-consuming peek: report whether there are non-self messages
+                    # newer than the current last_known_ts without updating it.
+                    if self._last_known_ts == 0.0:
+                        # If last_known_ts is not initialized, treat peek as not reporting
+                        # updates (caller may choose to initialize instead).
+                        log_debug("[chat_update_checker] Peek requested but last_known_ts not initialized; reporting no updates")
+                    elif max_ts_float > self._last_known_ts:
+                        updated = True
+                        rows2 = await execute_query(
+                            """
+                            SELECT interface_path, sender_name, sender_id, UNIX_TIMESTAMP(timestamp) as ts
+                            FROM chat_history_cache
+                            WHERE UNIX_TIMESTAMP(timestamp) > %s
+                              AND COALESCE(sender_id, '') NOT IN (%s, %s)
+                              AND COALESCE(sender_name, '') NOT IN (%s, %s)
+                            ORDER BY timestamp ASC
+                            """,
+                            (self._last_known_ts, "self", "synth", "self", "synth"),
+                        )
+                        log_debug(f"[chat_update_checker] Found {len(rows2) if rows2 else 0} non-self messages since last_known (peek)")
+                        for r in rows2:
+                            if isinstance(r, dict):
+                                interface_path = r.get("interface_path")
+                                last_active = r.get("ts")
+                            else:
+                                interface_path = r[0]
+                                last_active = r[3]
+
+                            chat_id = interface_path
+                            if isinstance(interface_path, str):
+                                parts = interface_path.split("/")
+                                if len(parts) > 1:
+                                    chat_id = parts[1]
+                            new_messages.append({"chat_id": chat_id, "last_active": float(last_active)})
 
         except Exception as e:
             # DB error - fallback to in-memory recent_chats (best-effort)
@@ -175,8 +243,8 @@ _checker = ChatUpdateChecker()
 def get_chat_update_checker() -> ChatUpdateChecker:
     return _checker
 
-async def check_for_updates_once() -> Dict[str, Any]:
-    return await _checker.check_for_updates()
+async def check_for_updates_once(consume: bool = True) -> Dict[str, Any]:
+    return await _checker.check_for_updates(consume=consume)
 
 async def start_chat_update_checker() -> Optional[asyncio.Task]:
     if not _checker.enabled:

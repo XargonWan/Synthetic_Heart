@@ -77,3 +77,29 @@ async def test_start_creates_task():
     assert isinstance(checker._task, asyncio.Task)
     # stop it to avoid background running tasks during tests
     checker.stop()
+
+
+@pytest.mark.asyncio
+async def test_peek_does_not_consume(monkeypatch):
+    """A non-consuming peek (consume=False) must not modify _last_known_ts but
+    must still report updates when max_ts is newer than the current last_known."""
+    checker = cuc.get_chat_update_checker()
+
+    async def fake_execute(query, params=()):
+        # MAX query
+        if "MAX(UNIX_TIMESTAMP(timestamp))" in query or "MAX(last_active)" in query:
+            return [(1000.0,)]
+        # rows since last_known
+        if "WHERE UNIX_TIMESTAMP(timestamp) > %s" in query:
+            return [("telegram_bot/-1", "Jay", "31321637", 950.0)]
+        return []
+
+    monkeypatch.setattr('core.chat_update_checker.execute_query', fake_execute)
+
+    # Initialize last_known_ts to earlier time
+    checker._last_known_ts = 900.0
+
+    res = await checker.check_for_updates(consume=False)
+    assert res['updated'] is True
+    # Ensure internal last_known_ts was NOT updated by peek
+    assert checker._last_known_ts == 900.0

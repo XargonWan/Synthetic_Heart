@@ -3109,6 +3109,16 @@ class SynthWebUIInterface:
             # Estimate total
             total_count = offset + len(rows) + (per_page if has_more else 0)
             total_pages = (total_count + per_page - 1) // per_page
+
+            # Attach per-action execs to entries
+            try:
+                from plugins.grillo.grillo_impl import GrilloPlugin
+                activity_ids = [e['id'] for e in entries]
+                action_map = await GrilloPlugin.fetch_action_execs(activity_ids) if activity_ids else {}
+                for e in entries:
+                    e['actions'] = action_map.get(e['id'], [])
+            except Exception as e:
+                log_debug(f"[webui] fetch_action_execs failed: {e}")
             
             return JSONResponse({
                 "success": True,

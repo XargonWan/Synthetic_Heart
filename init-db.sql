@@ -48,6 +48,22 @@ CREATE TABLE IF NOT EXISTS grillo_activity_log (
     FOREIGN KEY (diary_entry_id) REFERENCES ai_diary(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Tracks action-level executions proposed/executed by Grillo (linked to grillo_activity_log)
+CREATE TABLE IF NOT EXISTS grillo_action_execs (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    activity_log_id INT NOT NULL,
+    action_index INT NOT NULL,
+    action_type VARCHAR(150) NOT NULL,
+    payload JSON,
+    status ENUM('pending','processed','failed') NOT NULL DEFAULT 'pending',
+    error_text TEXT,
+    result JSON,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_activity_log_id (activity_log_id),
+    FOREIGN KEY (activity_log_id) REFERENCES grillo_activity_log(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- Grant privileges to synth user from any host
 GRANT ALL PRIVILEGES ON synth.* TO 'synth'@'%' IDENTIFIED BY 'synth';
 FLUSH PRIVILEGES;
