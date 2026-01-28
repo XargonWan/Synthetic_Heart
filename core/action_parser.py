@@ -57,6 +57,17 @@ def _maybe_unescape_text_in_payload(payload: dict) -> None:
     if not text or not isinstance(text, str):
         return
 
+    # Recover common mojibake (UTF-8 bytes decoded as latin-1/cp1252)
+    try:
+        from core.text_utils import try_recover_mojibake
+        recovered = try_recover_mojibake(text)
+        if recovered and recovered != text:
+            payload["text"] = recovered
+            text = recovered
+    except Exception:
+        # Non-fatal — keep original text if recovery fails
+        pass
+
     # Quick heuristic — only attempt to decode when we see backslash escapes
     if "\\n" not in text and "\\u" not in text and "\\t" not in text and "\\r" not in text and "\\x" not in text:
         return
