@@ -186,6 +186,34 @@ register_exposed_var(
     advanced=True,
 )
 
+# Driver recovery defaults must be defined BEFORE the config variables are registered
+DEFAULT_DRIVER_RESPONSIVE_TIMEOUT = 10  # seconds to wait for a trivial driver operation
+DEFAULT_DRIVER_RECOVERY_RETRIES = 2  # how many times to try restarting the driver and retrying the workflow
+
+register_exposed_var(
+    "SELENIUM_DRIVER_RESPONSIVE_TIMEOUT",
+    label="Selenium Driver Responsiveness Timeout (sec)",
+    default=DEFAULT_DRIVER_RESPONSIVE_TIMEOUT,
+    value_type=int,
+    ui_type="number",
+    description="Seconds to wait for a trivial driver operation (window handles / current_url) before considering it frozen and attempting a restart.",
+    scope="llm",
+    component="selenium_llm_base",
+    advanced=True,
+)
+
+register_exposed_var(
+    "SELENIUM_DRIVER_RECOVERY_RETRIES",
+    label="Selenium Driver Recovery Retries",
+    default=DEFAULT_DRIVER_RECOVERY_RETRIES,
+    value_type=int,
+    ui_type="number",
+    description="Number of attempts to restart the browser and retry the workflow when the driver appears frozen.",
+    scope="llm",
+    component="selenium_llm_base",
+    advanced=True,
+)
+
 register_exposed_var(
     "SELENIUM_SPLIT_PROMPT_PARTS",
     label="Selenium Split Prompt Parts",
@@ -218,6 +246,10 @@ DEFAULT_RESPONSE_STABLE_GRACE = 3.5
 DEFAULT_PART1_RESPONSE_STABLE_GRACE = 0.4
 
 DEFAULT_SPLIT_PROMPT_PARTS = 3
+
+class FrozenDriverError(Exception):
+    """Raised when the Selenium driver appears unresponsive or frozen."""
+    pass
 
 # Cache the last response per chat to avoid duplicates
 previous_responses: Dict[str, str] = {}
@@ -422,6 +454,120 @@ class SeleniumLLMBase(AIPluginBase):
     async def _release_shared_driver(cls) -> None:
         """Release reference to shared driver (now uses global driver)."""
         await cls._release_global_shared_driver()
+
+    async def _ensure_driver_responsive_or_restart(self, allow_recreate: bool = True) -> None:
+        """Ensure the current driver responds to a trivial check, otherwise restart it.
+
+        Tries a quick window_handles/current_url check with a short timeout. If the check
+        times out or raises, attempts to quit the existing shared driver and recreate a fresh one.
+        Raises FrozenDriverError if recovery fails.
+        """
+        try:
+            timeout = int(config_registry.get_value("SELENIUM_DRIVER_RESPONSIVE_TIMEOUT", DEFAULT_DRIVER_RESPONSIVE_TIMEOUT))
+        except Exception:
+            timeout = DEFAULT_DRIVER_RESPONSIVE_TIMEOUT
+
+        # Do the check in a separate thread and enforce timeout
+        try:
+            def _health_check():
+                if self.driver is None:
+                    raise FrozenDriverError("No driver assigned")
+                # Access two cheap properties to detect frozen/stale sessions
+                _ = len(self.driver.window_handles)
+                _ = self.driver.current_url
+                return True
+
+            await asyncio.wait_for(asyncio.to_thread(_health_check), timeout=timeout)
+            # If success, return quietly
+            return
+        except asyncio.TimeoutError:
+            log_warning(f"[selenium] 🔴 Driver did not respond within {timeout}s - considered frozen")
+        except Exception as e:
+            log_warning(f"[selenium] 🔴 Driver health check failed: {e}")
+
+        # Attempt to recover by killing and recreating the shared driver
+        if not allow_recreate:
+            raise FrozenDriverError("Driver unresponsive and recreation is disabled")
+
+        try:
+            log_info("[selenium] 🛠️ Attempting to recover the frozen driver: quitting and recreating shared driver")
+            # Quit current driver if possible
+            try:
+                await asyncio.to_thread(lambda: self.driver.quit() if self.driver is not None else None)
+            except Exception as e:
+                log_warning(f"[selenium] Error quitting frozen driver: {e}")
+
+            # Reset global shared driver state so next _get_shared_driver() will recreate
+            SeleniumLLMBase._global_shared_driver = None
+            SeleniumLLMBase._global_ref_count = 0
+
+            # Try to get a fresh shared driver (this can raise)
+            new_driver = await self._get_shared_driver()
+            self.driver = new_driver
+            log_info("[selenium] ✅ Recovered and replaced frozen driver successfully")
+            return
+        except Exception as e:
+            log_error(f"[selenium] ❌ Driver recovery attempt failed: {e}")
+            raise FrozenDriverError(f"Driver recovery failed: {e}")
+
+    def _ensure_driver_responsive_or_restart_sync(self, allow_recreate: bool = True) -> None:
+        """Synchronous wrapper used by sync workflows to ensure driver is responsive or recreate it.
+
+        Uses a blocking thread pool health check with timeout and falls back to synchronous recreation
+        using the class-level _create_shared_driver method.
+        """
+        try:
+            timeout = int(config_registry.get_value("SELENIUM_DRIVER_RESPONSIVE_TIMEOUT", DEFAULT_DRIVER_RESPONSIVE_TIMEOUT))
+        except Exception:
+            timeout = DEFAULT_DRIVER_RESPONSIVE_TIMEOUT
+
+        def _health_check():
+            if self.driver is None:
+                raise FrozenDriverError("No driver assigned")
+            _ = len(self.driver.window_handles)
+            _ = self.driver.current_url
+            return True
+
+        try:
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                fut = ex.submit(_health_check)
+                fut.result(timeout=timeout)
+            return
+        except concurrent.futures.TimeoutError:
+            log_warning(f"[selenium] 🔴 (sync) Driver did not respond within {timeout}s - considered frozen")
+        except Exception as e:
+            log_warning(f"[selenium] 🔴 (sync) Driver health check failed: {e}")
+
+        if not allow_recreate:
+            raise FrozenDriverError("Driver unresponsive and recreation is disabled")
+
+        try:
+            log_info("[selenium] 🛠️ (sync) Attempting to recover the frozen driver: quitting and recreating shared driver")
+            try:
+                if self.driver is not None:
+                    try:
+                        self.driver.quit()
+                    except Exception as e:
+                        log_warning(f"[selenium] Error quitting driver during sync recovery: {e}")
+            except Exception:
+                pass
+
+            try:
+                self._cleanup_chromium_remnants()
+            except Exception:
+                pass
+
+            # Create a new driver synchronously
+            new_driver = type(self)._create_shared_driver()
+            SeleniumLLMBase._global_shared_driver = new_driver
+            SeleniumLLMBase._global_ref_count = 1
+            self.driver = new_driver
+            log_info("[selenium] ✅ (sync) Recovered and replaced frozen driver successfully")
+            return
+        except Exception as e:
+            log_error(f"[selenium] ❌ (sync) Driver recovery attempt failed: {e}")
+            raise FrozenDriverError(f"Sync driver recovery failed: {e}")
 
     @classmethod
     def _create_shared_driver(cls) -> webdriver.Remote:
@@ -1394,6 +1540,9 @@ class SeleniumLLMBase(AIPluginBase):
         last_change = start
         final_text = ""
 
+        consecutive_errors = 0
+        max_consecutive_errors = 2
+
         while True:
             if time.time() - start >= max_total_wait:
                 log_warning("[selenium] Timeout while waiting for response")
@@ -1403,9 +1552,67 @@ class SeleniumLLMBase(AIPluginBase):
             # Uses the engine-specific selectors set in selectors["modal_dismissal"]
             modal_selectors = self.selectors.get("modal_dismissal", [])
             if modal_selectors:
-                self._dismiss_modal_with_selectors(driver, modal_selectors)
+                try:
+                    self._dismiss_modal_with_selectors(driver, modal_selectors)
+                except Exception:
+                    # Non-fatal
+                    pass
 
-            text = self._extract_response_text(driver)
+            try:
+                text = self._extract_response_text(driver)
+                # If extraction succeeded, reset consecutive error counter
+                consecutive_errors = 0
+            except Exception as e:
+                consecutive_errors += 1
+                log_warning(f"[selenium] Error extracting response text (attempt {consecutive_errors}): {e}")
+                # If we hit several consecutive extraction errors, consider driver frozen and attempt recovery
+                if consecutive_errors >= max_consecutive_errors:
+                    log_warning("[selenium] 🔴 Multiple consecutive errors extracting response - driver may be frozen")
+                    # Best-effort synchronous recovery: try to quit and recreate the shared driver
+                    try:
+                        try:
+                            if self.driver is not None:
+                                try:
+                                    self.driver.quit()
+                                except Exception as e:
+                                    log_warning(f"[selenium] Error quitting driver during recovery: {e}")
+                        except Exception:
+                            pass
+
+                        # Cleanup remnants before recreating
+                        try:
+                            self._cleanup_chromium_remnants()
+                        except Exception:
+                            pass
+
+                        # Recreate driver synchronously (this may block for a while)
+                        try:
+                            new_driver = type(self)._create_shared_driver()
+                            SeleniumLLMBase._global_shared_driver = new_driver
+                            SeleniumLLMBase._global_ref_count = 1
+                            self.driver = new_driver
+                            log_info("[selenium] ✅ Synchronous recovery: replaced frozen driver; request should be retried")
+                            # Signal to caller that the driver state changed so they can retry
+                            raise FrozenDriverError("Driver recovered synchronously; please retry the workflow")
+                        except Exception as e2:
+                            log_error(f"[selenium] ❌ Synchronous driver recreation failed: {e2}")
+                            # If recreation fails, bubble up a FrozenDriverError
+                            raise FrozenDriverError(f"Driver recreation failed: {e2}")
+
+                    except FrozenDriverError:
+                        # Propagate FrozenDriverError up to caller for retry handling
+                        raise
+                    except Exception as e3:
+                        log_error(f"[selenium] Unexpected error during driver recovery: {e3}")
+                        raise FrozenDriverError(f"Unexpected recovery error: {e3}")
+
+                # Sleep a short bit before trying again
+                try:
+                    time.sleep(max(0.05, float(poll_interval)))
+                except Exception:
+                    time.sleep(DEFAULT_RESPONSE_POLL_INTERVAL)
+                continue
+
             current_len = len(text)
             changed = current_len != last_len
 
@@ -1429,7 +1636,6 @@ class SeleniumLLMBase(AIPluginBase):
                 time.sleep(max(0.05, float(poll_interval)))
             except Exception:
                 time.sleep(DEFAULT_RESPONSE_POLL_INTERVAL)
-
     def _dismiss_modal_with_selectors(self, driver, modal_selectors: list) -> bool:
         """Dismiss any modal/dialog overlay using provided selectors.
         
@@ -2967,11 +3173,16 @@ class SeleniumLLMBase(AIPluginBase):
                 SeleniumLLMBase._global_shared_driver = None
                 SeleniumLLMBase._global_ref_count = 0
                 # Get a fresh driver
-                shared_driver = await self._get_shared_driver()
-                self.driver = shared_driver
-                log_info(f"[selenium] ✅ Fresh driver ready for {self.component_name}")
-                window_count = len(self.driver.window_handles)
-                log_info(f"[selenium] Using fresh shared driver with {window_count} window(s)")
+                try:
+                    # Use the async recovery helper inside async context
+                    await self._ensure_driver_responsive_or_restart()
+                except Exception:
+                    # Fallback to direct recreate if helper failed
+                    shared_driver = await self._get_shared_driver()
+                    self.driver = shared_driver
+                    log_info(f"[selenium] ✅ Fresh driver ready for {self.component_name}")
+                    window_count = len(self.driver.window_handles)
+                    log_info(f"[selenium] Using fresh shared driver with {window_count} window(s)")
 
 
             # Check for double-prompt split condition (only when not explicitly skipping)
@@ -3421,6 +3632,12 @@ class SeleniumLLMBase(AIPluginBase):
             for attempt in range(1, max_retries + 1):
                 log_info(f"[selenium] PART{part_index} attempt {attempt}/{max_retries}")
                 try:
+                    # Pre-check and attempt sync recovery before each PART attempt
+                    try:
+                        self._ensure_driver_responsive_or_restart_sync()
+                    except FrozenDriverError as e:
+                        log_warning(f"[selenium] PART{part_index} pre-check recovery raised: {e}")
+
                     attempt_start = time.time()
                     part_resp = self._execute_complete_workflow(
                         context_text,
@@ -3469,10 +3686,49 @@ class SeleniumLLMBase(AIPluginBase):
             time.sleep(0.1)
         except Exception:
             pass
+
+        # Execute workflow with driver recovery retries
         try:
-            resp = self._execute_complete_workflow(final_part_text)
-            log_info("[selenium] PART2 response received — treating as final response for action parsing/corrector flow")
-            return resp
+            try:
+                recovery_retries = int(config_registry.get_value("SELENIUM_DRIVER_RECOVERY_RETRIES", DEFAULT_DRIVER_RECOVERY_RETRIES))
+            except Exception:
+                recovery_retries = DEFAULT_DRIVER_RECOVERY_RETRIES
+
+            last_exception = None
+            for attempt in range(recovery_retries + 1):
+                try:
+                    # Quick health-check and optional recovery before attempting the workflow
+                    try:
+                        self._ensure_driver_responsive_or_restart_sync()
+                    except FrozenDriverError as e:
+                        log_warning(f"[selenium] Pre-workflow driver recovery raised: {e}")
+                        # continue to attempt workflow with fresh driver
+
+                    resp = self._execute_complete_workflow(final_part_text)
+                    log_info("[selenium] PART2 response received — treating as final response for action parsing/corrector flow")
+                    return resp
+                except (FrozenDriverError, WebDriverException, ReadTimeoutError, TimeoutError) as e:
+                    last_exception = e
+                    log_warning(f"[selenium] Workflow attempt {attempt + 1} failed due to driver issue: {e}")
+                    # Try to recover and then retry
+                    try:
+                        self._ensure_driver_responsive_or_restart_sync()
+                    except Exception as rec_e:
+                        log_error(f"[selenium] Failed to recover driver after workflow failure: {rec_e}")
+                        # If we cannot recover, break and propagate
+                        break
+                    # small pause before retry
+                    try:
+                        time.sleep(0.2)
+                    except Exception:
+                        pass
+                    continue
+
+            # If we get here, all attempts failed
+            if last_exception is not None:
+                log_error(f"[selenium] All {recovery_retries + 1} workflow attempts failed: {last_exception}")
+                raise last_exception
+
         finally:
             # Always reset the flag to avoid residual state
             self._skip_double_prompt_for_this_send = False
