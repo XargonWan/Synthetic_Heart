@@ -252,12 +252,38 @@ class DiscordInterface:
             log_warning("[discord_interface] Missing channel_id or text in send_message")
             return
 
+        # === ADDED: TTS Generation Logic ===
+        audio_file = None
+        try:
+            from core.core_initializer import PLUGIN_REGISTRY
+            tts_plugin = PLUGIN_REGISTRY.get("tts_lipsync")
+            # Only attempt if text is not empty and reasonable length for TTS
+            if tts_plugin and text and len(text.strip()) > 0 and len(text) <= 1024:
+                log_debug(f"[discord_interface] Attempting TTS generation for message...")
+                try:
+                    filename = await tts_plugin._generate_audio(text)
+                    if filename:
+                        audio_path = tts_plugin.static_dir / filename
+                        if audio_path.exists():
+                            # Pass absolute path as string
+                            audio_file = str(audio_path)
+                            log_debug(f"[discord_interface] TTS audio generated at {audio_file}")
+                        else:
+                            log_warning(f"[discord_interface] Generated TTS file not found at {audio_path}")
+                except Exception as tts_e:
+                    log_debug(f"[discord_interface] TTS generation failed: {tts_e}")
+        except Exception as e:
+            log_debug(f"[discord_interface] TTS feature verification failed: {e}")
+        # ===================================
+
         try:
             reply_to = kwargs.get("reply_to_message_id")
             # Set temporary attribute so _discord_send can access reply id
             if reply_to is not None:
                 setattr(self, '_last_reply_to_id', reply_to)
-            await universal_send(self._discord_send, channel_id, text=text, reply_to_message_id=reply_to)
+            
+            await universal_send(self._discord_send, channel_id, text=text, reply_to_message_id=reply_to, file_path=audio_file)
+            
             # Clear temporary attribute
             if hasattr(self, '_last_reply_to_id'):
                 try:
@@ -287,7 +313,7 @@ class DiscordInterface:
                 f"[discord_interface] Failed to send message to {channel_id}: {repr(e)}"
             )
 
-    async def _discord_send(self, channel_id, text, reply_to_message_id=None):
+    async def _discord_send(self, channel_id, text, reply_to_message_id=None, file_path=None):
         """Internal Discord send method.
 
         This method is robust: it will try to resolve the provided numeric id
@@ -332,7 +358,13 @@ class DiscordInterface:
                     # If replying to a specific message id was requested, we can't easily
                     # reply in the same way in a DM, so just send a plain DM message.
                     log_debug(f"[discord_interface] Sending DM to user {channel_id}")
-                    await user.send(text)
+                    
+                    if file_path:
+                        with open(file_path, 'rb') as f:
+                            discord_file = discord.File(f, filename="voice_message.wav")
+                            await user.send(content=text, file=discord_file)
+                    else:
+                        await user.send(text)
                     return
             except Exception as e:  # pragma: no cover - network dependent
                 log_debug(f"[discord_interface] DM send attempt failed for {channel_id}: {e}")
@@ -344,12 +376,23 @@ class DiscordInterface:
         if reply_to_message_id:
             try:
                 msg = await channel.fetch_message(int(reply_to_message_id))
-                await msg.reply(text)
+                if file_path:
+                    with open(file_path, 'rb') as f:
+                        discord_file = discord.File(f, filename="voice_message.wav")
+                        await msg.reply(content=text, file=discord_file)
+                else:
+                    await msg.reply(text)
                 return
             except Exception as e:
                 log_debug(f"[discord_interface] Could not reply to message id {reply_to_message_id}: {e}")
 
-        await channel.send(text)
+        # Standard Send
+        if file_path:
+            with open(file_path, 'rb') as f:
+                discord_file = discord.File(f, filename="voice_message.wav")
+                await channel.send(content=text, file=discord_file)
+        else:
+            await channel.send(text)
 
     async def _process_message(self, message):
         """Handle incoming Discord messages."""

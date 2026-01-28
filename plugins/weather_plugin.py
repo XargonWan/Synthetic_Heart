@@ -165,9 +165,17 @@ class WeatherPlugin:
                 (desc, temp_c, feels_c, humidity, wind_speed, wind_dir, cloudcover, visibility, pressure)
             )
 
+            # Extract daily forecast for High/Low
+            if "weather" in data and len(data["weather"]) > 0:
+                today = data["weather"][0]
+                max_temp = today.get("maxtempC", "N/A")
+                min_temp = today.get("mintempC", "N/A")
+            else:
+                max_temp, min_temp = "N/A", "N/A"
+
             emoji = self._choose_emoji(desc)
             weather_string = (
-                f"{location}: {emoji} {desc} +{temp_c}°C ("
+                f"{location}: {emoji} {desc} +{temp_c}°C (High {max_temp}°C/Low {min_temp}°C, "
                 f"Feels like {feels_c}°C, Humidity {humidity}%, "
                 f"Wind {wind_speed}km/h {wind_dir}, Visibility {visibility}km, "
                 f"Pressure {pressure}hPa, Cloud cover {cloudcover}%)"
@@ -215,20 +223,77 @@ class WeatherPlugin:
         log_info("[weather_plugin] Scheduler stopped")
 
     async def _weather_loop(self):
-        """Background loop that updates weather periodically based on fetch_minutes."""
+        """Background loop checks for scheduled notifications and updates weather.
+        
+        Checks every minute:
+        1. If it's time to refresh weather data (based on fetch_minutes)
+        2. If it's 6:00 AM local time -> triggers weathergirl announcement
+        """
         log_info("[weather_plugin] Weather background loop started")
+        
+        from core.time_zone_utils import utc_to_local
+        from core.auto_response import request_llm_delivery
+        from datetime import datetime
+        
+        last_notification_date = None
+
         try:
             while self._scheduler_running:
+                # 1. Weather Update Check
+                now = time.time()
+                if not self._cached_weather or (now - self._last_fetch > self.fetch_minutes * 60):
+                    try:
+                        await self._update_weather()
+                    except Exception as e:
+                        log_warning(f"[weather_plugin] Error during scheduled update: {e}")
+
+                # 2. Daily Announcement Check (6:00 AM)
                 try:
-                    await self._update_weather()
+                    local_dt = utc_to_local(datetime.utcnow())
+                    today_str = local_dt.strftime("%Y-%m-%d")
+                    
+                    # Check if it is 06:00 and we haven't notified today
+                    if local_dt.hour == 6 and local_dt.minute == 0:
+                        if last_notification_date != today_str:
+                            log_info(f"[weather_plugin] 🌦️ Initiating daily 6:00 AM weather announcement for {today_str}")
+                            
+                            # Ensure we have data
+                            if not self._cached_weather:
+                                await self._update_weather()
+                                
+                            # Ask LLM to generate the announcement
+                            # We use request_llm_delivery to have the LLM "speak" the announcement
+                            prompt = (
+                                f"It is currently 6:00 AM. Access the weather data provided in the context context. "
+                                f"Generate a cheerful, 'weathergirl' style morning announcement for the user. "
+                                f"Include current conditions, high/low temperatures for the day, and any warnings (rain/snow). "
+                                f"Be concise but energetic. "
+                                f"Current weather string: {self._cached_weather}"
+                            )
+                            
+                            # Trigger autonomous delivery
+                            # Using 'event_reminder' type ensures it bypasses some filters and gets priority
+                            # The recipient will be determined by the auto_response system (LogChat/Trainer)
+                            success = await request_llm_delivery(
+                                interface=self,
+                                context={
+                                    "input": {"type": "event_reminder", "text": prompt},
+                                    "weather_data": self._cached_weather
+                                },
+                                reason="daily_weather_forecast"
+                            )
+                            
+                            if success:
+                                last_notification_date = today_str
+                                log_info("[weather_plugin] Daily weather announcement triggered successfully")
+                            else:
+                                log_warning("[weather_plugin] Failed to trigger daily weather announcement")
+                                
                 except Exception as e:
-                    log_warning(f"[weather_plugin] Error during scheduled update: {e}")
-                # Sleep for configured minutes (fallback to 60 if invalid)
-                try:
-                    interval = int(self.fetch_minutes) if self.fetch_minutes and int(self.fetch_minutes) > 0 else 60
-                except Exception:
-                    interval = 60
-                await asyncio.sleep(interval * 60)
+                     log_error(f"[weather_plugin] Error in daily scheduler check: {e}")
+
+                # Sleep for 60 seconds to check again
+                await asyncio.sleep(60)
         finally:
             log_info("[weather_plugin] Weather background loop exiting")
 
