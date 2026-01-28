@@ -228,3 +228,43 @@ async def test_grillo_records_action_exec_status_when_auto(monkeypatch):
 
     # After auto-exec, we should have recorded the processed action
     assert any(c['status'] == 'processed' for c in created_calls)
+
+
+@pytest.mark.asyncio
+async def test_grillo_forces_auto_exec_when_context_is_grillo_beat(monkeypatch):
+    # Simulate checker suggesting actions
+    async def fake_inspect(llm_reply, original_user_message, context, message):
+        return [{"type": "schedule_message", "payload": {"text": "Promemoria C", "send_in": "1 day"}}]
+
+    monkeypatch.setattr(GrilloActionChecker, 'inspect_reply_and_suggest_actions', fake_inspect)
+
+    # Capture run_actions call
+    called = {}
+
+    async def fake_run_actions(actions, context, bot, message):
+        called['actions'] = actions
+        return {'processed': actions, 'failed_actions': [], 'errors': []}
+
+    monkeypatch.setattr(action_parser, 'run_actions', fake_run_actions)
+
+    # Make message_chain return FORWARD_AS_TEXT
+    async def fake_handle(bot, message, text, source, context=None, **kwargs):
+        return message_chain.FORWARD_AS_TEXT
+
+    monkeypatch.setattr('core.message_chain.handle_incoming_message', fake_handle)
+
+    # Force synchronous invocation and disable auto exec in config
+    monkeypatch.setattr(config_registry, 'get_value', lambda k, default=None, **kw: False if k == 'GRILLO_AUTO_GENERATE_ACTIONS' else False if k == 'GRILLO_ACTION_CHECK_ASYNC' else default)
+
+    async def fake_send(*args, **kwargs):
+        return None
+
+    # Pass through a context representing a grillo observer beat
+    ctx = {'grillo_beat': True, 'beat_type': 'observer'}
+
+    await transport_layer.llm_to_interface(fake_send, None, text="Va bene, ti avviso domani", chat_id=777, interface='telegram', context=ctx)
+
+    await asyncio.sleep(0.1)
+
+    assert 'actions' in called
+    assert called['actions'][0]['type'] == 'schedule_message'

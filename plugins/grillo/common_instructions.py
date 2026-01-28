@@ -9,5 +9,6 @@ GRILLO_INSTRUCTIONS = (
     "- If there is nothing worth proposing, return {\"actions\": []}.\n"
     "- Avoid duplicates: if the synth or a user already said something similar in the snippets, do not propose the same message again.\n"
     "- Keep proposals natural and focused on being helpful or engaging (not a technical audit).\n"
+    "- Do NOT address or mention the WebUI or system/internal labels (for example: 'webui', 'system', 'internal'); write as if speaking directly to the human participants in the conversation.\n"
     "- Examples: return {\"actions\": []} for no suggestions; for a proposed reply use e.g. {\"type\": \"message_telegram_bot\", \"payload\": {\"text\": \"That dream sounds wild — want to tell me more about Luca's part?\"}, \"safe\": true, \"confidence\": 0.9, \"rationale\": \"Encourages continuation of the story\"}.\n"
 )

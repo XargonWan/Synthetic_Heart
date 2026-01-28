@@ -412,7 +412,14 @@ async def _grillo_fire_and_forget(bot, message, original_user_message: str, llm_
     # Determine auto-exec policy
     try:
         from core.config_manager import config_registry
-        auto_exec = bool(config_registry.get_value('GRILLO_AUTO_GENERATE_ACTIONS', False, value_type=bool, group='grillo', component='grillo'))
+        # If this invocation came from a Grillo beat (observer or other beats),
+        # force auto-execution so beats are active by default (the action parser
+        # still enforces policy/autonomy checks).
+        if context and isinstance(context, dict) and context.get('grillo_beat'):
+            auto_exec = True
+            log_info(f"[grillo] Force auto_exec because grillo_beat present (beat_type={context.get('beat_type')})")
+        else:
+            auto_exec = bool(config_registry.get_value('GRILLO_AUTO_GENERATE_ACTIONS', False, value_type=bool, group='grillo', component='grillo'))
     except Exception:
         auto_exec = False
 
@@ -1248,6 +1255,24 @@ async def llm_to_interface(interface_send_func, *args, text: str = None, **kwarg
                     if isinstance(maybe, (int, str)):
                         chat_id = maybe
 
+                # Sanitize chat_id: accept int or numeric string; set None otherwise
+                try:
+                    if isinstance(chat_id, str):
+                        s = chat_id.strip()
+                        if s == "" or not s.lstrip('-').isdigit():
+                            # invalid/empty string -> normalize to None
+                            log_debug(f"[llm_to_interface] Sanitizing invalid chat_id '{chat_id}' -> None")
+                            chat_id = None
+                        else:
+                            chat_id = int(s)
+                    elif isinstance(chat_id, int):
+                        pass
+                    else:
+                        chat_id = None
+                except Exception:
+                    log_debug(f"[llm_to_interface] Could not coerce chat_id '{chat_id}' to int; setting to None")
+                    chat_id = None
+
                 # Build lightweight message and context objects for orchestrator
                 from types import SimpleNamespace
                 from datetime import datetime
@@ -1302,7 +1327,9 @@ async def llm_to_interface(interface_send_func, *args, text: str = None, **kwarg
                     log_debug('[llm_to_interface] corrector_orchestrator returned None; forwarding as usual')
 
             except Exception as e:
+                import traceback
                 log_warning(f"[llm_to_interface] Orchestrator handling failed: {e}")
+                log_debug(f"[llm_to_interface] Traceback: {traceback.format_exc()}")
                 # On failure, avoid forwarding suspicious payload to interface
                 return None
 
