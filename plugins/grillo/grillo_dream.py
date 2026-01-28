@@ -184,6 +184,12 @@ class GrilloDreamPlugin:
             try:
                 from plugins.grillo.grillo_impl import GrilloPlugin
                 activity_log_id = await GrilloPlugin.create_activity_log(beat_type="dream", prompt_text=prompt)
+                # Definitive logging: include activity id and short prompt snippet for traceability
+                try:
+                    snippet = str(prompt).replace('\n', ' ')[:200]
+                    log_info(f"[grillo_dream] Activity created: GRILLO_ACTIVITY id={activity_log_id} beat=dream samples={len(fragments)} prompt_snippet={snippet}")
+                except Exception:
+                    pass
             except Exception as e:
                 log_debug(f"[grillo_dream] Could not create activity log: {e}")
                 activity_log_id = None
@@ -312,11 +318,12 @@ class GrilloDreamPlugin:
         for i, f in enumerate(fragments, 1):
             body += f"{i}. {f}\n"
 
+        from plugins.grillo.common_instructions import GRILLO_INSTRUCTIONS
+
+        # Reuse shared GRILLO_INSTRUCTIONS and append dream-specific guidance
         instructions = (
-            "\n\nINSTRUCTIONS:\n"
-            "- Before generating the dream, check the fragments above for similar concepts. If you (the assistant) or the synth already authored a similar sentiment or message, avoid repeating it—do not reproduce duplicate material.\n"
-            "- Treat messages authored by the synth (e.g., 'Rekku', 'G.R.I.L.L.O.' or other system agents) as existing content to consider when checking for duplicates.\n"
-            "- Generate a single, cohesive dream narrative (approx 150-400 words).\n"
+            GRILLO_INSTRUCTIONS +
+            "\n- Generate a single, cohesive dream narrative (approx 150-400 words).\n"
             "- RESPOND ONLY WITH VALID JSON following the exact format below (no prose outside JSON):\n"
             "{\"actions\": [{\"type\": \"create_personal_diary_entry\", \"payload\": {\"content\": \"...\"}}], \"meta\": {\"autonomous\": true, \"rationale\": \"Daily dream consolidation\"}}\n"
             "- The diary 'content' should be the generated dream text (plain text).\n"

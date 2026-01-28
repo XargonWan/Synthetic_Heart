@@ -387,6 +387,167 @@ def _attempt_recover_actions_from_text(original_text: str, found_json: dict, met
 
 
 
+async def _grillo_fire_and_forget(bot, message, original_user_message: str, llm_reply: str, context: dict):
+    """Background helper that calls the GrilloActionChecker and either auto-executes
+    or persists proposed actions depending on configuration and policy.
+
+    This helper is intentionally defensive: failures here must not affect the
+    main LLM->interface flow.
+    """
+    try:
+        log_info(f"[grillo] Checker started for chat_id={getattr(message,'chat_id',None)} chain_result={context.get('chain_result') if context else 'unknown'}")
+        from plugins.grillo.grillo_action_checker import GrilloActionChecker
+        checker = GrilloActionChecker()
+        actions = await checker.inspect_reply_and_suggest_actions(llm_reply, original_user_message, context or {}, message)
+    except Exception as e:
+        log_debug(f"[grillo] Checker raised exception: {e}")
+        return
+
+    if not actions or not isinstance(actions, list) or len(actions) == 0:
+        log_info("[grillo] Checker completed: no suggested actions")
+        return
+
+    log_info(f"[grillo] Checker returned {len(actions)} suggested action(s)")
+
+    # Determine auto-exec policy
+    try:
+        from core.config_manager import config_registry
+        auto_exec = bool(config_registry.get_value('GRILLO_AUTO_GENERATE_ACTIONS', False, value_type=bool, group='grillo', component='grillo'))
+    except Exception:
+        auto_exec = False
+
+    try:
+        from plugins.grillo.grillo_impl import GrilloPlugin
+    except Exception:
+        GrilloPlugin = None
+
+    if auto_exec:
+        try:
+            # Run actions through the canonical action parser so policy/autonomy
+            # checks are applied consistently.
+            from core import action_parser
+            run_ctx = dict(context or {})
+            run_ctx['grillo_auto'] = True
+            result = await action_parser.run_actions(actions, run_ctx, bot, message)
+            log_info(f"[grillo] Auto-executed {len(actions)} action(s); result: {result}")
+            if GrilloPlugin:
+                try:
+                    activity_id = await GrilloPlugin.create_activity_log(beat_type='grillo_auto_exec', prompt_text=str({'user': original_user_message, 'llm_reply': llm_reply}), metadata={'suggested_actions': actions, 'result': result})
+                    log_info(f"[grillo] Logged auto-exec activity id={activity_id}")
+                except Exception as e:
+                    log_debug(f"[grillo] create_activity_log failed after auto-exec: {e}")
+
+            # Persist action-level execution results
+            if GrilloPlugin and activity_id:
+                try:
+                    processed = result.get('processed', []) if isinstance(result, dict) else []
+                    failed = result.get('failed_actions', []) if isinstance(result, dict) else []
+                    db_count = 0
+                    fallback_count = 0
+                    for idx, a in enumerate(actions):
+                        try:
+                            if any((a == p) or (p.get('type') == a.get('type') and p.get('payload') == a.get('payload')) for p in processed):
+                                res = await GrilloPlugin.create_action_exec(activity_log_id=activity_id, action_index=idx, action_type=a.get('type'), payload=a.get('payload'), status='processed', result=result)
+                                if res:
+                                    db_count += 1
+                                else:
+                                    fallback_count += 1
+                            else:
+                                # Try to match by index in failed list
+                                fail_entry = next((f for f in failed if f.get('index') == idx), None)
+                                if fail_entry:
+                                    err = '; '.join(fail_entry.get('errors', [])) if isinstance(fail_entry.get('errors', []), list) else str(fail_entry.get('errors'))
+                                    res = await GrilloPlugin.create_action_exec(activity_log_id=activity_id, action_index=idx, action_type=a.get('type'), payload=a.get('payload'), status='failed', error_text=err, result=fail_entry)
+                                    if res:
+                                        db_count += 1
+                                    else:
+                                        fallback_count += 1
+                                else:
+                                    # Unknown outcome: mark processed with available result
+                                    res = await GrilloPlugin.create_action_exec(activity_log_id=activity_id, action_index=idx, action_type=a.get('type'), payload=a.get('payload'), status='processed', result=result)
+                                    if res:
+                                        db_count += 1
+                                    else:
+                                        fallback_count += 1
+                        except Exception as e:
+                            log_debug(f"[grillo] create_action_exec failed after auto-exec per-action: {e}")
+                    log_info(f"[grillo] Recorded action_execs for activity_id={activity_id}: db={db_count}, fallback={fallback_count}")
+                except Exception as e:
+                    log_debug(f"[grillo] create_action_exec failed after auto-exec: {e}")
+        except Exception as e:
+            log_warning(f"[grillo] Auto-execution failed: {e}")
+            if GrilloPlugin:
+                try:
+                    await GrilloPlugin.create_activity_log(beat_type='grillo_auto_exec_failure', prompt_text=str({'user': original_user_message, 'llm_reply': llm_reply, 'error': str(e)}), metadata={'suggested_actions': actions})
+                except Exception:
+                    pass
+    else:
+        # Persist proposal for human review
+        try:
+            if GrilloPlugin:
+                try:
+                    activity_id = await GrilloPlugin.create_activity_log(beat_type='grillo_proposal', prompt_text=str({'user': original_user_message, 'llm_reply': llm_reply}), metadata={'suggested_actions': actions})
+                    if activity_id:
+                        log_info(f'[grillo] Persisted suggested actions to grillo_activity_log id={activity_id}')
+                    else:
+                        log_warning(f'[grillo] create_activity_log returned None while persisting proposal (activity not recorded)')
+                except Exception as e:
+                    log_debug(f"[grillo] create_activity_log failed while persisting proposal: {e}")
+        except Exception as e:
+            log_warning(f"[grillo] Failed to create activity log for suggested actions: {e}")
+
+        # Persist suggested actions as pending (best-effort)
+        try:
+            if GrilloPlugin and activity_id:
+                try:
+                    pending_count = 0
+                    fallback_count = 0
+                    for idx, a in enumerate(actions):
+                        res_id = await GrilloPlugin.create_action_exec(
+                            activity_log_id=activity_id,
+                            action_index=idx,
+                            action_type=a.get('type', 'unknown'),
+                            payload=a.get('payload'),
+                            status='pending'
+                        )
+                        if res_id:
+                            pending_count += 1
+                        else:
+                            fallback_count += 1
+                    log_info(f"[grillo] Persisted {pending_count} action_exec(s) to DB for activity_id={activity_id}, {fallback_count} to fallback")
+                except Exception as e:
+                    log_debug(f"[grillo] create_action_exec failed while persisting proposal: {e}")
+            elif GrilloPlugin and not activity_id:
+                # DB didn't record activity; write a fallback activity and store action execs there
+                try:
+                    activity_obj = {
+                        'beat_type': 'grillo_proposal',
+                        'prompt_text': str({'user': original_user_message, 'llm_reply': llm_reply}),
+                        'response_text': None,
+                        'metadata': {'suggested_actions': actions},
+                    }
+                    fallback_activity_id = await GrilloPlugin._fallback_write_activity(activity_obj)
+                    written = 0
+                    for idx, a in enumerate(actions):
+                        exec_obj = {
+                            'activity_log_id': fallback_activity_id,
+                            'action_index': idx,
+                            'action_type': a.get('type', 'unknown'),
+                            'payload': a.get('payload'),
+                            'status': 'pending',
+                            'error_text': None,
+                            'result': None,
+                            'created_at': None,
+                        }
+                        await GrilloPlugin._fallback_write_action_exec(exec_obj)
+                        written += 1
+                    log_info(f"[grillo] Persisted {written} action_exec(s) to fallback for fallback_activity_id={fallback_activity_id}")
+                except Exception as e:
+                    log_debug(f"[grillo] fallback write for proposal failed: {e}")
+        except Exception as e:
+            log_debug(f"[grillo] create_action_exec outer failed while persisting proposal: {e}")
+
+
 async def universal_send(interface_send_func, *args, text: str = None, **kwargs):
     """
     Universal send function that intercepts JSON actions and parses them.
@@ -1198,6 +1359,68 @@ async def llm_to_interface(interface_send_func, *args, text: str = None, **kwarg
             pass
         # Pass through to message chain
         result = await handle_incoming_message(bot=getattr(interface_send_func, '__self__', None) or None, message=message, text=text, source=source, context=kwargs.get('context', None), **kwargs)
+
+        # At this point the message_chain has completed. If this was an LLM plain-text
+        # reply (no JSON was present originally) we optionally run the Grillo checker in
+        # the background to detect and propose missing actions.
+        try:
+            # Ensure we only trigger for LLM-origin responses (plain-text or JSON)
+            # but skip system/correction payloads (they are handled by corrector).
+            if kwargs.get('is_llm_response', False) and not (isinstance(json_payload, dict) and 'system_message' in json_payload):
+                # Avoid double-invoking Grillo on the same message
+                already_checked = False
+                try:
+                    already_checked = getattr(message, 'grillo_checked', False)
+                except Exception:
+                    already_checked = False
+
+                if not already_checked:
+                    # Respect config that allows async vs sync execution for tests
+                    try:
+                        from core.config_manager import config_registry
+                        async_check = bool(config_registry.get_value('GRILLO_ACTION_CHECK_ASYNC', True, value_type=bool, group='grillo', component='grillo'))
+                    except Exception:
+                        async_check = True
+
+                    # Build minimal context to pass through
+                    checker_context = kwargs.get('context') or {}
+                    checker_context = dict(checker_context)
+                    # Attach last_action_result from message if present
+                    if hasattr(message, 'last_action_result'):
+                        checker_context['last_action_result'] = getattr(message, 'last_action_result')
+                    # Attach the final chain result (ACTIONS_EXECUTED / FORWARD_AS_TEXT / etc.)
+                    try:
+                        checker_context['chain_result'] = result
+                    except Exception:
+                        pass
+
+                    # Get an original_user_message when available in context
+                    original_user_message = checker_context.get('original_user_message') or checker_context.get('original_text') or ''
+
+                    if async_check:
+                        try:
+                            log_info(f"[grillo] Scheduling checker for chat_id={getattr(message,'chat_id',None)} chain_result={result}")
+                            asyncio.create_task(_grillo_fire_and_forget(getattr(interface_send_func, '__self__', None) or None, message, original_user_message, text, checker_context))
+                            # Mark as scheduled
+                            try:
+                                setattr(message, 'grillo_checked', True)
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            log_debug('[llm_to_interface] Failed to schedule Grillo checker task: ' + str(e))
+                    else:
+                        # Synchronous for testing convenience
+                        try:
+                            await _grillo_fire_and_forget(getattr(interface_send_func, '__self__', None) or None, message, original_user_message, text, checker_context)
+                            try:
+                                setattr(message, 'grillo_checked', True)
+                            except Exception:
+                                pass
+                        except Exception:
+                            log_debug('[llm_to_interface] Grillo checker synchronous call failed')
+        except Exception:
+            log_debug('[llm_to_interface] Grillo checker invocation encountered an error')
+
         if result == 'ACTIONS_EXECUTED' or result == 'BLOCKED':
             # Orchestrator handled or blocked: nothing to forward
             return None

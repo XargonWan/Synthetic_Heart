@@ -18,6 +18,8 @@ from core.core_initializer import register_plugin
 from core.logging_utils import log_info, log_debug, log_warning, log_error
 from core.config_manager import config_registry
 
+from plugins.grillo.common_instructions import GRILLO_INSTRUCTIONS as OBSERVER_INSTRUCTIONS
+
 
 class GrilloChatObserverPlugin:
     display_name = "G.R.I.L.L.O. Chat Observer"
@@ -65,6 +67,11 @@ class GrilloChatObserverPlugin:
         register_plugin("grillo_chat_observer", self)
         log_info("[grillo_chat_observer] Registered GrilloChatObserverPlugin")
 
+        # Track last run timestamp for observer to avoid missing messages even
+        # if the global checker has already consumed them. This is initialized
+        # on start() to the current time to avoid acting on historic messages.
+        self._last_run_ts: float = 0.0
+
         # Config listeners
         config_registry.add_listener("GRILLO_OBSERVER_ENABLED", lambda v: setattr(self, "enabled", bool(v)))
         config_registry.add_listener("GRILLO_OBSERVER_INTERVAL", lambda v: setattr(self, "interval", int(v)))
@@ -88,6 +95,12 @@ class GrilloChatObserverPlugin:
 
         GrilloChatObserverPlugin._scheduler_running = True
         GrilloChatObserverPlugin._scheduler_task = asyncio.create_task(self._observer_loop())
+        # Initialize last run timestamp to now so we don't process old history
+        try:
+            self._last_run_ts = float(datetime.utcnow().timestamp())
+            log_debug(f"[grillo_chat_observer] Initialized last_run_ts={self._last_run_ts}")
+        except Exception:
+            pass
         log_info("[grillo_chat_observer] Scheduler started")
 
     async def stop(self):
@@ -127,6 +140,57 @@ class GrilloChatObserverPlugin:
                 log_debug("[grillo_chat_observer] Skipping run because disabled")
                 return
 
+            # Only run observer if there are new non-self messages since the
+            # observer's last run. We query the chat_history_cache directly to
+            # avoid races with the global checker (which may consume updates).
+            try:
+                from core.db import execute_query
+                # Ensure last_run_ts initialized
+                if not getattr(self, '_last_run_ts', 0.0):
+                    self._last_run_ts = float(datetime.utcnow().timestamp())
+                    log_debug("[grillo_chat_observer] last_run_ts uninitialized – initializing and skipping first run")
+                    return
+
+                rows = await execute_query(
+                    """
+                    SELECT COUNT(*) as cnt, MAX(UNIX_TIMESTAMP(timestamp)) as max_ts
+                    FROM chat_history_cache
+                    WHERE UNIX_TIMESTAMP(timestamp) > %s
+                      AND COALESCE(sender_id, '') NOT IN (%s, %s)
+                      AND COALESCE(sender_name, '') NOT IN (%s, %s)
+                    """,
+                    (self._last_run_ts, 'self', 'synth', 'self', 'synth'),
+                )
+
+                cnt = 0
+                max_ts = None
+                if rows and len(rows) > 0:
+                    r = rows[0]
+                    if isinstance(r, dict):
+                        cnt = int(r.get('cnt') or 0)
+                        max_ts = r.get('max_ts')
+                    else:
+                        cnt = int(r[0] or 0)
+                        max_ts = r[1]
+
+                if cnt == 0:
+                    log_debug('[grillo_chat_observer] No new non-self messages since last_run; skipping')
+                    return
+                else:
+                    log_debug(f"[grillo_chat_observer] Found {cnt} new non-self messages since last_run; proceeding")
+
+            except Exception as e:
+                log_debug(f"[grillo_chat_observer] Direct DB check failed; falling back to checker: {e}")
+                # Fallback to non-consuming peek
+                try:
+                    from core.chat_update_checker import check_for_updates_once
+                    chk = await check_for_updates_once(consume=False)
+                    if not chk.get('updated'):
+                        log_debug("[grillo_chat_observer] No new messages after fallback; skipping observer run")
+                        return
+                except Exception as e2:
+                    log_debug(f"[grillo_chat_observer] Chat update checker fallback failed; proceeding: {e2}")
+
             fragments = await self._collect_recent_snippets(self.samples)
             if not fragments:
                 log_debug("[grillo_chat_observer] No fragments found; skipping")
@@ -139,6 +203,13 @@ class GrilloChatObserverPlugin:
             try:
                 from plugins.grillo.grillo_impl import GrilloPlugin
                 activity_log_id = await GrilloPlugin.create_activity_log(beat_type="observer", prompt_text=prompt)
+                # Definitive logging: include activity id and short prompt snippet for traceability
+                try:
+                    snippet = str(prompt).replace('\n', ' ')[:200]
+                    log_info(f"[grillo_chat_observer] Activity created: GRILLO_ACTIVITY id={activity_log_id} beat=observer propose_only={self.propose_only} prompt_snippet={snippet}")
+                except Exception:
+                    # Non-fatal; continue
+                    pass
             except Exception as e:
                 log_debug(f"[grillo_chat_observer] Could not create activity log: {e}")
 
@@ -160,10 +231,22 @@ class GrilloChatObserverPlugin:
                     "beat_type": "observer",
                     "activity_log_id": activity_log_id,
                     "grillo_snippets": fragments,
+                    "propose_only": bool(self.propose_only),
+                    "include_memories": True,
                 }
 
                 await message_queue.enqueue_low_priority(None, message, context_memory=context, interface_id='grillo', original_message=None)
                 log_info("[grillo_chat_observer] Observer prompt enqueued for LLM processing")
+
+                # Advance observer last-run to avoid reprocessing the same messages
+                try:
+                    if max_ts:
+                        self._last_run_ts = float(max_ts)
+                    else:
+                        self._last_run_ts = float(datetime.utcnow().timestamp())
+                    log_debug(f"[grillo_chat_observer] Updated last_run_ts to {self._last_run_ts}")
+                except Exception:
+                    pass
             except Exception as e:
                 log_error(f"[grillo_chat_observer] Failed to enqueue observer prompt: {e}")
         except Exception as e:
@@ -225,20 +308,20 @@ class GrilloChatObserverPlugin:
         for i, s in enumerate(snippets, 1):
             body += f"{i}. {s}\n"
 
-        propose_clause = "RESPOND WITH VALID JSON: a single object with an 'actions' array."
-        if self.propose_only:
-            propose_clause += " The actions should be proposals only; do NOT assume automatic execution."
-        propose_clause += " Include a top-level boolean 'safe' on each action indicating if you consider it safe to auto-execute."
-
-        instructions = (
-            "\n\nINSTRUCTIONS:\n"
-            "- Before deciding to write a message or propose a communication, check the chat snippets above for similar messages or concepts. If you (the assistant) or the synth already authored a similar message, do NOT repeat it—avoid producing duplicate messages or proposals.\n"
-            "- Treat messages authored by the synth (e.g., 'Rekku', 'G.R.I.L.L.O.' or other system agents) as existing proposals to consider when checking for duplicates.\n"
-            "- For each useful suggestion produce one action in the 'actions' array, e.g. {\"type\": \"message_telegram_bot\", \"payload\": {...}, \"safe\": true}.\n"
-            "- RESPOND ONLY WITH VALID JSON (no extra text).\n"
+        # Ask the LLM to think like a helpful participant: choose which recent message(s) you'd naturally reply to and propose short, human replies.
+        propose_clause = (
+            "Think like a helpful person reading these snippets: which message(s) would you naturally reply to, and what would you say?"
         )
+        if self.propose_only:
+            propose_clause += " Suggested actions should be proposals only (do NOT assume automatic execution)."
+        propose_clause += " Return ONLY a JSON object with an 'actions' array (see examples below)."
 
-        return header + body + propose_clause + instructions
+        # Use configured synth name in examples to avoid hardcoding 'G.R.I.L.L.O.'
+        synth_name = str(config_registry.get_var("SYNTH_NAME", "SyntH"))
+
+        # Keep the propose clause short and rely on OBSERVER_INSTRUCTIONS for friendly examples and required JSON format
+        prompt = header + body + propose_clause + OBSERVER_INSTRUCTIONS
+        return prompt
 
 
 PLUGIN_CLASS = GrilloChatObserverPlugin

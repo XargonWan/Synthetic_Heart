@@ -374,6 +374,101 @@
                 border-radius: 999px;
             }
 
+            .grillo-actions {
+                margin-top: 0.85rem;
+                padding: 0.75rem;
+                border-radius: 8px;
+                border: 1px solid var(--border);
+                background: rgba(12, 12, 20, 0.25);
+            }
+
+            .grillo-actions-header {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 0.5rem;
+                font-size: 0.85rem;
+                color: var(--text-soft);
+                margin-bottom: 0.65rem;
+            }
+
+            .grillo-actions-counts {
+                display: flex;
+                gap: 0.4rem;
+                flex-wrap: wrap;
+            }
+
+            .grillo-actions-counts span {
+                padding: 0.15rem 0.5rem;
+                border-radius: 999px;
+                font-size: 0.75rem;
+                font-weight: 600;
+                background: rgba(255, 255, 255, 0.08);
+                color: var(--text-soft);
+            }
+
+            .grillo-actions-list {
+                display: flex;
+                flex-direction: column;
+                gap: 0.6rem;
+            }
+
+            .grillo-action-item {
+                border-radius: 6px;
+                padding: 0.6rem 0.75rem;
+                background: rgba(255, 255, 255, 0.03);
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                display: flex;
+                flex-direction: column;
+                gap: 0.35rem;
+            }
+
+            .grillo-action-header {
+                display: flex;
+                align-items: center;
+                gap: 0.5rem;
+                flex-wrap: wrap;
+                font-size: 0.85rem;
+            }
+
+            .grillo-action-type {
+                font-weight: 600;
+                color: var(--text);
+            }
+
+            .grillo-action-status {
+                padding: 0.1rem 0.45rem;
+                border-radius: 999px;
+                font-size: 0.7rem;
+                font-weight: 700;
+                text-transform: uppercase;
+            }
+
+            .grillo-action-status.pending {
+                background: rgba(255, 193, 7, 0.2);
+                color: #ffc107;
+            }
+
+            .grillo-action-status.processed {
+                background: rgba(76, 175, 80, 0.2);
+                color: #4caf50;
+            }
+
+            .grillo-action-status.failed {
+                background: rgba(244, 67, 54, 0.2);
+                color: #f44336;
+            }
+
+            .grillo-action-detail {
+                font-size: 0.78rem;
+                color: var(--text-soft);
+                white-space: pre-wrap;
+                word-break: break-word;
+                background: rgba(12, 12, 20, 0.35);
+                border-radius: 6px;
+                padding: 0.45rem 0.6rem;
+            }
+
             .chat-message {
                 display: flex;
                 gap: 0.5rem;
@@ -806,6 +901,8 @@
                 const responseIsLong = safeResponse.split('\n').length > 6 || safeResponse.length > 600;
                 const responseClass = responseIsLong ? ' grillo-response--limited' : '';
 
+                const actionsBlock = renderGrilloActions(entry.actions || []);
+
                 return `
                     <div class="history-entry">
                         <div class="history-entry-header">
@@ -821,6 +918,7 @@
                             <div class="grillo-response${responseClass}">${safeResponse}</div>
                         </div>
                         ` : ''}
+                        ${actionsBlock}
                         ${entry.has_diary ? `
                             <div class="history-entry-detail" style="margin-top: 1rem;">
                                 <strong>📝 Reflection created</strong>
@@ -829,6 +927,72 @@
                         ` : '<div class="history-entry-detail" style="margin-top: 0.5rem; opacity: 0.6;"><em>No diary entry created yet</em></div>'}
                     </div>
                 `;
+            }
+
+            function renderGrilloActions(actions) {
+                if (!Array.isArray(actions) || actions.length === 0) {
+                    return `
+                        <div class="grillo-actions">
+                            <div class="grillo-actions-header">
+                                <span>Azioni Grillo</span>
+                            </div>
+                            <div class="history-entry-detail" style="margin: 0; opacity: 0.7;"><em>Nessuna azione proposta</em></div>
+                        </div>
+                    `;
+                }
+
+                const counts = actions.reduce((acc, action) => {
+                    const key = (action.status || 'pending').toLowerCase();
+                    acc[key] = (acc[key] || 0) + 1;
+                    return acc;
+                }, {});
+
+                const countChips = ['pending', 'processed', 'failed']
+                    .filter(key => counts[key])
+                    .map(key => `<span>${key}: ${counts[key]}</span>`)
+                    .join('');
+
+                const items = actions.map(action => {
+                    const status = (action.status || 'pending').toLowerCase();
+                    const typeLabel = escapeHtml(action.action_type || 'unknown');
+                    const payload = formatJsonBlock(action.payload);
+                    const result = formatJsonBlock(action.result);
+                    const errorText = action.error_text ? escapeHtml(action.error_text) : '';
+                    const createdAt = action.created_at ? formatTimestamp(action.created_at) : '';
+
+                    return `
+                        <div class="grillo-action-item">
+                            <div class="grillo-action-header">
+                                <span class="grillo-action-type">${typeLabel}</span>
+                                <span class="grillo-action-status ${status}">${status}</span>
+                                ${createdAt ? `<span style="font-size: 0.7rem; color: var(--text-soft);">${createdAt}</span>` : ''}
+                            </div>
+                            ${payload ? `<div class="grillo-action-detail"><strong>Payload:</strong>\n${payload}</div>` : ''}
+                            ${result ? `<div class="grillo-action-detail"><strong>Result:</strong>\n${result}</div>` : ''}
+                            ${errorText ? `<div class="grillo-action-detail"><strong>Error:</strong> ${errorText}</div>` : ''}
+                        </div>
+                    `;
+                }).join('');
+
+                return `
+                    <div class="grillo-actions">
+                        <div class="grillo-actions-header">
+                            <span>Azioni Grillo</span>
+                            ${countChips ? `<div class="grillo-actions-counts">${countChips}</div>` : ''}
+                        </div>
+                        <div class="grillo-actions-list">${items}</div>
+                    </div>
+                `;
+            }
+
+            function formatJsonBlock(value) {
+                if (value === undefined || value === null || value === '') return '';
+                try {
+                    const normalized = typeof value === 'string' ? JSON.parse(value) : value;
+                    return escapeHtml(JSON.stringify(normalized, null, 2));
+                } catch (e) {
+                    return escapeHtml(String(value));
+                }
             }
 
             function renderChatMessage(msg) {

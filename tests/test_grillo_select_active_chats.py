@@ -38,6 +38,20 @@ async def test_grillo_skips_chats_with_last_message_from_synth(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_memory_consolidation_prompt_instructions_are_specific(monkeypatch):
+    # Ensure the prompt now requests a concise, specific summary and provides an example
+    gp = GrilloPlugin()
+    gp.history_evaluator = FakeHistoryEvaluator()
+
+    prompt = await gp._create_memory_consolidation_prompt()
+    assert 'concise' in prompt
+    assert '1-2 sentence' in prompt
+    assert 'We talked about' in prompt or 'Example:' in prompt
+    assert 'create_personal_diary_entry' in prompt
+    assert 'context_tags' in prompt
+
+
+@pytest.mark.asyncio
 async def test_grillo_uses_trainer_chat_even_if_last_is_synth(monkeypatch):
     import core.recent_chats as recent_chats
     from core.interfaces_registry import get_interface_registry

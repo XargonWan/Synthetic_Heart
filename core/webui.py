@@ -17,8 +17,9 @@ import os
 import re
 import threading
 import uuid
+import platform
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Deque, Dict, Optional, List, Any
 
@@ -28,6 +29,7 @@ from fastapi import (
     WebSocketDisconnect,
     UploadFile,
     File,
+    Form,
     Request,
     HTTPException,
 )
@@ -43,7 +45,7 @@ import core.plugin_instance as plugin_instance
 from core import db as core_db
 from core.action_state_manager import get_action_state_manager, AnimationPhase
 from core.animation_handler import AnimationState
-from core.animation_handler import AnimationState
+from core import animation_uploads
 import mimetypes
 
 
@@ -79,6 +81,14 @@ class SynthWebUIInterface:
         self.connections: Dict[str, WebSocket] = {}
         self.message_history: Dict[str, Deque[dict]] = {}
         self.max_history = 100
+        # Mate Engine outbox (messages sent from SyntH to Mate)
+        self._mate_outbox: Deque[dict] = deque(maxlen=500)
+        import asyncio as _asyncio
+        self._mate_outbox_lock = _asyncio.Lock()
+        # Generic integration outboxes keyed by source (e.g., 'mate', 'other')
+        self._integration_outboxes: Dict[str, Deque[dict]] = {}
+        self._integration_outbox_locks: Dict[str, asyncio.Lock] = {}
+        # Helper to create per-source outbox (see ensure_integration_outbox method)
         # Track pending THINKING actions per session so we can deterministically
         # switch THINK -> WRITE -> IDLE when the async response is actually sent.
         self._pending_thinking_actions: Dict[str, Deque[str]] = {}
@@ -160,6 +170,17 @@ class SynthWebUIInterface:
             self._ensure_persistent_session_id()
         except Exception:
             log_warning(f"{LOG_PREFIX} Unable to initialize persistent session id")
+
+        # Temporary animation upload cleanup settings
+        try:
+            self.mate_upload_ttl_days = int(os.getenv("SYNTH_MATEENGINE_UPLOAD_TTL_DAYS", "7"))
+        except Exception:
+            self.mate_upload_ttl_days = 7
+        try:
+            self.mate_upload_cleanup_interval_s = int(os.getenv("SYNTH_MATEENGINE_UPLOAD_CLEANUP_INTERVAL_S", "3600"))
+        except Exception:
+            self.mate_upload_cleanup_interval_s = 3600
+        self._uploads_cleanup_task: Optional[asyncio.Task] = None
 
         # Static and VRM directories used by the Web UI. These are calculated
         # relative to the repository layout and can be overridden using the
@@ -314,6 +335,14 @@ class SynthWebUIInterface:
         self.app.get("/api/selkies")(self.get_selkies_config)
         self.app.get("/api/selkies/health")(self.get_selkies_health)
         self.app.get("/api/animations/{skin}/{animation_type}")(self.get_animations_for_type)
+        self.app.post("/api/animations/upload")(self.upload_animation)
+        self.app.get("/api/animations/uploads")(self.list_animation_uploads)
+        self.app.delete("/api/animations/uploads/{upload_id}")(self.delete_animation_upload)
+        self.app.post("/api/animations/promote")(self.promote_animation_upload)
+        self.app.get("/api/prompt_override")(self.get_prompt_override)
+        # Generic integrations endpoints (source-agnostic)
+        self.app.post("/api/integrations/messages")(self.post_integration_message)
+        self.app.get("/api/integrations/outbox")(self.get_integration_outbox)
         # Provide an internal endpoint implementation that doesn't rely on a
         # bound `get_animation_state` method at init time. This avoids
         # AttributeError in environments with dynamic reloads.
@@ -342,6 +371,8 @@ class SynthWebUIInterface:
                 raise HTTPException(status_code=500, detail=f"Failed to retrieve animation state: {exc}") from exc
 
         self.app.get("/api/animation_state")(_animation_state_endpoint)
+        # Allow authorized clients to request a centralized state change
+        self.app.post("/api/animation_state")(self.set_animation_state)
         self.app.get("/api/locations")(self.get_suggested_locations)
 
         # Template sections route for modular loading
@@ -366,16 +397,16 @@ class SynthWebUIInterface:
         # AnimationHandler already sends websocket animation commands via set_webui(); avoid
         # double-sending by not also broadcasting from a callback.
         log_info(f"{LOG_PREFIX} Animation handler initialized (single websocket sender)", log_file=WEBUI_LOG)
-        
+
         # Initialize global action state manager
         self.action_state_manager = get_action_state_manager()
         # Register callback to broadcast state changes to all WebSocket clients
         self.action_state_manager.register_state_changed_callback(self._broadcast_action_state)
         log_info(f"{LOG_PREFIX} Action state manager initialized with WebSocket broadcast", log_file=WEBUI_LOG)
-        
+
         # Persona manager will be initialized in start() method after core initialization
         self.persona_manager = None
-        
+
         if self.autostart:
             log_info(f"{LOG_PREFIX} Autostart enabled - will start server when event loop is available", log_file=WEBUI_LOG)
             # Don't start server here - it will be started by the main application
@@ -398,6 +429,34 @@ class SynthWebUIInterface:
         except Exception:
             pass
 
+        if self.autostart:
+            self._schedule_uploads_cleanup()
+
+    async def set_animation_state(self, request: Request):
+        """Set the centralized animation state. Expected JSON:
+        {"state": "think|write|idle|talk", "session_id": "...", "loop": true}
+        """
+        data = await request.json()
+        state_str = data.get("state") if isinstance(data, dict) else None
+        if not state_str or not isinstance(state_str, str):
+            raise HTTPException(status_code=400, detail="'state' is required and must be a string")
+        try:
+            state_enum = AnimationState[state_str.upper()]
+        except Exception:
+            raise HTTPException(status_code=400, detail=f"Unknown animation state: {state_str}")
+
+        session_id = data.get("session_id")
+        loop = bool(data.get("loop", True))
+        context_id = data.get("context_id")
+        source = data.get("source")
+
+        try:
+            await self.animation_handler.play_animation(state_enum, session_id=session_id, loop=loop, context_id=context_id, source=source)
+            return JSONResponse({"status": "ok", "state": state_str, "session_id": session_id})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} set_animation_state failed: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
     # ------------------------------------------------------------------
     # Interface metadata
     # ------------------------------------------------------------------
@@ -412,6 +471,17 @@ class SynthWebUIInterface:
                 "required_fields": ["text"],
                 "optional_fields": ["interface_path"],
                 "description": f"Send a text message to a {BRAND_NAME} session.",
+            }
+            ,
+            "message_mate_engine": {
+                "required_fields": ["text"],
+                "optional_fields": ["target"],
+                "description": "(Deprecated) Send a text message to an integration outbox (source: mate).",
+            },
+            "message_integration": {
+                "required_fields": ["source", "text"],
+                "optional_fields": ["target"],
+                "description": "Send a text message to a named integration outbox (generic).",
             }
         }
 
@@ -431,6 +501,23 @@ class SynthWebUIInterface:
                         "example": "session-id",
                         "description": "Session identifier returned by the websocket",
                     },
+                },
+            }
+        if action_name == "message_mate_engine":
+            return {
+                "description": "(Deprecated) Send a message to an integration outbox (legacy mate alias).",
+                "payload": {
+                    "text": {"type": "string", "example": "Hello from SyntH!", "description": "Message content to deliver"},
+                    "target": {"type": "string", "example": "mate-session-id", "description": "Optional target/session identifier", "optional": True},
+                },
+            }
+        if action_name == "message_integration":
+            return {
+                "description": "Send a message to a named integration outbox.",
+                "payload": {
+                    "source": {"type": "string", "description": "Integration source name (e.g., 'mate')"},
+                    "text": {"type": "string", "example": "Hello from SyntH!"},
+                    "target": {"type": "string", "example": "session-id", "optional": True},
                 },
             }
         return {}
@@ -1389,6 +1476,32 @@ class SynthWebUIInterface:
         except Exception as exc:
             log_warning(f"{LOG_PREFIX} Failed to ensure persistent session id: {exc}")
 
+    def _schedule_uploads_cleanup(self) -> None:
+        """Schedule the temporary animation uploads cleanup loop."""
+        if self._uploads_cleanup_task and not self._uploads_cleanup_task.done():
+            return
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                self._uploads_cleanup_task = loop.create_task(self._cleanup_animation_uploads_loop())
+            else:
+                self._uploads_cleanup_task = asyncio.create_task(self._cleanup_animation_uploads_loop())
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} Failed to schedule uploads cleanup loop: {exc}")
+
+    async def _cleanup_animation_uploads_loop(self) -> None:
+        """Periodically remove expired temporary animation uploads."""
+        while True:
+            try:
+                removed = animation_uploads.cleanup_expired_uploads(self.mate_upload_ttl_days)
+                if removed and getattr(self, "animation_handler", None):
+                    for upload_id in removed:
+                        animations_root = animation_uploads.get_upload_root(upload_id) / "animations"
+                        self.animation_handler.remove_temporary_search_path(animations_root)
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Uploads cleanup loop failed: {exc}")
+            await asyncio.sleep(max(self.mate_upload_cleanup_interval_s, 60))
+
     async def _ensure_session_history_loaded(self, session_id: str) -> None:
         """Load persisted chat history for the given session into self.message_history.
 
@@ -1734,6 +1847,14 @@ class SynthWebUIInterface:
                 log_warning(f"{LOG_PREFIX} execute_action could not determine session_id from context or message. Keys: {list(context.keys())}")
 
             await self.send_message(payload, original_message=original_message)
+        elif action.get("type") in ("message_mate_engine", "message_integration"):
+            payload = action.get("payload", {})
+            text = payload.get("text")
+            target = payload.get("target")
+            source = payload.get("source") if action.get("type") == "message_integration" else "mate"
+            if text:
+                # Use the generic enqueue_outbox API for integration messages
+                await self.enqueue_outbox(source, text=text, target=target)
 
     # ------------------------------------------------------------------
     # VRM management API
@@ -2078,6 +2199,283 @@ class SynthWebUIInterface:
         except Exception as e:
             log_error(f"{LOG_PREFIX} Error listing animations for {skin}/{animation_type}: {e}")
             return JSONResponse({"animations": []}, status_code=500)
+
+    async def upload_animation(
+        self,
+        file: UploadFile = File(...),
+        state: str = Form(...),
+        descriptor: Optional[str] = Form(None),
+        tags: Optional[str] = Form(None),
+        upload_id: Optional[str] = Form(None),
+    ):
+        """Upload a temporary animation file and register it for playback."""
+        if not file or not file.filename:
+            raise HTTPException(status_code=400, detail="No file uploaded")
+
+        filename = animation_uploads.sanitize_filename(file.filename)
+        ext = Path(filename).suffix.lower()
+        if ext not in {".fbx", ".vrma"}:
+            raise HTTPException(status_code=400, detail="Only .fbx or .vrma files are accepted")
+
+        try:
+            upload_id = animation_uploads.sanitize_upload_id(upload_id)
+            normalized_state = animation_uploads.normalize_state(state)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        target_dir = animation_uploads.get_state_dir(upload_id, normalized_state)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_path = target_dir / filename
+
+        bytes_written = 0
+        try:
+            with target_path.open("wb") as buffer:
+                while True:
+                    chunk = await file.read(1 << 20)
+                    if not chunk:
+                        break
+                    buffer.write(chunk)
+                    bytes_written += len(chunk)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to store animation upload: {exc}")
+            if target_path.exists():
+                try:
+                    target_path.unlink()
+                except Exception:
+                    pass
+            raise HTTPException(status_code=500, detail="Failed to store animation file") from exc
+        finally:
+            await file.close()
+
+        descriptor_path = None
+        if descriptor:
+            try:
+                descriptor_payload = json.loads(descriptor)
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail="descriptor must be valid JSON") from exc
+
+            descriptor_path = target_path.with_suffix(target_path.suffix + ".json")
+            try:
+                with descriptor_path.open("w", encoding="utf-8") as handle:
+                    json.dump(descriptor_payload, handle, indent=2, sort_keys=True)
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to store descriptor: {exc}")
+
+        tag_list: Optional[List[str]] = None
+        if tags:
+            try:
+                parsed = json.loads(tags)
+                if isinstance(parsed, list):
+                    tag_list = [str(tag) for tag in parsed]
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail="tags must be a JSON array") from exc
+
+        meta = animation_uploads.record_upload(
+            upload_id,
+            normalized_state,
+            filename,
+            size_bytes=bytes_written,
+            tags=tag_list,
+            descriptor_path=descriptor_path,
+            original_filename=file.filename,
+        )
+
+        try:
+            animations_root = animation_uploads.get_upload_root(upload_id) / "animations"
+            if getattr(self, "animation_handler", None):
+                self.animation_handler.add_temporary_search_path(animations_root)
+                self.animation_handler.register_temporary_state_override(
+                    upload_id=upload_id,
+                    state=normalized_state,
+                    animations=[filename],
+                )
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} Failed to register temporary animation search path: {exc}")
+
+        url = f"/skins/temp/{upload_id}/animations/{normalized_state}/{filename}"
+        return JSONResponse(
+            {
+                "status": "ok",
+                "upload_id": upload_id,
+                "state": normalized_state,
+                "filename": filename,
+                "url": url,
+                "meta": meta,
+            },
+            status_code=201,
+        )
+
+    async def list_animation_uploads(self):
+        """List temporary animation uploads and their metadata."""
+        uploads = animation_uploads.list_uploads()
+        payload: List[Dict[str, Any]] = []
+        for meta in uploads:
+            upload_id = meta.get("upload_id")
+            states = meta.get("states", {})
+            for state, files in states.items():
+                payload.append(
+                    {
+                        "upload_id": upload_id,
+                        "state": state,
+                        "files": files,
+                        "url_prefix": f"/skins/temp/{upload_id}/animations/{state}",
+                        "created_at": meta.get("created_at"),
+                        "tags": meta.get("tags", []),
+                    }
+                )
+        return JSONResponse({"uploads": payload})
+
+    async def delete_animation_upload(self, upload_id: str):
+        """Delete a temporary animation upload and deregister it."""
+        removed = animation_uploads.delete_upload(upload_id)
+        try:
+            animations_root = animation_uploads.get_upload_root(upload_id) / "animations"
+            if getattr(self, "animation_handler", None):
+                self.animation_handler.remove_temporary_search_path(animations_root)
+        except Exception:
+            pass
+        if not removed:
+            raise HTTPException(status_code=404, detail="Upload not found")
+        return JSONResponse({"status": "ok", "removed": upload_id})
+
+    async def promote_animation_upload(self, request: Request):
+        """Promote a temporary upload into a permanent skin animation folder."""
+        if os.getenv("SYNTH_MATEENGINE_PROMOTE_ENABLED", "0") != "1":
+            raise HTTPException(status_code=403, detail="Promotion is disabled on this server")
+        data = await request.json()
+        upload_id = data.get("upload_id")
+        target_skin = data.get("target_skin")
+        if not upload_id or not target_skin:
+            raise HTTPException(status_code=400, detail="upload_id and target_skin are required")
+
+        target_state = data.get("target_state")
+        overwrite = bool(data.get("overwrite", False))
+        rename = data.get("rename")
+
+        try:
+            promoted = animation_uploads.promote_upload(
+                upload_id,
+                target_skin=target_skin,
+                target_state=target_state,
+                overwrite=overwrite,
+                rename=rename,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except FileExistsError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        promoted_urls = []
+        for path in promoted:
+            try:
+                rel = path.relative_to(Path(__file__).resolve().parent.parent)
+                promoted_urls.append(f"/{rel.as_posix()}")
+            except Exception:
+                promoted_urls.append(str(path))
+
+        return JSONResponse({"status": "ok", "promoted": promoted_urls, "skin": target_skin})
+
+    async def get_prompt_override(self, request: Request):
+        """Return prompt override/injection instructions for external interfaces."""
+        override = os.getenv("SYNTH_MATEENGINE_PROMPT_OVERRIDE", "0") == "1"
+        host = None
+        try:
+            if request and request.client:
+                host = request.client.host
+        except Exception:
+            host = None
+
+        os_name = os.getenv("SYNTH_HOST_OS") or platform.platform()
+        host_label = host or "unknown-host"
+
+        injection = (
+            "Interface note (MateEngine, host={host}, os={os}): "
+            "This interface may request limited animation control and UI hints; "
+            "do not replace SyntH system instructions."
+        ).format(host=host_label, os=os_name)
+
+        payload = {
+            "override": override,
+            "injection": injection,
+            "source": "MateEngine",
+            "static": True,
+            "metadata": {
+                "os": os_name,
+                "host": host_label,
+                "controls": {"animations": "limited"},
+            },
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+        }
+        return JSONResponse(payload)
+
+    async def enqueue_outbox(self, source: str, *, text: str, target: Optional[str] = None) -> None:
+        """Enqueue a message for a named integration outbox (public API).
+
+        Args:
+            source: integration source name (e.g., 'mate')
+            text: message text
+            target: optional recipient target
+        """
+        # Ensure the destination outbox exists
+        self.ensure_integration_outbox(source)
+        entry = {"text": text, "target": target, "created_at": datetime.now(tz=timezone.utc).isoformat()}
+        async with self._integration_outbox_locks[source]:
+            self._integration_outboxes[source].append(entry)
+
+    # Backwards compatibility shim (internal use only)
+    async def _enqueue_integration_outbox(self, *, source: str, text: str, target: Optional[str] = None) -> None:
+        await self.enqueue_outbox(source, text=text, target=target)
+
+    async def post_integration_message(self, request: Request):
+        """Accept messages from external integrations (generic). Expected JSON:
+        { "source": "mate", "type": "chat", "payload": {...}, "metadata": {...} }
+        """
+        data = await request.json()
+        source = data.get("source")
+        typ = data.get("type") or data.get("message_type") or "chat"
+        payload = data.get("payload") or {}
+        metadata = data.get("metadata") or {}
+        if not source:
+            raise HTTPException(status_code=400, detail="'source' is required")
+        if typ in ("chat", "message"):
+            text = payload.get("text")
+            if not isinstance(text, str) or not text.strip():
+                raise HTTPException(status_code=400, detail="'payload.text' must be a non-empty string for chat messages")
+            # Create a lightweight message object for routing
+            from types import SimpleNamespace
+            msg = SimpleNamespace()
+            msg.chat_id = payload.get("conversation_id") or None
+            msg.interface_path = f"integration:{source}"
+            # Forward into the message chain so plugins and the core can handle it
+            from core import message_chain
+            result = await message_chain.handle_incoming_message(None, msg, text, source="interface", context={"integration_source": source, "metadata": metadata})
+            return JSONResponse({"status": "ok", "result": result})
+        else:
+            # Other message types: store in integration outbox
+            text = payload.get("text") or json.dumps(payload)
+            await self._enqueue_integration_outbox(source=source, text=text, target=payload.get("target"))
+            return JSONResponse({"status": "ok", "stored": True})
+
+    async def get_integration_outbox(self, request: Request):
+        """Return and clear queued messages for a given integration source."""
+        params = request.query_params
+        source = params.get("source")
+        if not source:
+            raise HTTPException(status_code=400, detail="'source' query param is required")
+        self.ensure_integration_outbox(source)
+        async with self._integration_outbox_locks[source]:
+            items = list(self._integration_outboxes[source])
+            self._integration_outboxes[source].clear()
+        return JSONResponse({"messages": items})
+
+    def ensure_integration_outbox(self, src: str) -> None:
+        """Create per-source outbox and lock if they don't exist."""
+        if src not in self._integration_outboxes:
+            self._integration_outboxes[src] = deque(maxlen=500)
+            import asyncio as _asyncio
+            self._integration_outbox_locks[src] = _asyncio.Lock()
 
     async def diary_summary(self, request: Request):
         """Return persona snapshot and recent diary entries for the Diary tab."""
@@ -2759,6 +3157,16 @@ class SynthWebUIInterface:
             # Estimate total
             total_count = offset + len(rows) + (per_page if has_more else 0)
             total_pages = (total_count + per_page - 1) // per_page
+
+            # Attach per-action execs to entries
+            try:
+                from plugins.grillo.grillo_impl import GrilloPlugin
+                activity_ids = [e['id'] for e in entries]
+                action_map = await GrilloPlugin.fetch_action_execs(activity_ids) if activity_ids else {}
+                for e in entries:
+                    e['actions'] = action_map.get(e['id'], [])
+            except Exception as e:
+                log_debug(f"[webui] fetch_action_execs failed: {e}")
             
             return JSONResponse({
                 "success": True,

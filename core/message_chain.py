@@ -320,6 +320,20 @@ async def handle_incoming_message(bot, message: Optional[SimpleNamespace], text:
                         # If we had corruption recovery or validation failures, check if correction is needed
                         needs_correction = len(failed) > 0 or metadata.get('recovered', False)
                         
+                        # Attach last action result to message/context so downstream hooks
+                        # (e.g. Grillo action checker) can inspect what happened.
+                        last_action_result = {
+                            'processed': processed,
+                            'failed': failed,
+                            'errors': errors
+                        }
+                        try:
+                            ctx['last_action_result'] = last_action_result
+                            if hasattr(message, '__dict__'):
+                                message.last_action_result = last_action_result
+                        except Exception:
+                            pass
+
                         if needs_correction and (source == "llm" or getattr(message, "from_llm", False)):
                             # Some actions failed or JSON was corrupted - request selective correction
                             log_warning(f'[message_chain] {len(failed)} actions failed, requesting correction for missing/invalid actions')
