@@ -115,30 +115,31 @@ async def enqueue(bot, message, context_memory=None, priority: bool = False, int
             return
 
         log_debug(f"[QUEUE] DEBUG: Message is directed to bot - continuing processing")
-        
-        # Add reaction if configured (REACT_WHEN_MENTIONED)
-        try:
-            emoji = get_reaction_emoji()
-            log_debug(f"[QUEUE] get_reaction_emoji returned: '{emoji}'")
-            log_debug(f"[QUEUE] About to check emoji: '{emoji}' (bool: {bool(emoji)})")
-            if emoji:
-                log_debug("[QUEUE] About to get interface registry")
-                interface = INTERFACE_REGISTRY.get(interface_id)
-                log_debug(f"[QUEUE] Interface for {interface_id}: {interface}")
-                log_debug(f"[QUEUE] Interface type: {type(interface)}")
-                log_debug(f"[QUEUE] original_message is None: {original_message is None}")
-                if interface:
-                    log_debug(f"[QUEUE] Adding reaction '{emoji}' via interface {interface_id}")
-                    await react_when_mentioned(interface, original_message or message, emoji)
-                else:
-                    log_warning(f"[QUEUE] No interface found for {interface_id}")
-            else:
-                log_debug("[QUEUE] No reaction emoji configured")
-        except Exception as e:
-            log_error(f"[QUEUE] Error adding reaction: {e}")
-            log_debug(f"[QUEUE] Reaction traceback: {traceback.format_exc()}")
     else:
         log_debug(f"[QUEUE] DEBUG: skip_mention_check=True - bypassing is_message_for_bot check (1:1 interface)")
+        directed = True
+
+    # Add reaction if configured (REACT_WHEN_MENTIONED)
+    try:
+        emoji = get_reaction_emoji()
+        log_debug(f"[QUEUE] get_reaction_emoji returned: '{emoji}'")
+        log_debug(f"[QUEUE] About to check emoji: '{emoji}' (bool: {bool(emoji)})")
+        if emoji and directed:
+            log_debug("[QUEUE] About to get interface registry")
+            interface = INTERFACE_REGISTRY.get(interface_id)
+            log_debug(f"[QUEUE] Interface for {interface_id}: {interface}")
+            log_debug(f"[QUEUE] Interface type: {type(interface)}")
+            log_debug(f"[QUEUE] original_message is None: {original_message is None}")
+            if interface:
+                log_debug(f"[QUEUE] Adding reaction '{emoji}' via interface {interface_id}")
+                await react_when_mentioned(interface, original_message or message, emoji)
+            else:
+                log_warning(f"[QUEUE] No interface found for {interface_id}")
+        else:
+            log_debug("[QUEUE] No reaction emoji configured or not directed")
+    except Exception as e:
+        log_error(f"[QUEUE] Error adding reaction: {e}")
+        log_debug(f"[QUEUE] Reaction traceback: {traceback.format_exc()}")
     
     # Check if user is blocked (but allow trainers)
     user_id = message.from_user.id if message.from_user else 0
