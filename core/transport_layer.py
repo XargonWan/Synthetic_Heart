@@ -267,8 +267,18 @@ def _attempt_recover_actions_from_text(original_text: str, found_json: dict, met
         except Exception:
             existing = set()
 
-        # Candidate action types we try to recover if missing
-        candidates = ['message_telegram_bot', 'message_synth_webui', 'message_ollama_serve', 'message_discord_bot']
+        # Candidate action types we try to recover if missing (dynamic)
+        candidates = []
+        try:
+            from core.core_initializer import core_initializer
+            available_actions = core_initializer.actions_block.get("available_actions", {})
+            candidates = [
+                action_type
+                for action_type in available_actions.keys()
+                if isinstance(action_type, str) and action_type.startswith("message_")
+            ]
+        except Exception:
+            candidates = []
 
         for candidate in candidates:
             if candidate in existing:
