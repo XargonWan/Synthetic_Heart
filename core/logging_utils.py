@@ -2,8 +2,10 @@ import logging
 import os
 import sys
 import traceback
+from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 # Try to load environment variables from .env early so logging defaults reflect .env
 try:
@@ -32,6 +34,25 @@ _LEVELS = {
 # Global variables for logging configuration
 _LOGGING_LEVEL = os.getenv("LOGGING_LEVEL", "INFO").upper()  # Default to INFO or env value
 _LOGGING_LOGCHAT_LEVEL = "ERROR"
+
+
+class TimeZoneFormatter(logging.Formatter):
+    """Formatter that respects the configured timezone."""
+
+    def __init__(self, fmt=None, datefmt=None):
+        super().__init__(fmt, datefmt)
+        try:
+            tz_name = os.getenv("TZ", "UTC")
+            self.tz = ZoneInfo(tz_name)
+        except Exception:
+            self.tz = timezone.utc
+
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.fromtimestamp(record.created, timezone.utc)
+        dt_local = dt.astimezone(self.tz)
+        if datefmt:
+            return dt_local.strftime(datefmt)
+        return dt_local.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _register_logging_config():
@@ -117,7 +138,7 @@ def _write_to_separate_log(level: str, message: str, log_file: str) -> None:
             separate_logger.setLevel(_LEVELS.get(_LOGGING_LEVEL, logging.ERROR))
             separate_logger.propagate = False
             
-            formatter = logging.Formatter(
+            formatter = TimeZoneFormatter(
                 "[%(asctime)s] [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s",
                 "%Y-%m-%d %H:%M:%S",
             )
@@ -151,7 +172,7 @@ def setup_logging() -> logging.Logger:
     logger.propagate = False
 
     if not logger.handlers:
-        formatter = logging.Formatter(
+        formatter = TimeZoneFormatter(
             "[%(asctime)s] [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s",
             "%Y-%m-%d %H:%M:%S",
         )

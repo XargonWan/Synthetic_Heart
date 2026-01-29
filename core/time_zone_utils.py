@@ -36,7 +36,11 @@ def get_local_timezone() -> ZoneInfo:
     Logs a warning and falls back to UTC if the variable is missing or
     points to an invalid timezone.
     """
-    tz_name = str(_TZ) or "UTC"
+    tz_name = str(_TZ)
+    env_tz = os.getenv("TZ")
+    if (not tz_name or tz_name == "UTC") and env_tz:
+        tz_name = env_tz
+    tz_name = tz_name or "UTC"
     try:
         return ZoneInfo(tz_name)
     except Exception:
@@ -46,6 +50,8 @@ def get_local_timezone() -> ZoneInfo:
 
 def utc_to_local(dt: datetime) -> datetime:
     """Convert a UTC datetime to local time using the local TZ."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=ZoneInfo("UTC"))
     return dt.astimezone(get_local_timezone())
 
 
