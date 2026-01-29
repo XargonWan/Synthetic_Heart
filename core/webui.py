@@ -468,8 +468,8 @@ class SynthWebUIInterface:
     def get_supported_actions() -> dict:
         return {
             "message_synth_webui": {
-                "required_fields": ["text", "interface_path"],
-                "optional_fields": [],
+                "required_fields": ["text"],
+                "optional_fields": ["interface_path"],
                 "description": f"Send a text message to a {BRAND_NAME} session.",
             }
             ,
@@ -1551,6 +1551,29 @@ class SynthWebUIInterface:
 
         session_id = str(chat_id)
         websocket = self.connections.get(session_id)
+        if not websocket:
+            try:
+                from core.config_manager import config_registry
+
+                alias_map = config_registry.get_value("CONTEXT_LINK_MAP", {}, value_type="json")
+                if isinstance(alias_map, dict):
+                    sources = [k for k, v in alias_map.items() if v == session_id]
+                    for source in sources:
+                        candidate = None
+                        if source in self.connections:
+                            candidate = source
+                        elif "/" in source and source.startswith(f"{INTERFACE_NAME}/"):
+                            extracted = source.split("/")[1]
+                            if extracted in self.connections:
+                                candidate = extracted
+
+                        if candidate:
+                            log_debug(f"{LOG_PREFIX} 🔀 Alias redirect: {session_id} -> {candidate}")
+                            websocket = self.connections[candidate]
+                            session_id = candidate
+                            break
+            except Exception as e:
+                log_debug(f"{LOG_PREFIX} Alias resolution check failed: {e}")
         if not websocket:
             # Improved debug information: list active sessions to help debug target mismatches
             active_sessions = list(self.connections.keys())
