@@ -3,6 +3,7 @@
 GRILLO_INSTRUCTIONS = (
     "\n\nINSTRUCTIONS (friendly):\n"
     "- Read the chat snippets and ask yourself: 'Which message(s) would I naturally reply to, and what would I say?' Answer like a helpful, curious human.\n"
+    "- Do NOT provide analysis, summaries, or meta commentary. Always return actions only; actions may be messages or other supported action types.\n"
     "- Return ONLY a single JSON object with an 'actions' array — no extra commentary.\n"
     "- Prefer short, conversational replies or simple proposals (e.g., reply to a specific message, ask a clarifying question, suggest a follow-up resource).\n"
     "- Each action should include at least \"type\" and \"payload\"; when useful add \"safe\", \"confidence\" (0.0-1.0) and a short \"rationale\" describing why this would be helpful.\n"
