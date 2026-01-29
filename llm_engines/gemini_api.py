@@ -15,7 +15,25 @@ from core.logging_utils import log_debug, log_info, log_warning, log_error
 import json
 import asyncio
 
-# Register Gemini API Key configuration
+def _is_gemini_active(value: str | None) -> bool:
+    return str(value or "").strip().lower() == "gemini_api"
+
+
+def _update_gemini_key_visibility(active_value: str | None = None) -> None:
+    try:
+        active = active_value if active_value is not None else config_registry.get_value(
+            "ACTIVE_LLM",
+            "selenium_chatgpt",
+        )
+        defn = config_registry._definitions.get("GEMINI_API_KEY")
+        if defn is not None:
+            defn.hidden = not _is_gemini_active(active)
+    except Exception as e:
+        log_debug(f"[gemini_api] Failed to update GEMINI_API_KEY visibility: {e}")
+
+
+# Register Gemini API Key configuration (visible only when Gemini API is active)
+_is_active = _is_gemini_active(config_registry.get_value("ACTIVE_LLM", "selenium_chatgpt"))
 GEMINI_API_KEY = config_registry.get_value(
     "GEMINI_API_KEY",
     "",
@@ -24,9 +42,11 @@ GEMINI_API_KEY = config_registry.get_value(
     group="llm",
     component="gemini_api",
     sensitive=True,
+    hidden=not _is_active,
 )
 
 config_registry.add_listener("GEMINI_API_KEY", lambda v: globals().update(GEMINI_API_KEY=v or ""))
+config_registry.add_listener("ACTIVE_LLM", _update_gemini_key_visibility)
 
 # Model configuration
 # As of early 2025, Gemini 2.0 Flash is the latest efficient model.
