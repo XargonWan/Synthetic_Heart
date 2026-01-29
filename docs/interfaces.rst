@@ -72,6 +72,7 @@ The Telegram bot interface offers comprehensive Telegram integration:
 - Inline keyboard and callback support
 - Group and private chat handling
 - Trainer ID security validation
+- Wake/Sleep attention mode (commands ``/wake`` ``/sleep`` ``/status``)
 
 Reddit Interface
 ----------------

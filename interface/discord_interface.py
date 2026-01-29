@@ -509,8 +509,56 @@ class DiscordInterface:
                 attachments=getattr(message, 'attachments', [])  # Add attachments for image processing
             )
 
+            # === Wake/Sleep & Attention Logic ===
+            text_lower = content.lower()
+            is_wake_command = "hey 2b" in text_lower
+            is_sleep_command = "bye 2b" in text_lower
+
+            chat_scope_id = thread_id if thread_id else channel_id
+            if is_wake_command:
+                self.chat_attention_state[chat_scope_id] = True
+                log_debug(f"[discord_interface] Wake command detected in chat {chat_scope_id}")
+            elif is_sleep_command:
+                self.chat_attention_state[chat_scope_id] = False
+                log_debug(f"[discord_interface] Sleep command detected in chat {chat_scope_id}")
+
+            is_awake = self.chat_attention_state.get(chat_scope_id, False)
+            is_explicit_trigger = is_wake_command or is_sleep_command
+            if not is_explicit_trigger:
+                if "@" in content:
+                    is_explicit_trigger = True
+                elif getattr(message, "guild", None) is None:
+                    is_explicit_trigger = True
+                elif reply_to and bot_user:
+                    if getattr(reply_to.from_user, "id", None) == getattr(bot_user, "id", None):
+                        is_explicit_trigger = True
+
+            directed, reason = await is_message_for_bot(wrapped, self.client)
+
+            if is_awake:
+                if not directed:
+                    directed = True
+                    reason = "awake_state"
+            else:
+                if directed and not is_explicit_trigger:
+                    directed = False
+                    reason = "asleep_state_no_trigger"
+                    log_debug(f"[discord_interface] Suppressed message due to Asleep state: {content}")
+                elif not directed and is_explicit_trigger:
+                    directed = True
+                    reason = "explicit_trigger_asleep"
+
+            if not directed:
+                return
+
             try:
-                await message_queue.enqueue(self.client, wrapped, interface_id="discord_bot", original_message=message)
+                await message_queue.enqueue(
+                    self.client,
+                    wrapped,
+                    interface_id="discord_bot",
+                    original_message=message,
+                    skip_mention_check=True,
+                )
             except Exception as e:  # pragma: no cover - queue errors
                 log_error(f"[discord_interface] message_queue enqueue failed: {e}")
 

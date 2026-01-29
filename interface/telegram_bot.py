@@ -152,6 +152,7 @@ def get_trainer_id() -> Optional[int]:
 say_sessions = {}
 context_memory = {}
 last_selected_chat = {}
+chat_attention_state = {}
 message_id = None
 
 # Throttling for bot None lookup warnings
@@ -401,6 +402,30 @@ async def cancel_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ No active send to cancel.")
 
 
+async def wake_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Force wake state via command."""
+    chat_id = update.effective_chat.id
+    chat_attention_state[chat_id] = True
+    log_info(f"[telegram_bot] /wake command used in chat {chat_id}")
+    await update.message.reply_text("👀 I am awake and listening to all messages.")
+
+
+async def sleep_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Force sleep state via command."""
+    chat_id = update.effective_chat.id
+    chat_attention_state[chat_id] = False
+    log_info(f"[telegram_bot] /sleep command used in chat {chat_id}")
+    await update.message.reply_text("💤 Going to sleep. I will only respond to mentions, replies, or 'Hey 2B'.")
+
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Check wake/sleep status."""
+    chat_id = update.effective_chat.id
+    is_awake = chat_attention_state.get(chat_id, False)
+    status_text = "Awake (listening to all)" if is_awake else "Asleep (waiting for trigger)"
+    await update.message.reply_text(f"🤖 **Status**: {status_text}", parse_mode="Markdown")
+
+
 async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_debug("/test received")
     await update.message.reply_text("✅ Test OK")
@@ -607,14 +632,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     log_debug(f"human_count={human_count}, message.chat.type={message.chat.type}")
     
-    # Get bot username for mention checking
+    # Get bot username and id for mention/reply checking
     bot_username = None
+    bot_id = None
     try:
         bot_info = await context.bot.get_me()
         bot_username = bot_info.username if bot_info else None
-        log_debug(f"Bot username: {bot_username}")
+        bot_id = bot_info.id if bot_info else None
+        log_debug(f"Bot username: {bot_username}, ID: {bot_id}")
     except Exception as e:
-        log_debug(f"Could not get bot username: {e}")
+        log_debug(f"Could not get bot info: {e}")
+
+    chat_id = message.chat.id
+    is_awake = chat_attention_state.get(chat_id, False)
+
+    # Explicit triggers override sleep (slash commands handled elsewhere)
+    is_explicit_trigger = False
+    if "@" in text:
+        is_explicit_trigger = True
+    elif message.chat.type == "private":
+        is_explicit_trigger = True
+    elif message.reply_to_message and bot_id:
+        if message.reply_to_message.from_user and message.reply_to_message.from_user.id == bot_id:
+            is_explicit_trigger = True
     
     # If human_count is still None for group/supergroup chats, calculate it
     if human_count is None and message.chat.type in ["group", "supergroup"]:
@@ -629,6 +669,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     directed, reason = await is_message_for_bot(message, context.bot, bot_username=bot_username, human_count=human_count)
     log_debug(f"is_message_for_bot returned directed={directed}, reason='{reason}'")
+
+    if is_awake:
+        if not directed:
+            directed = True
+            reason = "awake_state"
+            log_debug("[telegram_bot] Forced directed=True due to Awake state")
+    else:
+        if directed and not is_explicit_trigger:
+            directed = False
+            reason = "asleep_state_no_trigger"
+            log_debug("[telegram_bot] Suppressed directed=True due to Asleep state (no explicit trigger)")
+        elif not directed and is_explicit_trigger:
+            directed = True
+            reason = "explicit_trigger_asleep"
+            log_debug("[telegram_bot] Forced directed=True due to explicit trigger in Asleep state")
     
     if not directed:
         log_debug(f"[telegram_bot] DEBUG: Message not directed to bot - ignoring")
@@ -705,7 +760,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         log_debug(f"🔴 [PRIORITY 4] Calling message_queue.enqueue now...")
         
-        await message_queue.enqueue(context.bot, message, interface_id="telegram_bot", original_message=message)
+        await message_queue.enqueue(
+            context.bot,
+            message,
+            interface_id="telegram_bot",
+            original_message=message,
+            skip_mention_check=directed,
+        )
         
         log_debug(f"🔴 [PRIORITY 4 SUCCESS] Message successfully enqueued - processing should continue in queue")
         
@@ -1099,6 +1160,11 @@ async def start_bot():
         log_info("[telegram_bot] Adding command handlers...")
         # Use generic command handler for all commands
         app.add_handler(MessageHandler(filters.COMMAND, handle_command))
+
+        # Specific wake/sleep/status commands (useful when privacy mode is on)
+        app.add_handler(CommandHandler("wake", wake_command))
+        app.add_handler(CommandHandler("sleep", sleep_command))
+        app.add_handler(CommandHandler("status", status_command))
         
         # Single unified message handler for ALL non-command messages
         log_info("[telegram_bot] Adding unified MessageHandler for all messages...")
