@@ -51,6 +51,15 @@ class AIPluginBase:
         """Handle a plugin-defined custom action."""
         raise NotImplementedError("handle_custom_action not implemented")
 
+    async def execute_action(self, action: dict, context: dict, bot, original_message):
+        """Bridge method to call handle_custom_action from action_parser.
+
+        Default implementation extracts action type and payload.
+        """
+        action_type = action.get("type")
+        payload = action.get("payload", {})
+        return await self.handle_custom_action(action_type, payload)
+
     @staticmethod
     def get_supported_actions() -> dict:
         """Return schema information for supported actions."""

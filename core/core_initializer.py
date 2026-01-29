@@ -53,6 +53,7 @@ class CoreInitializer:
         self._summary_displayed = False  # Flag to prevent duplicate summaries
         self._building_actions_block = False  # Flag to prevent infinite rebuild loops
         self._initial_initialization = False  # Flag to indicate we're in initial startup phase
+        self._background_tasks = set()
         
         # Component tracking system
         self.components: Dict[str, ComponentInfo] = {}
@@ -544,7 +545,9 @@ class CoreInitializer:
                                 try:
                                     loop = asyncio.get_running_loop()
                                     if loop and loop.is_running():
-                                        loop.create_task(instance.start())
+                                        task = loop.create_task(instance.start())
+                                        self._background_tasks.add(task)
+                                        task.add_done_callback(self._background_tasks.discard)
                                         log_info(
                                             f"[core_initializer] Started async plugin: {module_name}"
                                         )

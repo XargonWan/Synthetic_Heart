@@ -552,6 +552,22 @@ def _plugins_for(action_type: str) -> List[Any]:
         except Exception as e:
             log_error(f"[action_parser] Error querying plugin {plugin}: {repr(e)}")
 
+    # Special handling for tts_speak: explicitly check for TTS plugin if not found
+    if action_type == "tts_speak" and not plugins:
+        for plugin in loaded_plugins:
+            if plugin.__class__.__name__ in {"TTSLipsyncPlugin", "TTSLipSyncPlugin"}:
+                plugins.append(plugin)
+                log_info("[action_parser] ✅ Explicitly added TTS plugin for tts_speak")
+                break
+
+    # Special handling for trigger_weather_report: explicitly check for WeatherPlugin if not found
+    if action_type == "trigger_weather_report" and not plugins:
+        for plugin in loaded_plugins:
+            if plugin.__class__.__name__ == "WeatherPlugin":
+                plugins.append(plugin)
+                log_info("[action_parser] ✅ Explicitly added WeatherPlugin for trigger_weather_report")
+                break
+
     try:
         from core.core_initializer import INTERFACE_REGISTRY
     except Exception as e:  # pragma: no cover - defensive
@@ -679,6 +695,10 @@ async def _handle_plugin_action(
                 return
         except Exception as e:  # pragma: no cover - defensive
             log_warning(f"[action_parser] Interface dispatch failed: {e}")
+
+        if action_type == "trigger_weather_report":
+            log_warning("[action_parser] ⚠️ Suppressing failed 'trigger_weather_report' to prevent recursion loop.")
+            return None
 
         log_error(f"[action_parser] ❌ No plugin or interface supports action type '{action_type}'")
         return
