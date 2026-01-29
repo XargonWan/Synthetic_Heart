@@ -739,6 +739,20 @@ def register_all():
         advanced=True,
     )
 
+    register_exposed_var(
+        "CONTEXT_LINK_MAP",
+        label="Context Link Map (JSON)",
+        default={},
+        value_type="json",
+        ui_type="json",
+        description=(
+            "JSON map to link different interface paths to a single context (Unified Lane). "
+            "Format: {'source_path_or_id': 'target_path'}."
+        ),
+        scope="core",
+        component="core",
+    )
+
     log_info("[variables_engine] Completed explicit exposed var registrations")
 
 

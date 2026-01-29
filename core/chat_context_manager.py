@@ -16,6 +16,51 @@ from core.config_manager import config_registry
 _context_memory: Dict[str, deque] = {}
 _initialized = False
 
+# Register configuration variable at module level to ensure visibility
+CONTEXT_LINK_MAP = config_registry.get_var(
+    "CONTEXT_LINK_MAP",
+    default={},
+    label="Context Link Map (JSON)",
+    value_type="json",
+    description=(
+        "JSON map to link different interface paths to a single context (Unified Lane). "
+        "Format: {'source_path_or_id': 'target_path'}."
+    ),
+    group="core",
+    component="chat_context_manager",
+)
+
+
+def _resolve_context_path(interface_path: str) -> str:
+    """Resolve interface path to a target path if aliased (Unified Lane)."""
+    try:
+        alias_map = CONTEXT_LINK_MAP.value
+        log_debug(f"[context_manager] Loaded alias_map: {alias_map} (type: {type(alias_map)})")
+
+        if not alias_map:
+            return interface_path
+
+        if not isinstance(alias_map, dict):
+            log_debug(f"[context_manager] CONTEXT_LINK_MAP is not a dict: {type(alias_map)}")
+            return interface_path
+
+        if interface_path in alias_map:
+            target = alias_map[interface_path]
+            log_debug(f"[context_manager] 🔗 Resolved alias: {interface_path} -> {target}")
+            return target
+
+        parts = interface_path.split('/')
+        if len(parts) >= 2:
+            user_segment = parts[1]
+            if user_segment in alias_map:
+                target = alias_map[user_segment]
+                log_debug(f"[context_manager] 🔗 Resolved user alias: {interface_path} -> {target}")
+                return target
+    except Exception as e:
+        log_warning(f"[context_manager] Error resolving context path: {e}")
+
+    return interface_path
+
 
 async def initialize_context_manager() -> None:
     """Initialize context manager and load persisted chat history.
@@ -56,6 +101,9 @@ def get_or_create_chat_context(interface_path: str) -> deque:
     Returns:
         A deque with maxlen=CHAT_HISTORY_LIMIT
     """
+    original_path = interface_path
+    interface_path = _resolve_context_path(interface_path)
+
     if interface_path not in _context_memory:
         # Keep legacy exposed var for backward compatibility, but prefer the
         # unified global verbosity setting.
@@ -81,7 +129,12 @@ def get_or_create_chat_context(interface_path: str) -> deque:
             limit = 10
         
         _context_memory[interface_path] = deque(maxlen=limit)
-        log_debug(f"[context_manager] Created context for interface_path {interface_path} with limit {limit}")
+        if interface_path != original_path:
+            log_debug(
+                f"[context_manager] Created context for alias {original_path} -> {interface_path} with limit {limit}"
+            )
+        else:
+            log_debug(f"[context_manager] Created context for interface_path {interface_path} with limit {limit}")
     
     return _context_memory[interface_path]
 
@@ -111,6 +164,8 @@ async def add_message_to_context(
         timestamp: Optional ISO format timestamp
         **extra_fields: Additional fields to store in context
     """
+    interface_path = _resolve_context_path(interface_path)
+
     # Add to in-memory context
     context = get_or_create_chat_context(interface_path)
     
@@ -131,18 +186,17 @@ async def add_message_to_context(
     # This tracks the last activity time for each chat without requiring LLM reasoning
     try:
         from plugins.recent_chats import update_chat_activity
-        import asyncio
         # Extract chat_id from interface_path (format: interface/chat_id/thread_id)
         parts = interface_path.split('/')
         chat_id = parts[1] if len(parts) > 1 else interface_path
-        asyncio.create_task(update_chat_activity(
+        await update_chat_activity(
             chat_id=chat_id,
             metadata={
                 'username': sender_name,
                 'user_id': sender_id,
                 'interface_path': interface_path
             }
-        ))
+        )
     except Exception as e:
         log_debug(f"[context_manager] Failed to update chat activity: {e}")
     
@@ -172,6 +226,7 @@ async def load_chat_history(interface_path: str) -> None:
     try:
         from core.chat_history_cache import load_chat_history as cache_load
         
+        interface_path = _resolve_context_path(interface_path)
         history = await cache_load(interface_path)
         context = get_or_create_chat_context(interface_path)
         # IMPORTANT: This function is used to rehydrate memory from persistence.
@@ -201,6 +256,7 @@ def clear_chat_context(interface_path: str) -> None:
     Args:
         interface_path: Interface path (e.g., telegram_bot/123456/2)
     """
+    interface_path = _resolve_context_path(interface_path)
     if interface_path in _context_memory:
         _context_memory[interface_path].clear()
         log_debug(f"[context_manager] Cleared context for interface_path {interface_path}")
@@ -238,6 +294,8 @@ async def save_response_message(interface_path: str, message_text: str) -> None:
     """
     if not interface_path or not message_text:
         return
+
+    interface_path = _resolve_context_path(interface_path)
     
     try:
         from core.chat_history_cache import save_chat_message
