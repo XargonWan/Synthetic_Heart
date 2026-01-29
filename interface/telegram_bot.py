@@ -402,30 +402,6 @@ async def cancel_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ No active send to cancel.")
 
 
-async def wake_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Force wake state via command."""
-    chat_id = update.effective_chat.id
-    chat_attention_state[chat_id] = True
-    log_info(f"[telegram_bot] /wake command used in chat {chat_id}")
-    await update.message.reply_text("👀 I am awake and listening to all messages.")
-
-
-async def sleep_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Force sleep state via command."""
-    chat_id = update.effective_chat.id
-    chat_attention_state[chat_id] = False
-    log_info(f"[telegram_bot] /sleep command used in chat {chat_id}")
-    await update.message.reply_text("💤 Going to sleep. I will only respond to mentions, replies, or 'Hey 2B'.")
-
-
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Check wake/sleep status."""
-    chat_id = update.effective_chat.id
-    is_awake = chat_attention_state.get(chat_id, False)
-    status_text = "Awake (listening to all)" if is_awake else "Asleep (waiting for trigger)"
-    await update.message.reply_text(f"🤖 **Status**: {status_text}", parse_mode="Markdown")
-
-
 async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_debug("/test received")
     await update.message.reply_text("✅ Test OK")
@@ -643,52 +619,42 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         log_debug(f"Could not get bot info: {e}")
 
-    chat_id = message.chat.id
-    is_awake = chat_attention_state.get(chat_id, False)
-
-    # Explicit triggers override sleep (slash commands handled elsewhere)
-    is_explicit_trigger = False
-    if "@" in text:
-        is_explicit_trigger = True
-    elif message.chat.type == "private":
-        is_explicit_trigger = True
-    elif message.reply_to_message and bot_id:
-        if message.reply_to_message.from_user and message.reply_to_message.from_user.id == bot_id:
-            is_explicit_trigger = True
     
-    # If human_count is still None for group/supergroup chats, calculate it
-    if human_count is None and message.chat.type in ["group", "supergroup"]:
-        try:
-            member_count = await context.bot.get_chat_member_count(message.chat.id)
-            # Subtract 1 for the bot itself (assuming bot is a member)
-            human_count = max(0, member_count - 1)
-            log_debug(f"[telegram_bot] Calculated human_count={human_count} for group chat {message.chat.id}")
-        except Exception as e:
-            log_debug(f"[telegram_bot] Could not calculate human_count: {e}")
-            # Keep human_count as None; is_message_for_bot will handle it
+    # Wake/sleep gating: awake follows normal routing, sleep ignores non-command messages.
+    chat_id = message.chat.id
+    if chat_id not in chat_attention_state:
+        chat_attention_state[chat_id] = True
+    is_awake = chat_attention_state.get(chat_id, True)
+    if not is_awake:
+        log_debug(f"[telegram_bot] Chat {chat_id} is asleep; ignoring message")
+        return
+
+    # Avoid single-human fallback in group/supergroup chats to prevent false positives.
+    if message.chat.type in ["group", "supergroup"]:
+        human_count = None
     
     directed, reason = await is_message_for_bot(message, context.bot, bot_username=bot_username, human_count=human_count)
     log_debug(f"is_message_for_bot returned directed={directed}, reason='{reason}'")
 
-    if is_awake:
-        if not directed:
-            directed = True
-            reason = "awake_state"
-            log_debug("[telegram_bot] Forced directed=True due to Awake state")
-    else:
-        if directed and not is_explicit_trigger:
-            directed = False
-            reason = "asleep_state_no_trigger"
-            log_debug("[telegram_bot] Suppressed directed=True due to Asleep state (no explicit trigger)")
-        elif not directed and is_explicit_trigger:
-            directed = True
-            reason = "explicit_trigger_asleep"
-            log_debug("[telegram_bot] Forced directed=True due to explicit trigger in Asleep state")
-    
+    # Add reaction immediately when the message is directed (before sleep suppression)
+    try:
+        if directed:
+            from core.reaction_handler import get_reaction_emoji, react_when_mentioned
+            from core.core_initializer import INTERFACE_REGISTRY
+            emoji = get_reaction_emoji()
+            if emoji:
+                interface = INTERFACE_REGISTRY.get("telegram_bot")
+                if interface:
+                    await react_when_mentioned(interface, message, emoji)
+    except Exception as e:
+        log_debug(f"[telegram_bot] Reaction add skipped/failed: {e}")
+
     if not directed:
         log_debug(f"[telegram_bot] DEBUG: Message not directed to bot - ignoring")
         if reason == "missing_human_count":
             log_debug("[telegram_bot] DEBUG: Reason: missing_human_count")
+        elif reason == "unknown_human_count":
+            log_debug("[telegram_bot] DEBUG: Reason: unknown_human_count")
         elif reason == "multiple_humans":
             log_debug("[telegram_bot] DEBUG: Reason: multiple_humans")
         else:
@@ -790,7 +756,8 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     interface_context = {
         'update': update,
         'context': context,
-        'bot': context.bot
+        'bot': context.bot,
+        'interface_id': 'telegram_bot',
     }
     
     try:
@@ -1168,11 +1135,6 @@ async def start_bot():
         # Use generic command handler for all commands
         app.add_handler(MessageHandler(filters.COMMAND, handle_command))
 
-        # Specific wake/sleep/status commands (useful when privacy mode is on)
-        app.add_handler(CommandHandler("wake", wake_command))
-        app.add_handler(CommandHandler("sleep", sleep_command))
-        app.add_handler(CommandHandler("status", status_command))
-        
         # Single unified message handler for ALL non-command messages
         log_info("[telegram_bot] Adding unified MessageHandler for all messages...")
         app.add_handler(MessageHandler(
