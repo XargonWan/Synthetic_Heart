@@ -242,11 +242,7 @@ def _log(level: str, message: str, exc: Optional[Exception] = None, log_file: Op
                                 message_data["thread_id"] = thread_id
                             await iface.send_message(message_data)
                         except Exception:
-                            # Silent fallback to trainer for the same interface
-                            trainer_id = get_trainer_id(log_chat_interface)
-                            if trainer_id:
-                                trainer_data = {"text": notification_message, "target": trainer_id}
-                                await iface.send_message(trainer_data)
+                            pass  # No fallback to trainer to avoid spam
 
                     try:
                         loop = asyncio.get_running_loop()
@@ -264,32 +260,7 @@ def _log(level: str, message: str, exc: Optional[Exception] = None, log_file: Op
                         pass  # No event loop available in this context
                     return
             
-            # Fallback to trainer - use any available interface
-            for interface_name, iface in INTERFACE_REGISTRY.items():
-                trainer_id = get_trainer_id(interface_name)
-                if trainer_id and hasattr(iface, 'send_message'):
-                    async def send_to_trainer():
-                        try:
-                            trainer_data = {"text": notification_message, "target": trainer_id}
-                            await iface.send_message(trainer_data)
-                        except Exception:
-                            pass  # Silent failure
-
-                    try:
-                        loop = asyncio.get_running_loop()
-                        if loop and loop.is_running():
-                            loop.create_task(send_to_trainer())
-                        else:
-                            try:
-                                loop = asyncio.get_event_loop()
-                                if not loop.is_closed():
-                                    loop.run_until_complete(send_to_trainer())
-                                # If no running loop, just skip async send in logging context
-                            except RuntimeError:
-                                pass  # No event loop available in this context
-                    except RuntimeError:
-                        pass  # No event loop available in this context
-                    return
+            # No fallback to trainer here to prevent error spam. Configure LogChat if needed.
                         
         except Exception:
             # Silent failure - no recursive logging
