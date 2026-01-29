@@ -296,6 +296,13 @@ class DiscordInterface:
         # Try channel first
         try:
             channel = self.client.get_channel(int(channel_id))
+            if channel is None:
+                # Fallback to API fetch for uncached channels/threads
+                try:
+                    channel = await self.client.fetch_channel(int(channel_id))
+                except Exception as e:  # pragma: no cover - network dependent
+                    log_debug(f"[discord_interface] fetch_channel failed for {channel_id}: {e}")
+                    channel = None
         except Exception:
             channel = None
 
@@ -327,7 +334,7 @@ class DiscordInterface:
                 log_debug(f"[discord_interface] DM send attempt failed for {channel_id}: {e}")
 
             # If we reach here, both channel and user resolution failed
-            raise RuntimeError("Unknown channel")
+            raise RuntimeError(f"Unknown channel or user: {channel_id}")
 
         # If reply to a specific message was requested, try to fetch and reply
         if reply_to_message_id:
@@ -391,8 +398,13 @@ class DiscordInterface:
             if not entities:
                 entities = None
 
-            # Simple ping check
-            if content.lower() == "ping":
+            # Simple ping check (strip mention for '@Bot ping')
+            ping_check_content = content
+            if bot_user and getattr(bot_user, "name", None):
+                mention_text = f"@{bot_user.name}"
+                ping_check_content = ping_check_content.replace(mention_text, "").strip()
+
+            if ping_check_content.lower() == "ping":
                 await self._discord_send(message.channel.id, "pong")
                 return
 
