@@ -668,7 +668,7 @@ async def _handle_plugin_action(
                     f"[action_parser] ✉️ Dispatching message action to interface '{iface_name}'"
                 )
                 try:
-                    result = interface.send_message(payload, original_message)
+                    result = interface.send_message(payload, original_message=original_message)
                     if inspect.iscoroutine(result):
                         await result
                     return None
@@ -719,7 +719,7 @@ async def _handle_plugin_action(
                 log_info(
                     f"[action_parser] ✉️ Dispatching message action to interface '{plugin_iface}' via send_message"
                 )
-                result = plugin.send_message(payload, original_message)
+                result = plugin.send_message(payload, original_message=original_message)
                 if inspect.iscoroutine(result):
                     await result
                 log_info(
@@ -1483,10 +1483,10 @@ async def gather_static_injections(message=None, context_memory=None) -> dict:
     """
 
     injections: dict = {}
-    log_info(f"[action_parser] 🔍 gather_static_injections() CALLED")
+    log_debug(f"[action_parser] 🔍 gather_static_injections() CALLED")
     try:
         plugins_list = _load_action_plugins()
-        log_info(f"[action_parser] Found {len(list(plugins_list))} plugins to check for static_inject")
+        log_debug(f"[action_parser] Found {len(list(plugins_list))} plugins to check for static_inject")
         plugins_list = _load_action_plugins()  # Reload since we consumed it in len()
         
         for plugin in plugins_list:
@@ -1509,7 +1509,7 @@ async def gather_static_injections(message=None, context_memory=None) -> dict:
                 if not supported or not has_method:
                     continue
 
-                log_info(f"[action_parser] 🎯 Calling get_static_injection() on {plugin.__class__.__name__}")
+                log_debug(f"[action_parser] 🎯 Calling get_static_injection() on {plugin.__class__.__name__}")
                 
                 # Pass message and context_memory if the plugin expects them
                 try:
@@ -1524,7 +1524,7 @@ async def gather_static_injections(message=None, context_memory=None) -> dict:
                 if inspect.iscoroutine(result):
                     result = await result
                     
-                log_info(f"[action_parser] ✅ Got result from {plugin.__class__.__name__}: {list(result.keys()) if isinstance(result, dict) else type(result)}")
+                log_debug(f"[action_parser] ✅ Got result from {plugin.__class__.__name__}: {list(result.keys()) if isinstance(result, dict) else type(result)}")
                 
                 if isinstance(result, dict):
                     injections.update(result)
