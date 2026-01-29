@@ -210,11 +210,14 @@ async def is_message_for_bot(
             log_debug("[mention] match_reason=@synth_mention")
             log_debug("[mention] ✅ Explicit @synth mention found - PRIORITY 3 - message is for bot")
             return True, None
-        # Check for bot username if provided
-        if bot_username and f"@{bot_username}" in message_text:
-            log_debug(f"[mention] match_reason=@{bot_username}_mention")
-            log_debug(f"[mention] ✅ Explicit @mention found: @{bot_username} - PRIORITY 3 - message is for bot")
-            return True, None
+        # Check for bot username if provided (case-insensitive)
+        if bot_username:
+            normalized_msg = message_text.lower()
+            normalized_bot = f"@{bot_username}".lower()
+            if normalized_bot in normalized_msg:
+                log_debug(f"[mention] match_reason=@{bot_username}_mention")
+                log_debug(f"[mention] ✅ Explicit @mention found: @{bot_username} (case-insensitive) - PRIORITY 3 - message is for bot")
+                return True, None
     
     # Priority 4: Check for synth aliases in message text (activation words)
     if message_text:
@@ -272,6 +275,19 @@ async def is_message_for_bot(
                 log_debug(f"[mention] No persona name available to check")
         except Exception as e:
             log_debug(f"[mention] Error checking persona name: {e}")
+
+    # Priority 4c: Check for persona triggers (aliases/likes/dislikes/interests)
+    if message_text:
+        try:
+            from core.persona_manager import get_persona_manager
+
+            persona_manager = get_persona_manager()
+            if persona_manager and persona_manager.check_triggers(message_text):
+                log_debug("[mention] match_reason=persona_trigger")
+                log_debug("[mention] ✅ Persona trigger found (aliases/likes/dislikes/interests) - PRIORITY 4c - message is for bot")
+                return True, None
+        except Exception as e:
+            log_debug(f"[mention] Error checking persona triggers: {e}")
     
     # Priority 5: Check for chat 1:1 using human count (fallback)
     if human_count is not None and human_count == 1:
