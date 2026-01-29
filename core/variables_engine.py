@@ -704,6 +704,42 @@ def register_all():
     )
 
     register_exposed_var(
+        "LOG_LLM_TRAFFIC_ENABLED",
+        label="Log LLM Traffic",
+        default=False,
+        value_type=bool,
+        ui_type="bool",
+        description="Persist prompt/response pairs to a JSONL file for debugging.",
+        scope="logging",
+        component="core",
+        advanced=True,
+    )
+
+    register_exposed_var(
+        "LOG_LLM_TRAFFIC_PATH",
+        label="LLM Traffic Log Path",
+        default="logs/llm_traffic.jsonl",
+        value_type=str,
+        ui_type="string",
+        description="Path to the JSONL log file for LLM traffic.",
+        scope="logging",
+        component="core",
+        advanced=True,
+    )
+
+    register_exposed_var(
+        "LOG_LLM_TRAFFIC_REDACT_ACTIONS",
+        label="Redact Actions In LLM Log",
+        default=True,
+        value_type=bool,
+        ui_type="bool",
+        description="Remove the actions block from logged prompts to reduce size.",
+        scope="logging",
+        component="core",
+        advanced=True,
+    )
+
+    register_exposed_var(
         "DIARY_HISTORY_DAYS",
         label="Diary History Days",
         default=2,

@@ -6,12 +6,15 @@ from core.llm_registry import get_llm_registry
 import asyncio
 from types import SimpleNamespace
 from datetime import datetime
+import json
+import os
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.action_parser import parse_action
 from core.json_utils import dumps as json_dumps, sanitize_for_json
 from core.image_processor import get_image_processor, process_image_message
 from core.abstract_context import AbstractContext, AbstractUser, AbstractMessage
 from core.mention_utils import is_message_for_bot
+from core.config_manager import config_registry
 
 # Plugin managed centrally in initialize_core_components
 plugin = None
@@ -405,6 +408,10 @@ async def handle_incoming_message(bot, message, context_memory_or_prompt, interf
             raise ValueError("No LLM plugin loaded")
             
         result = await plugin.handle_incoming_message(bot, message, prompt)
+        try:
+            _log_llm_traffic(prompt, result, interface)
+        except Exception as e:
+            log_error(f"[plugin_instance] Failed to log LLM traffic: {e}")
         # Log that plugin finished processing
         try:
             log_info(f"[flow] <- LLM plugin: completed for chat_id={getattr(message, 'chat_id', None)} result_type={type(result)}")
@@ -469,6 +476,60 @@ def get_supported_models():
     if plugin and hasattr(plugin, "get_supported_models"):
         return plugin.get_supported_models()
     return []
+
+
+def _log_llm_traffic(prompt, response, interface_name):
+    """Log raw LLM traffic to a JSONL file (optional)."""
+    try:
+        enabled = config_registry.get_value(
+            "LOG_LLM_TRAFFIC_ENABLED",
+            False,
+            value_type=bool,
+            group="logging",
+            component="core",
+        )
+        if not enabled:
+            return
+        log_path = config_registry.get_value(
+            "LOG_LLM_TRAFFIC_PATH",
+            "logs/llm_traffic.jsonl",
+            value_type=str,
+            group="logging",
+            component="core",
+        )
+        redact_actions = config_registry.get_value(
+            "LOG_LLM_TRAFFIC_REDACT_ACTIONS",
+            True,
+            value_type=bool,
+            group="logging",
+            component="core",
+        )
+    except Exception:
+        return
+
+    log_prompt = prompt
+    if redact_actions and isinstance(prompt, dict):
+        try:
+            log_prompt = prompt.copy()
+            log_prompt.pop("actions", None)
+        except Exception:
+            pass
+
+    entry = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "interface": interface_name,
+        "input_context": log_prompt,
+        "response": response,
+    }
+
+    try:
+        log_dir = os.path.dirname(os.path.abspath(log_path)) or "logs"
+        os.makedirs(log_dir, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, indent=2, default=str) + "\n\n")
+        log_debug(f"[plugin_instance] 📝 Logged LLM traffic to {log_path}")
+    except Exception as e:
+        log_error(f"[plugin_instance] Failed to write to traffic log: {e}")
 
 
 def get_target(message_id):
