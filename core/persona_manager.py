@@ -1299,8 +1299,12 @@ Please resend your message with ONLY valid emotions from the list above."""
         message_lower = message_content.lower()
         
         # Check aliases trigger
-        if SYNTH_ALIASES_TRIGGER and persona.aliases:
-            for alias in persona.aliases:
+        if SYNTH_ALIASES_TRIGGER:
+            try:
+                aliases = build_canonical_aliases(persona)
+            except Exception:
+                aliases = persona.aliases or []
+            for alias in aliases:
                 if alias.lower() in message_lower:
                     log_debug(f"[persona_manager] Alias trigger found: {alias}")
                     return True
