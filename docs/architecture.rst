@@ -181,3 +181,33 @@ Security and Validation
 - **Error Handling**: Comprehensive error handling with user-friendly notifications
 
 The architecture's modular design ensures that security policies can be consistently applied across all components without code duplication.
+
+Unified Lane & Unified History
+------------------------------
+
+Synthetic Heart supports optional **Unified Lane** and **Unified History** behaviors
+to improve continuity across interfaces and sessions.
+
+**Unified Lane (Context Linking)**
+    Allows multiple interface paths to map to a single shared context lane.
+    This is useful when you want WebUI, Discord, and other interfaces to share
+    a common conversation history.
+
+    Configure the mapping via ``CONTEXT_LINK_MAP`` (JSON), for example:
+
+    .. code-block:: json
+
+        {
+          "synth_webui/SESSION_UUID": "lane_Trainer_Main",
+          "discord_bot/123456/0": "lane_Trainer_Main",
+          "123456": "lane_Trainer_Main"
+        }
+
+    The resolver checks for exact path matches first and then tries a user-id
+    match using the second path segment (``interface/chat_id/...``).
+
+**Unified History**
+    When ``UNIFIED_HISTORY`` is enabled, the current chat history is built by
+    merging global DB history with in-memory chat logs across all interfaces.
+    This creates a shared “brain” for the synth. Disable this flag if you need
+    strict isolation between users or channels.
