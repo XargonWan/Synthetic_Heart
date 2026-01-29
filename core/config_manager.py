@@ -282,7 +282,7 @@ class ConfigRegistry:
                 definition.raw_value = self._serialize_value(definition, new_value)
                 definition.loaded = True
 
-                log_info(f"[config] Updated '{key}' via setter")
+                log_debug(f"[config] Updated '{key}' via setter")
 
                 for callback in list(definition.listeners):
                     try:
@@ -306,7 +306,7 @@ class ConfigRegistry:
         definition.raw_value = serialized
         definition.loaded = True
 
-        log_info(f"[config] Updated '{key}' via Web UI/API")
+        log_debug(f"[config] Updated '{key}' via Web UI/API")
 
         for callback in list(definition.listeners):
             try:
