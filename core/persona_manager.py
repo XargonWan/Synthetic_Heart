@@ -1179,15 +1179,44 @@ class PersonaManager(PluginBase):
         if not message_text:
             return
         
-        # Run local extraction first to detect invalid emotions and set corrector state
+        # 1) Try JSON feelings object first (new standard)
+        emotion_data = {}
         try:
-            extracted = self.extract_emotion_tags_from_text(message_text)
-            if extracted:
-                log_info(f"[persona_manager] Local extraction found emotion tags: {extracted}")
-                # Update persona emotive state locally (non-blocking save scheduled inside)
-                self.update_emotive_state(extracted)
+            from core.transport_layer import extract_json_from_text
+            parsed_json = extract_json_from_text(message_text, return_metadata=False)
+            if isinstance(parsed_json, dict) and "feelings" in parsed_json:
+                raw_feelings = parsed_json.get("feelings")
+                if isinstance(raw_feelings, dict):
+                    for em, val in raw_feelings.items():
+                        try:
+                            em_norm = str(em).lower().strip()
+                            if em_norm in VALID_EMOTIONS:
+                                intensity = float(val)
+                                intensity = max(0.0, min(10.0, intensity))
+                                emotion_data[em_norm] = intensity
+                            else:
+                                log_debug(f"[persona_manager] Ignoring non-whitelisted emotion: {em_norm}")
+                        except (ValueError, TypeError):
+                            pass
+                    if emotion_data:
+                        log_debug(f"[persona_manager] Found 'feelings' object in JSON: {emotion_data}")
         except Exception as e:
-            log_debug(f"[persona_manager] Local emotion extraction failed: {e}")
+            log_debug(f"[persona_manager] JSON emotion extraction failed: {e}")
+
+        # 2) Legacy fallback: extract tags from text if no JSON feelings were found
+        if not emotion_data:
+            try:
+                extracted = self.extract_emotion_tags_from_text(message_text)
+                if extracted:
+                    log_info(f"[persona_manager] Local extraction found emotion tags: {extracted}")
+                    emotion_data.update(extracted)
+            except Exception as e:
+                log_debug(f"[persona_manager] Local emotion extraction failed: {e}")
+
+        # 3) Update persona state if we found data
+        if emotion_data:
+            log_info(f"[persona_manager] Updating emotive state with: {emotion_data}")
+            self.update_emotive_state(emotion_data)
 
         # Try to delegate to emotion_manager plugin for centralized storage/update
         try:
@@ -1204,9 +1233,9 @@ class PersonaManager(PluginBase):
             except RuntimeError:
                 asyncio.run(emotion_mgr.update_emotion_from_tags(message_text))
 
-            log_info(f"[persona_manager] Delegated emotion update to emotion_manager plugin (background)")
-        except Exception as e:
-            log_debug(f"[persona_manager] Could not delegate to emotion_manager plugin: {e}")
+            log_debug(f"[persona_manager] Delegated emotion update to emotion_manager plugin (background)")
+        except Exception:
+            pass
 
     def get_emotion_validation_corrector(self) -> Optional[str]:
         """Generate a corrector message if invalid emotions were detected.
