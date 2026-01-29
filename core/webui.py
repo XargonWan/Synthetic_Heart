@@ -1068,6 +1068,19 @@ class SynthWebUIInterface:
             except Exception as exc:
                 log_warning(f"{LOG_PREFIX} Failed to broadcast action state to session {session_id}: {exc}")
 
+    async def broadcast_event(self, event: str, payload: Dict[str, Any]) -> None:
+        """Broadcast a custom event to all connected clients."""
+        log_debug(f"{LOG_PREFIX} Broadcasting event '{event}' to {len(self.connections)} clients")
+        message = {
+            "type": event,
+            **payload
+        }
+        for session_id, websocket in list(self.connections.items()):
+            try:
+                await websocket.send_json(message)
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to broadcast event '{event}' to {session_id}: {exc}")
+
     async def _broadcast_animation_state(
         self,
         state: AnimationState,

@@ -52,6 +52,8 @@ The Discord interface provides full bot integration:
 - Media upload/download support
 - Thread and channel management
 - Role and permission integration
+- **Wake/Sleep Attention System**: Use "Hey 2B" to wake the bot and "Bye 2B" to sleep.
+- **Reaction Control**: The "👀" reaction is explicitly disabled for cleaner UI.
 
 Telegram Bot Interface
 ----------------------
@@ -72,6 +74,7 @@ The Telegram bot interface offers comprehensive Telegram integration:
 - Inline keyboard and callback support
 - Group and private chat handling
 - Trainer ID security validation
+- **Wake/Sleep Attention System**: Use "/wake" or "Hey 2B" to wake the bot and "/sleep" or "Bye 2B" to sleep.
 
 Reddit Interface
 ----------------
@@ -116,6 +119,8 @@ See also: :doc:`compose_env_vars` for a complete list of Compose variables, defa
 - Real-time chat updates
 - File upload support
 - Responsive design
+- **Emotion State API**: ``/api/emotion-state`` for driving avatar animations.
+- **Console Logging**: ``/api/log-console`` captures frontend logs.
 
 **Extended API Endpoints**
 

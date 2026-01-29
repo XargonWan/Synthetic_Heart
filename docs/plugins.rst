@@ -197,7 +197,8 @@ The emotional state is exposed to the WebUI for real-time visualization and can 
 * ``message_plugin`` – Send text across registered interfaces (no configuration).
 * ``recent_chats`` – Access to recent conversation history.
 * ``time_plugin`` – Inject current time and location (no configuration).
-* ``weather_plugin`` – Provide weather info as static context. Optional ``WEATHER_FETCH_TIME`` sets refresh interval.
+* ``weather_plugin`` – Provide weather info as static context. Supports scheduled updates via ``WEATHER_CHECK_INTERVAL`` and manual triggering.
+* ``tts_lipsync`` – Generate speech and sync with VRM avatar lips. See :doc:`tts_lipsync`.
 
 Recent Chats Plugin
 -------------------
@@ -301,6 +302,24 @@ context about past conversations.
 The plugin requires database access and automatically creates the necessary tables
 on first run. In development, use ``recreate_diary_table.py`` to reset the table
 structure.
+
+
+Video & Audio Plugins
+---------------------
+
+.. versionadded:: 1.1.0
+   Multimedia support plugins.
+
+TTS Lip Sync Plugin
+~~~~~~~~~~~~~~~~~~~
+
+The ``tts_lipsync`` plugin provides Text-To-Speech capabilities integrated with the Web UI avatars. 
+
+*   **Multi-Server Support**: Automatically falls back to secondary servers if the primary is offline.
+*   **Emotion Support**: Maps emotional context to voice intonation.
+*   **Lip Sync**: Broadcasts audio events to the Web UI to drive avatar mouth movements.
+
+See the full documentation: :doc:`tts_lipsync`.
 
 Plugin Registration System
 --------------------------

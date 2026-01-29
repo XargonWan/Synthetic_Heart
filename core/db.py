@@ -288,12 +288,8 @@ async def get_conn() -> aiomysql.Connection:
             _conn_acquired_times[id(conn)] = time.time()
             # Capture a short stack trace at acquisition time to help diagnose
             # where connections are being held without release.
-            try:
-                import traceback
-                stack = traceback.format_stack(limit=8)
-                _conn_acquired_stacks[id(conn)] = ''.join(stack)
-            except Exception:
-                pass
+            # Stack trace generation removed for performance optimization
+            pass
         except Exception:
             pass
         # Warn when we're close to pool capacity

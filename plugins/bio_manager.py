@@ -133,7 +133,7 @@ def _run(coro):
         if loop.is_running():
             # We're in async context, use run_coroutine_threadsafe to avoid creating new loop
             log_debug(f"[bio_manager] Using run_coroutine_threadsafe for: {coro_name}")
-            result = asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=30.0)
+            result = asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=60.0)
             log_debug(f"[bio_manager] _run completed successfully for: {coro_name}")
             return result
         else:
@@ -956,13 +956,19 @@ class BioPlugin:
                 )
                 seen.add(uid)
 
-        self._participants = participants
+        # Move assignment to after enrichment so we have the nicknames
+        # self._participants = participants  <-- Moved down
 
         if not participants:
+            self._participants = []
             return {}
 
         data = []
         now = datetime.utcnow().isoformat()
+        
+        # Enrich participants with bio data
+        enriched_participants = []
+        
         for p in participants:
             bio = await _get_bio_light_async(p["id"])  # Use async version
             # Ensure bio is always a dict to prevent 'str' object has no attribute 'get' error
@@ -970,11 +976,16 @@ class BioPlugin:
                 log_warning(f"[bio_manager] _get_bio_light_async returned non-dict for user {p['id']}: {type(bio)} - {bio}")
                 bio = {}
             short_info = bio.get("information", "")[:200]
+            nicknames = bio.get("known_as", [])
+            
+            # Update the participant object for internal storage
+            p["nicknames"] = nicknames
+            enriched_participants.append(p)
             
             entry = {
                 "id": p["id"],
                 "usertag": p.get("usertag"),
-                "nicknames": bio.get("known_as", []),
+                "nicknames": nicknames,
                 "short_bio": short_info,
                 "feelings": bio.get("feelings", []),
             }
@@ -984,6 +995,9 @@ class BioPlugin:
             except Exception as e:
                 log_warning(f"[bio_manager] Failed to update last_accessed for user {p['id']}: {e}")
                 # Continue without failing the entire injection
+
+        # update internal cache with full info
+        self._participants = enriched_participants
 
         return {"participants": data}
 
@@ -996,9 +1010,8 @@ class BioPlugin:
         for p in self._participants:
             if target in {p.get("usertag"), p.get("username")}:
                 return p["id"]
-            bio = get_bio_light(p["id"])
-            # Ensure bio is a dict before calling .get()
-            if isinstance(bio, dict) and target in bio.get("known_as", []):
+            # Fix: Use cached nicknames to avoid synchronous DB call which causes deadlock/timeout
+            if target in p.get("nicknames", []):
                 return p["id"]
         return None
 

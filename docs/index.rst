@@ -37,6 +37,7 @@ getting started.
    persona_configuration
    llm_engines
    plugins
+   tts_lipsync
    action_schema_format
    validation_system
    message_handling

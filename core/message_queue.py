@@ -171,6 +171,7 @@ async def enqueue(bot, message, context_memory=None, priority: bool = False, int
     if (
         not skip_mention_check  # Only rate-limit multi-user interfaces
         and not is_trainer
+        and user_id not in (0, -1)  # Exempt system users (auto-response, etc.)
         and not rate_limit.is_allowed(
             llm_name, user_id, interface_id or "unknown", max_messages, window_seconds, trainer_fraction, consume=False
         )
@@ -391,6 +392,8 @@ async def enqueue_low_priority(bot, message, context_memory=None, interface_id: 
     log_debug(f"[QUEUE] Low-priority message enqueued from {item['interface']} chat {chat_id} thread {thread_id}")
 
 
+import heapq
+
 async def compact_similar_messages(first: dict, limit: int = 5) -> list:
     """Collect already-queued messages from same chat/thread/interface."""
     batch = [first]
@@ -398,19 +401,58 @@ async def compact_similar_messages(first: dict, limit: int = 5) -> list:
     thread_id = first.get("thread_id")
     interface = first.get("interface")
     ts = first["timestamp"]
+    
+    # Track seen message IDs to prevent duplication (Telegram retries, etc.)
+    seen_ids = set()
+    first_msg = first.get("message")
+    if first_msg:
+        mid = getattr(first_msg, "message_id", None)
+        if mid:
+            seen_ids.add(mid)
 
+    # Access internal queue - dangerous but necessary for compaction
+    # We must copy/iterate carefully
     queue_items = list(_queue._queue)
-    for prio, counter, item in queue_items:
+    dirty = False
+    
+    for item_tuple in queue_items:
         if len(batch) >= limit:
             break
+            
+        prio, counter, item = item_tuple
+        
+        # Check matching context
         if (
             item["chat_id"] == chat_id
             and item.get("thread_id") == thread_id
             and item.get("interface") == interface
             and item["timestamp"] - ts <= 600
         ):
-            _queue._queue.remove((prio, counter, item))
-            batch.append(item)
+            # Check for duplicate message ID
+            msg = item.get("message")
+            if msg:
+                mid = getattr(msg, "message_id", None)
+                if mid and mid in seen_ids:
+                    # Duplicate message found! Remove it but don't add to batch
+                    _queue._queue.remove(item_tuple)
+                    dirty = True
+                    log_debug(f"[COMPACT] Removed duplicate message {mid} from queue")
+                    continue
+                if mid:
+                    seen_ids.add(mid)
+
+            # Valid compacted message
+            try:
+                _queue._queue.remove(item_tuple)
+                dirty = True
+                batch.append(item)
+            except ValueError:
+                # Item might have been removed concurrently? Unlikely with single consumer but possible
+                pass
+                
+    if dirty:
+        # CRITICAL: Restore heap invariant after modifying list
+        heapq.heapify(_queue._queue)
 
     batch.sort(key=lambda x: x["timestamp"])
 

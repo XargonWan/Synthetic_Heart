@@ -44,6 +44,7 @@ class CoreInitializer:
     """Centralizes the initialization of all synth components."""
     
     def __init__(self):
+        self._background_tasks = set()
         self.loaded_plugins = []
         self.active_interfaces = []
         self.active_llm = None
@@ -559,7 +560,9 @@ class CoreInitializer:
                                 try:
                                     loop = asyncio.get_running_loop()
                                     if loop and loop.is_running():
-                                        loop.create_task(instance.start())
+                                        task = loop.create_task(instance.start())
+                                        self._background_tasks.add(task)
+                                        task.add_done_callback(self._background_tasks.discard)
                                         log_info(
                                             f"[core_initializer] Started async plugin: {module_name}"
                                         )

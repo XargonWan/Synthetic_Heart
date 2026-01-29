@@ -114,6 +114,7 @@ Available Engines
 
 **Stable Engines:**
 
+* ``gemini_api`` – Google Gemini API integration using the ``google-genai`` SDK. Supports Flash 2.0 and Pro models with native tool calling.
 * ``selenium_chatgpt_legacy`` – Legacy version of the ChatGPT Selenium engine. For backward compatibility only; consider migrating to the standardized ``selenium_chatgpt`` engine.
 
 **Standardized Selenium Engines:**
@@ -137,6 +138,34 @@ The ``manual`` engine forwards all prompts to a human trainer instead of an AI m
 - **Development Aid**: Allows manual inspection of prompts and responses
 - **No Configuration**: Works immediately without API keys or external dependencies
 - **Trainer Feedback**: Responses are sent back through the normal message flow
+
+- Trainer Feedback: Responses are sent back through the normal message flow
+- No Configuration: Works immediately without API keys or external dependencies
+
+Gemini API Engine
+-----------------
+
+The ``gemini_api`` engine provides official integration with Google's Gemini models using the ``google-genai`` SDK:
+
+- **Native Integration**: Uses the official API instead of browser automation
+- **Performance**: Faster response times and higher reliability than Selenium engines
+- **Latest Models**: Supports Gemini 2.0 Flash, Gemini 1.5 Pro, and experimental preview models
+- **Reasoning**: Supports "thinking" models (e.g., ``gemini-2.0-flash-thinking``)
+
+**Configuration:**
+
+.. code-block:: bash
+
+   GEMINI_API_KEY=your_api_key_here
+
+**Supported Models:**
+
+The engine automatically defaults to ``gemini-3-flash-preview`` but supports:
+
+- ``gemini-3-flash-preview``
+- ``gemini-3-pro-preview``
+- ``gemini-2.0-flash-thinking-exp-01-21``
+- ``gemini-2.0-flash``
 
 Selenium ChatGPT Engine
 -----------------------

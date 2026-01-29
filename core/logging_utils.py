@@ -4,6 +4,8 @@ import sys
 import traceback
 from logging.handlers import RotatingFileHandler
 from typing import Optional
+from zoneinfo import ZoneInfo
+from datetime import datetime, timezone
 
 # Try to load environment variables from .env early so logging defaults reflect .env
 try:
@@ -97,6 +99,29 @@ def _register_logging_config():
         pass
 
 
+
+class TimeZoneFormatter(logging.Formatter):
+    """Formatter that respects the configured timezone."""
+    
+    def __init__(self, fmt=None, datefmt=None):
+        super().__init__(fmt, datefmt)
+        # Try to get timezone from env first (most reliable at startup)
+        try:
+            tz_name = os.getenv("TZ", "UTC")
+            self.tz = ZoneInfo(tz_name)
+        except Exception:
+            self.tz = timezone.utc
+
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.fromtimestamp(record.created, timezone.utc)
+        dt_local = dt.astimezone(self.tz)
+        if datefmt:
+            s = dt_local.strftime(datefmt)
+        else:
+            s = dt_local.strftime("%Y-%m-%d %H:%M:%S")
+        return s
+
+
 def _write_to_separate_log(level: str, message: str, log_file: str) -> None:
     """Write log message to a separate log file.
     
@@ -117,7 +142,7 @@ def _write_to_separate_log(level: str, message: str, log_file: str) -> None:
             separate_logger.setLevel(_LEVELS.get(_LOGGING_LEVEL, logging.ERROR))
             separate_logger.propagate = False
             
-            formatter = logging.Formatter(
+            formatter = TimeZoneFormatter(
                 "[%(asctime)s] [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s",
                 "%Y-%m-%d %H:%M:%S",
             )
@@ -151,7 +176,7 @@ def setup_logging() -> logging.Logger:
     logger.propagate = False
 
     if not logger.handlers:
-        formatter = logging.Formatter(
+        formatter = TimeZoneFormatter(
             "[%(asctime)s] [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s",
             "%Y-%m-%d %H:%M:%S",
         )

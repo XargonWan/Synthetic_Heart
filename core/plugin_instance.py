@@ -4,6 +4,7 @@ from core.config import get_active_llm, set_active_llm
 from core.prompt_engine import build_json_prompt
 from core.llm_registry import get_llm_registry
 import asyncio
+import os
 from types import SimpleNamespace
 from datetime import datetime
 from core.logging_utils import log_debug, log_info, log_warning, log_error
@@ -405,6 +406,13 @@ async def handle_incoming_message(bot, message, context_memory_or_prompt, interf
             raise ValueError("No LLM plugin loaded")
             
         result = await plugin.handle_incoming_message(bot, message, prompt)
+        
+        # Log full traffic for debugging (USER REQUESTED)
+        try:
+            _log_llm_traffic(prompt, result, interface)
+        except Exception as e:
+            log_error(f"[plugin_instance] Failed to log LLM traffic: {e}")
+
         # Log that plugin finished processing
         try:
             log_info(f"[flow] <- LLM plugin: completed for chat_id={getattr(message, 'chat_id', None)} result_type={type(result)}")
@@ -463,6 +471,65 @@ async def handle_incoming_message(bot, message, context_memory_or_prompt, interf
     except Exception as e:
         log_error(f"[plugin_instance] LLM plugin raised an exception: {e}")
         raise
+
+def _log_llm_traffic(prompt, response, interface_name):
+    """Log raw LLM traffic to a JSONL file."""
+    
+    # Create a simplified version of the prompt for logging
+    # User requested to remove plugins ('actions') and make it readable
+    log_prompt = prompt
+    if isinstance(prompt, dict):
+        try:
+            log_prompt = prompt.copy()
+            # Remove the massive actions/plugins block
+            log_prompt.pop('actions', None)
+            # Optional: Remove static instructions if they clutter the log too much
+            # for now, we only strictly remove 'actions' as requested ("none of the plugins")
+            # log_prompt.pop('instructions', None) 
+            # log_prompt.pop('instructions_verbose', None)
+        except Exception:
+            # If copy fails (e.g. deep copy issues), fall back to original but warn? 
+            # Shallow copy of dict is usually fine.
+            pass
+
+    entry = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "interface": interface_name,
+        "input_context": log_prompt, # Renamed to indicate it might be processed
+        "response": response
+    }
+    
+    try:
+        # Use absolute path relative to the project root
+        # This file is in core/plugin_instance.py -> parent is core -> parent is project root
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(current_dir)
+        log_dir = os.path.join(project_root, "logs")
+        
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = os.path.join(log_dir, "llm_traffic.jsonl")
+        
+        # Use default json dumps for pretty printing, not the core.json_utils one which might lack indent param
+        import json
+        
+        with open(log_file, "a", encoding="utf-8") as f:
+            # Add extra newlines for separation between entries since it's multiline now
+            f.write(json.dumps(entry, indent=2, default=str) + "\n\n")
+            f.flush()
+            os.fsync(f.fileno())
+            
+        log_debug(f"[plugin_instance] 📝 Logged LLM traffic to {log_file}")
+    except Exception as e:
+        # Fallback to local 'logs' dir if path resolution fails
+        try:
+            log_error(f"[plugin_instance] Absolute path logging failed ({e}), trying relative...")
+            # Ensure local logs dir exists for fallback
+            os.makedirs("logs", exist_ok=True)
+            import json
+            with open("logs/llm_traffic.jsonl", "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, indent=2, default=str) + "\n\n")
+        except Exception as e2:
+            log_error(f"[plugin_instance] Failed to write to traffic log: {e2}")
 
 
 def get_supported_models():

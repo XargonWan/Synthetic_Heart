@@ -270,6 +270,32 @@ async def handle_incoming_message(bot, message: Optional[SimpleNamespace], text:
                 # Don't return here - let corrector fix it
                 parsed = None  # Force correction path
 
+            # Synthera Emotion Forwarding:
+            # If the LLM provided a global 'feelings' object (as instructed by prompt), 
+            # but forgot to set 'emotion' in the tts_speak payload, copy the dominant emotion over.
+            if parsed is not None and isinstance(parsed, dict) and "feelings" in parsed and actions:
+                try:
+                    feelings = parsed.get("feelings")
+                    if isinstance(feelings, dict) and feelings:
+                        # Find dominant emotion (highest intensity)
+                        # Filter for keys with numeric values to be safe
+                        valid_feelings = {k: float(v) for k, v in feelings.items() if isinstance(v, (int, float))}
+                        if valid_feelings:
+                            dominant_emotion = max(valid_feelings, key=valid_feelings.get)
+                            # Only forward if intensity is significant (>0)
+                            if valid_feelings[dominant_emotion] > 0:
+                                log_debug(f"[message_chain] 🎭 Found dominant emotion in metadata: {dominant_emotion} ({valid_feelings[dominant_emotion]})")
+                                for action in actions:
+                                    # Check for tts_speak actions
+                                    atype = action.get("type") or action.get("action")
+                                    if atype == "tts_speak":
+                                        payload = action.get("payload")
+                                        if isinstance(payload, dict) and not payload.get("emotion"):
+                                            payload["emotion"] = dominant_emotion
+                                            log_info(f"[message_chain] 💉 Auto-injected emotion '{dominant_emotion}' into tts_speak payload")
+                except Exception as e:
+                    log_warning(f"[message_chain] Failed to auto-forward emotions: {e}")
+
             # Only execute actions if we have valid ones
             if parsed is not None:
                 # Note: LLM decides freely whether to respond to user or not
@@ -293,14 +319,39 @@ async def handle_incoming_message(bot, message: Optional[SimpleNamespace], text:
                         current_message_action_types = ["message_telegram_bot", "message_discord_bot", "message_ollama_serve", "message_synth_webui"]
 
                     if isinstance(actions, list):
+                        # Synthera Auto-TTS Injection Logic
+                        # Check if we have a message action but NO tts_speak action
+                        has_tts = any((str(a.get('type') or a.get('action')) == 'tts_speak') for a in actions)
+                        user_message_action = None
+                        
                         for action in actions:
                             # Support both 'action' and 'type' keys
                             action_name = None
                             if isinstance(action, dict):
                                 action_name = action.get('action') or action.get('type')
+                            
                             if action_name in current_message_action_types:
                                 has_user_response = True
-                                break
+                                # Keep reference to the first user message action to extract text from
+                                if not user_message_action:
+                                    user_message_action = action
+                        
+                        # If we have a user message but no TTS, inject it automatically
+                        if has_user_response and not has_tts and user_message_action:
+                            payload = user_message_action.get('payload', {})
+                            # Try common fields for text content
+                            text_to_speak = payload.get('text') or payload.get('content') or payload.get('message')
+                            
+                            if text_to_speak and isinstance(text_to_speak, str) and len(text_to_speak.strip()) > 0:
+                                log_info(f"[message_chain] 🗣️ Auto-injecting 'tts_speak' action for message: {text_to_speak[:30]}...")
+                                tts_action = {
+                                    "type": "tts_speak",
+                                    "payload": {
+                                        "text": text_to_speak,
+                                        "emotion": payload.get('emotion')
+                                    }
+                                }
+                                actions.append(tts_action)
 
                     if not has_user_response:
                         log_debug('[message_chain] LLM chose not to send user message (diary/internal only)')

@@ -1340,25 +1340,62 @@ class PersonaManager(PluginBase):
         emotional tags and update the persona's state accordingly.
         
         Delegates to emotion_manager plugin if available for centralized management.
-        Falls back to local extraction for backward compatibility.
+        Falls back to local extraction via JSON 'feelings' object.
         
         Args:
-            message_text: The complete LLM message text
+            message_text: The complete LLM message text (raw JSON string)
         """
         if not message_text:
             return
         
-        # Run local extraction first to detect invalid emotions and set corrector state
+        emotion_data = {}
+        
+        # 1. Try to extract JSON and look for 'feelings' object (New Standard)
         try:
-            extracted = self.extract_emotion_tags_from_text(message_text)
-            if extracted:
-                log_info(f"[persona_manager] Local extraction found emotion tags: {extracted}")
-                # Update persona emotive state locally (non-blocking save scheduled inside)
-                self.update_emotive_state(extracted)
+            from core.transport_layer import extract_json_from_text
+            parsed_json = extract_json_from_text(message_text, return_metadata=False)
+            
+            if isinstance(parsed_json, dict) and "feelings" in parsed_json:
+                raw_feelings = parsed_json.get("feelings")
+                if isinstance(raw_feelings, dict):
+                    log_debug(f"[persona_manager] Found 'feelings' object in JSON: {raw_feelings}")
+                    
+                    # Validate and normalize keys/values
+                    for em, val in raw_feelings.items():
+                        try:
+                            # Normalize emotion name
+                            em_norm = str(em).lower().strip()
+                            # Check against whitelist (optional but safer)
+                            if em_norm in VALID_EMOTIONS:
+                                # Ensure numeric intensity 0-10
+                                intensity = float(val)
+                                intensity = max(0.0, min(10.0, intensity))
+                                emotion_data[em_norm] = intensity
+                            else:
+                                log_debug(f"[persona_manager] Ignoring non-whitelisted emotion: {em_norm}")
+                                # We can optionally track invalid emotions here too if strict enforcement is needed
+                        except (ValueError, TypeError):
+                            pass
         except Exception as e:
-            log_debug(f"[persona_manager] Local emotion extraction failed: {e}")
+            log_debug(f"[persona_manager] JSON emotion extraction failed: {e}")
 
-        # Try to delegate to emotion_manager plugin for centralized storage/update
+        # 2. Legacy Fallback: Extract embedded tags from text (Old Standard)
+        # Only if no valid JSON feelings were found
+        if not emotion_data:
+            try:
+                extracted = self.extract_emotion_tags_from_text(message_text)
+                if extracted:
+                    log_info(f"[persona_manager] Local regex extraction found emotion tags: {extracted}")
+                    emotion_data.update(extracted)
+            except Exception as e:
+                log_debug(f"[persona_manager] Local regex extraction failed: {e}")
+
+        # 3. Update State if we found data
+        if emotion_data:
+            log_info(f"[persona_manager] Updating emotive state with: {emotion_data}")
+            self.update_emotive_state(emotion_data)
+
+        # 4. Try to delegate to emotion_manager plugin for centralized storage/update (Optional)
         try:
             from plugins.emotion_manager import EmotionManager
             emotion_mgr = EmotionManager()
@@ -1367,15 +1404,17 @@ class PersonaManager(PluginBase):
             try:
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
+                    # Pass the raw text or the extracted dict depending on what the plugin expects.
+                    # Assuming it might still use old logic, let's pass the text.
                     asyncio.create_task(emotion_mgr.update_emotion_from_tags(message_text))
                 else:
                     asyncio.run(emotion_mgr.update_emotion_from_tags(message_text))
             except RuntimeError:
                 asyncio.run(emotion_mgr.update_emotion_from_tags(message_text))
 
-            log_info(f"[persona_manager] Delegated emotion update to emotion_manager plugin (background)")
-        except Exception as e:
-            log_debug(f"[persona_manager] Could not delegate to emotion_manager plugin: {e}")
+            log_debug(f"[persona_manager] Delegated emotion update to emotion_manager plugin (background)")
+        except Exception:
+            pass
 
     def get_emotion_validation_corrector(self) -> Optional[str]:
         """Generate a corrector message if invalid emotions were detected.

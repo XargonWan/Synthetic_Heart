@@ -43,7 +43,13 @@ from collections import deque
 import json
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.user_utils import get_user_usertag
+# Import memory subsystem
+try:
+    from core.memory_subsystem.memory_core import record_passive_observation
+except ImportError:
+    record_passive_observation = None  # Fallback if module not fully ready
 from interface.message_send_utils import (
+
     safe_send,
     send_with_thread_fallback,
 )
@@ -152,6 +158,8 @@ def get_trainer_id() -> Optional[int]:
 say_sessions = {}
 context_memory = {}
 last_selected_chat = {}
+chat_attention_state = {}
+
 message_id = None
 
 # Throttling for bot None lookup warnings
@@ -400,6 +408,29 @@ async def cancel_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("⚠️ No active send to cancel.")
 
+async def wake_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Force wake state via command."""
+    chat_id = update.effective_chat.id
+    chat_attention_state[chat_id] = True
+    log_info(f"[telegram_bot] /wake command used in chat {chat_id}")
+    await update.message.reply_text("👀 I am awake and listening to all messages.")
+
+async def sleep_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Force sleep state via command."""
+    chat_id = update.effective_chat.id
+    chat_attention_state[chat_id] = False
+    log_info(f"[telegram_bot] /sleep command used in chat {chat_id}")
+    await update.message.reply_text("💤 Going to sleep. I will only respond to mentions, replies, or 'Hey 2B'.")
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Check wake/sleep status."""
+    chat_id = update.effective_chat.id
+    is_awake = chat_attention_state.get(chat_id, False)
+    status_text = "Awake (listening to all)" if is_awake else "Asleep (waiting for trigger)"
+    await update.message.reply_text(f"🤖 **Status**: {status_text}", parse_mode="Markdown")
+
+
+
 
 async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_debug("/test received")
@@ -600,22 +631,56 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_debug(f"After trainer-specific checks - continuing to message processing")
     log_debug(f"Checking if message is for bot - calling is_message_for_bot")
     
-    # Check if message is directed to bot
+    
+    # Check if message is for bot
     human_count = getattr(message, "human_count", None)
     if human_count is None and hasattr(message, "chat"):
         human_count = getattr(message.chat, "human_count", None)
     
-    log_debug(f"human_count={human_count}, message.chat.type={message.chat.type}")
+    log_debug(f"Checking if message is for bot - calling is_message_for_bot")
     
-    # Get bot username for mention checking
+    # Get bot username and ID for mention/reply checking
     bot_username = None
+    bot_id = None
     try:
         bot_info = await context.bot.get_me()
         bot_username = bot_info.username if bot_info else None
-        log_debug(f"Bot username: {bot_username}")
+        bot_id = bot_info.id if bot_info else None
+        log_debug(f"Bot username: {bot_username}, ID: {bot_id}")
     except Exception as e:
-        log_debug(f"Could not get bot username: {e}")
+        log_debug(f"Could not get bot info: {e}")
     
+    # Check for Wake/Sleep words FIRST ("Hey 2B", "Bye 2B")
+    # This must happen BEFORE calculation of 'directed' so we can influence it
+    # "2B" is hardcoded as requested.
+    text_lower = text.lower()
+    is_wake_command = "hey 2b" in text_lower
+    is_sleep_command = "bye 2b" in text_lower
+    
+    chat_id = message.chat.id
+    if is_wake_command:
+        chat_attention_state[chat_id] = True
+        log_debug(f"[telegram_bot] Wake command detected in chat {chat_id}")
+    elif is_sleep_command:
+        chat_attention_state[chat_id] = False
+        log_debug(f"[telegram_bot] Sleep command detected in chat {chat_id}")
+        
+    is_awake = chat_attention_state.get(chat_id, False) # Default to Sleeping (False)
+    
+    # Calculate explicit triggers (override Sleep)
+    is_explicit_trigger = is_wake_command or is_sleep_command
+    if not is_explicit_trigger:
+        if "@" in text: # Explicit mention
+            is_explicit_trigger = True
+        elif message.chat.type == "private": # Private chat always passes
+            is_explicit_trigger = True
+        elif message.reply_to_message and bot_id:
+             # Check if reply to bot
+             if message.reply_to_message.from_user and message.reply_to_message.from_user.id == bot_id:
+                  is_explicit_trigger = True
+    
+    log_debug(f"[telegram_bot] Attention State: Awake={is_awake}, ExplicitTrigger={is_explicit_trigger}")
+
     # If human_count is still None for group/supergroup chats, calculate it
     if human_count is None and message.chat.type in ["group", "supergroup"]:
         try:
@@ -629,6 +694,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     directed, reason = await is_message_for_bot(message, context.bot, bot_username=bot_username, human_count=human_count)
     log_debug(f"is_message_for_bot returned directed={directed}, reason='{reason}'")
+
+    if is_awake:
+        # If Awake, we respond to everything in the group (acting as a participant)
+        if not directed:
+             directed = True
+             reason = "awake_state"
+             log_debug(f"[telegram_bot] Forced directed=True due to Awake state")
+    else:
+        # If Asleep, we ONLY respond to explicit triggers
+        if directed and not is_explicit_trigger:
+             # Ignore (was likely Alias or Single Human, but we are sleeping)
+             directed = False
+             reason = "asleep_state_no_trigger"
+             log_debug(f"[telegram_bot] Suppressed directed=True due to Asleep state (no explicit trigger)")
+        elif not directed and is_explicit_trigger:
+             # Awake/Sleep command or @ detected but is_message_for_bot missed it?
+             directed = True
+             reason = "explicit_trigger_asleep"
+             log_debug(f"[telegram_bot] Forced directed=True due to Explicit Trigger in Asleep state")
     
     if not directed:
         log_debug(f"[telegram_bot] DEBUG: Message not directed to bot - ignoring")
@@ -638,9 +722,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log_debug("[telegram_bot] DEBUG: Reason: multiple_humans")
         else:
             log_debug(f"[telegram_bot] DEBUG: Reason: {reason or 'not directed to bot'}")
+
+        # === PASSIVE OBSERVATION (Memory) ===
+        # If we are here, the bot is Asleep or ignoring the message.
+        # This is the perfect time to passively record it if we have a feature for it.
+        # We only record text messages to save space, and avoid private chats (usually handled by other logic)
+        # or we might want private chats too? For now, focused on Group Chat scraping as requested.
+        try:
+            if (record_passive_observation and 
+                text and 
+                message.chat.type in ["group", "supergroup"] and 
+                not text.startswith("/")): # Ignore commands
+                
+                # Run as background task to not slow down processing
+                asyncio.create_task(record_passive_observation(
+                    interface_path=interface_path,
+                    user_id=str(user_id),
+                    username=username,
+                    content=text
+                ))
+        except Exception as e:
+            log_debug(f"[telegram_bot] Passive observation failed: {e}")
+
         return
     
     log_debug(f"[telegram_bot] DEBUG: Message is directed to bot - continuing processing")
+
     
     log_debug(f"[telegram_bot] Message from {user_id} ({message.chat.type}): {text}")
 
@@ -705,9 +812,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         log_debug(f"🔴 [PRIORITY 4] Calling message_queue.enqueue now...")
         
-        await message_queue.enqueue(context.bot, message, interface_id="telegram_bot", original_message=message)
+        # KEY FIX: Pass 'directed' as skip_mention_check.
+        # If we have already determined the message IS for the bot (because of Awake state, explicit trigger, etc.),
+        # we tell the queue to trust us and skip its own redundant check (which lacks our local state context).
+        await message_queue.enqueue(
+            context.bot, 
+            message, 
+            interface_id="telegram_bot", 
+            original_message=message,
+            skip_mention_check=directed
+        )
         
         log_debug(f"🔴 [PRIORITY 4 SUCCESS] Message successfully enqueued - processing should continue in queue")
+
         
     except Exception as e:
         log_error(f"🔴 [PRIORITY 4 ERROR] message_queue enqueue failed: {repr(e)}", e)
@@ -1105,6 +1222,20 @@ async def start_bot():
         log_info("[telegram_bot] Adding command handlers...")
         # Use generic command handler for all commands
         app.add_handler(MessageHandler(filters.COMMAND, handle_command))
+
+        # Add specific commands for wake/sleep as fallback for privacy mode
+        app.add_handler(CommandHandler("wake", wake_command))
+        app.add_handler(CommandHandler("sleep", sleep_command))
+        app.add_handler(CommandHandler("status", status_command))
+        
+        # Add a TypeHandler to log ALL updates received from Telegram (Dispatcher group -1 runs first)
+        from telegram.ext import TypeHandler
+        async def log_all_updates(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            log_debug(f"[telegram_bot] RAW UPDATE RECEIVED: {update.to_dict() if hasattr(update, 'to_dict') else update}")
+        
+        app.add_handler(TypeHandler(Update, log_all_updates), group=-1)
+
+
         
         # Single unified message handler for ALL non-command messages
         log_info("[telegram_bot] Adding unified MessageHandler for all messages...")
@@ -1720,88 +1851,143 @@ class TelegramInterface:
                     thread_id = orig_thread_id
                     log_debug(f"[telegram_interface] Using original message thread for same chat: {thread_id}")
 
+        # === CHANGED: Try TTS First for Combined Message ===
+        sent_message = None
+        tts_done = False
+        
         try:
-            sent_message = await send_with_thread_fallback(
-                self.bot,
-                chat_id,
-                text,
-                parse_mode="Markdown",
-                thread_id=thread_id,  # fixed: correct param is thread_id
-                reply_to_message_id=reply_message_id,
-                fallback_chat_id=fallback_chat_id,
-                fallback_thread_id=fallback_thread_id,
-                fallback_reply_to_message_id=fallback_reply_to,
-            )
-            
-            # Save SyntH's response via core chat_context_manager
+            from core.core_initializer import PLUGIN_REGISTRY
+            tts_plugin = PLUGIN_REGISTRY.get("tts_lipsync")
+            # Only attempt combined voice+text if text fits in caption (1024 chars) and isn't empty
+            if tts_plugin and text and len(text.strip()) > 0 and len(text) <= 1024:
+                 log_debug(f"[telegram_bot] Attempting TTS generation for combined voice message...")
+                 try:
+                     filename = await tts_plugin._generate_audio(text)
+                     if filename:
+                         audio_path = tts_plugin.static_dir / filename
+                         if audio_path.exists():
+                             # Ensure thread_id is int if possible
+                             tid = None
+                             if thread_id:
+                                 try:
+                                     tid = int(thread_id)
+                                 except (ValueError, TypeError):
+                                     tid = thread_id
+                             
+                             with open(audio_path, 'rb') as voice_file:
+                                 sent_message = await self.bot.send_voice(
+                                     chat_id=chat_id,
+                                     voice=voice_file,
+                                     message_thread_id=tid,
+                                     caption=text,
+                                     parse_mode="Markdown",
+                                     reply_to_message_id=reply_message_id
+                                 )
+                             log_info(f"[telegram_bot] Sent combined TTS voice+text message for '{text[:20]}...'")
+                             tts_done = True
+                             
+                             # Save to context (using the voice message as the "response")
+                             try:
+                                 from core.chat_context_manager import save_response_message
+                                 from core.interface_path_utils import build_interface_path
+                                 msg_interface_path = build_interface_path('telegram_bot', str(chat_id), str(thread_id) if thread_id else None)
+                                 await save_response_message(msg_interface_path, text)
+                             except Exception as e:
+                                 log_debug(f"[telegram_interface] Failed to save voice response via context_manager: {e}")
+
+                         else:
+                             log_warning(f"[telegram_bot] TTS audio file not found at {audio_path}")
+                     else:
+                         log_debug("[telegram_bot] TTS generation skipped or failed (audio is None)")
+                 except Exception as inner_e:
+                     log_debug(f"[telegram_bot] TTS combined generation/sending inner exception: {inner_e}")
+        except Exception as e:
+            log_debug(f"[telegram_bot] TTS combined feature failed (non-blocking): {e}")
+
+        # Fallback to standard text message if TTS didn't handle it
+        if not tts_done:
             try:
-                from core.chat_context_manager import save_response_message
-                from core.interface_path_utils import build_interface_path
-                msg_interface_path = build_interface_path('telegram_bot', str(chat_id), str(thread_id) if thread_id else None)
-                await save_response_message(msg_interface_path, text)
-            except Exception as e:
-                log_debug(f"[telegram_interface] Failed to save response via context_manager: {e}")
+                sent_message = await send_with_thread_fallback(
+                    self.bot,
+                    chat_id,
+                    text,
+                    parse_mode="Markdown",
+                    thread_id=thread_id,
+                    reply_to_message_id=reply_message_id,
+                    fallback_chat_id=fallback_chat_id,
+                    fallback_thread_id=fallback_thread_id,
+                    fallback_reply_to_message_id=fallback_reply_to,
+                )
                 
-        except BadRequest as e:
-            if "chat not found" in str(e).lower():
-                # Use orchestrator instead of legacy corrector
                 try:
-                    from core import action_parser
-                    import json
-                    from types import SimpleNamespace
-                    from datetime import datetime
-                except Exception:
-                    action_parser = None
-                correction_payload = {
-                    "system_message": {
-                        "type": "error",
-                        "message": f"Chat {chat_id} not found",
-                        "your_reply": payload,
-                    }
-                }
-                msg = SimpleNamespace()
-                msg.chat_id = chat_id
-                msg.text = ""
-                msg.original_text = json.dumps(correction_payload, ensure_ascii=False)
-                msg.thread_id = thread_id
-                msg.date = datetime.utcnow()
-                msg.from_llm = False
-                if action_parser is not None:
+                    from core.chat_context_manager import save_response_message
+                    from core.interface_path_utils import build_interface_path
+                    msg_interface_path = build_interface_path('telegram_bot', str(chat_id), str(thread_id) if thread_id else None)
+                    await save_response_message(msg_interface_path, text)
+                except Exception as e:
+                    log_debug(f"[telegram_interface] Failed to save response via context_manager: {e}")
+                    
+            except BadRequest as e:
+                # [Error handling block remains same as original]
+                if "chat not found" in str(e).lower():
                     try:
-                        await action_parser.corrector_orchestrator(text=msg.original_text, context={"interface": "telegram"}, bot=self.bot, message=msg)
+                        from core import action_parser
+                        import json
+                        from types import SimpleNamespace
+                        from datetime import datetime
                     except Exception:
-                        pass
-                return
-            else:
-                # Generic error -> request correction via orchestrator
-                try:
-                    from core import action_parser
-                    import json
-                    from types import SimpleNamespace
-                    from datetime import datetime
-                except Exception:
-                    action_parser = None
-                correction_payload = {
-                    "system_message": {
-                        "type": "error",
-                        "message": str(e),
-                        "your_reply": payload,
+                        action_parser = None
+                    correction_payload = {
+                        "system_message": {
+                            "type": "error",
+                            "message": f"Chat {chat_id} not found",
+                            "your_reply": payload,
+                        }
                     }
-                }
-                msg = SimpleNamespace()
-                msg.chat_id = chat_id
-                msg.text = ""
-                msg.original_text = json.dumps(correction_payload, ensure_ascii=False)
-                msg.thread_id = thread_id
-                msg.date = datetime.utcnow()
-                msg.from_llm = False
-                if action_parser is not None:
+                    msg = SimpleNamespace()
+                    msg.chat_id = chat_id
+                    msg.text = ""
+                    msg.original_text = json.dumps(correction_payload, ensure_ascii=False)
+                    msg.thread_id = thread_id
+                    msg.date = datetime.utcnow()
+                    msg.from_llm = False
+                    if action_parser is not None:
+                        try:
+                            await action_parser.corrector_orchestrator(text=msg.original_text, context={"interface": "telegram"}, bot=self.bot, message=msg)
+                        except Exception:
+                            pass
+                    return
+                else:
                     try:
-                        await action_parser.corrector_orchestrator(text=msg.original_text, context={"interface": "telegram"}, bot=self.bot, message=msg)
+                        from core import action_parser
+                        import json
+                        from types import SimpleNamespace
+                        from datetime import datetime
                     except Exception:
-                        pass
-                return
+                        action_parser = None
+                    correction_payload = {
+                        "system_message": {
+                            "type": "error",
+                            "message": str(e),
+                            "your_reply": payload,
+                        }
+                    }
+                    msg = SimpleNamespace()
+                    msg.chat_id = chat_id
+                    msg.text = ""
+                    msg.original_text = json.dumps(correction_payload, ensure_ascii=False)
+                    msg.thread_id = thread_id
+                    msg.date = datetime.utcnow()
+                    msg.from_llm = False
+                    if action_parser is not None:
+                        try:
+                            await action_parser.corrector_orchestrator(text=msg.original_text, context={"interface": "telegram"}, bot=self.bot, message=msg)
+                        except Exception:
+                            pass
+                    return
+        
         await self._verify_delivery(sent_message, payload, original_message)
+
 
     async def add_reaction(self, message, emoji: str) -> bool:
         """Add a reaction to a message.

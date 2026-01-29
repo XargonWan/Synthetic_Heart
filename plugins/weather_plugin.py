@@ -84,7 +84,7 @@ class WeatherPlugin:
 
     # Plugin action registration
     def get_supported_action_types(self):
-        return ["static_inject"]
+        return ["static_inject", "trigger_weather_report"]
 
     def get_supported_actions(self):
         return {
@@ -92,8 +92,27 @@ class WeatherPlugin:
                 "description": "Inject static contextual data into every prompt",
                 "required_fields": [],
                 "optional_fields": [],
+            },
+            "trigger_weather_report": {
+                "description": "Manually trigger the 'Weathergirl' 6 AM style announcement immediately. EXECUTE SILENTLY: Do NOT output any conversational text or acknowledgment. Just trigger the event.",
+                "required_fields": [],
+                "optional_fields": ["interface_path"],
+                "brief": "Trigger the weather announcement immediately for testing.",
+                "source": "weather"
             }
         }
+
+    async def execute_action(self, action: dict, context: dict, bot, original_message):
+        action_type = action.get("type")
+        payload = action.get("payload", {})
+        
+        if action_type == "trigger_weather_report":
+            log_info("[weather_plugin] Manual trigger received for weather report")
+            # Extract interface_path from payload if provided
+            target = payload.get("interface_path")
+            success = await self.trigger_announcement(manual=True, target=target)
+            return {"status": "success" if success else "failed"}
+        return {"error": "Unknown action"}
 
     async def get_static_injection(self) -> dict:
         await self._ensure_weather()
@@ -106,6 +125,122 @@ class WeatherPlugin:
             or now - self._last_fetch > self.fetch_minutes * 60
         ):
             await self._update_weather()
+
+    async def trigger_announcement(self, manual: bool = False, target: str = None) -> bool:
+        """Trigger the 'weathergirl' style announcement.
+        
+        Args:
+            manual: If True, bypass time checks and force delivery.
+            target: Optional interface_path to send the report to (required for manual triggers).
+        """
+        try:
+            log_info(f"[weather_plugin] 🌦️ Initiating {'MANUAL ' if manual else ''}daily weather announcement")
+            
+            # Ensure we have data
+            if not self._cached_weather:
+                await self._update_weather()
+                
+            from core.auto_response import request_llm_delivery
+            
+
+            
+            # Resolve interface to use for delivery
+            delivery_interface = self
+            context_message = None
+            
+            if target:
+                # target format: "interface_name/chat_id"
+                if "/" in target:
+                    parts = target.split("/")
+                    interface_name = parts[0]
+                    
+                    # 1. Resolve Interface Instance
+                    try:
+                        from core.core_initializer import INTERFACE_REGISTRY
+                        if interface_name in INTERFACE_REGISTRY:
+                            delivery_interface = INTERFACE_REGISTRY[interface_name]
+                            log_info(f"[weather_plugin] Using resolved interface: {interface_name}")
+                        else:
+                             log_warning(f"[weather_plugin] Could not find interface '{interface_name}' in registry")
+                    except Exception as e:
+                        log_warning(f"[weather_plugin] Error resolving interface: {e}")
+
+                    # 2. Create Context Message for Routing
+                    try:
+                        chat_id_str = parts[1]
+                        # Handle potential thread_id
+                        thread_id = parts[2] if len(parts) > 2 else None
+                        
+                        from types import SimpleNamespace
+                        context_message = SimpleNamespace()
+                        # Best effort conversion to int for chat_id, though string is often acceptable
+                        try:
+                            context_message.chat_id = int(chat_id_str)
+                        except ValueError:
+                            context_message.chat_id = chat_id_str
+                            
+                        context_message.message_id = 0
+                        context_message.message_thread_id = int(thread_id) if thread_id else None
+                        context_message.from_user = SimpleNamespace(id=0, username="weather_system", full_name="Weather System")
+                        context_message.chat = SimpleNamespace(id=context_message.chat_id, type="private")
+                        context_message.text = "System Weather Trigger"
+                        
+                        log_info(f"[weather_plugin] Created context message bound to chat {context_message.chat_id}")
+                    except Exception as e:
+                        log_warning(f"[weather_plugin] Failed to create context message: {e}")
+
+            # Build target instruction JSON snippet
+            target_json_field = f', "interface_path": "{target}"' if target else ''
+
+            # Ask LLM to generate the announcement
+            # NOTE: We only request message_telegram_bot because TelegramInterface.send_message
+            # has built-in TTS that automatically generates combined voice+text messages.
+            # Requesting tts_speak separately would cause duplicate TTS generation.
+            context_note = "It is currently 6:00 AM." if not manual else "This is a MANUAL test trigger of the 6:00 AM segment."
+            prompt = (
+                f"{context_note} Access the weather data provided in the context. "
+                f"Generate a cheerful, 'weathergirl' style morning announcement for the user. "
+                f"Include current conditions, high/low temperatures for the day, and any warnings (rain/snow). "
+                f"Be concise but energetic. Keep the message under 1024 characters so it fits in a voice message caption. "
+                f"IMPORTANT: Do NOT use emojis - the message will be converted to spoken audio. "
+                f"Current weather string: {self._cached_weather}\n\n"
+                f"=== CRITICAL INSTRUCTIONS ===\n"
+                f"1. You are acting as the Weathergirl system. Output ONLY valid JSON.\n"
+                f"2. Do NOT output any conversational text, pleasantries, or acknowledgments.\n"
+                f"3. Do NOT use emojis or special unicode symbols in the announcement text.\n"
+                f"4. Respond ONLY with a JSON object: {{ \"actions\": [ ... ] }}.\n"
+                f"5. Include ONLY this action in the 'actions' array:\n"
+                f"   - {{ \"type\": \"message_telegram_bot\", \"payload\": {{ \"text\": \"...announcement...\"{target_json_field} }} }}\n"
+                f"6. The Telegram interface will automatically generate TTS audio for your message.\n"
+                f"7. NEVER include 'trigger_weather_report' or 'tts_speak' to avoid recursion/duplicates."
+            )
+
+            log_info(f"[weather_plugin] Requesting LLM delivery to interface: {delivery_interface.__class__.__name__}")
+            
+            # Trigger autonomous delivery
+            success = await request_llm_delivery(
+                interface=delivery_interface,
+                message=context_message,
+                context={
+                    "input": {"type": "event_reminder", "text": prompt},
+                    "weather_data": self._cached_weather
+                },
+                reason="daily_weather_forecast" if not manual else "manual_weather_trigger"
+            )
+            
+            log_info(f"[weather_plugin] request_llm_delivery success: {success}")
+            return success
+            
+            if success:
+                log_info("[weather_plugin] Weather announcement triggered successfully")
+                return True
+            else:
+                log_warning("[weather_plugin] Failed to trigger weather announcement")
+                return False
+                
+        except Exception as e:
+             log_error(f"[weather_plugin] Error in trigger_announcement: {e}")
+             return False
 
     async def _update_weather(self) -> None:
         location = get_local_location()
@@ -120,7 +255,8 @@ class WeatherPlugin:
                 log_warning("[weather_plugin] Event loop closed; aborting weather update")
                 self._cached_weather = f"{location}: ⚠️ Weather service temporarily unavailable (system shutting down)"
                 return
-
+            
+            # ... rest of update logic unchanged ...
             try:
                 response = await loop.run_in_executor(self._executor, urllib.request.urlopen, url)
                 data_bytes = await loop.run_in_executor(self._executor, response.read)
@@ -159,12 +295,12 @@ class WeatherPlugin:
             cloudcover = cc.get("cloudcover", "N/A")
             visibility = cc.get("visibility", "N/A")
             pressure = cc.get("pressure", "N/A")
-
+            
             log_debug(
                 "[weather_plugin] Parsed values: desc=%s temp=%s feels=%s humidity=%s wind=%s%s cloud=%s visibility=%s pressure=%s"%
                 (desc, temp_c, feels_c, humidity, wind_speed, wind_dir, cloudcover, visibility, pressure)
             )
-
+            
             # Extract daily forecast for High/Low
             if "weather" in data and len(data["weather"]) > 0:
                 today = data["weather"][0]
@@ -172,7 +308,7 @@ class WeatherPlugin:
                 min_temp = today.get("mintempC", "N/A")
             else:
                 max_temp, min_temp = "N/A", "N/A"
-
+            
             emoji = self._choose_emoji(desc)
             weather_string = (
                 f"{location}: {emoji} {desc} +{temp_c}°C (High {max_temp}°C/Low {min_temp}°C, "
@@ -232,7 +368,6 @@ class WeatherPlugin:
         log_info("[weather_plugin] Weather background loop started")
         
         from core.time_zone_utils import utc_to_local
-        from core.auto_response import request_llm_delivery
         from datetime import datetime
         
         last_notification_date = None
@@ -257,37 +392,10 @@ class WeatherPlugin:
                         if last_notification_date != today_str:
                             log_info(f"[weather_plugin] 🌦️ Initiating daily 6:00 AM weather announcement for {today_str}")
                             
-                            # Ensure we have data
-                            if not self._cached_weather:
-                                await self._update_weather()
-                                
-                            # Ask LLM to generate the announcement
-                            # We use request_llm_delivery to have the LLM "speak" the announcement
-                            prompt = (
-                                f"It is currently 6:00 AM. Access the weather data provided in the context context. "
-                                f"Generate a cheerful, 'weathergirl' style morning announcement for the user. "
-                                f"Include current conditions, high/low temperatures for the day, and any warnings (rain/snow). "
-                                f"Be concise but energetic. "
-                                f"Current weather string: {self._cached_weather}"
-                            )
-                            
-                            # Trigger autonomous delivery
-                            # Using 'event_reminder' type ensures it bypasses some filters and gets priority
-                            # The recipient will be determined by the auto_response system (LogChat/Trainer)
-                            success = await request_llm_delivery(
-                                interface=self,
-                                context={
-                                    "input": {"type": "event_reminder", "text": prompt},
-                                    "weather_data": self._cached_weather
-                                },
-                                reason="daily_weather_forecast"
-                            )
+                            success = await self.trigger_announcement()
                             
                             if success:
                                 last_notification_date = today_str
-                                log_info("[weather_plugin] Daily weather announcement triggered successfully")
-                            else:
-                                log_warning("[weather_plugin] Failed to trigger daily weather announcement")
                                 
                 except Exception as e:
                      log_error(f"[weather_plugin] Error in daily scheduler check: {e}")
