@@ -295,15 +295,12 @@ async def is_message_for_bot(
         log_debug("[mention] ✅ Single human in chat - PRIORITY 5 - treating as message for bot")
         return True, None
     
-    # No direct mention found and either multiple humans or unknown count
+    # No direct mention found and either multiple humans or unknown count.
+    # If we can't determine human_count, treat it as not 1:1 by default.
     if human_count is None:
-        log_debug("[mention] ⚠️ No direct mention found and human count unavailable - checking if we should fallback")
-        # Fallback: if this is a group/supergroup and no direct mention found, don't process
-        # But if this is being called in a context where we couldn't determine human_count,
-        # we allow it to be processed if there's ANY indication it could be for the bot
-        # For now, return False with missing_human_count reason to let the caller decide
-        return False, "missing_human_count"
-    else:
-        log_debug(f"[mention] No direct mention found and multiple humans in chat ({human_count})")
-        return False, "multiple_humans"
+        log_debug("[mention] No direct mention found and human count unavailable - treating as not 1:1")
+        return False, "unknown_human_count"
+
+    log_debug(f"[mention] No direct mention found and multiple humans in chat ({human_count})")
+    return False, "multiple_humans"
 
