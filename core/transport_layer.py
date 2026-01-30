@@ -578,6 +578,18 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
     if text is None:
         text = ""
 
+    # Normalize mojibake in plain text before any downstream processing
+    try:
+        if isinstance(text, str) and text:
+            from core.text_utils import try_recover_mojibake
+            recovered_text = try_recover_mojibake(text)
+            if recovered_text and recovered_text != text:
+                log_debug("[transport] Recovered mojibake in outbound text")
+                text = recovered_text
+    except Exception:
+        # Non-fatal: keep original text if recovery fails
+        pass
+
     # Diagnostic: log interface function and runtime send parameters
     try:
         bot_self = getattr(interface_send_func, '__self__', None)
