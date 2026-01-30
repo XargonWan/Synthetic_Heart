@@ -40,6 +40,24 @@ If a plugin is missing:
 
 ---
 
+## Background Agents (e.g., Grillo)
+Some functionality in SyntH is provided by long-running, scheduled "agents" implemented as plugins rather than simple action handlers. The canonical example is **G.R.I.L.L.O.** (the "Grillo" plugin), which performs periodic "beats" to drive internal introspection tasks such as tag elaboration, memory consolidation, self-reflection, curiosity probes, and relationship insights.
+
+Key points:
+- Implementation: located under `plugins/grillo/` with a lightweight backward-compatible wrapper at `plugins/grillo_plugin.py`.
+- Purpose: generates internal prompts (beats) which are enqueued as low-priority internal messages via `core.message_queue.enqueue_low_priority` and processed by the normal message chain.
+- DB: uses `grillo_activity_log`, `grillo_beats` and `grillo_action_execs` (see `init-db.sql`) to record prompts, responses, and execution history for the WebUI History > Grillo view.
+- Integration: when Grillo enqueues a beat it attaches context keys like `grillo_beat`, `beat_type` and `activity_log_id`. Outbound messages produced by beats are recorded by `core.action_parser._maybe_record_grillo_outbound_message` so the activity log can show human-readable response text.
+- Extensibility: Grillo can discover optional beat-specific plugins (e.g., tag compactor, memory compactor, curiosity generators) via the plugin registry and defer prompt building to them when available.
+- Configuration & safety: configurable via `GRILLO_BEAT_INTERVAL` and includes duplicate suppression and simple rate-limiting to avoid flooding.
+- Testing: there are tests under `tests/` (e.g., `test_llm_to_interface_grillo_integration.py`) and a helper `tmp/grillo_e2e.py` for manual/CI experiments.
+  - Monitoring: watch Grillo logs with `docker exec synth-dev tail -f /app/logs/synth.log | grep -E "\[grillo\]|grillo"` and inspect `grillo_activity_log` / `grillo_beats` in the DB to verify beats and responses.
+
+Notes for contributors:
+- Treat Grillo as an internal agent — it uses the same action pipeline but is intended for background maintenance tasks. Ensure any new beat types are documented and recorded in the activity logs so the WebUI can present results.
+
+---
+
 ## LLM Engines
 - Engines subclass `AIPluginBase`.
 - They handle reasoning and output JSON actions.
@@ -147,17 +165,23 @@ curl -X POST http://localhost:11434/api/chat \
 **Monitor the logs while testing:**
 
 ```bash
-docker exec synth-dev tail -f /app/logs/synth.log | grep -E "execute_action|schedule_message|Retrieved.*rows"
+docker exec synth-dev tail -f /app/logs/synth.log | grep -E "run_action|execute_action|schedule_message|Event scheduler|get_due_events|Retrieved.*rows|delivered|marked as delivered"
 ```
 
-**Expected log sequence:**
-1. `[action_parser] 🎬 run_action called with action: {'type': 'schedule_message', ...}`
-2. `[event_plugin] 🎬 execute_action: type=schedule_message, payload={...}`
-3. `[event_plugin] ⏰ _handle_schedule_message_payload CALLED`
-4. `[event_plugin] 🎯 Schedule message task created`
-5. After delay: `[event_plugin] Event scheduler checking for due events...`
-6. `[event_plugin] Retrieved 1 rows` (or more if multiple events)
-7. Event delivered to LLM via interface_to_llm transport
+**Expected log sequence (accurate messages & levels):**
+1. `[action_parser] 🎬 run_action called with action: {...}` — emitted from `core/action_parser.py` (INFO)
+2. `[event_plugin] 🎬 execute_action: type=schedule_message, payload=...` — `plugins/event_plugin.py` (INFO)
+3. `[event_plugin] ⏰ _handle_schedule_message_payload CALLED with payload: {...}` — (INFO)
+4. `[event_plugin] 🎯 Schedule message task created: <task_name>` — (INFO)
+5. `[event_plugin] Event scheduler checking for due events...` — scheduler heartbeat logged with **DEBUG** level (may be hidden if DEBUG is not enabled)
+6. `[get_due_events] Retrieved {n} rows` — logged in `core/db.py` inside `get_due_events()` with **DEBUG** level (shows actual number retrieved)
+7. `[event_plugin] Event {id} delivered to LLM` — logged when `request_llm_delivery` returns success (INFO)
+8. `[event_plugin] ✅ Event {id} successfully marked as delivered in DB` — logged after `mark_event_delivered(event_id)` succeeds (INFO)
+
+**Notes:**
+- Some messages (steps 5 and 6) are logged at DEBUG level; enable DEBUG logging to see them. ⚠️
+- If delivery fails you'll see warnings/errors such as `[event_plugin] Failed to deliver event {id} after {n} attempts` or DB/transport errors. 
+- Use the `get_due_events` / `Event scheduler` logs to confirm the scheduler loop is running and finding events.
 
 **Key points:**
 - The system prompt MUST instruct the LLM to respond with ONLY valid JSON
