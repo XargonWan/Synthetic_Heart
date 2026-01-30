@@ -6,7 +6,7 @@ Self-reflection prompt builder for G.R.I.L.L.O.
 
 from core.ai_plugin_base import AIPluginBase
 
-display_name = "Grillo: Self Reflection"
+display_name = "G.R.I.L.L.O Self Reflection"
 BEAT_TYPE = "self_reflection"
 
 class GrilloSelfReflectionPlugin(AIPluginBase):

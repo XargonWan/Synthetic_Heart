@@ -7,7 +7,7 @@ Memory Consolidation plugin for G.R.I.L.L.O.
 from core.ai_plugin_base import AIPluginBase
 from core.logging_utils import log_debug
 
-display_name = "Grillo: Memory Consolidation"
+display_name = "G.R.I.L.L.O Memory Consolidation"
 BEAT_TYPE = "memory_consolidation"
 
 class GrilloMemoryPlugin(AIPluginBase):
