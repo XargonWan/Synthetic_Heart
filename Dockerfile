@@ -16,6 +16,8 @@ ENV PIXELFLUX_USE_XSHM=0 \
     QT_X11_NO_MITSHM=1 \
     DISABLE_XSHM=1 \
     BROWSER=/usr/local/bin/chromium-browser
+ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
 # Block snap completely
 RUN echo 'Package: snapd' > /etc/apt/preferences.d/no-snap && \
