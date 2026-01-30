@@ -600,6 +600,7 @@ async def _consumer_loop() -> None:
                     context = final.get("context", {})
                     if isinstance(context, dict):
                         context["interface_path"] = interface_path
+                        context["thread_id"] = thread_id
                         log_debug(f"[QUEUE] Added interface_path to context: {interface_path}")
                     else:
                         log_warning(f"[QUEUE] Context is not a dict, cannot add interface_path")
@@ -765,29 +766,15 @@ async def _consumer_loop() -> None:
 
                             # Attempt to send a fallback message so the client isn't left waiting.
                             try:
-                                from core.message_chain import get_failed_message_text
-                                failed_text = str(get_failed_message_text())
+                                from core.message_chain import send_llm_fallback_message
 
-                                bot_obj = final.get('bot')
-                                # Telegram-style bots expose send_message(chat_id=..., text=...)
-                                if bot_obj is not None and hasattr(bot_obj, 'send_message') and chat_id:
-                                    await bot_obj.send_message(chat_id=chat_id, text=failed_text)
-                                    log_debug(f"[QUEUE] Sent fallback message due to timeout to chat {chat_id}")
-                                else:
-                                    # Interface-style send (Discord/WebUI/etc)
-                                    try:
-                                        from core.core_initializer import INTERFACE_REGISTRY
-                                        iface = INTERFACE_REGISTRY.get(interface_id)
-                                    except Exception:
-                                        iface = None
-
-                                    if iface is not None and hasattr(iface, 'send_message') and interface_path:
-                                        payload = {"text": failed_text, "interface_path": interface_path}
-                                        try:
-                                            await iface.send_message(payload, original_message=final.get('message'))
-                                        except TypeError:
-                                            await iface.send_message(payload)
-                                        log_debug(f"[QUEUE] Sent interface fallback due to timeout to {interface_path}")
+                                await send_llm_fallback_message(
+                                    final.get("bot"),
+                                    final.get("message"),
+                                    failure_reason=f"timeout after {timeout_seconds}s",
+                                    context=context,
+                                )
+                                log_debug(f"[QUEUE] Sent fallback message due to timeout to {interface_path}")
                             except Exception as send_exc:
                                 log_warning(f"[QUEUE] Failed to send fallback message on timeout for chat {chat_id}: {send_exc}")
 
