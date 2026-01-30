@@ -83,6 +83,9 @@ _interface_registry = get_interface_registry()
 # Load environment variables
 load_dotenv()
 
+# Global state for chat attention (wake/sleep)
+chat_attention_state = {}
+
 # Register exposed variable for WebUI
 register_exposed_var(
     "BOTFATHER_TOKEN",
@@ -623,9 +626,71 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Wake/sleep gating: awake follows normal routing, sleep ignores non-command messages.
     chat_id = message.chat.id
     if chat_id not in chat_attention_state:
-        chat_attention_state[chat_id] = True
-    is_awake = chat_attention_state.get(chat_id, True)
-    if not is_awake:
+        # Default to awake for private chats, sleep for groups
+        chat_attention_state[chat_id] = (message.chat.type == "private")
+    
+    is_awake = chat_attention_state.get(chat_id, (message.chat.type == "private"))
+    
+    # Check for state change triggers
+    text_lower = text.lower().strip()
+    
+    # Sleep triggers
+    sleep_triggers = ["bye 2b", "bye b", "goodnight 2b", "gn 2b", "cya 2b", "shut up 2b"]
+    should_sleep = any(t in text_lower for t in sleep_triggers)
+
+    # Wake triggers
+    # Note: "2b" is in "bye 2b", so we must ensure sleep takes priority
+    wake_triggers = ["hey 2b", "hey b", "2b", "yo 2b", "hi 2b"]
+    is_wake_word = any(t in text_lower for t in wake_triggers)
+    
+    # Mentions also wake up
+    is_mention = False
+    if bot_username and f"@{bot_username.lower()}" in text_lower:
+        is_mention = True
+        
+    should_wake = (is_wake_word or is_mention) and not should_sleep
+    
+    if should_sleep:
+        if is_awake:
+            log_info(f"[telegram_bot] Putting chat {chat_id} to sleep due to trigger in '{text}'")
+            chat_attention_state[chat_id] = False
+            # We set local is_awake to True one last time to allow the "bye" message to be processed
+            # The NEXT message will check chat_attention_state and find it False.
+            is_awake = True 
+            try:
+                # Add sleep reaction
+                await context.bot.set_message_reaction(chat_id=chat_id, message_id=message.message_id, reaction="😴")
+            except Exception:
+                pass
+
+    elif should_wake:
+        if not is_awake:
+            log_info(f"[telegram_bot] Waking up chat {chat_id} due to trigger in '{text}'")
+            chat_attention_state[chat_id] = True
+            is_awake = True
+            try:
+                # Add wake reaction
+                await context.bot.set_message_reaction(chat_id=chat_id, message_id=message.message_id, reaction="👀")
+            except Exception:
+                pass
+            
+    # Bypass triggers (execute even if asleep, but don't wake up efficiently)
+    bypass_triggers = ["weather report", "weather check", "how is the weather", "weather forecast", "check weather", "weather status"]
+    should_bypass = any(t in text_lower for t in bypass_triggers) and not should_sleep
+
+    # Re-evaluate effective awake status for THIS message processing
+    # If is_awake is True, we process.
+    if should_bypass:
+        log_info(f"[telegram_bot] Bypassing sleep for chat {chat_id} due to trigger in '{text}'")
+        is_awake = True
+
+    if not is_awake and not should_wake and not should_sleep:
+        log_debug(f"[telegram_bot] Chat {chat_id} is asleep; ignoring message")
+        return
+    
+    # Re-evaluate effective awake status for THIS message processing
+    # If is_awake is True, we process.
+    if not is_awake and not should_wake and not should_sleep:
         log_debug(f"[telegram_bot] Chat {chat_id} is asleep; ignoring message")
         return
 
@@ -648,6 +713,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await react_when_mentioned(interface, message, emoji)
     except Exception as e:
         log_debug(f"[telegram_bot] Reaction add skipped/failed: {e}")
+
+    if is_awake and not directed:
+        # If we are awake (attention locked), treat ALL messages from this chat as directed
+        # UNLESS it's a sleep trigger that we just processed (we don't want to reply to "bye" twice if logic differs)
+        # But generally, if we are awake, we listen to everything.
+        log_debug(f"[telegram_bot] Chat is AWAKE - forcing directed=True for continuous interaction")
+        directed = True
 
     if not directed:
         log_debug(f"[telegram_bot] DEBUG: Message not directed to bot - ignoring")
@@ -1413,6 +1485,12 @@ class TelegramInterface:
                         "description": "Alternative to interface_path for specifying the chat by name",
                         "optional": True,
                     },
+                    "caption": {
+                        "type": "string",
+                        "example": "This is a voice message",
+                        "description": "Text caption to display with the voice message",
+                        "optional": True,
+                    },
                 },
             }
         return None
@@ -1446,6 +1524,70 @@ class TelegramInterface:
                 errors.append("payload.chat_name must be a string")
 
         return errors
+
+    async def execute_action(self, action: dict, context: dict, bot, original_message):
+        """Execute non-message actions (audio, etc)."""
+        action_type = action.get("type")
+        payload = action.get("payload", {})
+
+        if action_type == "audio_telegram_bot":
+            interface_path = payload.get("interface_path")
+            audio_path = payload.get("audio")
+            caption = payload.get("caption") or payload.get("text")
+            
+            # Telegram has a 1024 char limit for captions
+            if caption and len(caption) > 1024:
+                log_warning(f"[telegram_interface] Caption length {len(caption)} exceeds limit (1024). Sending as separate text message.")
+                await self.send_message({
+                    "text": caption, 
+                    "interface_path": interface_path,
+                    "chat_name": payload.get("chat_name")
+                })
+                caption = None
+            
+            target = None
+            thread_id = None
+            if interface_path:
+                try:
+                    from core.interface_path_utils import parse_interface_path
+                    _, levels = parse_interface_path(interface_path)
+                    # telegram_bot/chat_id/thread_id
+                    if len(levels) >= 1:
+                         target = levels[0]
+                    if len(levels) >= 2:
+                         thread_id = levels[1]
+                except Exception as e:
+                    log_warning(f"[telegram_interface] Failed to parse path {interface_path}: {e}")
+            
+            chat_name = payload.get("chat_name")
+            if not target and chat_name:
+                 # TODO: resolve chat name logic if needed, skipping for now
+                 pass
+
+            if not target:
+                log_warning("[telegram_interface] Missing target for audio")
+                return {"status": "failed", "message": "Missing target"}
+
+            if not audio_path or not os.path.exists(audio_path):
+                 log_warning(f"[telegram_interface] Audio file missing: {audio_path}")
+                 return {"status": "failed", "message": "Audio missing"}
+
+            try:
+                log_debug(f"[telegram_interface] Sending voice to {target} (thread={thread_id})")
+                with open(audio_path, 'rb') as audio_file:
+                    await self.bot.send_voice(
+                        chat_id=target,
+                        voice=audio_file,
+                        caption=caption,
+                        message_thread_id=thread_id
+                    )
+                log_info(f"[telegram_interface] Sent audio to {target}")
+                return {"status": "success"}
+            except Exception as e:
+                log_error(f"[telegram_interface] Failed to send audio: {e}")
+                return {"status": "failed", "error": str(e)}
+
+        return {"status": "failed", "message": f"Unknown action {action_type}"}
 
     def _register_custom_validation(self):
         """Register custom validation rules with the validation registry."""
@@ -1923,11 +2065,9 @@ def shutdown_interface():
         if _polling_task is not None:
             if not _polling_task.done():
                 log_info("[telegram_bot] Cancelling polling task...")
-                _polling_task.cancel()
+                # _polling_task.cancel()
                 try:
-                    import asyncio
-                    # Give it a moment to cancel gracefully
-                    asyncio.get_event_loop().run_until_complete(asyncio.sleep(0.5))
+                    _polling_task.cancel()
                 except Exception:
                     pass
             _polling_task = None

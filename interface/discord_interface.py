@@ -1,7 +1,5 @@
-# interface/discord_interface.py (esempio)
-"""Example Discord interface using the universal transport layer."""
-
 import asyncio
+import os
 from collections import deque
 from types import SimpleNamespace
 from typing import List, Any
@@ -12,6 +10,7 @@ except Exception:  # pragma: no cover - graceful fallback for tests without inst
     discord = None
 
 from core.logging_utils import log_debug, log_error, log_info, log_warning
+from core.mention_utils import is_message_for_bot
 from core.transport_layer import universal_send
 from core.core_initializer import register_interface
 from core.command_registry import execute_command
@@ -19,6 +18,7 @@ from core import message_queue
 from plugins.chat_link import ChatLinkStore
 from core.config_manager import config_registry
 from core.variables_engine import register_exposed_var
+from core.interfaces_registry import get_interface_registry
 
 
 context_memory: dict[int, deque] = {}
@@ -38,7 +38,17 @@ class DiscordInterface:
         # Register custom validation with the new validation system
         self._register_custom_validation()
         
+        # Register trainer ID if configured
+        try:
+            trainer_id = _parse_trainer_id_from_config()
+            if trainer_id:
+                get_interface_registry().set_trainer_id("discord_bot", trainer_id)
+                log_info(f"[discord_interface] Registered trainer ID: {trainer_id}")
+        except Exception as e:
+            log_warning(f"[discord_interface] Failed to register trainer ID: {e}")
+            
         self.client = None
+        self.chat_attention_state = {}
         if discord is not None:  # pragma: no branch
             intents = discord.Intents.default()
             intents.message_content = True
@@ -85,12 +95,7 @@ class DiscordInterface:
         
         if self.is_enabled:
             log_info("[discord_interface] Discord interface registered and enabled")
-            
-            # Start message_queue consumer
-            try:  # pragma: no cover - if no running loop
-                asyncio.get_event_loop().create_task(message_queue.run())
-            except Exception:
-                pass
+            # Message queue consumer is started by main.py
         else:
             reason = self.disabled_reason or "missing configuration"
             log_warning(f"[discord_interface] Interface loaded in disabled state: {reason}")
@@ -100,9 +105,26 @@ class DiscordInterface:
         self.is_enabled = False
         self.disabled_reason = reason
 
+    def _register_trainer_id(self):
+        """Register the trainer ID from config."""
+        try:
+            # Re-read config to ensure we have the latest value
+            trainer_id = _parse_trainer_id_from_config()
+            log_info(f"[discord_interface] Parsing TRAINER_IDS result: {trainer_id}")
+            if trainer_id:
+                get_interface_registry().set_trainer_id("discord_bot", trainer_id)
+                log_info(f"[discord_interface] Successfully registered trainer ID: {trainer_id}")
+            else:
+                log_warning("[discord_interface] No trainer ID found for discord_bot in configuration")
+        except Exception as e:
+            log_warning(f"[discord_interface] Failed to register trainer ID: {e}")
+
     async def start(self):
         """Start the Discord interface."""
         log_info("[discord_interface] Starting Discord interface...")
+        
+        # Ensure trainer ID is registered (retrying with fresh config)
+        self._register_trainer_id()
         
         # Update token from config (may have been loaded from DB after __init__)
         self.bot_token = get_discord_token()
@@ -212,10 +234,12 @@ class DiscordInterface:
         - send_message(chat_id=..., text=...)
         - send_message({"interface_path": ..., "text": ...})
         """
+        audio_path = None
         if isinstance(channel_id, dict):
             payload = channel_id
             text = payload.get("text", text)
             interface_path = payload.get("interface_path")
+            audio_path = payload.get("audio") or payload.get("audio_path")
             
             # Extract channel_id from interface_path if provided
             if interface_path:
@@ -247,9 +271,11 @@ class DiscordInterface:
                 )
             if text is None:
                 text = kwargs.get("text")
+            
+            audio_path = kwargs.get("audio") or kwargs.get("audio_path")
 
-        if channel_id is None or text is None:
-            log_warning("[discord_interface] Missing channel_id or text in send_message")
+        if channel_id is None or (text is None and audio_path is None):
+            log_warning("[discord_interface] Missing channel_id or contents (text/audio) in send_message")
             return
 
         try:
@@ -257,7 +283,14 @@ class DiscordInterface:
             # Set temporary attribute so _discord_send can access reply id
             if reply_to is not None:
                 setattr(self, '_last_reply_to_id', reply_to)
-            await universal_send(self._discord_send, channel_id, text=text, reply_to_message_id=reply_to)
+            
+            await universal_send(
+                self._discord_send, 
+                channel_id, 
+                text=text, 
+                reply_to_message_id=reply_to,
+                audio_path=audio_path
+            )
             # Clear temporary attribute
             if hasattr(self, '_last_reply_to_id'):
                 try:
@@ -277,13 +310,13 @@ class DiscordInterface:
             except Exception as e:
                 log_debug(f"[discord_interface] Failed to save response via context_manager: {e}")
             
-            log_debug(f"[discord_interface] Message sent to {channel_id}: {text}")
+            log_debug(f"[discord_interface] Message sent to {channel_id}: {text[:50] if text else '[Audio]'}")
         except Exception as e:
             log_error(
                 f"[discord_interface] Failed to send message to {channel_id}: {repr(e)}"
             )
 
-    async def _discord_send(self, channel_id, text, reply_to_message_id=None):
+    async def _discord_send(self, channel_id, text, reply_to_message_id=None, audio_path=None):
         """Internal Discord send method.
 
         This method is robust: it will try to resolve the provided numeric id
@@ -325,10 +358,14 @@ class DiscordInterface:
                         user = None
 
                 if user is not None:
-                    # If replying to a specific message id was requested, we can't easily
-                    # reply in the same way in a DM, so just send a plain DM message.
                     log_debug(f"[discord_interface] Sending DM to user {channel_id}")
-                    await user.send(text)
+                    
+                    file_obj = None
+                    if audio_path and os.path.exists(audio_path):
+                         file_obj = discord.File(audio_path)
+                         
+                    if text or file_obj:
+                         await user.send(text or "", file=file_obj)
                     return
             except Exception as e:  # pragma: no cover - network dependent
                 log_debug(f"[discord_interface] DM send attempt failed for {channel_id}: {e}")
@@ -336,16 +373,24 @@ class DiscordInterface:
             # If we reach here, both channel and user resolution failed
             raise RuntimeError(f"Unknown channel or user: {channel_id}")
 
+        # Prepare file object
+        file_obj = None
+        if audio_path:
+            if os.path.exists(audio_path):
+                file_obj = discord.File(audio_path)
+            else:
+                log_warning(f"[discord_interface] Audio file not found: {audio_path}")
+
         # If reply to a specific message was requested, try to fetch and reply
         if reply_to_message_id:
             try:
                 msg = await channel.fetch_message(int(reply_to_message_id))
-                await msg.reply(text)
+                await msg.reply(text or "", file=file_obj)
                 return
             except Exception as e:
                 log_debug(f"[discord_interface] Could not reply to message id {reply_to_message_id}: {e}")
 
-        await channel.send(text)
+        await channel.send(text or "", file=file_obj)
 
     async def _process_message(self, message):
         """Handle incoming Discord messages."""
@@ -747,9 +792,45 @@ DISCORD_BOT_TOKEN = config_registry.get_var(
 discord_interface = None
 
 
+
+def _parse_trainer_id_from_config() -> int | None:
+    """Extract trainer ID for discord_bot from TRAINER_IDS configuration."""
+    trainer_ids = config_registry.get_var(
+        "TRAINER_IDS",
+        "",
+        label="Trainer IDs",
+        description="Comma-separated list of trainer IDs for each interface (format: interface_name:user_id)",
+        group="core",
+        component="discord_interface",
+    )
+    
+    trainer_ids_str = str(trainer_ids) if trainer_ids else ""
+    if not trainer_ids_str:
+        return None
+    
+    for trainer_config in trainer_ids_str.split(','):
+        trainer_config = trainer_config.strip()
+        # Accept both 'discord_bot:' (primary) and 'discord:' (short alias)
+        if trainer_config.startswith('discord_bot:'):
+            try:
+                return int(trainer_config.split(':')[1])
+            except (ValueError, IndexError):
+                log_warning(f"[discord_interface] Invalid trainer ID format in TRAINER_IDS: {trainer_config}")
+                return None
+        elif trainer_config.startswith('discord:'):
+            try:
+                return int(trainer_config.split(':')[1])
+            except (ValueError, IndexError):
+                log_warning(f"[discord_interface] Invalid trainer ID format in TRAINER_IDS: {trainer_config}")
+                return None
+    
+    return None
+
+
 def get_discord_token() -> str:
     """Get the Discord bot token as a string."""
     return str(DISCORD_BOT_TOKEN) if DISCORD_BOT_TOKEN else ""
+
 
 
 # Auto-register Discord interface at import time

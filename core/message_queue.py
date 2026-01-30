@@ -167,6 +167,8 @@ async def enqueue(bot, message, context_memory=None, priority: bool = False, int
 
     chat_id = message.chat_id
     llm_name = plugin.__class__.__module__.split(".")[-1]
+    
+    delay = 300
 
     if (
         not is_trainer
@@ -539,8 +541,11 @@ async def _consumer_loop() -> None:
 
             # Check if user is trainer for this interface
             registry = get_interface_registry()
-            interface_id = getattr(user_msg, 'interface_id', 'unknown')
+            # Fix: Use interface from queue item, with fallback to message attribute
+            interface_id = final.get("interface") or getattr(user_msg, 'interface_id', 'unknown')
             is_trainer = registry.is_trainer(interface_id, user_id)
+            
+            log_debug(f"[QUEUE] Consumer consumer check: user_id={user_id}, interface_id={interface_id}, is_trainer={is_trainer}")
 
             if (
                 not is_trainer

@@ -197,8 +197,16 @@ The emotional state is exposed to the WebUI for real-time visualization and can 
 * ``message_plugin`` – Send text across registered interfaces (no configuration).
 * ``recent_chats`` – Access to recent conversation history.
 * ``time_plugin`` – Inject current time and location (no configuration).
-* ``weather_plugin`` – Provide weather info as static context. Optional ``WEATHER_FETCH_TIME`` sets refresh interval. Daily announcements can be enabled with ``WEATHER_DAILY_REPORT_ENABLED`` and targeted via ``WEATHER_DAILY_REPORT_INTERFACE`` (default: ``synth_webui``). Manual reports use action ``trigger_weather_report`` with ``interface_id`` or ``interface_path``.
-* ``tts_lipsync`` – Generate speech audio from external TTS endpoints and broadcast ``synth:tts-play`` to the WebUI. Configure ``TTS_ENDPOINTS`` and optional ``TTS_TIMEOUT_SECONDS`` / ``TTS_OUTPUT_DIR``.
+* ``weather_plugin`` – Provide weather info as static context. Optional ``WEATHER_FETCH_TIME`` sets refresh interval. Daily announcements can be enabled with ``WEATHER_DAILY_REPORT_ENABLED`` via ``WEATHER_DAILY_REPORT_INTERFACE``.
+    - **Broadcasting**: If interface is ``telegram_bot``, reports are broadcast to all known group chats.
+    - **Context Awareness**: Injects specific targeted interface paths so the LLM knows where to address the report.
+    - **Manual Trigger**: "weather report" (bypasses sleep mode).
+* ``tts_lipsync`` – Generate speech audio from external TTS endpoints.
+    - **Smart Cleaning**: Emojis are stripped from audio generation to prevent reading errors, but preserved in text captions.
+    - **Configuration**: ``TTS_ENDPOINTS`` (comma-separated list of URLs), ``TTS_TIMEOUT_SECONDS``, ``TTS_OUTPUT_DIR``.
+    - **Failover Support**: Automatically cycles through configured endpoints if one fails. Supports hardcoded voice reference mapping for specific servers in ``_get_voice_ref``.
+    - **Auto-Dispatch**: Automatically dispatches generated audio to the active interface (Discord/Telegram) based on ``interface_path`` in context.
+    - **Audio Format**: Automatically wraps raw PCM streams in WAV containers for compatibility.
 
 Recent Chats Plugin
 -------------------
