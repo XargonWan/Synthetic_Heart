@@ -2,39 +2,52 @@
 """
 Gemini API LLM Engine for Synthetic Heart.
 
-This engine uses the Google GenAI SDK to communicate with Gemini models.
+This engine uses the Gemini REST API to communicate with Gemini models.
 It follows the standard LLM engine architecture to ensure all plugins
 (diary, emotions, bio_manager, etc.) work properly.
 """
 
-from google import genai
-from google.genai import types
 from core.ai_plugin_base import AIPluginBase
 from core.config_manager import config_registry
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 import json
 import asyncio
+import requests
 
-def _is_gemini_active(value: str | None) -> bool:
-    return str(value or "").strip().lower() == "gemini_api"
+# Register Gemini API Key configuration (always visible so it can be set before activation)
+try:
+    from core.variables_engine import register_exposed_var
 
+    register_exposed_var(
+        "GEMINI_API_KEY",
+        label="Gemini API Key",
+        default="",
+        value_type=str,
+        ui_type="password",
+        description="API key for Google Gemini models.",
+        scope="llm",
+        component="gemini_api",
+        tags=["llm_engine", "sensitive"],
+        needs_component_reload=True,
+    )
+    register_exposed_var(
+        "GEMINI_API_BASE_URL",
+        label="Gemini API Base URL",
+        default="https://generativelanguage.googleapis.com",
+        value_type=str,
+        ui_type="string",
+        description="Base URL for the Gemini REST API.",
+        scope="llm",
+        component="gemini_api",
+        tags=["llm_engine"],
+        advanced=True,
+        needs_component_reload=True,
+    )
+except Exception:
+    # Fail silently during import-time if variables engine isn't ready
+    pass
 
-def _update_gemini_key_visibility(active_value: str | None = None) -> None:
-    try:
-        active = active_value if active_value is not None else config_registry.get_value(
-            "ACTIVE_LLM",
-            "selenium_chatgpt",
-        )
-        defn = config_registry._definitions.get("GEMINI_API_KEY")
-        if defn is not None:
-            defn.hidden = not _is_gemini_active(active)
-    except Exception as e:
-        log_debug(f"[gemini_api] Failed to update GEMINI_API_KEY visibility: {e}")
-
-
-# Register Gemini API Key configuration (visible only when Gemini API is active)
-_is_active = _is_gemini_active(config_registry.get_value("ACTIVE_LLM", "selenium_chatgpt"))
-GEMINI_API_KEY = config_registry.get_value(
+GEMINI_API_KEY = config_registry.get_var(
     "GEMINI_API_KEY",
     "",
     label="Gemini API Key",
@@ -42,11 +55,19 @@ GEMINI_API_KEY = config_registry.get_value(
     group="llm",
     component="gemini_api",
     sensitive=True,
-    hidden=not _is_active,
 )
 
-config_registry.add_listener("GEMINI_API_KEY", lambda v: globals().update(GEMINI_API_KEY=v or ""))
-config_registry.add_listener("ACTIVE_LLM", _update_gemini_key_visibility)
+GEMINI_API_BASE_URL = config_registry.get_var(
+    "GEMINI_API_BASE_URL",
+    "https://generativelanguage.googleapis.com",
+    label="Gemini API Base URL",
+    description="Base URL for the Gemini REST API.",
+    value_type=str,
+    group="llm",
+    component="gemini_api",
+    tags=["llm_engine"],
+    advanced=True,
+)
 
 # Model configuration
 # As of early 2025, Gemini 2.0 Flash is the latest efficient model.
@@ -79,6 +100,63 @@ MODEL_CONFIGS = {
 
 DEFAULT_MODEL = "gemini-3-flash-preview"
 
+def _get_gemini_model() -> str:
+    from core.config import get_current_model
+
+    current = get_current_model()
+    if current in MODEL_CONFIGS:
+        return current
+    return DEFAULT_MODEL
+
+
+def _set_gemini_model(value: str) -> None:
+    from core.config import set_current_model
+
+    model = str(value).strip()
+    if model not in MODEL_CONFIGS:
+        model = DEFAULT_MODEL
+    set_current_model(model)
+    try:
+        from core.plugin_instance import plugin as active_plugin
+
+        if active_plugin and hasattr(active_plugin, "set_current_model"):
+            active_plugin.set_current_model(model)
+    except Exception:
+        pass
+
+try:
+    from core.variables_engine import register_exposed_var
+
+    register_exposed_var(
+        "GEMINI_MODEL",
+        label="Gemini Model",
+        default=DEFAULT_MODEL,
+        value_type=str,
+        ui_type="select",
+        options=list(MODEL_CONFIGS.keys()),
+        description="Active Gemini model used by gemini_api.",
+        scope="llm",
+        component="gemini_api",
+        tags=["llm_engine"],
+        needs_component_reload=False,
+    )
+except Exception:
+    pass
+
+GEMINI_MODEL = config_registry.get_var(
+    "GEMINI_MODEL",
+    DEFAULT_MODEL,
+    label="Gemini Model",
+    description="Active Gemini model used by gemini_api.",
+    value_type=str,
+    group="llm",
+    component="gemini_api",
+    tags=["llm_engine"],
+    constraints={"choices": list(MODEL_CONFIGS.keys())},
+    getter=_get_gemini_model,
+    setter=_set_gemini_model,
+)
+
 # Model limits map for plugin_instance.py compatibility
 # This maps model names to their max character limits
 MODEL_LIMITS_MAP = {
@@ -89,9 +167,8 @@ MODEL_LIMITS_MAP = {
     "default": 500000,
 }
 
-
 class GeminiAPIPlugin(AIPluginBase):
-    """Gemini API LLM Engine using Google GenAI SDK.
+    """Gemini API LLM Engine using REST API only.
     
     This engine follows the standard Synthetic Heart LLM architecture:
     1. handle_incoming_message() receives the prompt and generates a response
@@ -104,7 +181,7 @@ class GeminiAPIPlugin(AIPluginBase):
     3. The message_chain then routes the response to the appropriate interface
     """
     
-    display_name = "Gemini API (GenAI SDK)"
+    display_name = "Gemini API"
 
     def __init__(self, notify_fn=None):
         from core.notifier import set_notifier
@@ -117,12 +194,9 @@ class GeminiAPIPlugin(AIPluginBase):
             self._notify_fn = lambda chat_id, message: log_info(f"[NOTIFY fallback] {message}")
             set_notifier(self._notify_fn)
 
-        self._current_model = get_current_model() or DEFAULT_MODEL
+        self._current_model = str(GEMINI_MODEL) or get_current_model() or DEFAULT_MODEL
         if self._current_model not in MODEL_CONFIGS:
             self._current_model = DEFAULT_MODEL
-        
-        self.client = None
-        self._init_client()
         
         # Track current request metadata for error handling
         self._current_request_meta = None
@@ -132,17 +206,11 @@ class GeminiAPIPlugin(AIPluginBase):
         
         log_info(f"[gemini_api] Initialized with model: {self._current_model}")
 
-    def _init_client(self):
-        """Initialize the Gemini API client."""
-        if GEMINI_API_KEY:
-            try:
-                self.client = genai.Client(api_key=GEMINI_API_KEY)
-                log_info("[gemini_api] Client initialized successfully")
-            except Exception as e:
-                log_error(f"[gemini_api] Failed to initialize client: {e}")
-                self.client = None
-        else:
-            log_warning("[gemini_api] No API key configured")
+    def get_health_status(self):
+        """Return (ok, error_message) indicating whether the engine is ready."""
+        if not GEMINI_API_KEY or not str(GEMINI_API_KEY).strip():
+            return False, "GEMINI_API_KEY not configured"
+        return True, ""
 
     def get_supported_models(self) -> list[str]:
         """Return available model names."""
@@ -166,7 +234,8 @@ class GeminiAPIPlugin(AIPluginBase):
             tuple: (requests_per_window, window_seconds, burst_limit)
         """
         # Gemini API has generous limits, but we still apply reasonable limits
-        return (60, 60, 10)  # 60 requests per minute with burst of 10
+        # trainer_fraction must be between 0 and 1
+        return (60, 60, 0.5)  # 60 requests per minute, 50% reserved for trainers
 
     def get_interface_limits(self) -> dict:
         """Get the limits and capabilities for this LLM interface."""
@@ -243,11 +312,6 @@ class GeminiAPIPlugin(AIPluginBase):
         """
         if not GEMINI_API_KEY:
             return '{"actions": [{"type": "system_message", "payload": {"text": "⚠️ Gemini API Key not configured. Please set GEMINI_API_KEY in settings or .env"}}]}'
-        
-        if not self.client:
-            self._init_client()
-            if not self.client:
-                return '{"actions": [{"type": "system_message", "payload": {"text": "⚠️ Failed to initialize Gemini client"}}]}'
 
         try:
             # Handle different prompt formats
@@ -255,7 +319,7 @@ class GeminiAPIPlugin(AIPluginBase):
                 # Check for system_message (correction scenario)
                 if "system_message" in prompt:
                     return await self._handle_correction_prompt(prompt)
-                
+
                 # Standard JSON prompt from prompt_engine
                 prompt_text = json.dumps(prompt, indent=2, ensure_ascii=False)
             elif isinstance(prompt, str):
@@ -281,32 +345,15 @@ class GeminiAPIPlugin(AIPluginBase):
             }
 
             # Configure thinking if enabled for this model
-            if thinking_enabled:
-                if "gemini-3" in self._current_model:
-                    # Default to low for responsiveness as per docs recommendations for chat/apps
-                    config_args["thinking_config"] = types.ThinkingConfig(thinking_level="low")
-                else:
-                    # Legacy for 2.0 Flash Thinking
-                    config_args["thinking_config"] = types.ThinkingConfig(include_thoughts=False)
-            
             # Build system instruction that enforces JSON output
             system_instruction = self._build_system_instruction(prompt)
             config_args["system_instruction"] = system_instruction
 
-            generation_config = types.GenerateContentConfig(**config_args)
-
-            # Make the API call - run in executor since it may be blocking
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: self.client.models.generate_content(
-                    model=self._current_model,
-                    contents=prompt_text,
-                    config=generation_config
-                )
+            response_text = await self._http_generate_content(
+                prompt_text=prompt_text,
+                system_instruction=system_instruction,
+                max_output_tokens=config_args.get("max_output_tokens", 8192),
             )
-            
-            response_text = response.text if response else ""
             
             log_debug(f"[gemini_api] Received response ({len(response_text)} chars)")
             
@@ -404,6 +451,129 @@ class GeminiAPIPlugin(AIPluginBase):
         
         return system_instruction
 
+    async def _http_generate_content(self, prompt_text: str, system_instruction: str, max_output_tokens: int) -> str:
+        """Generate content using the Gemini REST API."""
+        base_url = str(GEMINI_API_BASE_URL).strip() or "https://generativelanguage.googleapis.com"
+        api_key = str(GEMINI_API_KEY).strip()
+        if base_url.endswith("/v1") or base_url.endswith("/v1beta"):
+            versioned_base = base_url
+        else:
+            versioned_base = f"{base_url}/v1beta"
+        url = f"{versioned_base}/models/{self._current_model}:generateContent"
+
+        payload = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": prompt_text}],
+                }
+            ],
+            "systemInstruction": {
+                "role": "system",
+                "parts": [{"text": system_instruction}],
+            },
+            "generationConfig": {
+                "maxOutputTokens": int(max_output_tokens),
+            },
+        }
+
+        def _do_request():
+            return requests.post(
+                url,
+                params={"key": api_key},
+                json=payload,
+                timeout=30,
+            )
+
+        retryable_statuses = {429, 500, 503, 504}
+        max_attempts = 3
+        response = None
+
+        for attempt in range(max_attempts):
+            try:
+                loop = asyncio.get_event_loop()
+                response = await loop.run_in_executor(None, _do_request)
+            except Exception as e:
+                if attempt < max_attempts - 1:
+                    delay = min(8, 1 * (2 ** attempt))
+                    log_warning(
+                        f"[gemini_api] HTTP request failed (attempt {attempt + 1}/{max_attempts}): {e}. "
+                        f"Retrying in {delay}s"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                log_error(f"[gemini_api] HTTP request failed: {e}")
+                return json.dumps({
+                    "actions": [{
+                        "type": "system_message",
+                        "payload": {"text": f"⚠️ Gemini HTTP request failed: {str(e)}"}
+                    }]
+                })
+
+            if response.status_code >= 400:
+                if response.status_code in retryable_statuses and attempt < max_attempts - 1:
+                    delay = min(8, 1 * (2 ** attempt))
+                    log_warning(
+                        f"[gemini_api] HTTP error {response.status_code} (attempt {attempt + 1}/{max_attempts}). "
+                        f"Retrying in {delay}s"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                log_error(f"[gemini_api] HTTP error {response.status_code}: {response.text}")
+                return json.dumps({
+                    "actions": [{
+                        "type": "system_message",
+                        "payload": {"text": f"⚠️ Gemini HTTP error {response.status_code}: {response.text}"}
+                    }]
+                })
+            break
+
+        if response is None:
+            return json.dumps({
+                "actions": [{
+                    "type": "system_message",
+                    "payload": {"text": "⚠️ Gemini HTTP request failed: no response"}
+                }]
+            })
+
+        try:
+            data = response.json()
+        except Exception as e:
+            log_error(f"[gemini_api] HTTP response JSON parse failed: {e}")
+            return json.dumps({
+                "actions": [{
+                    "type": "system_message",
+                    "payload": {"text": "⚠️ Gemini HTTP response was not valid JSON"}
+                }]
+            })
+
+        candidates = data.get("candidates") or []
+        if not candidates:
+            log_error(f"[gemini_api] HTTP response missing candidates: {data}")
+            return json.dumps({
+                "actions": [{
+                    "type": "system_message",
+                    "payload": {"text": "⚠️ Gemini HTTP response missing candidates"}
+                }]
+            })
+
+        content = candidates[0].get("content", {})
+        parts = content.get("parts") or []
+        response_text = "".join(
+            part.get("text", "") for part in parts if isinstance(part, dict)
+        ).strip()
+
+        if not response_text:
+            log_error(f"[gemini_api] HTTP response contained no text: {data}")
+            return json.dumps({
+                "actions": [{
+                    "type": "system_message",
+                    "payload": {"text": "⚠️ Gemini HTTP response contained no text"}
+                }]
+            })
+
+        return response_text
+
     async def _handle_correction_prompt(self, prompt: dict) -> str:
         """Handle a correction/system_message prompt.
         
@@ -469,24 +639,11 @@ class GeminiAPIPlugin(AIPluginBase):
             )
         }
         
-        generation_config = types.GenerateContentConfig(**config_args)
-        
-        try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: self.client.models.generate_content(
-                    model=self._current_model,
-                    contents=correction_prompt,
-                    config=generation_config
-                )
-            )
-            
-            return response.text if response else ""
-            
-        except Exception as e:
-            log_error(f"[gemini_api] Correction generation failed: {e}")
-            raise
+        return await self._http_generate_content(
+            prompt_text=correction_prompt,
+            system_instruction=config_args["system_instruction"],
+            max_output_tokens=config_args.get("max_output_tokens", 8192),
+        )
 
 
 PLUGIN_CLASS = GeminiAPIPlugin
