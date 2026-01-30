@@ -5556,9 +5556,9 @@
                     (componentsPayload.plugins || []).forEach(p => {
                         if (p?.status === 'success') allowed.add(p.name);
                     });
-                    // LLM engines: include only those with loaded=true
+                    // LLM engines: include loaded OR active (so active engine settings are visible)
                     (componentsPayload.llm?.engines || []).forEach(e => {
-                        if (e?.loaded) allowed.add(e.name);
+                        if (e?.loaded || e?.active) allowed.add(e.name);
                     });
                 }
             } catch (e) {
