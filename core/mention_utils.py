@@ -210,11 +210,14 @@ async def is_message_for_bot(
             log_debug("[mention] match_reason=@synth_mention")
             log_debug("[mention] ✅ Explicit @synth mention found - PRIORITY 3 - message is for bot")
             return True, None
-        # Check for bot username if provided
-        if bot_username and f"@{bot_username}" in message_text:
-            log_debug(f"[mention] match_reason=@{bot_username}_mention")
-            log_debug(f"[mention] ✅ Explicit @mention found: @{bot_username} - PRIORITY 3 - message is for bot")
-            return True, None
+        # Check for bot username if provided (case-insensitive)
+        if bot_username:
+            normalized_msg = message_text.lower()
+            normalized_bot = f"@{bot_username}".lower()
+            if normalized_bot in normalized_msg:
+                log_debug(f"[mention] match_reason=@{bot_username}_mention")
+                log_debug(f"[mention] ✅ Explicit @mention found: @{bot_username} (case-insensitive) - PRIORITY 3 - message is for bot")
+                return True, None
     
     # Priority 4: Check for synth aliases in message text (activation words)
     if message_text:
@@ -272,6 +275,19 @@ async def is_message_for_bot(
                 log_debug(f"[mention] No persona name available to check")
         except Exception as e:
             log_debug(f"[mention] Error checking persona name: {e}")
+
+    # Priority 4c: Check for persona triggers (aliases/likes/dislikes/interests)
+    if message_text:
+        try:
+            from core.persona_manager import get_persona_manager
+
+            persona_manager = get_persona_manager()
+            if persona_manager and persona_manager.check_triggers(message_text):
+                log_debug("[mention] match_reason=persona_trigger")
+                log_debug("[mention] ✅ Persona trigger found (aliases/likes/dislikes/interests) - PRIORITY 4c - message is for bot")
+                return True, None
+        except Exception as e:
+            log_debug(f"[mention] Error checking persona triggers: {e}")
     
     # Priority 5: Check for chat 1:1 using human count (fallback)
     if human_count is not None and human_count == 1:
@@ -279,15 +295,12 @@ async def is_message_for_bot(
         log_debug("[mention] ✅ Single human in chat - PRIORITY 5 - treating as message for bot")
         return True, None
     
-    # No direct mention found and either multiple humans or unknown count
+    # No direct mention found and either multiple humans or unknown count.
+    # If we can't determine human_count, treat it as not 1:1 by default.
     if human_count is None:
-        log_debug("[mention] ⚠️ No direct mention found and human count unavailable - checking if we should fallback")
-        # Fallback: if this is a group/supergroup and no direct mention found, don't process
-        # But if this is being called in a context where we couldn't determine human_count,
-        # we allow it to be processed if there's ANY indication it could be for the bot
-        # For now, return False with missing_human_count reason to let the caller decide
-        return False, "missing_human_count"
-    else:
-        log_debug(f"[mention] No direct mention found and multiple humans in chat ({human_count})")
-        return False, "multiple_humans"
+        log_debug("[mention] No direct mention found and human count unavailable - treating as not 1:1")
+        return False, "unknown_human_count"
+
+    log_debug(f"[mention] No direct mention found and multiple humans in chat ({human_count})")
+    return False, "multiple_humans"
 

@@ -357,13 +357,10 @@ class GrilloPlugin(AIPluginBase):
                             json.dumps(metadata) if metadata else None,
                         ),
                     )
-                    try:
-                        await conn.commit()
-                    except Exception:
-                        pass
+                    await conn.commit()
                     return getattr(cur, "lastrowid", None)
         except Exception as e:
-            log_debug(f"[grillo] create_activity_log failed: {e}")
+            log_error(f"[grillo] create_activity_log failed: {e}")
             return None
 
     @classmethod
@@ -406,12 +403,9 @@ class GrilloPlugin(AIPluginBase):
                             "UPDATE grillo_activity_log SET diary_entry_id=%s WHERE id=%s",
                             (diary_entry_id, activity_log_id),
                         )
-                    try:
-                        await conn.commit()
-                    except Exception:
-                        pass
+                    await conn.commit()
         except Exception as e:
-            log_debug(f"[grillo] link_diary_entry_to_activity failed: {e}")
+            log_error(f"[grillo] link_diary_entry_to_activity failed: {e}")
 
     @classmethod
     async def set_activity_response_text(
@@ -452,12 +446,9 @@ class GrilloPlugin(AIPluginBase):
                             "UPDATE grillo_activity_log SET response_text=%s WHERE id=%s",
                             (response_text, activity_log_id),
                         )
-                    try:
-                        await conn.commit()
-                    except Exception:
-                        pass
+                    await conn.commit()
         except Exception as e:
-            log_debug(f"[grillo] set_activity_response_text failed: {e}")
+            log_error(f"[grillo] set_activity_response_text failed: {e}")
 
     @classmethod
     async def record_suppressed_event(cls, activity_log_id: Optional[int] = None, reason: str = "") -> None:

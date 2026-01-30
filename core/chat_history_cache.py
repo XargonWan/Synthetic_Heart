@@ -189,6 +189,52 @@ async def load_chat_history(interface_path: str) -> deque:
         return deque()
 
 
+async def load_global_chat_history(limit: int = 10) -> deque:
+    """Load global chat history from cache across all interface paths.
+
+    Args:
+        limit: Max number of messages to retrieve
+
+    Returns:
+        deque of message objects in chronological order
+    """
+    try:
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    SELECT sender_name, sender_id, message_text, timestamp, interface_path
+                    FROM chat_history_cache
+                    ORDER BY timestamp DESC
+                    LIMIT %s
+                    """,
+                    (limit,),
+                )
+                rows = await cur.fetchall()
+                rows.reverse()
+
+                messages = deque()
+                for row in rows:
+                    try:
+                        sender_name, sender_id, message_text, timestamp, ipath = row
+                        msg = {
+                            "sender_name": sender_name,
+                            "sender_id": sender_id,
+                            "text": message_text,
+                            "timestamp": timestamp.isoformat() if isinstance(timestamp, datetime) else str(timestamp),
+                            "interface_path": ipath,
+                        }
+                        messages.append(msg)
+                    except Exception as e:
+                        log_debug(f"[chat_history_cache] Error parsing global message row: {e}")
+
+                log_debug(f"[chat_history_cache] Loaded {len(messages)} global messages")
+                return messages
+    except Exception as e:
+        log_error(f"[chat_history_cache] Failed to load global chat history: {e}")
+        return deque()
+
+
 async def clear_chat_history(interface_path: str) -> None:
     """Clear all messages for a specific interface path.
     

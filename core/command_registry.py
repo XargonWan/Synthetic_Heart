@@ -119,6 +119,9 @@ async def help_command() -> str:
     help_text += (
         "\n*📋 Misc*\n"
         "`/last_chats` – Last active chats\n"
+        "`/wake` – Enable normal routing in this chat\n"
+        "`/sleep` – Ignore non-command messages in this chat\n"
+        "`/status` – Show wake/sleep status for this chat\n"
         "`/diary [days]` – View synth's diary entries (default: 7 days)\n"
         "`/purge_map [days]` – Purge old mappings\n"
         "`/clean_chat_link <chat_id>` – Remove the link between a chat and conversation.\n"
@@ -181,6 +184,76 @@ def get_help_text() -> str:
 # Register default commands
 register_command("help", help_command)
 register_command("diary", diary_command)
+
+
+async def _resolve_interface_context(interface_context: Any) -> tuple[str | None, Any | None, Any | None]:
+    """Extract (interface_id, update, context) from an interface_context payload."""
+    if not interface_context:
+        return None, None, None
+    interface_id = interface_context.get("interface_id") if isinstance(interface_context, dict) else None
+    update = interface_context.get("update") if isinstance(interface_context, dict) else None
+    context = interface_context.get("context") if isinstance(interface_context, dict) else None
+    return interface_id, update, context
+
+
+async def wake_command(interface_context=None) -> str:
+    """Set the chat to awake (normal routing)."""
+    interface_id, update, _context = await _resolve_interface_context(interface_context)
+    if interface_id != "telegram_bot" or not update:
+        return "👀 Awake."
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if chat_id is None:
+        return "⚠️ Unable to determine chat."
+    try:
+        from interface.telegram_bot import chat_attention_state
+
+        chat_attention_state[chat_id] = True
+    except Exception as exc:
+        log_debug(f"[command_registry] Failed to set wake state: {exc}")
+        return "❌ Failed to set awake state."
+    return "👀 Awake: normal routing enabled."
+
+
+async def sleep_command(interface_context=None) -> str:
+    """Set the chat to sleep (ignore non-command messages)."""
+    interface_id, update, _context = await _resolve_interface_context(interface_context)
+    if interface_id != "telegram_bot" or not update:
+        return "💤 Asleep."
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if chat_id is None:
+        return "⚠️ Unable to determine chat."
+    try:
+        from interface.telegram_bot import chat_attention_state
+
+        chat_attention_state[chat_id] = False
+    except Exception as exc:
+        log_debug(f"[command_registry] Failed to set sleep state: {exc}")
+        return "❌ Failed to set sleep state."
+    return "💤 Asleep: non-command messages are ignored."
+
+
+async def status_command(interface_context=None) -> str:
+    """Report wake/sleep state for the chat."""
+    interface_id, update, _context = await _resolve_interface_context(interface_context)
+    if interface_id != "telegram_bot" or not update:
+        return "🤖 Status unavailable for this interface."
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if chat_id is None:
+        return "⚠️ Unable to determine chat."
+    try:
+        from interface.telegram_bot import chat_attention_state
+
+        is_awake = chat_attention_state.get(chat_id, True)
+    except Exception as exc:
+        log_debug(f"[command_registry] Failed to read status: {exc}")
+        return "❌ Failed to read status."
+    status_text = "Awake (normal routing)" if is_awake else "Asleep (ignoring non-commands)"
+    return f"🤖 Status: {status_text}"
+
+
+register_command("wake", wake_command)
+register_command("sleep", sleep_command)
+register_command("status", status_command)
 
 
 async def llm_command(*args) -> str:

@@ -12,13 +12,28 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+import json
 from typing import List, Optional
 
 from core.core_initializer import register_plugin
 from core.logging_utils import log_info, log_debug, log_warning, log_error
 from core.config_manager import config_registry
+from core.variables_engine import register_exposed_var
 
 from plugins.grillo.common_instructions import GRILLO_INSTRUCTIONS as OBSERVER_INSTRUCTIONS
+
+
+register_exposed_var(
+    "GRILLO_OBSERVER_STORE_MEMORIES",
+    label="Grillo Observer Store Memories",
+    default=True,
+    value_type=bool,
+    ui_type="boolean",
+    description="When enabled, observer snippets are stored as passive memories",
+    scope="plugins",
+    component="grillo_chat_observer",
+    tags=["plugin"],
+)
 
 
 class GrilloChatObserverPlugin:
@@ -63,6 +78,15 @@ class GrilloChatObserverPlugin:
             group="grillo",
             component="grillo_chat_observer",
         )
+        self.store_memories = config_registry.get_value(
+            "GRILLO_OBSERVER_STORE_MEMORIES", True,
+            label="Grillo Observer Store Memories",
+            description="Store observer snippets as passive memories",
+            value_type=bool,
+            group="grillo",
+            component="grillo_chat_observer",
+            advanced=True,
+        )
 
         register_plugin("grillo_chat_observer", self)
         log_info("[grillo_chat_observer] Registered GrilloChatObserverPlugin")
@@ -77,6 +101,7 @@ class GrilloChatObserverPlugin:
         config_registry.add_listener("GRILLO_OBSERVER_INTERVAL", lambda v: setattr(self, "interval", int(v)))
         config_registry.add_listener("GRILLO_OBSERVER_SAMPLES", lambda v: setattr(self, "samples", int(v)))
         config_registry.add_listener("GRILLO_OBSERVER_PROPOSE_ONLY", lambda v: setattr(self, "propose_only", bool(v)))
+        config_registry.add_listener("GRILLO_OBSERVER_STORE_MEMORIES", lambda v: setattr(self, "store_memories", bool(v)))
 
     def get_supported_action_types(self):
         return []
@@ -196,6 +221,9 @@ class GrilloChatObserverPlugin:
                 log_debug("[grillo_chat_observer] No fragments found; skipping")
                 return
 
+            if self.store_memories:
+                await self._store_passive_memories(fragments)
+
             prompt = self._build_observer_prompt(fragments)
 
             # Activity log entry
@@ -301,6 +329,26 @@ class GrilloChatObserverPlugin:
             log_error(f"[grillo_chat_observer] Error collecting snippets: {e}")
             return []
 
+    async def _store_passive_memories(self, snippets: List[str]) -> None:
+        """Persist observer snippets as passive memories when enabled."""
+        try:
+            from core.db import insert_memory
+            tags = json.dumps(["grillo", "observer", "passive"])
+            for snippet in snippets:
+                try:
+                    await insert_memory(
+                        content=snippet,
+                        author="observer",
+                        source="grillo_observer",
+                        tags=tags,
+                        scope="observer",
+                    )
+                except Exception as e:
+                    log_debug(f"[grillo_chat_observer] Failed to store memory: {e}")
+            log_info(f"[grillo_chat_observer] Stored {len(snippets)} observer snippets as memories")
+        except Exception as e:
+            log_warning(f"[grillo_chat_observer] Memory storage failed: {e}")
+
     def _build_observer_prompt(self, snippets: List[str]) -> str:
         header = "[G.R.I.L.L.O. CHAT OBSERVER] Below are recent chat snippets from across conversations. Analyze and propose any actions that would be helpful."
 
@@ -310,7 +358,8 @@ class GrilloChatObserverPlugin:
 
         # Ask the LLM to think like a helpful participant: choose which recent message(s) you'd naturally reply to and propose short, human replies.
         propose_clause = (
-            "Think like a helpful person reading these snippets: which message(s) would you naturally reply to, and what would you say?"
+            "Think like a helpful human reading these snippets: which message(s) would you naturally reply to, and what would you say? "
+            "Do NOT address or mention the WebUI or any system/internal labels (for example: 'webui' or 'system'); write as if speaking directly to the human participant(s) in the conversation."
         )
         if self.propose_only:
             propose_clause += " Suggested actions should be proposals only (do NOT assume automatic execution)."

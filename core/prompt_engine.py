@@ -851,13 +851,25 @@ async def build_json_prompt(message, context_memory, interface_name: str | None 
         "instructions": json_instructions,
     }
 
-    # For chat-like interfaces (Telegram, Discord, WebUI) include an explicit
-    # unminified instruction block that reminds the LLM this is a chat and
-    # must be concise. This must be preserved verbatim and sent as a system
-    # message by LLM wrappers. We intentionally do not minify this text.
+    # For chat-like interfaces, include an explicit unminified instruction block.
+    # Avoid hardcoded interface names by inferring from available actions.
     try:
-        chat_ifaces = ["telegram", "discord", "webui", "synth_webui", "telegram_bot", "discord_bot"]
-        if interface_name and any(k in (interface_name or "").lower() for k in chat_ifaces):
+        is_chat_interface = False
+        if interface_name:
+            try:
+                from core.core_initializer import core_initializer
+                available_actions = core_initializer.actions_block.get("available_actions", {})
+                for action_type, schema in available_actions.items():
+                    if not isinstance(action_type, str) or not action_type.startswith("message_"):
+                        continue
+                    owner = str(schema.get("source", "")) if isinstance(schema, dict) else ""
+                    if interface_name in owner:
+                        is_chat_interface = True
+                        break
+            except Exception:
+                is_chat_interface = False
+
+        if interface_name and is_chat_interface:
             prompt_with_instructions["instructions_verbose"] = load_unminified_chat_instruction(interface_name)
             log_info(f"[json_prompt] 🔒 Added instructions_verbose for chat interface: {interface_name}")
     except Exception as e:

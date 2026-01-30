@@ -2,6 +2,7 @@ import asyncio
 import inspect
 import time
 import queue as _thread_queue
+import heapq
 from datetime import datetime
 import traceback
 from types import SimpleNamespace
@@ -114,30 +115,31 @@ async def enqueue(bot, message, context_memory=None, priority: bool = False, int
             return
 
         log_debug(f"[QUEUE] DEBUG: Message is directed to bot - continuing processing")
-        
-        # Add reaction if configured (REACT_WHEN_MENTIONED)
-        try:
-            emoji = get_reaction_emoji()
-            log_debug(f"[QUEUE] get_reaction_emoji returned: '{emoji}'")
-            log_debug(f"[QUEUE] About to check emoji: '{emoji}' (bool: {bool(emoji)})")
-            if emoji:
-                log_debug("[QUEUE] About to get interface registry")
-                interface = INTERFACE_REGISTRY.get(interface_id)
-                log_debug(f"[QUEUE] Interface for {interface_id}: {interface}")
-                log_debug(f"[QUEUE] Interface type: {type(interface)}")
-                log_debug(f"[QUEUE] original_message is None: {original_message is None}")
-                if interface:
-                    log_debug(f"[QUEUE] Adding reaction '{emoji}' via interface {interface_id}")
-                    await react_when_mentioned(interface, original_message or message, emoji)
-                else:
-                    log_warning(f"[QUEUE] No interface found for {interface_id}")
-            else:
-                log_debug("[QUEUE] No reaction emoji configured")
-        except Exception as e:
-            log_error(f"[QUEUE] Error adding reaction: {e}")
-            log_debug(f"[QUEUE] Reaction traceback: {traceback.format_exc()}")
     else:
         log_debug(f"[QUEUE] DEBUG: skip_mention_check=True - bypassing is_message_for_bot check (1:1 interface)")
+        directed = True
+
+    # Add reaction if configured (REACT_WHEN_MENTIONED)
+    try:
+        emoji = get_reaction_emoji()
+        log_debug(f"[QUEUE] get_reaction_emoji returned: '{emoji}'")
+        log_debug(f"[QUEUE] About to check emoji: '{emoji}' (bool: {bool(emoji)})")
+        if emoji and directed:
+            log_debug("[QUEUE] About to get interface registry")
+            interface = INTERFACE_REGISTRY.get(interface_id)
+            log_debug(f"[QUEUE] Interface for {interface_id}: {interface}")
+            log_debug(f"[QUEUE] Interface type: {type(interface)}")
+            log_debug(f"[QUEUE] original_message is None: {original_message is None}")
+            if interface:
+                log_debug(f"[QUEUE] Adding reaction '{emoji}' via interface {interface_id}")
+                await react_when_mentioned(interface, original_message or message, emoji)
+            else:
+                log_warning(f"[QUEUE] No interface found for {interface_id}")
+        else:
+            log_debug("[QUEUE] No reaction emoji configured or not directed")
+    except Exception as e:
+        log_error(f"[QUEUE] Error adding reaction: {e}")
+        log_debug(f"[QUEUE] Reaction traceback: {traceback.format_exc()}")
     
     # Check if user is blocked (but allow trainers)
     user_id = message.from_user.id if message.from_user else 0
@@ -168,6 +170,7 @@ async def enqueue(bot, message, context_memory=None, priority: bool = False, int
 
     if (
         not is_trainer
+        and user_id not in (0, -1)
         and not rate_limit.is_allowed(
             llm_name, user_id, interface_id or "unknown", max_messages, window_seconds, trainer_fraction, consume=False
         )
@@ -395,18 +398,51 @@ async def compact_similar_messages(first: dict, limit: int = 5) -> list:
     interface = first.get("interface")
     ts = first["timestamp"]
 
+    seen_ids = set()
+    first_msg = first.get("message")
+    if first_msg:
+        mid = getattr(first_msg, "message_id", None)
+        if mid:
+            seen_ids.add(mid)
+
     queue_items = list(_queue._queue)
-    for prio, item in queue_items:
+    dirty = False
+    for item_tuple in queue_items:
         if len(batch) >= limit:
             break
+        if len(item_tuple) == 3:
+            prio, counter, item = item_tuple
+        else:
+            prio, item = item_tuple
+            counter = None
         if (
             item["chat_id"] == chat_id
             and item.get("thread_id") == thread_id
             and item.get("interface") == interface
             and item["timestamp"] - ts <= 600
         ):
-            _queue._queue.remove((prio, item))
-            batch.append(item)
+            msg = item.get("message")
+            if msg:
+                mid = getattr(msg, "message_id", None)
+                if mid and mid in seen_ids:
+                    try:
+                        _queue._queue.remove(item_tuple)
+                        dirty = True
+                    except ValueError:
+                        pass
+                    log_debug(f"[COMPACT] Removed duplicate message {mid} from queue")
+                    continue
+                if mid:
+                    seen_ids.add(mid)
+            try:
+                _queue._queue.remove(item_tuple)
+                dirty = True
+                batch.append(item)
+            except ValueError:
+                pass
+
+    if dirty:
+        heapq.heapify(_queue._queue)
 
     batch.sort(key=lambda x: x["timestamp"])
 

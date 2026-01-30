@@ -57,6 +57,17 @@ def _maybe_unescape_text_in_payload(payload: dict) -> None:
     if not text or not isinstance(text, str):
         return
 
+    # Recover common mojibake (UTF-8 bytes decoded as latin-1/cp1252)
+    try:
+        from core.text_utils import try_recover_mojibake
+        recovered = try_recover_mojibake(text)
+        if recovered and recovered != text:
+            payload["text"] = recovered
+            text = recovered
+    except Exception:
+        # Non-fatal — keep original text if recovery fails
+        pass
+
     # Quick heuristic — only attempt to decode when we see backslash escapes
     if "\\n" not in text and "\\u" not in text and "\\t" not in text and "\\r" not in text and "\\x" not in text:
         return
@@ -541,6 +552,22 @@ def _plugins_for(action_type: str) -> List[Any]:
         except Exception as e:
             log_error(f"[action_parser] Error querying plugin {plugin}: {repr(e)}")
 
+    # Special handling for tts_speak: explicitly check for TTS plugin if not found
+    if action_type == "tts_speak" and not plugins:
+        for plugin in loaded_plugins:
+            if plugin.__class__.__name__ in {"TTSLipsyncPlugin", "TTSLipSyncPlugin"}:
+                plugins.append(plugin)
+                log_info("[action_parser] ✅ Explicitly added TTS plugin for tts_speak")
+                break
+
+    # Special handling for trigger_weather_report: explicitly check for WeatherPlugin if not found
+    if action_type == "trigger_weather_report" and not plugins:
+        for plugin in loaded_plugins:
+            if plugin.__class__.__name__ == "WeatherPlugin":
+                plugins.append(plugin)
+                log_info("[action_parser] ✅ Explicitly added WeatherPlugin for trigger_weather_report")
+                break
+
     try:
         from core.core_initializer import INTERFACE_REGISTRY
     except Exception as e:  # pragma: no cover - defensive
@@ -657,7 +684,7 @@ async def _handle_plugin_action(
                     f"[action_parser] ✉️ Dispatching message action to interface '{iface_name}'"
                 )
                 try:
-                    result = interface.send_message(payload, original_message)
+                    result = interface.send_message(payload, original_message=original_message)
                     if inspect.iscoroutine(result):
                         await result
                     return None
@@ -668,6 +695,10 @@ async def _handle_plugin_action(
                 return
         except Exception as e:  # pragma: no cover - defensive
             log_warning(f"[action_parser] Interface dispatch failed: {e}")
+
+        if action_type == "trigger_weather_report":
+            log_warning("[action_parser] ⚠️ Suppressing failed 'trigger_weather_report' to prevent recursion loop.")
+            return None
 
         log_error(f"[action_parser] ❌ No plugin or interface supports action type '{action_type}'")
         return
@@ -708,7 +739,7 @@ async def _handle_plugin_action(
                 log_info(
                     f"[action_parser] ✉️ Dispatching message action to interface '{plugin_iface}' via send_message"
                 )
-                result = plugin.send_message(payload, original_message)
+                result = plugin.send_message(payload, original_message=original_message)
                 if inspect.iscoroutine(result):
                     await result
                 log_info(
@@ -1472,10 +1503,10 @@ async def gather_static_injections(message=None, context_memory=None) -> dict:
     """
 
     injections: dict = {}
-    log_info(f"[action_parser] 🔍 gather_static_injections() CALLED")
+    log_debug(f"[action_parser] 🔍 gather_static_injections() CALLED")
     try:
         plugins_list = _load_action_plugins()
-        log_info(f"[action_parser] Found {len(list(plugins_list))} plugins to check for static_inject")
+        log_debug(f"[action_parser] Found {len(list(plugins_list))} plugins to check for static_inject")
         plugins_list = _load_action_plugins()  # Reload since we consumed it in len()
         
         for plugin in plugins_list:
@@ -1498,7 +1529,7 @@ async def gather_static_injections(message=None, context_memory=None) -> dict:
                 if not supported or not has_method:
                     continue
 
-                log_info(f"[action_parser] 🎯 Calling get_static_injection() on {plugin.__class__.__name__}")
+                log_debug(f"[action_parser] 🎯 Calling get_static_injection() on {plugin.__class__.__name__}")
                 
                 # Pass message and context_memory if the plugin expects them
                 try:
@@ -1513,7 +1544,7 @@ async def gather_static_injections(message=None, context_memory=None) -> dict:
                 if inspect.iscoroutine(result):
                     result = await result
                     
-                log_info(f"[action_parser] ✅ Got result from {plugin.__class__.__name__}: {list(result.keys()) if isinstance(result, dict) else type(result)}")
+                log_debug(f"[action_parser] ✅ Got result from {plugin.__class__.__name__}: {list(result.keys()) if isinstance(result, dict) else type(result)}")
                 
                 if isinstance(result, dict):
                     injections.update(result)

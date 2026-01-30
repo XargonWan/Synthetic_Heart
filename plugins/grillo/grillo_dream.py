@@ -318,16 +318,15 @@ class GrilloDreamPlugin:
         for i, f in enumerate(fragments, 1):
             body += f"{i}. {f}\n"
 
-        from plugins.grillo.common_instructions import GRILLO_INSTRUCTIONS
-
-        # Reuse shared GRILLO_INSTRUCTIONS and append dream-specific guidance
+        # Dream-only instructions (do not reuse chat observer guidance)
         instructions = (
-            GRILLO_INSTRUCTIONS +
-            "\n- Generate a single, cohesive dream narrative (approx 150-400 words).\n"
+            "\n\nINSTRUCTIONS (dream):\n"
+            "- Generate a single, cohesive dream narrative (approx 150-400 words).\n"
             "- RESPOND ONLY WITH VALID JSON following the exact format below (no prose outside JSON):\n"
             "{\"actions\": [{\"type\": \"create_personal_diary_entry\", \"payload\": {\"content\": \"...\"}}], \"meta\": {\"autonomous\": true, \"rationale\": \"Daily dream consolidation\"}}\n"
             "- The diary 'content' should be the generated dream text (plain text).\n"
-            "- If you cannot generate a dream, reply with a JSON proposal explaining why (e.g., insufficient data)."
+            "- If you cannot generate a dream, reply with a JSON proposal explaining why (e.g., insufficient data).\n"
+            "- Do NOT address or mention the WebUI or any system/internal labels (for example: 'webui', 'system', 'internal')."
         )
 
         return header + body + instructions

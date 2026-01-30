@@ -5,12 +5,13 @@ import time
 import urllib.parse
 import urllib.request
 import urllib.error
+from datetime import datetime
 from typing import Optional
 import concurrent.futures
 
 from core.core_initializer import core_initializer, register_plugin
 from core.logging_utils import log_debug, log_info, log_warning, log_error
-from core.time_zone_utils import get_local_location
+from core.time_zone_utils import get_local_location, utc_to_local
 from core.config_manager import config_registry
 from core.variables_engine import register_exposed_var
 
@@ -40,6 +41,30 @@ register_exposed_var(
     tags=["plugin"],
 )
 
+register_exposed_var(
+    "WEATHER_DAILY_REPORT_ENABLED",
+    label="Daily Weather Report",
+    default=False,
+    value_type=bool,
+    ui_type="boolean",
+    description="Send a daily weather announcement at 06:00 local time",
+    scope="plugins",
+    component="weather_plugin",
+    tags=["plugin"],
+)
+
+register_exposed_var(
+    "WEATHER_DAILY_REPORT_INTERFACE",
+    label="Daily Weather Report Interface",
+    default="synth_webui",
+    value_type=str,
+    ui_type="text",
+    description="Interface id used for the daily weather announcement",
+    scope="plugins",
+    component="weather_plugin",
+    tags=["plugin"],
+)
+
 
 class WeatherPlugin:
     """Plugin to provide weather information using wttr.in."""
@@ -63,6 +88,26 @@ class WeatherPlugin:
             component="weather_plugin",
             advanced=False,
         )
+        self.daily_report_enabled = config_registry.get_value(
+            "WEATHER_DAILY_REPORT_ENABLED",
+            False,
+            label="Daily Weather Report",
+            description="Send a daily weather announcement at 06:00 local time",
+            value_type=bool,
+            group="plugins",
+            component="weather_plugin",
+            advanced=False,
+        )
+        self.daily_report_interface = config_registry.get_value(
+            "WEATHER_DAILY_REPORT_INTERFACE",
+            "synth_webui",
+            label="Daily Weather Report Interface",
+            description="Interface id used for the daily weather announcement",
+            value_type=str,
+            group="plugins",
+            component="weather_plugin",
+            advanced=True,
+        )
         
         # Add listener to update fetch_minutes when config changes
         def _update_fetch_minutes(value):
@@ -74,6 +119,23 @@ class WeatherPlugin:
                 self.fetch_minutes = 60
         
         config_registry.add_listener("WEATHER_FETCH_TIME", _update_fetch_minutes)
+
+        def _update_daily_report_enabled(value):
+            try:
+                self.daily_report_enabled = bool(value)
+                log_info(f"[weather_plugin] Daily report enabled: {self.daily_report_enabled}")
+            except Exception:
+                self.daily_report_enabled = False
+
+        def _update_daily_report_interface(value):
+            try:
+                self.daily_report_interface = str(value) if value else ""
+                log_info(f"[weather_plugin] Daily report interface set to: {self.daily_report_interface or 'none'}")
+            except Exception:
+                self.daily_report_interface = ""
+
+        config_registry.add_listener("WEATHER_DAILY_REPORT_ENABLED", _update_daily_report_enabled)
+        config_registry.add_listener("WEATHER_DAILY_REPORT_INTERFACE", _update_daily_report_interface)
         
         # Use a dedicated executor so we don't depend on the event loop's default executor
         # which may be shut down during interpreter shutdown.
@@ -81,10 +143,11 @@ class WeatherPlugin:
         # Background scheduler task (managed as singleton per process)
         self._scheduler_task = None
         self._scheduler_running = False
+        self._last_daily_report_date = None
 
     # Plugin action registration
     def get_supported_action_types(self):
-        return ["static_inject"]
+        return ["static_inject", "trigger_weather_report"]
 
     def get_supported_actions(self):
         return {
@@ -92,8 +155,31 @@ class WeatherPlugin:
                 "description": "Inject static contextual data into every prompt",
                 "required_fields": [],
                 "optional_fields": [],
+            },
+            "trigger_weather_report": {
+                "description": "Manually trigger a weather announcement via LLM.",
+                "required_fields": [],
+                "optional_fields": ["interface_path", "interface_id"],
             }
         }
+
+    async def execute_action(self, action: dict, context: dict, bot, original_message):
+        action_type = action.get("type")
+        payload = action.get("payload", {}) or {}
+
+        if action_type == "trigger_weather_report":
+            target_path = payload.get("interface_path")
+            target_iface = payload.get("interface_id")
+            if not target_iface and isinstance(target_path, str) and "/" in target_path:
+                target_iface = target_path.split("/")[0]
+            if not target_iface:
+                log_warning("[weather_plugin] trigger_weather_report missing interface_id/interface_path")
+                return {"status": "error", "message": "interface_id or interface_path required"}
+
+            success = await self._trigger_manual_report(target_iface)
+            return {"status": "success" if success else "failed"}
+
+        return {"error": "Unknown action"}
 
     async def get_static_injection(self) -> dict:
         await self._ensure_weather()
@@ -220,17 +306,104 @@ class WeatherPlugin:
         try:
             while self._scheduler_running:
                 try:
-                    await self._update_weather()
+                    await self._ensure_weather()
+                    if self.daily_report_enabled:
+                        now_local = utc_to_local(datetime.utcnow())
+                        today_key = now_local.date().isoformat()
+                        if now_local.hour == 6 and now_local.minute == 0:
+                            if self._last_daily_report_date != today_key:
+                                if await self._trigger_daily_report():
+                                    self._last_daily_report_date = today_key
                 except Exception as e:
                     log_warning(f"[weather_plugin] Error during scheduled update: {e}")
-                # Sleep for configured minutes (fallback to 60 if invalid)
-                try:
-                    interval = int(self.fetch_minutes) if self.fetch_minutes and int(self.fetch_minutes) > 0 else 60
-                except Exception:
-                    interval = 60
-                await asyncio.sleep(interval * 60)
+                await asyncio.sleep(60)
         finally:
             log_info("[weather_plugin] Weather background loop exiting")
+
+    async def _trigger_daily_report(self) -> bool:
+        """Trigger a daily weather announcement via the LLM."""
+        try:
+            interface_id = (self.daily_report_interface or "").strip()
+            if not interface_id:
+                log_warning("[weather_plugin] Daily report interface not configured; skipping announcement")
+                return False
+
+            try:
+                from core.core_initializer import INTERFACE_REGISTRY
+                interface = INTERFACE_REGISTRY.get(interface_id)
+            except Exception as e:
+                log_warning(f"[weather_plugin] Failed to resolve interface registry: {e}")
+                interface = None
+
+            if interface is None:
+                log_warning(f"[weather_plugin] Interface '{interface_id}' not available; skipping announcement")
+                return False
+
+            if not self._cached_weather:
+                await self._update_weather()
+
+            from core.auto_response import request_llm_delivery
+            prompt = (
+                "It is 6:00 AM local time. Use the weather data provided in context to create "
+                "a short, friendly daily weather update. Keep it concise and professional. "
+                f"Weather data: {self._cached_weather}"
+            )
+
+            success = await request_llm_delivery(
+                interface=interface,
+                context={
+                    "input": {"type": "event_reminder", "text": prompt},
+                    "weather_data": self._cached_weather,
+                },
+                reason="daily_weather_report",
+            )
+
+            if success:
+                log_info("[weather_plugin] Daily weather announcement triggered")
+                return True
+
+            log_warning("[weather_plugin] Daily weather announcement failed")
+            return False
+        except Exception as e:
+            log_error(f"[weather_plugin] Daily weather announcement error: {e}")
+            return False
+
+    async def _trigger_manual_report(self, interface_id: str) -> bool:
+        """Trigger a weather report on demand via LLM."""
+        try:
+            from core.core_initializer import INTERFACE_REGISTRY
+            interface = INTERFACE_REGISTRY.get(interface_id)
+            if interface is None:
+                log_warning(f"[weather_plugin] Interface '{interface_id}' not available for manual report")
+                return False
+
+            if not self._cached_weather:
+                await self._update_weather()
+
+            from core.auto_response import request_llm_delivery
+            prompt = (
+                "Manual weather report request. Use the weather data in context to create a short, "
+                "friendly update. Keep it concise. Weather data: "
+                f"{self._cached_weather}"
+            )
+
+            success = await request_llm_delivery(
+                interface=interface,
+                context={
+                    "input": {"type": "event_reminder", "text": prompt},
+                    "weather_data": self._cached_weather,
+                },
+                reason="manual_weather_report",
+            )
+
+            if success:
+                log_info("[weather_plugin] Manual weather announcement triggered")
+                return True
+            log_warning("[weather_plugin] Manual weather announcement failed")
+            return False
+        except Exception as e:
+            log_error(f"[weather_plugin] Manual weather announcement error: {e}")
+            return False
 
     @staticmethod
     def _choose_emoji(description: str) -> str:

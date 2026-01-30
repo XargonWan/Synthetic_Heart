@@ -53,6 +53,7 @@ class CoreInitializer:
         self._summary_displayed = False  # Flag to prevent duplicate summaries
         self._building_actions_block = False  # Flag to prevent infinite rebuild loops
         self._initial_initialization = False  # Flag to indicate we're in initial startup phase
+        self._background_tasks = set()
         
         # Component tracking system
         self.components: Dict[str, ComponentInfo] = {}
@@ -544,7 +545,9 @@ class CoreInitializer:
                                 try:
                                     loop = asyncio.get_running_loop()
                                     if loop and loop.is_running():
-                                        loop.create_task(instance.start())
+                                        task = loop.create_task(instance.start())
+                                        self._background_tasks.add(task)
+                                        task.add_done_callback(self._background_tasks.discard)
                                         log_info(
                                             f"[core_initializer] Started async plugin: {module_name}"
                                         )
@@ -579,6 +582,12 @@ class CoreInitializer:
                         log_debug(
                             f"[core_initializer] Plugin {module_name} has no start method"
                         )
+
+                    # Track success for WebUI diagnostics
+                    self.mark_component_success(
+                        plugin_short_name,
+                        details=f"Loaded from {module_name}",
+                    )
 
                 except Exception as e:
                     log_error(
@@ -740,44 +749,23 @@ class CoreInitializer:
         is changed, the corresponding component's reload handler is triggered automatically.
         """
         from core.config_manager import config_registry
+        import sys
         
-        # Define reload handlers for each interface
-        reload_handlers = {}
-        
-        # Telegram interface reload handler
-        try:
-            from interface import telegram_bot
-            if hasattr(telegram_bot, 'reload_interface'):
-                reload_handlers['telegram_bot'] = telegram_bot.reload_interface
-                log_debug("[core_initializer] Registered reload handler for telegram_bot")
-        except Exception as e:
-            log_debug(f"[core_initializer] Failed to register telegram_bot reload handler: {e}")
-        
-        # Discord interface reload handler
-        try:
-            from interface import discord_interface
-            if hasattr(discord_interface, 'reload_interface'):
-                reload_handlers['discord_bot'] = discord_interface.reload_interface
-                log_debug("[core_initializer] Registered reload handler for discord_bot")
-        except Exception as e:
-            log_debug(f"[core_initializer] Failed to register discord_bot reload handler: {e}")
-        
-        # Matrix interface reload handler
-        try:
-            from interface import matrix_interface
-            if hasattr(matrix_interface, 'reload_interface'):
-                reload_handlers['matrix_chat'] = matrix_interface.reload_interface
-                log_debug("[core_initializer] Registered reload handler for matrix_chat")
-        except Exception as e:
-            log_debug(f"[core_initializer] Failed to register matrix_bot reload handler: {e}")
-        
-        # Register all handlers with config registry
-        for component_name, handler in reload_handlers.items():
+        # Discover reload handlers from registered interface modules (agnostic)
+        for interface_name, interface_instance in INTERFACE_REGISTRY.items():
             try:
-                config_registry.register_reload_handler(component_name, handler)
-                log_info(f"[core_initializer] ✅ Reload handler registered for component: {component_name}")
+                module_name = getattr(interface_instance, "__module__", None)
+                module = sys.modules.get(module_name) if module_name else None
+                if module and hasattr(module, "reload_interface"):
+                    handler = getattr(module, "reload_interface")
+                    config_registry.register_reload_handler(interface_name, handler)
+                    log_info(
+                        f"[core_initializer] ✅ Reload handler registered for component: {interface_name}"
+                    )
             except Exception as e:
-                log_error(f"[core_initializer] Failed to register reload handler for {component_name}: {e}")
+                log_error(
+                    f"[core_initializer] Failed to register reload handler for {interface_name}: {e}"
+                )
     
     def register_interface(self, interface_name: str):
         """Register an active interface."""

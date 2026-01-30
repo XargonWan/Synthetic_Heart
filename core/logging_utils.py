@@ -2,8 +2,10 @@ import logging
 import os
 import sys
 import traceback
+from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 # Try to load environment variables from .env early so logging defaults reflect .env
 try:
@@ -32,6 +34,25 @@ _LEVELS = {
 # Global variables for logging configuration
 _LOGGING_LEVEL = os.getenv("LOGGING_LEVEL", "INFO").upper()  # Default to INFO or env value
 _LOGGING_LOGCHAT_LEVEL = "ERROR"
+
+
+class TimeZoneFormatter(logging.Formatter):
+    """Formatter that respects the configured timezone."""
+
+    def __init__(self, fmt=None, datefmt=None):
+        super().__init__(fmt, datefmt)
+        try:
+            tz_name = os.getenv("TZ", "UTC")
+            self.tz = ZoneInfo(tz_name)
+        except Exception:
+            self.tz = timezone.utc
+
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.fromtimestamp(record.created, timezone.utc)
+        dt_local = dt.astimezone(self.tz)
+        if datefmt:
+            return dt_local.strftime(datefmt)
+        return dt_local.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _register_logging_config():
@@ -117,7 +138,7 @@ def _write_to_separate_log(level: str, message: str, log_file: str) -> None:
             separate_logger.setLevel(_LEVELS.get(_LOGGING_LEVEL, logging.ERROR))
             separate_logger.propagate = False
             
-            formatter = logging.Formatter(
+            formatter = TimeZoneFormatter(
                 "[%(asctime)s] [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s",
                 "%Y-%m-%d %H:%M:%S",
             )
@@ -151,7 +172,7 @@ def setup_logging() -> logging.Logger:
     logger.propagate = False
 
     if not logger.handlers:
-        formatter = logging.Formatter(
+        formatter = TimeZoneFormatter(
             "[%(asctime)s] [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s",
             "%Y-%m-%d %H:%M:%S",
         )
@@ -242,11 +263,7 @@ def _log(level: str, message: str, exc: Optional[Exception] = None, log_file: Op
                                 message_data["thread_id"] = thread_id
                             await iface.send_message(message_data)
                         except Exception:
-                            # Silent fallback to trainer for the same interface
-                            trainer_id = get_trainer_id(log_chat_interface)
-                            if trainer_id:
-                                trainer_data = {"text": notification_message, "target": trainer_id}
-                                await iface.send_message(trainer_data)
+                            pass  # No fallback to trainer to avoid spam
 
                     try:
                         loop = asyncio.get_running_loop()
@@ -264,32 +281,7 @@ def _log(level: str, message: str, exc: Optional[Exception] = None, log_file: Op
                         pass  # No event loop available in this context
                     return
             
-            # Fallback to trainer - use any available interface
-            for interface_name, iface in INTERFACE_REGISTRY.items():
-                trainer_id = get_trainer_id(interface_name)
-                if trainer_id and hasattr(iface, 'send_message'):
-                    async def send_to_trainer():
-                        try:
-                            trainer_data = {"text": notification_message, "target": trainer_id}
-                            await iface.send_message(trainer_data)
-                        except Exception:
-                            pass  # Silent failure
-
-                    try:
-                        loop = asyncio.get_running_loop()
-                        if loop and loop.is_running():
-                            loop.create_task(send_to_trainer())
-                        else:
-                            try:
-                                loop = asyncio.get_event_loop()
-                                if not loop.is_closed():
-                                    loop.run_until_complete(send_to_trainer())
-                                # If no running loop, just skip async send in logging context
-                            except RuntimeError:
-                                pass  # No event loop available in this context
-                    except RuntimeError:
-                        pass  # No event loop available in this context
-                    return
+            # No fallback to trainer here to prevent error spam. Configure LogChat if needed.
                         
         except Exception:
             # Silent failure - no recursive logging

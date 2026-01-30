@@ -82,7 +82,7 @@ async def wait_for_db(max_attempts=10, delay=3):
     for attempt in range(1, max_attempts + 1):
         try:
             host, port, user, passwd, dbname = _read_db_config()
-            log_info(f"[db] Attempt {attempt}: connecting to {user}@{host}:{port}/{dbname}")
+            log_debug(f"[db] Attempt {attempt}: connecting to {user}@{host}:{port}/{dbname}")
             conn = await aiomysql.connect(
                 host=host,
                 port=port,
@@ -91,7 +91,7 @@ async def wait_for_db(max_attempts=10, delay=3):
                 db=dbname,
                 autocommit=True,
             )
-            log_info("[db] Successfully connected to the database!")
+            log_debug("[db] Successfully connected to the database!")
             conn.close()
             return True
         except Exception as e:

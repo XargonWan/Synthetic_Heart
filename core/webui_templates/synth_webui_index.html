@@ -2826,6 +2826,10 @@
         // Configuration values from server
         window.RESPONSE_TIMEOUT = %%RESPONSE_TIMEOUT%%;
         window.FAILED_MESSAGE_TEXT = "%%FAILED_MESSAGE_TEXT%%";
+        window.__synthLipSyncAnalyser = null;
+        window.__synthLipSyncData = null;
+        window.__synthIsLipSyncing = false;
+        window.__synthLipSyncAudio = null;
         
         const navButtons = document.querySelectorAll('.nav-btn');
         const tabPanels = document.querySelectorAll('.tab-panel');
@@ -7043,6 +7047,70 @@
                         if (typeof showTypingIndicator === 'function') showTypingIndicator();
                     } catch (e) {}
                     // The actual response will arrive as a 'message' type later
+                    return;
+                }
+                if (data.type === 'synth:tts-play') {
+                    console.log('[synth_webui] Received TTS play event:', data);
+                    try {
+                        if (data.audio_url) {
+                            const audio = new Audio(data.audio_url);
+                            audio.crossOrigin = "anonymous";
+                            audio.volume = 1.0;
+                            window.__synthLipSyncAudio = audio;
+
+                            try {
+                                const AudioContext = window.AudioContext || window.webkitAudioContext;
+                                if (AudioContext) {
+                                    if (!window.__synthAudioCtx) window.__synthAudioCtx = new AudioContext();
+                                    const ctx = window.__synthAudioCtx;
+                                    if (ctx.state === 'suspended') ctx.resume();
+
+                                    const source = ctx.createMediaElementSource(audio);
+                                    const analyser = ctx.createAnalyser();
+                                    analyser.fftSize = 1024;
+                                    source.connect(analyser);
+                                    analyser.connect(ctx.destination);
+                                    window.__synthLipSyncAnalyser = analyser;
+                                    window.__synthIsLipSyncing = true;
+                                    console.log('[synth_webui] Lip-sync analyser connected');
+                                }
+                            } catch (e) {
+                                console.warn('[synth_webui] Web Audio API setup failed for lip-sync:', e);
+                            }
+
+                            if (window.animationHandler) {
+                                window.animationHandler.startAction('talk');
+                            }
+
+                            audio.onended = () => {
+                                console.log('[synth_webui] TTS playback ended');
+                                window.__synthIsLipSyncing = false;
+                                window.__synthLipSyncAnalyser = null;
+                                window.__synthLipSyncAudio = null;
+
+                                if (window.animationHandler) window.animationHandler.startAction('idle');
+                                if (window.currentVRM && window.currentVRM.expressionManager) {
+                                    ['aa', 'ih', 'ou', 'ee', 'oh'].forEach(k => {
+                                        try { window.currentVRM.expressionManager.setValue(k, 0); } catch (e) {}
+                                    });
+                                }
+                            };
+
+                            audio.onerror = (err) => {
+                                console.warn('[synth_webui] Audio playback error:', err);
+                                window.__synthIsLipSyncing = false;
+                                window.__synthLipSyncAnalyser = null;
+                                window.__synthLipSyncAudio = null;
+                            };
+
+                            const p = audio.play();
+                            if (p !== undefined) {
+                                p.catch(e => console.warn('[synth_webui] TTS playback play() failed:', e));
+                            }
+                        }
+                    } catch (e) {
+                        console.warn('[synth_webui] Error in TTS handler:', e);
+                    }
                     return;
                 }
                 if (data.type === 'message') {
@@ -12022,6 +12090,24 @@
                 requestAnimationFrame(render);
                 const delta = clock.getDelta();
                 if (currentVRM) {
+                    if (window.__synthIsLipSyncing && window.__synthLipSyncAnalyser && currentVRM.expressionManager) {
+                        try {
+                            const analyser = window.__synthLipSyncAnalyser;
+                            if (!window.__synthLipSyncData) window.__synthLipSyncData = new Uint8Array(analyser.frequencyBinCount);
+                            analyser.getByteFrequencyData(window.__synthLipSyncData);
+                            const data = window.__synthLipSyncData;
+                            let sum = 0;
+                            for (let i = 0; i < data.length; i++) sum += data[i];
+                            const volume = sum / (data.length * 255.0);
+                            const mouthOpen = Math.max(0, Math.min(1, (volume - 0.02) * 3.0));
+                            const shapes = { aa: mouthOpen, ih: 0, ou: 0, ee: 0, oh: 0 };
+                            Object.entries(shapes).forEach(([k, v]) => {
+                                currentVRM.expressionManager.setValue(k, v);
+                            });
+                        } catch (e) {
+                            // suppress to avoid render-loop spam
+                        }
+                    }
                     // Update VRM lookAt target.
                     // Default: look forward (not directly at the camera).
                     // On knock: briefly blend the target slightly towards the camera for a low-key “notice”.

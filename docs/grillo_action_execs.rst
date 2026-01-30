@@ -43,6 +43,16 @@ style: the LLM is asked to think like a helpful participant and suggest what
 message(s) it would naturally reply to (short, conversational proposals), not
 analyze the flow as a technical audit.
 
+Execution policy:
+
+- When a Grillo *beat* (e.g., the Chat Observer) is the source of a proposal,
+  the transport layer will force action execution through the canonical
+  `action_parser.run_actions()` path (this is done even if
+  `GRILLO_AUTO_GENERATE_ACTIONS=False`). The canonical parser still enforces
+  autonomy and policy checks; forcing execution simply ensures beats remain
+  active by default and do not require additional per-beat configuration.
+
+
 Usage
 -----
 

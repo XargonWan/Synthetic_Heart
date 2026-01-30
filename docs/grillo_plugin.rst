@@ -329,6 +329,10 @@ Configuration variables:
 
 UI: These variables are exposed in the WebUI under **Configurations → Grillo** (they are visible by default, not in the Advanced subsection). Other Grillo-related plugin settings (e.g. ``GRILLO_OBSERVER_*``) appear under **Configurations → Grillo → Grillo Observer** and History Evaluator settings appear under **Configurations → Grillo → History Evaluator**.
 
+Observer memory flag:
+
+- ``GRILLO_OBSERVER_STORE_MEMORIES`` (bool, default: ``True``) — when enabled, the observer persists sampled snippets as passive memories.
+
 Notes:
 
 - The system stores and schedules events in UTC internally, but dream scheduling is *interpreted in local time* (see ``core.time_zone_utils``). If you set the dream time to 05:00 and your TZ is JST (UTC+9), the plugin calculates the next occurrence in JST and converts appropriately to UTC for scheduling.

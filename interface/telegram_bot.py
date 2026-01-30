@@ -152,6 +152,7 @@ def get_trainer_id() -> Optional[int]:
 say_sessions = {}
 context_memory = {}
 last_selected_chat = {}
+chat_attention_state = {}
 message_id = None
 
 # Throttling for bot None lookup warnings
@@ -607,33 +608,53 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     log_debug(f"human_count={human_count}, message.chat.type={message.chat.type}")
     
-    # Get bot username for mention checking
+    # Get bot username and id for mention/reply checking
     bot_username = None
+    bot_id = None
     try:
         bot_info = await context.bot.get_me()
         bot_username = bot_info.username if bot_info else None
-        log_debug(f"Bot username: {bot_username}")
+        bot_id = bot_info.id if bot_info else None
+        log_debug(f"Bot username: {bot_username}, ID: {bot_id}")
     except Exception as e:
-        log_debug(f"Could not get bot username: {e}")
+        log_debug(f"Could not get bot info: {e}")
+
     
-    # If human_count is still None for group/supergroup chats, calculate it
-    if human_count is None and message.chat.type in ["group", "supergroup"]:
-        try:
-            member_count = await context.bot.get_chat_member_count(message.chat.id)
-            # Subtract 1 for the bot itself (assuming bot is a member)
-            human_count = max(0, member_count - 1)
-            log_debug(f"[telegram_bot] Calculated human_count={human_count} for group chat {message.chat.id}")
-        except Exception as e:
-            log_debug(f"[telegram_bot] Could not calculate human_count: {e}")
-            # Keep human_count as None; is_message_for_bot will handle it
+    # Wake/sleep gating: awake follows normal routing, sleep ignores non-command messages.
+    chat_id = message.chat.id
+    if chat_id not in chat_attention_state:
+        chat_attention_state[chat_id] = True
+    is_awake = chat_attention_state.get(chat_id, True)
+    if not is_awake:
+        log_debug(f"[telegram_bot] Chat {chat_id} is asleep; ignoring message")
+        return
+
+    # Avoid single-human fallback in group/supergroup chats to prevent false positives.
+    if message.chat.type in ["group", "supergroup"]:
+        human_count = None
     
     directed, reason = await is_message_for_bot(message, context.bot, bot_username=bot_username, human_count=human_count)
     log_debug(f"is_message_for_bot returned directed={directed}, reason='{reason}'")
-    
+
+    # Add reaction immediately when the message is directed (before sleep suppression)
+    try:
+        if directed:
+            from core.reaction_handler import get_reaction_emoji, react_when_mentioned
+            from core.core_initializer import INTERFACE_REGISTRY
+            emoji = get_reaction_emoji()
+            if emoji:
+                interface = INTERFACE_REGISTRY.get("telegram_bot")
+                if interface:
+                    await react_when_mentioned(interface, message, emoji)
+    except Exception as e:
+        log_debug(f"[telegram_bot] Reaction add skipped/failed: {e}")
+
     if not directed:
         log_debug(f"[telegram_bot] DEBUG: Message not directed to bot - ignoring")
         if reason == "missing_human_count":
             log_debug("[telegram_bot] DEBUG: Reason: missing_human_count")
+        elif reason == "unknown_human_count":
+            log_debug("[telegram_bot] DEBUG: Reason: unknown_human_count")
         elif reason == "multiple_humans":
             log_debug("[telegram_bot] DEBUG: Reason: multiple_humans")
         else:
@@ -705,7 +726,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         log_debug(f"🔴 [PRIORITY 4] Calling message_queue.enqueue now...")
         
-        await message_queue.enqueue(context.bot, message, interface_id="telegram_bot", original_message=message)
+        await message_queue.enqueue(
+            context.bot,
+            message,
+            interface_id="telegram_bot",
+            original_message=message,
+            skip_mention_check=directed,
+        )
         
         log_debug(f"🔴 [PRIORITY 4 SUCCESS] Message successfully enqueued - processing should continue in queue")
         
@@ -729,7 +756,8 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     interface_context = {
         'update': update,
         'context': context,
-        'bot': context.bot
+        'bot': context.bot,
+        'interface_id': 'telegram_bot',
     }
     
     try:
@@ -1026,6 +1054,7 @@ async def plugin_startup_callback(application):
 
 # Global variable to track the telegram polling task
 _polling_task = None
+_bot_started = False
 
 
 async def start_bot():
@@ -1034,7 +1063,13 @@ async def start_bot():
     This function assumes the core has already been initialized.
     It should be called from TelegramInterface.start() or during autostart.
     """
+    global _bot_started
+    if _bot_started:
+        log_debug("[telegram_bot] start_bot() already called, skipping duplicate startup")
+        return
+
     log_info("[telegram_bot] start_bot() function called")
+    _bot_started = True
     
     if not BOTFATHER_TOKEN:
         log_warning("[telegram_bot] BOTFATHER_TOKEN not configured - skipping Telegram bot startup")
@@ -1099,7 +1134,7 @@ async def start_bot():
         log_info("[telegram_bot] Adding command handlers...")
         # Use generic command handler for all commands
         app.add_handler(MessageHandler(filters.COMMAND, handle_command))
-        
+
         # Single unified message handler for ALL non-command messages
         log_info("[telegram_bot] Adding unified MessageHandler for all messages...")
         app.add_handler(MessageHandler(
