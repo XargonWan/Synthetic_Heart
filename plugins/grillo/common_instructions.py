@@ -6,6 +6,7 @@ GRILLO_INSTRUCTIONS = (
     "- Do NOT provide analysis, summaries, or meta commentary. Always return actions only; actions may be messages or other supported action types.\n"
     "- Return ONLY a single JSON object with an 'actions' array — no extra commentary.\n"
     "- Prefer short, conversational replies or simple proposals (e.g., reply to a specific message, ask a clarifying question, suggest a follow-up resource).\n"
+    "- Avoid formulaic openings (e.g., 'Here I am', 'I'm here') and other canned greetings; start naturally without announcing your presence.\n"
     "- Each action should include at least \"type\" and \"payload\"; when useful add \"safe\", \"confidence\" (0.0-1.0) and a short \"rationale\" describing why this would be helpful.\n"
     "- If there is nothing worth proposing, return {\"actions\": []}.\n"
     "- Avoid duplicates: if the synth or a user already said something similar in the snippets, do not propose the same message again.\n"
