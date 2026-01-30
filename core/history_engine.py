@@ -187,6 +187,25 @@ def _entry_to_text(entry: HistoryEntry) -> str:
     return f"[{_format_ts(ts)}] {sender}: \"{safe_text}\"".strip()
 
 
+def _source_label(entry: HistoryEntry, current_interface_path: str | None = None) -> str | None:
+    if not isinstance(entry, dict):
+        return None
+    entry_path = entry.get('interface_path') or entry.get('source_path')
+    if not entry_path:
+        return None
+    if current_interface_path and entry_path == current_interface_path:
+        return None
+    return str(entry_path)
+
+
+def _entry_to_text_with_source(entry: HistoryEntry, current_interface_path: str | None = None) -> str:
+    base = _entry_to_text(entry)
+    label = _source_label(entry, current_interface_path=current_interface_path)
+    if not label:
+        return base
+    return f"[from {label}] {base}".strip()
+
+
 def _dedup_key(text: str) -> str:
     normalized = " ".join((text or "").strip().split()).lower()
     return hashlib.sha256(normalized.encode('utf-8')).hexdigest()
@@ -312,7 +331,7 @@ class HistoryEngine:
                         log_debug(f"[history_engine] Could not load cached messages for current chat: {e}")
 
                 for m in msgs[-verbosity:] if verbosity > 0 else []:
-                    line = _entry_to_text(m)
+                    line = _entry_to_text_with_source(m, current_interface_path=interface_path)
                     k = _dedup_key(line)
                     if k in seen_history:
                         continue
@@ -363,7 +382,7 @@ class HistoryEngine:
                 seen_history = set()
 
                 for m in unified_candidates[-verbosity:] if verbosity > 0 else []:
-                    line = _entry_to_text(m)
+                    line = _entry_to_text_with_source(m, current_interface_path=interface_path)
                     k = _dedup_key(line)
                     if k in seen_history:
                         continue
@@ -410,7 +429,7 @@ class HistoryEngine:
                 if candidates:
                     candidates.sort(key=_sort_key)
                 for m in candidates[-verbosity:] if verbosity > 0 else []:
-                    line = _entry_to_text(m)
+                    line = _entry_to_text_with_source(m, current_interface_path=interface_path)
                     k = _dedup_key(line)
                     if k in seen_history:
                         continue
@@ -458,7 +477,7 @@ class HistoryEngine:
 
             if target in ('history_current_chat', 'history_recent'):
                 for raw in list(c.entries)[: max_items or (verbosity if verbosity > 0 else None)]:
-                    line = _entry_to_text(raw)
+                    line = _entry_to_text_with_source(raw, current_interface_path=interface_path)
                     k = _dedup_key(line)
                     if k in seen_history:
                         continue
