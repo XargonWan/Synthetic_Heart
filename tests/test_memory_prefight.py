@@ -129,3 +129,42 @@ def test_free_memory_randomize(monkeypatch):
     # The easier check: ensure that the memory snippet text appears in any serialized part of the prompt dict
     serialized = str(prompt)
     assert "mostro austriaco" in serialized or "mostro austriaco" in serialized.lower()
+
+
+async def test_preflight_corrector_invoked_on_malformed_json(monkeypatch):
+    # Simulate active LLM engine that returns malformed JSON and a corrector that fixes it
+    async def fake_generate_response(messages):
+        # Malformed JSON (missing a closing bracket)
+        return '{"actions": [{"type": "memory_search", "payload": {"mode": "free", "keywords": ["plan","tranquilla"]}}'
+
+    class FakeEngine:
+        async def generate_response(self, messages):
+            return await fake_generate_response(messages)
+
+    class FakeRegistry:
+        def get_engine(self, name):
+            return FakeEngine()
+
+    # Patch get_active_llm and registry
+    monkeypatch.setattr('core.config.get_active_llm', lambda: 'fake')
+    monkeypatch.setattr('core.llm_registry.get_llm_registry', lambda: FakeRegistry())
+
+    # Corrector will fix the malformed JSON into valid one
+    async def fake_corrector(text, bot=None, context=None, chat_id=None, thread_id=None):
+        return '{"actions": [{"type": "memory_search", "payload": {"mode": "free", "keywords": ["plan","tranquilla"], "max_results":5}}]}'
+
+    monkeypatch.setattr('core.transport_layer.run_corrector_middleware', fake_corrector)
+
+    # Patch run_action to return sample results
+    async def fake_run_action(action, context, bot=None, original_message=None):
+        return {"results": [{"snippet": "Found plan snippet"}], "delivered_to_llm": True}
+
+    monkeypatch.setattr('core.action_parser.run_action', fake_run_action)
+
+    from core.prompt_engine import llm_memory_search_preflight
+    from types import SimpleNamespace
+
+    snippets = asyncio.run(llm_memory_search_preflight(text='Sto facendo il plan ma stai tranquilla per favore :)', interface_name='telegram', original_message=SimpleNamespace(chat_id=1), max_results=5))
+
+    assert isinstance(snippets, list)
+    assert "Found plan snippet" in snippets
