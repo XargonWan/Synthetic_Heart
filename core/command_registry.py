@@ -388,6 +388,51 @@ async def splitprompt_command(*args) -> str:
 register_command("splitprompt", splitprompt_command)
 
 
+async def agent_command(*args, interface_context=None) -> str:
+    """Handle agent subcommands (trainer-only).
+
+    Usage:
+      /agent approve <proposal_id>
+    """
+    if not args:
+        return "Usage: /agent approve <proposal_id>"
+
+    sub = args[0].lower()
+    if sub == 'approve':
+        if len(args) < 2:
+            return "❌ Use: /agent approve <proposal_id>"
+        try:
+            proposal_id = int(args[1])
+        except ValueError:
+            return "❌ proposal_id must be an integer"
+
+        # Extract possible trainer info from interface_context
+        trainer_id = None
+        try:
+            if interface_context and isinstance(interface_context, dict):
+                update = interface_context.get('update')
+                if update and getattr(update, 'effective_user', None):
+                    trainer_id = getattr(update.effective_user, 'id', None)
+        except Exception:
+            trainer_id = None
+
+        try:
+            from core.core_initializer import PLUGIN_REGISTRY
+            plugin = PLUGIN_REGISTRY.get('agent')
+            if not plugin:
+                return "❌ Agent plugin not available"
+            original_message = {'sender_id': trainer_id}
+            res = await plugin.execute_action({'type': 'approve_action', 'payload': {'proposal_id': proposal_id}}, {}, None, original_message)
+            return f"✅ Approval result: {res}"
+        except Exception as e:
+            return f"❌ Error approving proposal: {e}"
+
+    return "❌ Unknown agent subcommand. Use: /agent approve <proposal_id>"
+
+
+register_command("agent", agent_command)
+
+
 async def block_command(*args) -> str:
     """Block a user by ID."""
     if not args:

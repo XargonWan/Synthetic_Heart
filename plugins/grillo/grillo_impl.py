@@ -186,7 +186,7 @@ class GrilloPlugin(AIPluginBase):
                 if last:
                     sender_id = last.get('sender_id')
                     sender_name = (last.get('sender_name') or "").lower()
-                    if str(sender_id) == 'self' or any(k in sender_name for k in ("rekku", "synth", "bot", "auto_response", "autoreply")):
+                    if str(sender_id) == 'self' or any(k in sender_name for k in ("synth", "bot", "auto_response", "autoreply")):
                         return False
             except Exception:
                 # If we cannot determine, play safe and treat as public

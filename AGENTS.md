@@ -43,6 +43,10 @@ If a plugin is missing:
 ## Background Agents (e.g., Grillo)
 Some functionality in SyntH is provided by long-running, scheduled "agents" implemented as plugins rather than simple action handlers. The canonical example is **G.R.I.L.L.O.** (the "Grillo" plugin), which performs periodic "beats" to drive internal introspection tasks such as tag elaboration, memory consolidation, self-reflection, curiosity probes, and relationship insights.
 
+In addition to Grillo, an **Agent plugin** can be implemented to give the SyntH a controlled "hand" to perform external tasks (e.g., shell commands, scheduled tasks) under policy-managed approval modes. The Agent plugin is intentionally **LLM-agnostic** and uses whatever active LLM the user configured; it enforces safety via configurable approval modes (always_approve, whitelist, always_ask, disabled) and container-aware defaults.
+
+Proposals created by the Agent are persisted to the `agent_activity_log` table (see `init-db.sql`) and execution records are stored in `agent_action_execs`. When `always_ask` is used or a whitelist block occurs, proposals are sent to the trainer's private chat via the existing trainer notification system so the trainer can approve or reject them.
+
 Key points:
 - Implementation: located under `plugins/grillo/` with a lightweight backward-compatible wrapper at `plugins/grillo_plugin.py`.
 - Purpose: generates internal prompts (beats) which are enqueued as low-priority internal messages via `core.message_queue.enqueue_low_priority` and processed by the normal message chain.
@@ -130,7 +134,7 @@ curl -X POST http://localhost:11434/api/chat \
     "messages": [
       {
         "role": "system",
-        "content": "You are Rekku. Respond with ONLY this JSON: {\"actions\": [{\"type\": \"schedule_message\", \"payload\": {\"text\": \"Test message!\", \"send_in\": \"10 seconds\"}}]}"
+        "content": "You are SyntH. Respond with ONLY this JSON: {\"actions\": [{\"type\": \"schedule_message\", \"payload\": {\"text\": \"Test message!\", \"send_in\": \"10 seconds\"}}]}"
       },
       {
         "role": "user",
@@ -151,7 +155,7 @@ curl -X POST http://localhost:11434/api/chat \
     "messages": [
       {
         "role": "system",
-        "content": "You are Rekku. Respond with ONLY this JSON: {\"actions\": [{\"type\": \"schedule_message\", \"payload\": {\"text\": \"Reminder text here\", \"send_in\": \"15 seconds\"}}]}"
+        "content": "You are SyntH. Respond with ONLY this JSON: {\"actions\": [{\"type\": \"schedule_message\", \"payload\": {\"text\": \"Reminder text here\", \"send_in\": \"15 seconds\"}}]}"
       },
       {
         "role": "user",
