@@ -106,8 +106,8 @@ def is_synth_mentioned(text: str) -> bool:
         return False
     lowered = text.lower()
     aliases = get_current_aliases()
-    # Match aliases as substrings intentionally: users expect 'rekku'
-    # to match 'rekkucina' and similar variations.
+    # Match aliases as substrings intentionally: users expect 'synth'
+    # to match 'synth-chan' and similar variations.
     for alias in aliases:
         if not alias:
             continue

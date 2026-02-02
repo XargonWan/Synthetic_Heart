@@ -1906,7 +1906,7 @@ class SynthWebUIInterface:
         
         # Last resort: try common persona folders
         skins_dir = Path(__file__).resolve().parent.parent / "skins"
-        for persona_folder in ["Rei", "Rekku", "Zero"]:
+        for persona_folder in ["Rei", "Zero"]:
             persona_vrm = skins_dir / persona_folder / "model.vrm"
             if persona_vrm.exists():
                 log_info(f"{LOG_PREFIX} Using fallback VRM from {persona_folder}: {persona_vrm}")

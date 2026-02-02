@@ -225,7 +225,7 @@ class MessagePlugin:
                                         sender_id = last.get("sender_id") or last.get("user_id") or ""
                                         sender_name = (last.get("sender_name") or last.get("username") or "").lower()
                                         # Consider 'self' and obvious bot names as synth-origin
-                                        if str(sender_id) == "self" or any(k in sender_name for k in ("rekku", "synth", "bot", "auto_response", "autoreply")):
+                                        if str(sender_id) == "self" or any(k in sender_name for k in ("synth", "bot", "auto_response", "autoreply")):
                                             if not suppress_enabled:
                                                 log_debug("[message_plugin] Grillo suppression disabled via config 'GRILLO_SUPPRESS_INACTIVE'; allowing send")
                                             else:

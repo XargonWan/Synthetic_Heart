@@ -1014,8 +1014,8 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
             # original user question was, not just that "your JSON was invalid". Without this,
             # the LLM might respond to the correction instructions themselves instead of
             # answering the user's original question.
-            # Example: User asks "Rekku ci sei?" -> LLM fails -> Corrector sends correction
-            #          With original_user_message, LLM knows to respond "Sì, ci sono ♡"
+            # Example: User asks "SyntH are you there?" -> LLM fails -> Corrector sends correction
+            #          With original_user_message, LLM knows to respond "Yup, here I am ♡"
             #          Without it, LLM might respond "Acknowledged, JSON was valid"
             original_user_message = ""
             if message:
