@@ -58,3 +58,4 @@ SyntH_main
 TODO*.md
 .github/prompts
 old
+.vscode/settings.json
