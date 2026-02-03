@@ -85,3 +85,4 @@ test_pipeline_output.wav
 *copy.py
 *copy.ps1
 res/synth_webui/static/audio/
+.uv/

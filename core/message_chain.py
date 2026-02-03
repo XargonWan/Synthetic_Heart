@@ -340,7 +340,7 @@ async def handle_incoming_message(bot, message: Optional[SimpleNamespace], text:
                                 has_user_response = True
                                 if not user_message_action:
                                     user_message_action = action
-                                break
+                                # break
 
                     # Auto-inject TTS if there's a user response but no tts_speak
                     # Only for actual user-facing interfaces (not internal like grillo)
