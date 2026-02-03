@@ -60,6 +60,22 @@ Key points:
 Notes for contributors:
 - Treat Grillo as an internal agent — it uses the same action pipeline but is intended for background maintenance tasks. Ensure any new beat types are documented and recorded in the activity logs so the WebUI can present results.
 
+## Agent Loop implementation (runtime) 🔧
+
+- The Agent loop is implemented in `core/agent_core.py` as `AgentLoopManager`. Each task is persisted to `agent_tasks` and runs in the background (non-blocking) using `asyncio.create_task()`.
+- Per-iteration flow:
+  - Run Recon (preflight) contributions from plugins (`core.recon.gather_recon_contributions()`) and inject them into the prompt.
+  - Build a structured iteration prompt and call the active engine via `core.plugin_instance.handle_incoming_message()`.
+  - Extract JSON from the LLM output (using `core.transport_layer.extract_json_from_text()`), normalize to `actions` and execute them with `core.action_parser.run_actions()`.
+  - Append per-iteration metadata to `iterations_meta` and update task status in DB.
+  - If a proposal requiring approval is detected (a new row in `agent_activity_log` with status `proposed`), the task is set to `waiting_for_approval` and paused automatically; the trainer is notified. Proposals created from an Agent task include `task_id` in the `agent_activity_log.metadata` so approvals can be correlated to tasks and resume them automatically.
+  - When the loop completes (success/failure/cancel) Debrief hooks are invoked (`core.debrief.run_debrief()`) to allow plugins to perform postflight processing.
+- The `start_task` action is supported by the Agent plugin (`plugins/agent_plugin.py`) and creates a persisted background task (returns `task_id`).
+- The WebUI exposes control endpoints for the Agent and an approval endpoint (`POST /api/agent/proposals/{proposal_id}/approve`) which calls the Agent plugin `approve_action` handler; if the proposal references a `task_id` the task will be resumed upon approval.
+- The WebUI includes an **Agent** tab that lists Agent tasks, shows per-task iterations and supports pause/resume/cancel controls.
+- Engines may optionally implement agent hooks (e.g., `supports_agent()`, `attach_agent()`, `agent_execute()`) — the Agent will attach to an engine if available but degrades gracefully when not.
+- See `tests/test_agent_loop.py` for unit tests that validate persistence, iteration flow and the `start_task` behavior.
+
 ---
 
 ## LLM Engines
@@ -109,6 +125,13 @@ To run tests locally, the agent may:
 ```bash
    ./run_tests.sh
 ```
+
+WebUI & templates linting (important):
+
+- When you modify WebUI files or templates (files under `core/webui_templates/` or related frontend assets), run the appropriate linters and static checks for HTML/JS to avoid client-side syntax errors. Examples:
+  - If using Node toolchain: `npx eslint "core/webui_templates/**/*.html" --ext .html,.js` or an equivalent npm script (e.g. `npm run lint:webui`) and `htmlhint` / `tidy` for HTML validation.
+  - If Node is not available, at minimum perform a browser smoke test (open WebUI, check DevTools Console for syntax errors and failed fetches) and validate that inline scripts are balanced and templates load correctly.
+- Add or update WebUI-related tests (E2E/browser test or a smoke test) when making changes that affect rendering, script execution, or template injection logic.
 
 If you need to restar the dev container use:
 ```bash
@@ -411,3 +434,4 @@ The documentation must be written in English and in ReadTheDocs format.
 * **Type hints & static checking:** All Python functions must include complete type annotations (parameters and return types). The project follows strict static typing and enforces type checking with `mypy` in **strict** mode. When adding or modifying Python code run `python -m mypy . --strict` (or `mypy --strict`) and resolve any reported errors before proposing the changes. Add or update `mypy.ini` / `pyproject.toml` configuration as needed and document relevant typing decisions in `./docs`.
 * **Cross-platform policy:** The project's default runtime is a Linux container. Do not write Windows- or macOS-specific code paths as the primary implementation. If platform-specific logic is unavoidable, implement it only as a secondary, well-documented case guarded by an OS check (e.g., `sys.platform` or `platform.system()`), include tests or CI guards where possible, and add explanatory notes in `./docs`. Prefer platform-agnostic or Linux-first implementations and show Linux-based examples in documentation.
 * Never use `git add` or `git commit` unless directly asked by the developer.
+* No POCs, only working and production ready code
