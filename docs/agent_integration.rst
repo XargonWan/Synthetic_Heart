@@ -27,3 +27,29 @@ The plugin enforces a conservative default: shell execution is disabled by defau
 Usage
 -----
 The agent accepts actions such as `agent_execute` and `propose_action`. For template/example usage, see `plugins/agent_plugin.py` implementation and `tests/test_agent_plugin.py` for PoC test cases.
+
+Testing the feature
+-------------------
+To run the agent-specific unit tests locally:
+
+1. Create and activate a virtual environment (or use the project's `venv`):
+
+.. code-block:: bash
+
+   python3 -m venv venv
+   source venv/bin/activate
+
+2. Install runtime and test dependencies:
+
+.. code-block:: bash
+
+   pip install -r requirements.txt
+   pip install pytest pytest-asyncio
+
+3. Run the agent tests only:
+
+.. code-block:: bash
+
+   pytest -q tests/test_agent_core.py -q
+
+Alternatively, use the convenience script at `dev/run_agent_tests.sh` which sets up the venv and runs the agent tests.

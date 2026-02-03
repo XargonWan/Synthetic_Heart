@@ -218,6 +218,48 @@ class GeminiAPIPlugin(AIPluginBase):
 
     def get_current_model(self) -> str:
         """Return the currently active model."""
+
+    # --- Agentic hooks (optional) ---
+    def supports_agent(self) -> bool:
+        """Return True if this engine provides optional agentic extensions.
+
+        Default: False. Engines that implement richer agentic behavior should
+        override this and implement `attach_agent`, `detach_agent` and
+        `agent_execute` as appropriate.
+        """
+        return False
+
+    def attach_agent(self, agent_plugin) -> None:
+        """Attach an Agent plugin instance to the engine.
+
+        Default behavior: store reference and set an attribute. Engines with
+        more complex integration can override this method.
+        """
+        try:
+            setattr(self, "_agent_plugin", agent_plugin)
+            setattr(self, "agent_enabled", True)
+            log_info("[gemini_api] Agent attached (no-op adapter)")
+        except Exception as e:
+            log_warning(f"[gemini_api] attach_agent failed: {e}")
+
+    def detach_agent(self, agent_plugin) -> None:
+        """Detach previously attached Agent plugin instance."""
+        try:
+            if hasattr(self, "_agent_plugin"):
+                delattr(self, "_agent_plugin")
+            setattr(self, "agent_enabled", False)
+            log_info("[gemini_api] Agent detached (no-op adapter)")
+        except Exception as e:
+            log_warning(f"[gemini_api] detach_agent failed: {e}")
+
+    def agent_execute(self, action_dict: dict, context: dict | None = None) -> dict:
+        """Optional engine-level execution helper for agentic actions.
+
+        Default implementation returns a not-supported dict so callers can fall back.
+        Engines that can safely perform tool-calls should implement this.
+        """
+        log_debug("[gemini_api] agent_execute called but not implemented for this engine")
+        return {"status": "unsupported", "reason": "engine does not implement agent_execute"}
         return self._current_model
 
     def set_current_model(self, name: str):
