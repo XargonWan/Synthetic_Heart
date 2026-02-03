@@ -44,7 +44,7 @@ function initializeHistoryTab() {
     });
 
     // Controls
-    document.getElementById('history-diary-search')?.addEventListener('input', debounce(() => {
+    document.getElementById('history-diary-search')?.addEventListener('input', SynthUtils.debounce(() => {
         historyState.diary.search = document.getElementById('history-diary-search').value;
         historyState.diary.page = 1; loadHistoryDiary();
     }, 500));
@@ -52,12 +52,12 @@ function initializeHistoryTab() {
     document.getElementById('history-diary-sort')?.addEventListener('change', () => { historyState.diary.sort = document.getElementById('history-diary-sort').value; historyState.diary.page = 1; loadHistoryDiary(); });
     document.getElementById('history-diary-archived')?.addEventListener('change', () => { historyState.diary.include_archived = document.getElementById('history-diary-archived').checked; historyState.diary.page = 1; loadHistoryDiary(); });
 
-    document.getElementById('history-grillo-search')?.addEventListener('input', debounce(() => { historyState.grillo.search = document.getElementById('history-grillo-search').value; historyState.grillo.page = 1; loadHistoryGrillo(); }, 500));
+    document.getElementById('history-grillo-search')?.addEventListener('input', SynthUtils.debounce(() => { historyState.grillo.search = document.getElementById('history-grillo-search').value; historyState.grillo.page = 1; loadHistoryGrillo(); }, 500));
     document.getElementById('history-grillo-beat-type')?.addEventListener('change', () => { historyState.grillo.beat_type = document.getElementById('history-grillo-beat-type').value; historyState.grillo.page = 1; loadHistoryGrillo(); });
     document.getElementById('history-grillo-sort')?.addEventListener('change', () => { historyState.grillo.sort = document.getElementById('history-grillo-sort').value; historyState.grillo.page = 1; loadHistoryGrillo(); });
 
     document.getElementById('history-chat-interface')?.addEventListener('change', () => { historyState.chat.interface_path = document.getElementById('history-chat-interface').value; historyState.chat.page = 1; loadHistoryChat(); });
-    document.getElementById('history-chat-search')?.addEventListener('input', debounce(() => { historyState.chat.search = document.getElementById('history-chat-search').value; historyState.chat.page = 1; loadHistoryChat(); }, 500));
+    document.getElementById('history-chat-search')?.addEventListener('input', SynthUtils.debounce(() => { historyState.chat.search = document.getElementById('history-chat-search').value; historyState.chat.page = 1; loadHistoryChat(); }, 500));
     document.getElementById('history-chat-sort')?.addEventListener('change', () => { historyState.chat.sort = document.getElementById('history-chat-sort').value; historyState.chat.page = 1; loadHistoryChat(); });
 
     // Load initial diary data immediately
@@ -228,10 +228,7 @@ function renderGrilloActions(actions) {
     `;
 }
 
-function formatJsonBlock(value) {
-    if (value === undefined || value === null || value === '') return '';
-    try { const normalized = typeof value === 'string' ? JSON.parse(value) : value; return escapeHtml(JSON.stringify(normalized, null, 2)); } catch (e) { return escapeHtml(String(value)); }
-}
+function formatJsonBlock(value) { return SynthUtils.formatJsonBlock(value); }
 
 function renderChatMessage(msg) {
     const timestamp = formatTimestamp(msg.timestamp);
@@ -266,19 +263,9 @@ function changePage(type, newPage) { historyState[type].page = newPage; loadHist
 
 function debounce(func, wait) { let timeout; return function executedFunction(...args) { const later = () => { clearTimeout(timeout); func(...args); }; clearTimeout(timeout); timeout = setTimeout(later, wait); }; }
 
-function escapeHtml(text) { if (text === undefined || text === null) return ''; const div = document.createElement('div'); div.textContent = text; return div.innerHTML; }
+function escapeHtml(text) { return SynthUtils.escapeHtml(text); }
 
-function formatTimestamp(isoString) {
-    if (!isoString) return 'Unknown time';
-    try {
-        let normalized = String(isoString).trim();
-        if (!normalized.endsWith('Z') && !/[+-]\d{2}:\d{2}$/.test(normalized)) normalized += 'Z';
-        const parsed = new Date(normalized);
-        if (Number.isNaN(parsed.getTime())) return isoString;
-        const localTZ = Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
-        return new Intl.DateTimeFormat('it-IT', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: localTZ, timeZoneName: 'short' }).format(parsed);
-    } catch (e) { return isoString; }
-}
+function formatTimestamp(isoString) { return SynthUtils.formatTimestamp(isoString); }
 
 // Expose initializer for dynamic loader
 window.SynthWebUI = window.SynthWebUI || {};
