@@ -47,6 +47,35 @@ class ValidationRegistry:
     def __init__(self):
         self._rules: Dict[str, List[ValidationRule]] = {}
         self._registered_components: Set[str] = set()
+        # Alias mapping: alias_name -> resolver(payload) -> Optional[canonical_action_type]
+        # Resolvers are callables that receive the action payload and return a
+        # canonical action_type (string) or None if they cannot resolve.
+        self._aliases: Dict[str, Any] = {}
+
+    def register_action_alias(self, alias_name: str, resolver: callable):
+        """Register a resolver for a legacy alias action name.
+
+        The resolver should accept a single arg (payload dict) and return a
+        canonical action type (str) or None.
+        """
+        if not callable(resolver):
+            raise ValueError("resolver must be callable")
+        log_debug(f"[ValidationRegistry] Registering alias resolver for '{alias_name}'")
+        self._aliases[alias_name] = resolver
+
+    def resolve_action_alias(self, alias_name: str, payload: dict) -> Any:
+        """Attempt to resolve an alias name using a registered resolver.
+
+        Returns the canonical action type (str) or None if unresolved.
+        """
+        resolver = self._aliases.get(alias_name)
+        if not resolver:
+            return None
+        try:
+            return resolver(payload or {})
+        except Exception as e:
+            log_warning(f"[ValidationRegistry] Alias resolver for '{alias_name}' failed: {e}")
+            return None
     
     def register_component_rules(self, component_name: str, rules: List[ValidationRule]):
         """Register validation rules for a component."""
@@ -149,6 +178,22 @@ def register_component_validation_rules(component_name: str, action_rules: Dict[
         rules.append(rule)
     
     _validation_registry.register_component_rules(component_name, rules)
+
+
+# Register a default alias resolver for legacy 'message_send' that delegates
+# to concrete interface actions. This lives in the registry (not in the
+# action parser) so it's configurable and centralized.
+
+# NOTE: We intentionally do NOT register a default resolver for legacy
+# action names like 'message_send'. Converting unknown action names silently
+# would hide potential errors and prevent the corrector from asking the LLM
+# to fix action names/parameters. If projects need special aliasing behavior,
+# they should register alias resolvers explicitly via
+# `get_validation_registry().register_action_alias(alias_name, resolver)`.
+
+# Example (for documentation or plugin initialization):
+#    get_validation_registry().register_action_alias('message_send', my_resolver)
+
 
 
 __all__ = [

@@ -70,6 +70,26 @@ class CoreInitializer:
     def are_dev_components_enabled(self) -> bool:
         """Check if dev components are currently enabled."""
         return self._enable_dev_components
+
+    def _evaluate_llm_health(self, plugin: Any) -> tuple[bool, str]:
+        """Return (ok, error_message) for an LLM engine health check."""
+        if plugin is None:
+            return False, "LLM engine instance is missing"
+
+        if hasattr(plugin, "get_health_status"):
+            try:
+                result = plugin.get_health_status()
+                if isinstance(result, tuple) and len(result) >= 2:
+                    return bool(result[0]), str(result[1] or "")
+                if isinstance(result, dict):
+                    ok = bool(result.get("ok", True))
+                    error = str(result.get("error") or result.get("message") or "")
+                    return ok, error
+                return bool(result), ""
+            except Exception as exc:
+                return False, f"Health check failed: {exc}"
+
+        return True, ""
     
     async def initialize_all(self, notify_fn=None):
         """Initialize all synth components in the correct order."""
@@ -438,7 +458,13 @@ class CoreInitializer:
                 self.mark_component_failed(self.active_llm, error_msg, "LLM plugin initialization failed")
             else:
                 log_debug(f"[core_initializer] Plugin {self.active_llm} loaded successfully: {plugin.__class__.__name__}")
-                self.mark_component_success(self.active_llm, details=f"LLM engine: {plugin.__class__.__name__}")
+                ok, error = self._evaluate_llm_health(plugin)
+                if ok:
+                    self.mark_component_success(self.active_llm, details=f"LLM engine: {plugin.__class__.__name__}")
+                else:
+                    message = error or "LLM engine loaded but not ready"
+                    log_warning(f"[core_initializer] LLM engine health check failed: {message}")
+                    self.mark_component_failed(self.active_llm, message, "LLM engine configuration incomplete")
             
             log_debug(f"[core_initializer] Active LLM engine loaded: {self.active_llm}")
         except Exception as e:
@@ -766,6 +792,43 @@ class CoreInitializer:
                 log_error(
                     f"[core_initializer] Failed to register reload handler for {interface_name}: {e}"
                 )
+
+        # Register reload handlers for LLM engines (e.g., API keys)
+        try:
+            from core.config import list_available_llms, get_active_llm
+            from core.llm_registry import get_llm_registry
+            from core.plugin_instance import load_plugin
+
+            for engine_name in list_available_llms():
+                async def _reload_llm_engine(engine_name=engine_name):
+                    llm_registry = get_llm_registry()
+                    try:
+                        active = await get_active_llm()
+                    except Exception:
+                        active = None
+
+                    if active == engine_name:
+                        await load_plugin(engine_name, ensure_started=True)
+                        from core.plugin_instance import plugin as active_plugin
+
+                        if active_plugin is None:
+                            self.mark_component_failed(engine_name, "LLM reload returned no instance", "Reload failed")
+                        else:
+                            ok, error = self._evaluate_llm_health(active_plugin)
+                            if ok:
+                                self.mark_component_success(engine_name, details=f"LLM engine: {active_plugin.__class__.__name__}")
+                            else:
+                                message = error or "LLM engine loaded but not ready"
+                                self.mark_component_failed(engine_name, message, "LLM engine configuration incomplete")
+                    else:
+                        if llm_registry.get_engine(engine_name):
+                            llm_registry.unload_engine(engine_name)
+                        llm_registry.load_engine(engine_name)
+
+                config_registry.register_reload_handler(engine_name, _reload_llm_engine)
+                log_info(f"[core_initializer] ✅ Reload handler registered for LLM engine: {engine_name}")
+        except Exception as e:
+            log_warning(f"[core_initializer] Failed to register LLM reload handlers: {e}")
     
     def register_interface(self, interface_name: str):
         """Register an active interface."""

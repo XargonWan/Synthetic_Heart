@@ -52,7 +52,6 @@ The Discord interface provides full bot integration:
 - Media upload/download support
 - Thread and channel management
 - Role and permission integration
-- **Audio Support**: Capable of sending audio files via ``audio`` or ``audio_path`` in message payloads
 
 Telegram Bot Interface
 ----------------------
@@ -72,7 +71,6 @@ The Telegram bot interface offers comprehensive Telegram integration:
 - Media handling (photos, documents, voice)
 - Inline keyboard and callback support
 - Group and private chat handling
-- **Voice Messages**: Supports sending voice messages via ``audio_telegram_bot`` action
 - Trainer ID security validation
 - Wake/Sleep attention mode (commands ``/wake`` ``/sleep`` ``/status``)
     - **Default**: awake (listens to all messages in the chat)

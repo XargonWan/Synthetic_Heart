@@ -50,6 +50,14 @@ System Components
     - Manages model-specific limits and capabilities
     - Supports both text and multimodal interactions
 
+    LLM engines expose configuration variables (API keys, endpoints, model selectors)
+    through the shared settings registry. These variables can be edited in the Web UI
+    even when the engine is not active. When a required variable is missing, the engine
+    may load in a **degraded** state and is surfaced as failed in the Components view so
+    operators can see it needs attention. Variables marked with
+    ``needs_component_reload`` automatically trigger a reload of the owning LLM engine
+    after an update, allowing API keys to be applied without restarting the whole system.
+
 ``plugins``
     Action providers that extend synth's capabilities (terminal access, weather, file operations, etc.). Each plugin:
     
@@ -211,3 +219,8 @@ to improve continuity across interfaces and sessions.
     merging global DB history with in-memory chat logs across all interfaces.
     This creates a shared “brain” for the synth. Disable this flag if you need
     strict isolation between users or channels.
+
+    .. versionchanged:: 1.0
+       Unified history entries coming from other chats are now prefixed with
+       ``[from <interface_path>]`` to make it explicit they are not part of the
+       current conversation.

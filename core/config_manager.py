@@ -400,6 +400,13 @@ class ConfigRegistry:
                 except Exception as exc:
                     log_warning(f"[config] Failed to load '{defn.key}' during export: {exc}")
 
+            if defn.getter is not None:
+                try:
+                    defn.value = defn.getter()
+                    defn.raw_value = self._serialize_value(defn, defn.value)
+                except Exception as exc:
+                    log_warning(f"[config] Failed to refresh '{defn.key}' during export: {exc}")
+
             exported.append(
                 {
                     "key": defn.key,

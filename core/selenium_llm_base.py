@@ -1788,6 +1788,11 @@ class SeleniumLLMBase(AIPluginBase):
         _get_response_selectors() in subclass to provide the right selectors.
         """
         try:
+            # Defensive: ensure driver is available before attempting selectors
+            if driver is None:
+                log_warning("[selenium] _extract_response_text called with driver=None - skipping selectors and returning empty response")
+                return ""
+
             selectors = self._get_response_selectors()
             
             for selector in selectors:

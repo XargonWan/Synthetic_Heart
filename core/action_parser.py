@@ -439,7 +439,9 @@ def validate_action(action: dict, context: dict = None, original_message=None) -
     if not action_type:
         errors.append("Missing 'type'")
     elif action_type not in supported_types:
-        # Check if any plugin or interface supports this action type
+        # No supported component found for this action type. Do not perform
+        # hardcoded conversions here — resolution of legacy or alias names
+        # should be handled by the ValidationRegistry or a dedicated adapter.
         errors.append(
             f"Unsupported type '{action_type}' - no plugin or interface found to handle it"
         )
@@ -454,6 +456,21 @@ def validate_action(action: dict, context: dict = None, original_message=None) -
         errors.append("Missing 'payload'")
     elif payload is not None and not isinstance(payload, dict):
         errors.append("'payload' must be a dict")
+
+    # If action type is not supported, allow validation registry to attempt
+    # resolving legacy/alias names (e.g., 'message_send'). This keeps the
+    # resolution logic centralized and configurable.
+    if action_type not in supported_types:
+        try:
+            validation_registry = get_validation_registry()
+            resolved = validation_registry.resolve_action_alias(action_type, payload or {})
+            if resolved:
+                log_debug(f"[action_parser] Resolved alias '{action_type}' -> '{resolved}' via ValidationRegistry")
+                action_type = resolved
+                action["type"] = resolved
+                # fall through to normal validation below
+        except Exception as e:
+            log_warning(f"[action_parser] Alias resolution failed for '{action_type}': {e}")
 
     # Dynamic validation - delegate to plugins or interfaces that support this action type
     if (isinstance(payload, dict) or action_type in actions_with_flexible_payload) and action_type in supported_types:
@@ -552,12 +569,12 @@ def _plugins_for(action_type: str) -> List[Any]:
         except Exception as e:
             log_error(f"[action_parser] Error querying plugin {plugin}: {repr(e)}")
 
-    # Special handling for tts_speak: explicitly check for TTS plugin if not found
+    # Special handling for tts_speak: explicitly check for master TTS plugin if not found
     if action_type == "tts_speak" and not plugins:
         for plugin in loaded_plugins:
-            if plugin.__class__.__name__ in {"TTSLipsyncPlugin", "TTSLipSyncPlugin"}:
+            if plugin.__class__.__name__ in {"TTSMasterPlugin", "TTSPlugin"}:
                 plugins.append(plugin)
-                log_info("[action_parser] ✅ Explicitly added TTS plugin for tts_speak")
+                log_info("[action_parser] ✅ Explicitly added TTS master plugin for tts_speak")
                 break
 
     # Special handling for trigger_weather_report: explicitly check for WeatherPlugin if not found

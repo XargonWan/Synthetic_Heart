@@ -478,6 +478,31 @@ def get_supported_models():
     return []
 
 
+def get_current_model():
+    if plugin and hasattr(plugin, "get_current_model"):
+        try:
+            return plugin.get_current_model()
+        except Exception:
+            pass
+    try:
+        from core.config import get_current_model as _get_current_model
+
+        return _get_current_model()
+    except Exception:
+        return None
+
+
+def set_current_model(model: str) -> None:
+    from core.config import set_current_model as _set_current_model
+
+    _set_current_model(model)
+    if plugin and hasattr(plugin, "set_current_model"):
+        try:
+            plugin.set_current_model(model)
+        except Exception:
+            pass
+
+
 def _log_llm_traffic(prompt, response, interface_name):
     """Log raw LLM traffic to a JSONL file (optional)."""
     try:

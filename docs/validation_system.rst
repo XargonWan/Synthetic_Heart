@@ -134,6 +134,12 @@ Updated Behavior
    - Required fields cannot be empty or null
    - Message: ``"Field 'field_name' cannot be empty for action 'action_type'"``
 
+4. **Unknown action handling & corrector** (new)  
+   - If the LLM emits an unknown or misnamed action (for example ``"message_send"`` or a plugin-specific action that doesn't exist), the system will NOT perform silent conversions. Instead:
+     - The action is validated against the current registry of supported action types (from the Validation Registry and registered interfaces).
+     - If validation fails (unsupported type or invalid parameters), the **corrector** will be invoked to request a selective correction from the LLM. This ensures the LLM is explicitly asked to fix names or payloads and prevents implicit guessing by the core.
+     - Component authors or integrators can register explicit alias resolvers via ``get_validation_registry().register_action_alias(alias_name, resolver)`` when an environment requires it, but this is opt-in and not applied automatically.
+
 No Hardcoding
 ~~~~~~~~~~~~~
 

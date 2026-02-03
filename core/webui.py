@@ -2069,9 +2069,36 @@ class SynthWebUIInterface:
         except Exception:
             unsafe_actions = set()
 
+        loaded_llm_engines = set()
+        try:
+            from core.llm_registry import get_llm_registry
+
+            llmreg = get_llm_registry()
+            for name in llmreg.get_available_engines():
+                try:
+                    if llmreg.get_engine(name) is not None:
+                        loaded_llm_engines.add(name)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        try:
+            from core.plugin_instance import plugin as active_plugin
+
+            if active_plugin is not None:
+                module_name = active_plugin.__class__.__module__.split(".")[-1]
+                loaded_llm_engines.add(module_name)
+        except Exception:
+            pass
+
         for entry in definitions:
             # Skip bootstrap-tagged items (not meant for UI)
             if "bootstrap" in entry.get("tags", []):
+                continue
+
+            # Hide LLM-engine-specific variables unless their engine is loaded
+            if "llm_engine" in entry.get("tags", []) and entry.get("component") not in loaded_llm_engines:
                 continue
             component_label = self._get_display_name(entry["component"], None)
             
