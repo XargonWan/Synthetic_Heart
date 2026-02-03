@@ -343,24 +343,99 @@ async def handle_incoming_message(bot, message: Optional[SimpleNamespace], text:
                                 break
 
                     # Auto-inject TTS if there's a user response but no tts_speak
+                    # Only for actual user-facing interfaces (not internal like grillo)
                     if has_user_response and not has_tts and user_message_action:
-                        payload = user_message_action.get('payload', {}) if isinstance(user_message_action, dict) else {}
-                        text_to_speak = payload.get('text') or payload.get('content') or payload.get('message')
-                        if text_to_speak and isinstance(text_to_speak, str) and len(text_to_speak.strip()) > 0:
-                            log_info(f"[message_chain] 🗣️ Auto-injecting 'tts_speak' action for message: {text_to_speak[:30]}...")
-                            tts_action = {
-                                "type": "tts_speak",
-                                "payload": {
-                                    "text": text_to_speak,
-                                    "emotion": payload.get('emotion') if isinstance(payload, dict) else None,
-                                },
-                            }
-                            actions.append(tts_action)
+                        # Check if this is for a user-facing interface
+                        user_facing_interfaces = ['discord_bot', 'telegram_bot', 'synth_webui', 'matrix_chat', 'ollama_serve']
+                        interface_path = ctx.get('interface_path', '')
+                        is_user_facing = any(interface_path.startswith(f"{iface}/") or interface_path == iface 
+                                            for iface in user_facing_interfaces)
+                        
+                        if is_user_facing:
+                            payload = user_message_action.get('payload', {}) if isinstance(user_message_action, dict) else {}
+                            text_to_speak = payload.get('text') or payload.get('content') or payload.get('message')
+                            if text_to_speak and isinstance(text_to_speak, str) and len(text_to_speak.strip()) > 0:
+                                log_info(f"[message_chain] 🗣️ Auto-injecting 'tts_speak' action for message: {text_to_speak[:30]}...")
+                                tts_action = {
+                                    "type": "tts_speak",
+                                    "payload": {
+                                        "text": text_to_speak,
+                                        "emotion": payload.get('emotion') if isinstance(payload, dict) else None,
+                                    },
+                                }
+                                actions.append(tts_action)
+                                # Update has_tts flag since we just added it
+                                has_tts = True
+                        else:
+                            log_debug(f"[message_chain] Skipping TTS auto-inject for non-user-facing interface: {interface_path}")
 
                     if not has_user_response:
                         log_debug('[message_chain] LLM chose not to send user message (diary/internal only)')
                     else:
                         log_debug('[message_chain] LLM will send message to user')
+                        
+                        # CRITICAL FIX: Merge text into TTS when both are present
+                        # This ensures text+audio are sent in the SAME message
+                        # SAFETY: Only do this if TTS plugin is actually loaded
+                        if has_user_response and has_tts and isinstance(actions, list):
+                            # Check if TTS plugin is loaded and active
+                            tts_plugin_available = False
+                            try:
+                                from core.core_initializer import core_initializer
+                                available_actions = core_initializer.actions_block.get("available_actions", {})
+                                # TTS plugin is available if tts_speak is in available actions
+                                tts_plugin_available = 'tts_speak' in available_actions
+                                log_debug(f"[message_chain] TTS plugin availability check: {tts_plugin_available}")
+                            except Exception as e:
+                                log_warning(f"[message_chain] Could not verify TTS plugin availability: {e}")
+                                tts_plugin_available = False
+                            
+                            # Only merge and remove message actions if TTS plugin is confirmed available
+                            if tts_plugin_available:
+                                # Find message and TTS actions
+                                message_actions_to_remove = []
+                                tts_actions = []
+                                
+                                for idx, action in enumerate(actions):
+                                    if not isinstance(action, dict):
+                                        continue
+                                    action_type = action.get('action') or action.get('type')
+                                    
+                                    if action_type == 'tts_speak':
+                                        tts_actions.append(action)
+                                    elif action_type in current_message_action_types:
+                                        # Check if this message action has the same interface_path as TTS
+                                        msg_payload = action.get('payload', {})
+                                        msg_interface_path = msg_payload.get('interface_path')
+                                        msg_text = msg_payload.get('text')
+                                        
+                                        if msg_text and msg_interface_path:
+                                            message_actions_to_remove.append((idx, msg_text, msg_interface_path))
+                                
+                                # Merge text into TTS payloads that match interface_path
+                                if message_actions_to_remove and tts_actions:
+                                    log_info(f"[message_chain] 🔗 Merging {len(message_actions_to_remove)} message action(s) into TTS to send text+audio together")
+                                    
+                                    for tts_action in tts_actions:
+                                        tts_payload = tts_action.get('payload', {})
+                                        if not isinstance(tts_payload, dict):
+                                            continue
+                                        
+                                        # Find matching message text for this TTS (same or compatible interface)
+                                        for idx, msg_text, msg_ipath in message_actions_to_remove:
+                                            # Merge the text into TTS payload
+                                            if '__merged_text' not in tts_payload:
+                                                tts_payload['__merged_text'] = msg_text
+                                                log_info(f"[message_chain] ✅ Merged text into tts_speak: '{msg_text[:50]}...'")
+                                                break
+                                    
+                                    # Remove the standalone message actions (they'll be sent with TTS)
+                                    # Remove in reverse order to avoid index shifting
+                                    for idx, _, _ in sorted(message_actions_to_remove, reverse=True):
+                                        removed_action = actions.pop(idx)
+                                        log_info(f"[message_chain] 🗑️ Removed duplicate message action (will be sent with TTS): {removed_action.get('type')}")
+                            else:
+                                log_info("[message_chain] ⚠️ TTS plugin not available - keeping separate message and TTS actions (text sent separately)")
                 
                 # Execute actions regardless of whether response is included
                 if parsed is not None:

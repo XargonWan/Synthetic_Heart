@@ -11,6 +11,10 @@ from zoneinfo import ZoneInfo
 try:
     # load_dotenv is optional; don't crash if package is missing
     from dotenv import load_dotenv
+    # Support both local development (cwd) and Docker (/app/.env)
+    # The default find_dotenv() logic works well for local dev
+    load_dotenv(override=False)
+    # Explicitly check /app/.env for Docker if not found above or for extra safety
     load_dotenv(dotenv_path="/app/.env", override=False)
 except Exception:
     pass
