@@ -1014,8 +1014,8 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
             # original user question was, not just that "your JSON was invalid". Without this,
             # the LLM might respond to the correction instructions themselves instead of
             # answering the user's original question.
-            # Example: User asks "Rekku ci sei?" -> LLM fails -> Corrector sends correction
-            #          With original_user_message, LLM knows to respond "Sì, ci sono ♡"
+            # Example: User asks "SyntH are you there?" -> LLM fails -> Corrector sends correction
+            #          With original_user_message, LLM knows to respond "Yup, here I am ♡"
             #          Without it, LLM might respond "Acknowledged, JSON was valid"
             original_user_message = ""
             if message:
@@ -1239,6 +1239,16 @@ async def llm_to_interface(interface_send_func, *args, text: str = None, **kwarg
     if kwargs.get('is_llm_response', False) and (not text or not text.strip()):
         log_debug("[transport] Empty LLM response received; skipping corrector and not forwarding")
         return None
+
+    # Normalize LLM text for mojibake / double-escaped sequences BEFORE parsing
+    try:
+        from core.text_utils import normalize_for_outbound
+        norm_text = normalize_for_outbound(text)
+        if norm_text and norm_text != text:
+            log_debug("[llm_to_interface] Normalized LLM text (mojibake/unescape)")
+            text = norm_text
+    except Exception:
+        pass
 
     # If the LLM sent a JSON-like payload that looks like a correction/system message,
     # handle it via the parser orchestrator to avoid echoing it back into the interfaces

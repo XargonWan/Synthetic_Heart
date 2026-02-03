@@ -155,6 +155,7 @@ class MessagePlugin:
             else:
                 rebuilt_interface_path = f"{interface_name}/{target}"
 
+
         # --- Grillo Suppression Logic ---
         if isinstance(context, dict) and (
             context.get("grillo_beat")
@@ -229,44 +230,40 @@ class MessagePlugin:
                 log_debug(f"[message_plugin] Grillo suppression check failed: {e}")
 
         # --- Dispatch ---
-
-        # 1. Try execute_action (Preferred)
-        if hasattr(interface, "execute_action"):
-            log_debug(
-                f"[message_plugin] Delegating {action_type} to {interface_name}.execute_action"
+        handler = INTERFACE_REGISTRY.get(interface_name)
+        if not handler:
+            log_warning(
+                f"[message_plugin] Interface '{interface_name}' not found in registry"
             )
-            return await interface.execute_action(
-                action, context, bot, original_message
-            )
-
-        # 2. Fallback to send_message
-        if not text:
-            # log_warning already logged in validation?
             return
 
-        kwargs = {}
-        if interface_path:
-            kwargs["interface_path"] = interface_path
-        if target:
-            kwargs["target"] = target
-        if thread_id:
-            kwargs["thread_id"] = thread_id
+        if not target:
+            target = getattr(original_message, "chat_id", None)
 
-        for key in ["reply_to_message_id", "conversation_id"]:
-            if key in payload:
-                kwargs[key] = payload[key]
+        if not thread_id and hasattr(original_message, "thread_id"):
+            thread_id = getattr(original_message, "thread_id", None)
 
-        generated_audio = context.get("generated_audio_path")
-        if generated_audio and "audio" not in kwargs:
-            kwargs["audio"] = generated_audio
-            kwargs["audio_path"] = generated_audio
-            log_info(
-                f"[message_plugin] Injecting audio context into send_message: {generated_audio}"
-            )
+        reply_to = None
+        if (
+            original_message
+            and hasattr(original_message, "chat_id")
+            and hasattr(original_message, "message_id")
+            and target == getattr(original_message, "chat_id")
+        ):
+            reply_to = original_message.message_id
+
+        send_payload = {"text": text, "target": target}
+        if thread_id is not None:
+            send_payload["thread_id"] = thread_id
+        if rebuilt_interface_path:
+            send_payload["interface_path"] = rebuilt_interface_path
 
         try:
-            await interface.send_message(text=text, **kwargs)
-            log_info(f"[message_plugin] Message sent to {target} via {interface_name}")
+            await handler.send_message(send_payload, original_message)
+            log_info(
+                f"[message_plugin] Message successfully sent to {target} (thread: {thread_id}, reply_to: {reply_to})"
+            )
+
         except Exception as e:
             log_error(
                 f"[message_plugin] Failed to send message via {interface_name}: {e}"

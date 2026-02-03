@@ -64,6 +64,35 @@ CREATE TABLE IF NOT EXISTS grillo_action_execs (
     FOREIGN KEY (activity_log_id) REFERENCES grillo_activity_log(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Agent Activity Log Table (for Agent plugin proposals/approvals/executions)
+CREATE TABLE IF NOT EXISTS agent_activity_log (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    command TEXT NOT NULL,
+    proposer VARCHAR(100),
+    status ENUM('proposed','approved','rejected','executed') NOT NULL DEFAULT 'proposed',
+    trainer_id VARCHAR(100),
+    request_ts DATETIME DEFAULT CURRENT_TIMESTAMP,
+    response_ts DATETIME,
+    result LONGTEXT,
+    metadata JSON,
+    INDEX idx_status (status),
+    INDEX idx_proposer (proposer)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Tracks executions related to agent_activity_log
+CREATE TABLE IF NOT EXISTS agent_action_execs (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    activity_log_id INT NOT NULL,
+    command TEXT NOT NULL,
+    status ENUM('pending','executed','failed') NOT NULL DEFAULT 'pending',
+    error_text TEXT,
+    result JSON,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_activity_log_id (activity_log_id),
+    FOREIGN KEY (activity_log_id) REFERENCES agent_activity_log(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- Grant privileges to synth user from any host
 GRANT ALL PRIVILEGES ON synth.* TO 'synth'@'%' IDENTIFIED BY 'synth';
 FLUSH PRIVILEGES;

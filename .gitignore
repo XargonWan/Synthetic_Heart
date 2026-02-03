@@ -60,14 +60,8 @@ old
 
 # --- Custom Ignores ---
 .gnore
-.env
-__pycache__/
-*.pyc
-logs/
-backups/
 WEBWAIFU/
 res/synth_webui/static/tts_cache/
-*.log
 *.vrm
 *.backup
 *.disabled
@@ -84,4 +78,4 @@ test_pipeline_output.wav
 *copy.py
 *copy.ps1
 res/synth_webui/static/audio/
-.uv/
+.vscode

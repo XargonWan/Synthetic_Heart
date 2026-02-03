@@ -356,6 +356,28 @@ If your service offers multiple response options, override ``_get_response_choic
 3. **Integration Testing**: Send test messages and verify response extraction
 4. **Choice Testing**: Test with services that offer multiple response options
 
+Agentic Hooks (optional)
+------------------------
+
+LLM engines can optionally implement *agentic* hooks so the core Agent plugin
+can attach and cooperate with engine-level features. These hooks are
+non-mandatory and engines should degrade gracefully if the Agent plugin is
+absent or disabled.
+
+Suggested hooks for engines:
+
+- ``supports_agent() -> bool`` — Return True if the engine provides agentic extensions.
+- ``attach_agent(agent_plugin)`` / ``detach_agent(agent_plugin)`` — Called when the
+  core Agent plugin attaches or detaches; engines can use this to cache the
+  plugin reference or perform initialization.
+- ``agent_prepare_prompt(context) -> dict`` — Return additional engine-specific
+  prompt material.
+- ``agent_execute(action_dict, context) -> dict`` — Optional execution helper;
+  return a dict with execution result, or ``{"status": "unsupported"}``.
+
+Engines must not raise exceptions if the Agent plugin is absent; calls should be
+protected and degrade safely.
+
 Engine Integration
 ------------------
 

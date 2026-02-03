@@ -8,7 +8,7 @@ Provides prompt-building for the 'tag_elaboration' beat.
 from core.ai_plugin_base import AIPluginBase
 from core.logging_utils import log_debug
 
-display_name = "Grillo: Tag Elaboration"
+display_name = "G.R.I.L.L.O Tag Elaboration"
 BEAT_TYPE = "tag_elaboration"
 
 class GrilloTagPlugin(AIPluginBase):

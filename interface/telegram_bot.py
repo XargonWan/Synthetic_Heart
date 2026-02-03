@@ -376,7 +376,8 @@ async def handle_response_command(update: Update, context: ContextTypes.DEFAULT_
 
     message = update.message
     if not message.reply_to_message:
-        await message.reply_text("⚠️ You must use this command in reply to a message forwarded by Rekku.")
+        synth_name = os.getenv("SYNTH_NAME") or "SyntH"
+        await message.reply_text(f"⚠️ You must use this command in reply to a message forwarded by {synth_name}.")
         return
 
     chat_id, message_id = await resolve_forwarded_target(message.reply_to_message)
@@ -1451,7 +1452,7 @@ class TelegramInterface:
                     },
                     "chat_name": {
                         "type": "string",
-                        "example": "Il covo di Rekku",
+                        "example": "Rekkus Hideout",
                         "description": "Alternative to interface_path for specifying the chat by name (will be resolved to interface_path)",
                         "optional": True,
                     },
@@ -1481,7 +1482,7 @@ class TelegramInterface:
                     },
                     "chat_name": {
                         "type": "string",
-                        "example": "Il covo di Rekku",
+                        "example": "Rekkus Hideout",
                         "description": "Alternative to interface_path for specifying the chat by name",
                         "optional": True,
                     },
@@ -1736,6 +1737,16 @@ class TelegramInterface:
         text = payload.get("text", "")
         interface_path = payload.get("interface_path")
         chat_name = payload.get("chat_name")
+
+        # Normalize text to recover mojibake or double-escaped unicode sequences
+        try:
+            from core.text_utils import normalize_for_outbound
+            norm = normalize_for_outbound(text)
+            if norm and norm != text:
+                log_debug("[telegram_interface] Normalized text payload (mojibake/unescape)")
+                text = norm
+        except Exception:
+            pass
         
         # If no interface_path and no chat_name, silently ignore (likely from synthetic event message)
         if not interface_path and not chat_name:

@@ -1326,7 +1326,7 @@ def build_minified_json_instructions() -> dict:
 def reduce_prompt_for_llm_limit(prompt: dict, max_chars: int) -> dict:
     """Reduce the prompt if it exceeds the LLM character limit.
     
-    CRITICAL: Both instructions, instructions_verbose (if present), AND persona (Rekku profile)
+    CRITICAL: Both instructions, instructions_verbose (if present), AND persona (SyntH profile)
     are NEVER removed - they are SACRED.
     
     Priority order (STEP BY STEP):
