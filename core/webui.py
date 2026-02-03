@@ -44,7 +44,7 @@ from core.message_chain import get_failed_message_text, RESPONSE_TIMEOUT, FAILED
 import core.plugin_instance as plugin_instance
 from core import db as core_db
 from core.action_state_manager import get_action_state_manager, AnimationPhase
-from core.animation_handler import AnimationState
+from core.animation_handler import AnimationState, AnimationHandler
 from core import animation_uploads
 import mimetypes
 
@@ -279,6 +279,32 @@ class SynthWebUIInterface:
         
         log_info(f"{LOG_PREFIX} ========== VRM DIRECTORY MOUNT END ==========")
 
+        # Initialize AnimationHandler so tests and runtime can access it
+        try:
+            self.animation_handler = AnimationHandler(self)
+            # Register webui callbacks with the animation handler
+            self.animation_handler.set_webui(self)
+            # Preload idle animations in background (non-blocking)
+            try:
+                asyncio.create_task(self.animation_handler.ensure_idle_preloaded())
+            except Exception:
+                pass
+        except Exception as e:
+            # If animation handler fails to initialize, create a lightweight stub
+            log_warning(f"{LOG_PREFIX} AnimationHandler init failed: {e}")
+
+            class _AnimStub:
+                def __init__(self):
+                    self._current_animation_file = None
+                    self._current_animation_descriptor = None
+                    self._current_animation_started_at = None
+
+                def get_current_animation_state(self):
+                    return {"state": AnimationState.IDLE.value, "animation_file": None, "descriptor": None}
+
+            self.animation_handler = _AnimStub()
+
+
 
         self.app.get("/")(self.index)
         self.app.get("/health")(self.health)
@@ -334,6 +360,17 @@ class SynthWebUIInterface:
         self.app.get("/api/history/chat")(self.history_chat)
         self.app.get("/api/selkies")(self.get_selkies_config)
         self.app.get("/api/selkies/health")(self.get_selkies_health)
+
+        # Agent tasks endpoints (Agent Loop persistence & control)
+        self.app.get("/api/agent/tasks")(self.list_agent_tasks)
+        self.app.get("/api/agent/tasks/{task_id}")(self.get_agent_task)
+        self.app.post("/api/agent/tasks")(self.create_agent_task)
+        self.app.post("/api/agent/tasks/{task_id}/pause")(self.pause_agent_task)
+        self.app.post("/api/agent/tasks/{task_id}/resume")(self.resume_agent_task)
+        self.app.post("/api/agent/tasks/{task_id}/cancel")(self.cancel_agent_task)
+        # Agent proposal approval endpoint
+        self.app.get("/api/agent/proposals")(self.list_agent_proposals)
+        self.app.post("/api/agent/proposals/{proposal_id}/approve")(self.approve_agent_proposal)
         self.app.get("/api/animations/{skin}/{animation_type}")(self.get_animations_for_type)
         self.app.post("/api/animations/upload")(self.upload_animation)
         self.app.get("/api/animations/uploads")(self.list_animation_uploads)
@@ -378,6 +415,158 @@ class SynthWebUIInterface:
         # Template sections route for modular loading
         self.app.get("/templates/{section}.html")(self.serve_template_section)
 
+    # --- Agent endpoints ---
+    async def list_agent_tasks(self, limit: int = 50):
+        try:
+            from core.db import get_conn_ctx
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute("SELECT id, engine, status, created_at, updated_at FROM agent_tasks ORDER BY created_at DESC LIMIT %s", (int(limit),))
+                    rows = await cur.fetchall()
+                    tasks = []
+                    for r in rows:
+                        tasks.append({"id": r[0], "engine": r[1], "status": r[2], "created_at": r[3].isoformat() if r[3] else None, "updated_at": r[4].isoformat() if r[4] else None})
+                    return JSONResponse({"tasks": tasks})
+        except Exception as e:
+            log_error(f"{LOG_PREFIX} list_agent_tasks failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    async def get_agent_task(self, task_id: int):
+        try:
+            from core.db import get_conn_ctx
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute("SELECT id, engine, status, input, iterations_meta, output, trainer_id, metadata, created_at, updated_at FROM agent_tasks WHERE id=%s", (int(task_id),))
+                    row = await cur.fetchone()
+                    if not row:
+                        raise HTTPException(status_code=404, detail="task not found")
+                    return JSONResponse({
+                        "id": row[0],
+                        "engine": row[1],
+                        "status": row[2],
+                        "input": json.loads(row[3]) if row[3] else None,
+                        "iterations_meta": json.loads(row[4]) if row[4] else [],
+                        "output": json.loads(row[5]) if row[5] else None,
+                        "trainer_id": row[6],
+                        "metadata": json.loads(row[7]) if row[7] else None,
+                        "created_at": row[8].isoformat() if row[8] else None,
+                        "updated_at": row[9].isoformat() if row[9] else None,
+                    })
+        except HTTPException:
+            raise
+        except Exception as e:
+            log_error(f"{LOG_PREFIX} get_agent_task failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    async def create_agent_task(self, request: Request):
+        try:
+            body = await request.json()
+            engine = body.get("engine", "default")
+            input_payload = body.get("input") or body.get("prompt") or {}
+            max_iterations = body.get("max_iterations")
+
+            # Check agent enabled
+            from core.config_manager import config_registry as cfg
+            if not bool(cfg.get_var("AGENT_ENABLED", True)):
+                raise HTTPException(status_code=403, detail="Agent disabled")
+
+            from core.agent_core import get_agent_loop_manager
+            manager = get_agent_loop_manager()
+            task_id = await manager.run_loop(engine=engine, input_payload=input_payload, context={}, max_iterations=max_iterations)
+            if not task_id:
+                raise HTTPException(status_code=500, detail="Failed to create agent task")
+            return JSONResponse({"task_id": task_id})
+        except HTTPException:
+            raise
+        except Exception as e:
+            log_error(f"{LOG_PREFIX} create_agent_task failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    async def pause_agent_task(self, task_id: int):
+        try:
+            from core.agent_core import get_agent_loop_manager
+            manager = get_agent_loop_manager()
+            manager.pause_task(int(task_id))
+            # Persist status
+            from core.db import get_conn_ctx
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute("UPDATE agent_tasks SET status=%s WHERE id=%s", ("paused", int(task_id)))
+                    await conn.commit()
+            return JSONResponse({"status": "paused"})
+        except Exception as e:
+            log_error(f"{LOG_PREFIX} pause_agent_task failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    async def resume_agent_task(self, task_id: int):
+        try:
+            from core.agent_core import get_agent_loop_manager
+            manager = get_agent_loop_manager()
+            manager.resume_task(int(task_id))
+            from core.db import get_conn_ctx
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute("UPDATE agent_tasks SET status=%s WHERE id=%s", ("running", int(task_id)))
+                    await conn.commit()
+            return JSONResponse({"status": "running"})
+        except Exception as e:
+            log_error(f"{LOG_PREFIX} resume_agent_task failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    async def cancel_agent_task(self, task_id: int):
+        try:
+            from core.agent_core import get_agent_loop_manager
+            manager = get_agent_loop_manager()
+            manager.cancel_task(int(task_id))
+            from core.db import get_conn_ctx
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute("UPDATE agent_tasks SET status=%s WHERE id=%s", ("cancelled", int(task_id)))
+                    await conn.commit()
+            return JSONResponse({"status": "cancelled"})
+        except Exception as e:
+            log_error(f"{LOG_PREFIX} cancel_agent_task failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    async def approve_agent_proposal(self, proposal_id: int, request: Request):
+        try:
+            body = await request.json()
+            trainer = body.get("trainer") or body.get("trainer_id") or None
+            original_message = {"sender_id": trainer} if trainer else None
+
+            from core.core_initializer import PLUGIN_REGISTRY
+            plugin = PLUGIN_REGISTRY.get('agent')
+            if not plugin:
+                raise HTTPException(status_code=404, detail="Agent plugin not loaded")
+
+            res = await plugin.execute_action({"type": "approve_action", "payload": {"proposal_id": int(proposal_id)}}, {}, None, original_message)
+            return JSONResponse({"result": res})
+        except HTTPException:
+            raise
+        except Exception as e:
+            log_error(f"{LOG_PREFIX} approve_agent_proposal failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    async def list_agent_proposals(self, limit: int = 50):
+        try:
+            from core.db import get_conn_ctx
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute("SELECT id, command, proposer, status, request_ts FROM agent_activity_log WHERE status=%s ORDER BY request_ts DESC LIMIT %s", ("proposed", int(limit)))
+                    rows = await cur.fetchall()
+                    proposals = []
+                    for r in rows:
+                        proposals.append({
+                            "id": r[0],
+                            "command": r[1],
+                            "proposer": r[2],
+                            "status": r[3],
+                            "requested_at": r[4].isoformat() if r[4] else None,
+                        })
+                    return JSONResponse({"proposals": proposals})
+        except Exception as e:
+            log_error(f"{LOG_PREFIX} list_agent_proposals failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
         # Register as an interface only when autostart is enabled.
         # Tests/dev harnesses may instantiate the WebUI with autostart disabled
         # and without a fully initialized core initializer.
@@ -788,7 +977,7 @@ class SynthWebUIInterface:
         """Serve modular template sections for dynamic loading."""
         try:
             # Validate section name to prevent path traversal
-            allowed_sections = {'home', 'logs', 'diary', 'config', 'components', 'about', 'navbar'}
+            allowed_sections = {'home', 'skins', 'logs', 'diary', 'history', 'config', 'components', 'settings', 'about', 'navbar', 'agent'}
             if section not in allowed_sections:
                 raise HTTPException(status_code=404, detail="Template section not found")
 

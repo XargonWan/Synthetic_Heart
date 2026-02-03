@@ -1384,7 +1384,7 @@
             const navLoaded = await loadNavigation();
 
             // Load all template sections (excluding navbar which is loaded separately)
-            const sections = ['home', 'logs', 'diary', 'config', 'components', 'about'];
+            const sections = ['home', 'logs', 'diary', 'agent', 'config', 'components', 'about'];
             const templatePromises = sections.map(section => loadTemplateSection(section));
             const templates = await Promise.all(templatePromises);
 
