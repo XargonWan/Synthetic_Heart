@@ -1240,6 +1240,16 @@ async def llm_to_interface(interface_send_func, *args, text: str = None, **kwarg
         log_debug("[transport] Empty LLM response received; skipping corrector and not forwarding")
         return None
 
+    # Normalize LLM text for mojibake / double-escaped sequences BEFORE parsing
+    try:
+        from core.text_utils import normalize_for_outbound
+        norm_text = normalize_for_outbound(text)
+        if norm_text and norm_text != text:
+            log_debug("[llm_to_interface] Normalized LLM text (mojibake/unescape)")
+            text = norm_text
+    except Exception:
+        pass
+
     # If the LLM sent a JSON-like payload that looks like a correction/system message,
     # handle it via the parser orchestrator to avoid echoing it back into the interfaces
     try:
