@@ -45,7 +45,11 @@ _ensure_module("telegram.ext", {
 # dotenv stub --------------------------------------------------------------
 _ensure_module("dotenv", {"load_dotenv": lambda *args, **kwargs: False})
 
-# aiomysql stub ------------------------------------------------------------
-async def _missing_connect(*args, **kwargs):
-    raise RuntimeError("aiomysql is not installed")
-_ensure_module("aiomysql", {"connect": _missing_connect, "create_pool": _missing_connect, "Connection": type("Connection", (), {})})
+# aiomysql stub - only install a stub if aiomysql is NOT available
+try:
+    import aiomysql  # noqa: F401
+except Exception:
+    async def _missing_connect(*args, **kwargs):
+        raise RuntimeError("aiomysql is not installed")
+
+    _ensure_module("aiomysql", {"connect": _missing_connect, "create_pool": _missing_connect, "Connection": type("Connection", (), {})})

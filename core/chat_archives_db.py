@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from core.logging_utils import log_debug, log_info, log_warning
 from core.db import get_conn_ctx
+import os
 
 
 async def init_chat_archives_table() -> None:
@@ -40,6 +41,23 @@ async def init_chat_archives_table() -> None:
 async def create_archive(session_id: str, messages: List[Dict[str, Any]], name: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     archive_id = uuid4().hex
     created_at = datetime.utcnow().isoformat()
+
+    # In-memory testing path ------------------------------------------------
+    if os.getenv('SYNTH_TESTING', '0') == '1':
+        if not hasattr(create_archive, '_in_memory_store'):
+            create_archive._in_memory_store = {}
+        create_archive._in_memory_store[archive_id] = {
+            "id": archive_id,
+            "session_id": session_id,
+            "name": name or 'Chat',
+            "messages": messages,
+            "metadata": metadata,
+            "created_at": created_at,
+        }
+        log_info(f"[chat_archives_db] (testing) Created archive {archive_id} for session {session_id}")
+        return {"id": archive_id, "created_at": created_at}
+
+    # Production DB path ----------------------------------------------------
     try:
         await init_chat_archives_table()
         async with get_conn_ctx() as conn:
@@ -56,6 +74,24 @@ async def create_archive(session_id: str, messages: List[Dict[str, Any]], name: 
 
 
 async def list_archives(session_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    # Testing path: list from in-memory store
+    if os.getenv('SYNTH_TESTING', '0') == '1':
+        store = getattr(create_archive, '_in_memory_store', {})
+        out = []
+        for a in store.values():
+            if session_id and a.get('session_id') != session_id:
+                continue
+            out.append({
+                "id": a['id'],
+                "session_id": a['session_id'],
+                "name": a.get('name', 'Chat'),
+                "created_at": a.get('created_at'),
+                "message_count": len(a.get('messages') or []),
+            })
+        # Order by created_at descending
+        out.sort(key=lambda x: x.get('created_at') or '', reverse=True)
+        return out
+
     try:
         log_debug(f"[chat_archives_db] list_archives called with session_id={session_id}")
         await init_chat_archives_table()
@@ -88,6 +124,14 @@ async def list_archives(session_id: Optional[str] = None) -> List[Dict[str, Any]
 
 
 async def load_archive(archive_id: str) -> Dict[str, Any]:
+    # Testing path ---------------------------------------------------------
+    if os.getenv('SYNTH_TESTING', '0') == '1':
+        store = getattr(create_archive, '_in_memory_store', {})
+        arch = store.get(archive_id)
+        if not arch:
+            raise FileNotFoundError(archive_id)
+        return arch
+
     try:
         await init_chat_archives_table()
         async with get_conn_ctx() as conn:
@@ -113,6 +157,15 @@ async def load_archive(archive_id: str) -> Dict[str, Any]:
 
 
 async def delete_archive(archive_id: str) -> None:
+    # Testing path ---------------------------------------------------------
+    if os.getenv('SYNTH_TESTING', '0') == '1':
+        store = getattr(create_archive, '_in_memory_store', {})
+        if archive_id in store:
+            del store[archive_id]
+            log_info(f"[chat_archives_db] (testing) Deleted archive {archive_id}")
+            return
+        raise FileNotFoundError(archive_id)
+
     try:
         await init_chat_archives_table()
         async with get_conn_ctx() as conn:

@@ -40,21 +40,23 @@ def get_reaction_emoji() -> Optional[str]:
     return emoji
 
 
-async def react_when_mentioned(interface, message, emoji: str) -> bool:
+async def react_when_mentioned(interface, message, emoji: Optional[str] = None) -> bool:
     """
     Add a reaction to a message using the interface's add_reaction method.
     
-    This function should be called when is_message_for_bot returns True.
-    It calls the interface's add_reaction method with the provided emoji.
+    If `emoji` is None this function will query the configured default via
+    `get_reaction_emoji()` and skip the reaction if no emoji is configured.
     
     Args:
         interface: The interface instance that supports add_reaction
         message: The message object that triggered the bot
-        emoji: The emoji to use as reaction
+        emoji: Optional emoji to use as reaction (defaults to configured value)
         
     Returns:
         bool: True if reaction was added successfully, False otherwise
-    """
+    """    # If emoji is None, get configured default
+    if emoji is None:
+        emoji = get_reaction_emoji()
     log_debug(f"[reaction] react_when_mentioned called with emoji '{emoji}', interface={type(interface).__name__}, message_id={getattr(message, 'message_id', 'unknown')}")
     if not emoji:
         log_debug("[reaction] No emoji configured, skipping reaction")

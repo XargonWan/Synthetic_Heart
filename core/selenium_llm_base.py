@@ -320,6 +320,116 @@ class SeleniumLLMBase(AIPluginBase):
     _global_driver_lock = asyncio.Lock()
     _global_ref_count = 0
 
+    # Agent task queue for serialized selenium execution (single-browser constraint)
+    # Use _task_queue to enqueue callables that will be executed sequentially.
+    _task_queue: Optional[asyncio.Queue] = None
+    _queue_worker_task: Optional[asyncio.Task] = None
+
+    @classmethod
+    async def _ensure_queue_worker(cls) -> None:
+        if cls._task_queue is None:
+            cls._task_queue = asyncio.Queue()
+        if cls._queue_worker_task is None or cls._queue_worker_task.done():
+            cls._queue_worker_task = asyncio.create_task(cls._queue_worker())
+
+    @classmethod
+    async def _queue_worker(cls) -> None:
+        """Worker that serially executes wrapped callables from the queue."""
+        while True:
+            wrapper = await cls._task_queue.get()
+            try:
+                await wrapper()
+            except Exception as e:
+                log_error(f"[selenium] _queue_worker task failed: {e}")
+            finally:
+                cls._task_queue.task_done()
+
+    async def enqueue_selenium_task(self, func: Callable[..., Any], *args, **kwargs) -> Any:
+        """Enqueue a coroutine (or sync function) for serialized selenium execution.
+
+        Returns the eventual result of func(*args, **kwargs).
+        """
+        await self._ensure_queue_worker()
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+
+        async def wrapper():
+            try:
+                if asyncio.iscoroutinefunction(func):
+                    res = await func(*args, **kwargs)
+                else:
+                    res = await asyncio.to_thread(func, *args, **kwargs)
+                fut.set_result(res)
+            except Exception as e:
+                fut.set_exception(e)
+
+        await self._task_queue.put(wrapper)
+        return await fut
+
+    # --- Agentic hooks ---
+    def supports_agent(self) -> bool:
+        """Selenium-based engines support agentic workflows (serialized single-browser tasks)."""
+        return True
+
+    def attach_agent(self, agent_plugin) -> None:
+        try:
+            setattr(self, "_agent_plugin", agent_plugin)
+            setattr(self, "agent_enabled", True)
+            log_info("[selenium] Agent attached to selenium engine")
+        except Exception as e:
+            log_warning(f"[selenium] attach_agent failed: {e}")
+
+    def detach_agent(self, agent_plugin) -> None:
+        try:
+            if hasattr(self, "_agent_plugin"):
+                delattr(self, "_agent_plugin")
+            setattr(self, "agent_enabled", False)
+            log_info("[selenium] Agent detached from selenium engine")
+        except Exception as e:
+            log_warning(f"[selenium] detach_agent failed: {e}")
+
+    def agent_execute(self, action_dict: dict, context: dict | None = None) -> dict:
+        """Engine-level execution helper for agentic actions.
+
+        For Selenium engines, we serialize execution through the single-browser
+        queue to avoid concurrent browser access. The default behavior attempts
+        to delegate to the Agent plugin's `execute_action` method inside the
+        serialized task so any shell commands or actions respect approval flows.
+        """
+        try:
+            from core.core_initializer import PLUGIN_REGISTRY
+            agent = PLUGIN_REGISTRY.get('agent') if isinstance(PLUGIN_REGISTRY, dict) else None
+
+            async def _exec():
+                if agent is None or not hasattr(agent, 'execute_action'):
+                    return {"status": "unsupported", "reason": "agent plugin unavailable"}
+                res = agent.execute_action(action_dict, context or {}, None, None)
+                if hasattr(res, '__await__'):
+                    # Await coroutine
+                    return await res
+                return res
+
+            # Use enqueue_selenium_task to serialize this execution
+            res = None
+            try:
+                loop = asyncio.get_running_loop()
+                # Submit and wait synchronously via run_until_complete if outside loop
+            except RuntimeError:
+                loop = None
+
+            if loop and loop.is_running():
+                # We're in an async context; schedule as task and return pending marker
+                _ = asyncio.create_task(self.enqueue_selenium_task(_exec))
+                return {"status": "scheduled"}
+            else:
+                # No running loop; run a temporary loop to execute
+                import asyncio as _asyncio
+                res = _asyncio.get_event_loop().run_until_complete(self.enqueue_selenium_task(_exec))
+                return res if res is not None else {"status": "ok"}
+        except Exception as e:
+            log_warning(f"[selenium] agent_execute failed: {e}")
+            return {"status": "error", "reason": str(e)}
+
     @classmethod
     def _driver_is_usable(cls, driver: Optional[webdriver.Remote]) -> bool:
         """Best-effort check to detect when the user closed the visible browser.

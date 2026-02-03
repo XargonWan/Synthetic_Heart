@@ -93,6 +93,22 @@ CREATE TABLE IF NOT EXISTS agent_action_execs (
     FOREIGN KEY (activity_log_id) REFERENCES agent_activity_log(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Agent tasks table: persistent record of agent loop tasks and their iterations
+CREATE TABLE IF NOT EXISTS agent_tasks (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    engine VARCHAR(64),
+    status ENUM('pending','running','waiting_for_approval','paused','completed','failed','cancelled') NOT NULL DEFAULT 'pending',
+    input JSON,
+    iterations_meta JSON,
+    output JSON,
+    trainer_id VARCHAR(64),
+    metadata JSON,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_agent_status (status),
+    INDEX idx_agent_created (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- Grant privileges to synth user from any host
 GRANT ALL PRIVILEGES ON synth.* TO 'synth'@'%' IDENTIFIED BY 'synth';
 FLUSH PRIVILEGES;

@@ -172,21 +172,56 @@ async def get_pool():
                     host, port, user, passwd, dbname = (os.getenv('DB_HOST', 'localhost'), int(os.getenv('DB_PORT', '3306')), os.getenv('DB_USER', 'synth'), os.getenv('DB_PASS', 'synth'), os.getenv('DB_NAME', 'synth'))
 
                 log_info(f"[db] Creating pool with minsize={DB_POOL_MINSIZE} maxsize={DB_POOL_MAXSIZE}")
-                new_pool = await aiomysql.create_pool(
-                    host=host,
-                    port=port,
-                    user=user,
-                    password=passwd,
-                    db=dbname,
-                    autocommit=True,
-                    minsize=DB_POOL_MINSIZE,
-                    maxsize=DB_POOL_MAXSIZE,
-                    pool_recycle=300,  # Recycle connections every 5 minutes (was 3600s) to prevent zombie connections
-                )
-                # Store the pool keyed by the loop id so concurrent event loops
-                # get a pool bound to their loop (avoids cross-loop use errors).
-                _pools_by_loop[loop_id] = new_pool
-                pool = new_pool
+
+                # If running tests in an environment without a MySQL server,
+                # provide a lightweight in-memory fake pool when SYNTH_TESTING=1
+                if os.getenv('SYNTH_TESTING', '0') == '1':
+                    class _FakeCursor:
+                        async def __aenter__(self):
+                            return self
+                        async def __aexit__(self, exc_type, exc, tb):
+                            return False
+                        async def execute(self, *args, **kwargs):
+                            return None
+                        async def fetchone(self):
+                            return None
+                        async def fetchall(self):
+                            return []
+
+                    class _FakeConn:
+                        def cursor(self):
+                            return _FakeCursor()
+                        def close(self):
+                            pass
+
+                    class _FakePool:
+                        async def acquire(self):
+                            return _FakeConn()
+                        async def release(self, conn):
+                            pass
+                        def close(self):
+                            pass
+                        async def wait_closed(self):
+                            pass
+
+                    _pools_by_loop[loop_id] = _FakePool()
+                    pool = _pools_by_loop[loop_id]
+                else:
+                    new_pool = await aiomysql.create_pool(
+                        host=host,
+                        port=port,
+                        user=user,
+                        password=passwd,
+                        db=dbname,
+                        autocommit=True,
+                        minsize=DB_POOL_MINSIZE,
+                        maxsize=DB_POOL_MAXSIZE,
+                        pool_recycle=300,  # Recycle connections every 5 minutes (was 3600s) to prevent zombie connections
+                    )
+                    # Store the pool keyed by the loop id so concurrent event loops
+                    # get a pool bound to their loop (avoids cross-loop use errors).
+                    _pools_by_loop[loop_id] = new_pool
+                    pool = new_pool
 
     return pool
 

@@ -14,6 +14,26 @@ All LLM engines follow a consistent architecture:
 - **Dynamic Switching**: Active engine can be changed without restarting the system
 - **Unified Limits**: Engines report their constraints (token limits, modalities, etc.)
 
+Agent Hooks (optional)
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Engines may optionally implement a small set of agent hooks to provide richer,
+engine-specific integrations for the Agent plugin. These hooks are optional and
+engines that do not implement them will degrade gracefully — the Agent will
+fall back to calling ``plugin_instance.handle_incoming_message()`` and the
+plugin-level handlers.
+
+Recommended methods (all optional):
+
+- ``supports_agent() -> bool`` — return True if the engine provides agentic features
+- ``attach_agent(agent_plugin)`` / ``detach_agent(agent_plugin)`` — lifecycle hooks
+- ``agent_prepare_prompt(context) -> dict`` — provide additional structured context
+- ``agent_execute(action_dict, context) -> dict`` — optional engine-level action executor
+
+Note: These hooks are intended to be lightweight extensions, not required
+capabilities. The Agent integration remains fully functional with engines that
+do nothing more than implement the standard ``AIPluginBase`` interface.
+
 Selenium Plugin Architecture
 -----------------------------
 
