@@ -601,6 +601,7 @@ class GrilloPlugin(AIPluginBase):
                     log_info(f"[grillo] Persisted action exec to fallback file for activity_id={activity_log_id} idx={action_index}")
                 except Exception as e2:
                     log_debug(f"[grillo] fallback write failed: {e2}")
+    @classmethod
     async def fetch_action_execs(cls, activity_ids: list[int]) -> dict:
         """Return mapping activity_log_id -> list of action exec dicts.
 
@@ -680,6 +681,7 @@ class GrilloPlugin(AIPluginBase):
         return mapping
 
     @classmethod
+    @classmethod
     async def _fallback_write_action_exec(cls, exec_obj: dict) -> None:
         """Append action exec to a local fallback JSONL file in logs/ if DB unavailable."""
         try:
@@ -692,6 +694,7 @@ class GrilloPlugin(AIPluginBase):
         except Exception as e:
             log_debug(f"[grillo] _fallback_write_action_exec failed: {e}")
 
+    @classmethod
     @classmethod
     async def _fallback_read_action_execs(cls, activity_ids: list[int]) -> dict:
         """Read fallback JSONL file and return mapping activity_log_id -> list of execs."""

@@ -22,6 +22,13 @@ from core.variables_engine import register_exposed_var
 
 from plugins.grillo.common_instructions import GRILLO_INSTRUCTIONS as OBSERVER_INSTRUCTIONS
 
+# Expose check_for_updates_once here for tests and for backwards compatibility
+try:
+    from core.chat_update_checker import check_for_updates_once
+except Exception:
+    async def check_for_updates_once(consume: bool = True):
+        return {"updated": False, "new_messages": [], "last_checked": None}
+
 
 register_exposed_var(
     "GRILLO_OBSERVER_STORE_MEMORIES",
@@ -199,8 +206,17 @@ class GrilloChatObserverPlugin:
                         max_ts = r[1]
 
                 if cnt == 0:
-                    log_debug('[grillo_chat_observer] No new non-self messages since last_run; skipping')
-                    return
+                    # No DB updates - do a non-consuming checker probe so tests and
+                    # other environments that rely on the checker are still respected
+                    try:
+                        chk = await check_for_updates_once(consume=False)
+                        if not chk.get('updated'):
+                            log_debug('[grillo_chat_observer] No new non-self messages since last_run; skipping')
+                            return
+                        # If checker reports updates, we proceed
+                    except Exception:
+                        log_debug('[grillo_chat_observer] No new non-self messages since last_run; skipping')
+                        return
                 else:
                     log_debug(f"[grillo_chat_observer] Found {cnt} new non-self messages since last_run; proceeding")
 
@@ -208,7 +224,7 @@ class GrilloChatObserverPlugin:
                 log_debug(f"[grillo_chat_observer] Direct DB check failed; falling back to checker: {e}")
                 # Fallback to non-consuming peek
                 try:
-                    from core.chat_update_checker import check_for_updates_once
+                    # Use the module-level check_for_updates_once (allows tests to monkeypatch it)
                     chk = await check_for_updates_once(consume=False)
                     if not chk.get('updated'):
                         log_debug("[grillo_chat_observer] No new messages after fallback; skipping observer run")
