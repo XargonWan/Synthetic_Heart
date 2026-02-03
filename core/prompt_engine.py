@@ -213,7 +213,28 @@ async def llm_memory_search_preflight(
         parsed = extract_json_from_text(llm_text, return_metadata=False)
     except Exception as e:
         log_debug(f"[json_prompt] LLM preflight: failed to parse JSON: {e}")
-        return []
+        # Attempt a single corrector pass if the output looks JSON-like (contains brackets)
+        try:
+            if isinstance(llm_text, str) and ("{" in llm_text or "[" in llm_text):
+                log_info("[json_prompt] LLM preflight: attempting corrector middleware on malformed JSON output")
+                try:
+                    from core.transport_layer import run_corrector_middleware
+                    # Build a minimal context/message for the corrector to have reference
+                    corrected = await run_corrector_middleware(llm_text, bot=None, context={'interface': interface_name, 'original_text': llm_text}, chat_id=getattr(original_message, 'chat_id', None))
+                    if corrected and isinstance(corrected, str):
+                        try:
+                            parsed = extract_json_from_text(corrected, return_metadata=False)
+                            # replace llm_text with corrected for telemetry/logging
+                            llm_text = corrected
+                        except Exception as e2:
+                            log_debug(f"[json_prompt] LLM preflight: corrected text still invalid JSON: {e2}")
+                except Exception as e1:
+                    log_debug(f"[json_prompt] LLM preflight: corrector middleware failed: {e1}")
+        except Exception:
+            pass
+
+        if not parsed:
+            return []
 
     # Accept either {"actions": [...]} or a single action object {"type":..., "payload":...}
     actions_list = None

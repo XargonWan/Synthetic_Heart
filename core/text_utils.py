@@ -79,3 +79,46 @@ def try_recover_mojibake(text: Optional[str]) -> Optional[str]:
 
     best = max(candidates, key=score)
     return best
+
+
+def normalize_for_outbound(text: Optional[str]) -> Optional[str]:
+    """Normalize text before sending to interfaces:
+
+    - Attempt mojibake recovery using try_recover_mojibake
+    - Unescape common backslash-escaped sequences (unicode_escape) if present
+
+    This function is conservative and returns the original text if any step
+    fails or if no likely transformation is detected.
+    """
+    if text is None:
+        return None
+
+    # First, try to recover mojibake
+    try:
+        recovered = try_recover_mojibake(text)
+        if recovered and recovered != text:
+            text = recovered
+    except Exception:
+        # Non-fatal: proceed with original text
+        pass
+
+    # If there are visible backslash escapes, attempt unicode unescape
+    try:
+        if isinstance(text, str) and ("\\u" in text or "\\n" in text or "\\t" in text or "\\r" in text or "\\x" in text or '\\"' in text or "\\'" in text):
+            unescaped = bytes(text, "utf-8").decode("unicode_escape")
+            if unescaped and unescaped != text:
+                text = unescaped
+    except Exception:
+        # Non-fatal: keep original text
+        pass
+
+    # Also collapse leftover JSON-style escapes like \" -> " and \\ -> \ if present
+    try:
+        if isinstance(text, str) and ('\\"' in text or "\\'" in text or '\\\\' in text):
+            new_text = text.replace('\\"', '"').replace("\\'", "'").replace('\\\\', '\\')
+            if new_text != text:
+                text = new_text
+    except Exception:
+        pass
+
+    return text

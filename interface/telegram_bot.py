@@ -1595,6 +1595,16 @@ class TelegramInterface:
         text = payload.get("text", "")
         interface_path = payload.get("interface_path")
         chat_name = payload.get("chat_name")
+
+        # Normalize text to recover mojibake or double-escaped unicode sequences
+        try:
+            from core.text_utils import normalize_for_outbound
+            norm = normalize_for_outbound(text)
+            if norm and norm != text:
+                log_debug("[telegram_interface] Normalized text payload (mojibake/unescape)")
+                text = norm
+        except Exception:
+            pass
         
         # If no interface_path and no chat_name, silently ignore (likely from synthetic event message)
         if not interface_path and not chat_name:
