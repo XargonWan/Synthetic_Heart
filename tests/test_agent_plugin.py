@@ -48,6 +48,27 @@ async def test_always_ask_mode_proposes(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_execute_notifies_trainer_when_enabled(monkeypatch):
+    called = {}
+
+    def notify(msg):
+        called['msg'] = msg
+
+    p = AgentPlugin(notify_fn=notify)
+    p._enabled = True
+    p._approval_mode = "always_approve"
+
+    async def fake_run(cmd, timeout=30.0):
+        return "OUT: " + cmd
+
+    monkeypatch.setattr(p, "_run_command", fake_run)
+
+    res = await p.execute_action({"type": "agent_execute", "payload": {"command": "echo hi"}}, {}, None, None)
+    assert "OUT: echo hi" in res
+    assert 'msg' in called and 'Agent executed command' in called['msg']
+
+
+@pytest.mark.asyncio
 async def test_disabled_mode_rejects(monkeypatch):
     p = AgentPlugin()
     p._enabled = True
