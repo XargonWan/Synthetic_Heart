@@ -36,8 +36,10 @@ async def test_engine_hooks_attach_and_agent_execute(monkeypatch):
         def load_engine(self, name):
             return hook
 
-    monkeypatch.setattr('core.config.get_active_llm', lambda: asyncio.sleep(0, result='some_engine'))
-    monkeypatch.setattr('core.llm_registry.get_llm_registry', lambda: FakeRegistry())
+    monkeypatch.setattr(
+        "core.config.get_active_llm", lambda: asyncio.sleep(0, result="some_engine")
+    )
+    monkeypatch.setattr("core.llm_registry.get_llm_registry", lambda: FakeRegistry())
 
     agent = AgentCore()
     agent._enabled = True
@@ -48,8 +50,8 @@ async def test_engine_hooks_attach_and_agent_execute(monkeypatch):
 
     # Test agent_execute usage
     out = hook.agent_execute({"type": "dummy", "payload": {"x": 1}})
-    assert out['status'] == 'ok'
-    assert out['action']['payload']['x'] == 1
+    assert out["status"] == "ok"
+    assert out["action"]["payload"]["x"] == 1
 
     await agent.detach_from_engine()
     assert hook.agent_attached is False

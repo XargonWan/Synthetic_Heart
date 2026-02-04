@@ -11,12 +11,9 @@ This plugin intentionally delegates core behaviour to `core.animation_uploads` a
 from __future__ import annotations
 
 import os
-import json
-from typing import Any, Dict, Optional
-from fastapi import Request, HTTPException
-from core.core_initializer import register_interface
+from typing import Any, Dict
 from core.logging_utils import log_info, log_warning
-from core.animation_uploads import promote_upload, list_uploads, delete_upload
+from core.animation_uploads import promote_upload
 
 
 class MateEnginePlugin:
@@ -43,16 +40,26 @@ class MateEnginePlugin:
         if action_name == "send_mate_message":
             return {
                 "description": "Send a message to Mate Engine integration (will appear in outbox for the client to poll)",
-                "payload": {"text": {"type": "string"}, "target": {"type": "string"}, "metadata": {"type": "object", "optional": True}},
+                "payload": {
+                    "text": {"type": "string"},
+                    "target": {"type": "string"},
+                    "metadata": {"type": "object", "optional": True},
+                },
             }
         if action_name == "promote_upload":
             return {
                 "description": "Promote an existing upload into a skin (admin-only)",
-                "payload": {"upload_id": {"type": "string"}, "target_skin": {"type": "string"}, "target_state": {"type": "string", "optional": True}},
+                "payload": {
+                    "upload_id": {"type": "string"},
+                    "target_skin": {"type": "string"},
+                    "target_state": {"type": "string", "optional": True},
+                },
             }
         return {}
 
-    async def execute_action(self, action: Dict[str, Any], context: Dict[str, Any], bot, original_message) -> None:
+    async def execute_action(
+        self, action: Dict[str, Any], context: Dict[str, Any], bot, original_message
+    ) -> None:
         """Execute LLM-triggered actions that operate on the Mate integration or uploads."""
         typ = action.get("type") or action.get("action")
         payload = action.get("payload") or {}
@@ -65,7 +72,12 @@ class MateEnginePlugin:
             # Use webui's enqueue helper by importing the interface if available
             try:
                 from core.webui import synth_webui_interface, SynthWebUIInterface
-                webui_instance = synth_webui_interface if getattr(synth_webui_interface, 'enqueue_outbox', None) else None
+
+                webui_instance = (
+                    synth_webui_interface
+                    if getattr(synth_webui_interface, "enqueue_outbox", None)
+                    else None
+                )
                 if webui_instance is None:
                     # Fallback to creating a temporary interface for enqueueing in tests or headless contexts
                     webui_instance = SynthWebUIInterface(autostart=False)
@@ -77,14 +89,26 @@ class MateEnginePlugin:
         elif typ == "promote_upload":
             # This action is admin-sensitive. Respect environment guard.
             if os.getenv("SYNTH_MATEENGINE_PROMOTE_ENABLED", "0") != "1":
-                raise PermissionError("Promote uploads is disabled (SYNTH_MATEENGINE_PROMOTE_ENABLED != 1)")
+                raise PermissionError(
+                    "Promote uploads is disabled (SYNTH_MATEENGINE_PROMOTE_ENABLED != 1)"
+                )
             upload_id = payload.get("upload_id")
             target_skin = payload.get("target_skin")
             if not upload_id or not target_skin:
-                raise ValueError("upload_id and target_skin are required for promote_upload")
+                raise ValueError(
+                    "upload_id and target_skin are required for promote_upload"
+                )
             try:
-                promoted = promote_upload(upload_id, target_skin=target_skin, target_state=payload.get("target_state"), overwrite=bool(payload.get("overwrite", False)), rename=payload.get("rename"))
-                log_info(f"[mate_plugin] Promoted upload {upload_id} into skin {target_skin}: {promoted}")
+                promoted = promote_upload(
+                    upload_id,
+                    target_skin=target_skin,
+                    target_state=payload.get("target_state"),
+                    overwrite=bool(payload.get("overwrite", False)),
+                    rename=payload.get("rename"),
+                )
+                log_info(
+                    f"[mate_plugin] Promoted upload {upload_id} into skin {target_skin}: {promoted}"
+                )
             except Exception as exc:
                 log_warning(f"[mate_plugin] Promotion failed: {exc}")
                 raise

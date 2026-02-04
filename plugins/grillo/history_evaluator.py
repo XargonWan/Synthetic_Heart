@@ -32,7 +32,15 @@ class HistoryEvaluatorPlugin(PluginBase):
     def __init__(self, config: Optional[dict] = None):
         super().__init__(config=config)
         try:
-            self.default_entries = int(config_registry.get_value("HISTORY_EVALUATOR_DEFAULT_ENTRIES", 10, value_type=int, group="grillo", component="history_evaluator"))
+            self.default_entries = int(
+                config_registry.get_value(
+                    "HISTORY_EVALUATOR_DEFAULT_ENTRIES",
+                    10,
+                    value_type=int,
+                    group="grillo",
+                    component="history_evaluator",
+                )
+            )
         except Exception:
             self.default_entries = 10
 
@@ -43,7 +51,9 @@ class HistoryEvaluatorPlugin(PluginBase):
             "description": "Utility plugin to create short reflective prompts from recent history",
         }
 
-    async def evaluate_history(self, interface_path: str, entries: int | None = None) -> str:
+    async def evaluate_history(
+        self, interface_path: str, entries: int | None = None
+    ) -> str:
         entries = entries or self.default_entries
         try:
             # Lazy import to avoid circular import during core initialization
@@ -76,7 +86,9 @@ class HistoryEvaluatorPlugin(PluginBase):
 
             return "\n".join(lines)
         except Exception as e:
-            log_error(f"[history_evaluator] Failed to evaluate history for {interface_path}: {e}")
+            log_error(
+                f"[history_evaluator] Failed to evaluate history for {interface_path}: {e}"
+            )
             return "[History Evaluator] Error while retrieving history."
 
 
@@ -93,8 +105,6 @@ by Grillo and other local components.
 """
 
 from core.ai_plugin_base import AIPluginBase
-from core.logging_utils import log_debug, log_error
-from core.config_manager import config_registry
 
 display_name = "History Evaluator (grillo)"
 
@@ -113,7 +123,13 @@ class HistoryEvaluatorPlugin(AIPluginBase):
     def __init__(self):
         try:
             self.default_entries = int(
-                config_registry.get_value("HISTORY_EVALUATOR_DEFAULT_ENTRIES", 10, value_type=int, group="grillo", component="history_evaluator")
+                config_registry.get_value(
+                    "HISTORY_EVALUATOR_DEFAULT_ENTRIES",
+                    10,
+                    value_type=int,
+                    group="grillo",
+                    component="history_evaluator",
+                )
             )
         except Exception:
             self.default_entries = 10
@@ -122,7 +138,9 @@ class HistoryEvaluatorPlugin(AIPluginBase):
         # No external actions — return empty dict so core auto-discovery registers us
         return {}
 
-    async def evaluate_history(self, interface_path: str, entries: int | None = None) -> str:
+    async def evaluate_history(
+        self, interface_path: str, entries: int | None = None
+    ) -> str:
         entries = entries or self.default_entries
         try:
             from core.chat_history_cache import load_chat_history
@@ -156,7 +174,9 @@ class HistoryEvaluatorPlugin(AIPluginBase):
             prompt = "\n".join(lines)
             return prompt
         except Exception as e:
-            log_error(f"[history_evaluator] Failed to evaluate history for {interface_path}: {e}")
+            log_error(
+                f"[history_evaluator] Failed to evaluate history for {interface_path}: {e}"
+            )
             return "[History Evaluator] Error while retrieving history."
 
 
@@ -173,8 +193,6 @@ so it is registered under `plugins/` and available via the core plugin registry.
 """
 
 from core.plugin_base import PluginBase
-from core.logging_utils import log_debug, log_info, log_warning, log_error
-from core.config_manager import config_registry
 from typing import Optional
 
 display_name = "Grillo History Evaluator"
@@ -194,7 +212,15 @@ class HistoryEvaluatorPlugin(PluginBase):
     def __init__(self, config: Optional[dict] = None):
         super().__init__(config=config)
         try:
-            self.default_entries = int(config_registry.get_value("HISTORY_EVALUATOR_DEFAULT_ENTRIES", 10, value_type=int, group="grillo", component="history_evaluator"))
+            self.default_entries = int(
+                config_registry.get_value(
+                    "HISTORY_EVALUATOR_DEFAULT_ENTRIES",
+                    10,
+                    value_type=int,
+                    group="grillo",
+                    component="history_evaluator",
+                )
+            )
         except Exception:
             self.default_entries = 10
 
@@ -205,7 +231,9 @@ class HistoryEvaluatorPlugin(PluginBase):
             "description": "Utility plugin to create short reflective prompts from recent history",
         }
 
-    async def evaluate_history(self, interface_path: str, entries: int | None = None) -> str:
+    async def evaluate_history(
+        self, interface_path: str, entries: int | None = None
+    ) -> str:
         entries = entries or self.default_entries
         try:
             # Lazy import to avoid circular import during core initialization
@@ -238,7 +266,9 @@ class HistoryEvaluatorPlugin(PluginBase):
 
             return "\n".join(lines)
         except Exception as e:
-            log_error(f"[history_evaluator] Failed to evaluate history for {interface_path}: {e}")
+            log_error(
+                f"[history_evaluator] Failed to evaluate history for {interface_path}: {e}"
+            )
             return "[History Evaluator] Error while retrieving history."
 
 

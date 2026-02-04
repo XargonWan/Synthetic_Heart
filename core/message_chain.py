@@ -65,6 +65,106 @@ def get_failed_message_text() -> str:
     return str(fallback)
 
 
+# Map of interface prefixes to their correct message action types
+_INTERFACE_TO_MESSAGE_ACTION: Dict[str, str] = {
+    "telegram_bot": "message_telegram_bot",
+    "discord_bot": "message_discord_bot",
+    "synth_webui": "message_synth_webui",
+    "matrix_chat": "message_matrix_chat",
+    "ollama_serve": "message_ollama_serve",
+}
+
+
+def _auto_inject_interface_path(actions: list, interface_path: Optional[str]) -> list:
+    """Auto-inject missing interface_path into message actions.
+
+    LLMs sometimes forget to include interface_path in message actions, causing
+    validation failures. This function detects message actions missing interface_path
+    and injects it from the context before validation runs.
+
+    Args:
+        actions: List of action dicts to process
+        interface_path: The interface path from context (e.g., 'telegram_bot/5208932647')
+
+    Returns:
+        The same list with interface_path injected in-place where missing
+    """
+    if not actions or not interface_path:
+        return actions
+
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        action_type = action.get("type") or action.get("action")
+        # Only process message_* action types
+        if not action_type or not action_type.startswith("message_"):
+            continue
+
+        payload = action.get("payload")
+        if not isinstance(payload, dict):
+            # Create payload if missing
+            payload = {}
+            action["payload"] = payload
+
+        # Check if interface_path is missing
+        if not payload.get("interface_path") and not payload.get("chat_name"):
+            log_info(
+                f"[message_chain] 🔧 Auto-injecting interface_path='{interface_path}' into {action_type} action (was missing)"
+            )
+            payload["interface_path"] = interface_path
+
+    return actions
+
+
+def _normalize_message_unknown(actions: list, interface_path: Optional[str]) -> list:
+    """Normalize 'message_unknown' action types to the correct interface-specific type.
+
+    Some LLMs fabricate action types like 'message_unknown' instead of using the
+    correct interface-specific action (e.g., 'message_telegram_bot'). This function
+    detects and corrects such actions based on the interface_path.
+
+    Args:
+        actions: List of action dicts to normalize
+        interface_path: The interface path (e.g., 'telegram_bot/5208932647')
+
+    Returns:
+        The same list with any 'message_unknown' types corrected in-place
+    """
+    if not actions or not interface_path:
+        return actions
+
+    # Extract interface prefix from path (e.g., 'telegram_bot' from 'telegram_bot/5208932647')
+    interface_prefix = (
+        interface_path.split("/")[0] if "/" in interface_path else interface_path
+    )
+    correct_action_type = _INTERFACE_TO_MESSAGE_ACTION.get(interface_prefix)
+
+    if not correct_action_type:
+        return actions
+
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        action_type = action.get("type") or action.get("action")
+        # Normalize 'message_unknown' and similar fabricated types
+        if (
+            action_type
+            and action_type.startswith("message_")
+            and action_type not in _INTERFACE_TO_MESSAGE_ACTION.values()
+        ):
+            old_type = action_type
+            # Update whichever key was used
+            if "type" in action:
+                action["type"] = correct_action_type
+            if "action" in action:
+                action["action"] = correct_action_type
+            log_info(
+                f"[message_chain] 🔧 Normalized invalid action type '{old_type}' -> '{correct_action_type}' based on interface_path={interface_path}"
+            )
+
+    return actions
+
+
 async def send_llm_fallback_message(
     bot, message: SimpleNamespace, failure_reason: str, context: dict = None
 ) -> str:
@@ -92,6 +192,13 @@ async def send_llm_fallback_message(
     interface_path = getattr(message, "interface_path", None)
     if not interface_path and context:
         interface_path = context.get("interface_path")
+
+    # Debug: trace all available routing info
+    log_debug(
+        f"[message_chain] FALLBACK ROUTING DEBUG: message.interface_path={getattr(message, 'interface_path', None)}, "
+        f"context.interface_path={context.get('interface_path') if context else None}, "
+        f"resolved_interface_path={interface_path}, chat_id={chat_id}, thread_id={thread_id}"
+    )
 
     # Log detailed error
     log_error(
@@ -153,8 +260,21 @@ async def handle_incoming_message(
     from types import SimpleNamespace
     from datetime import datetime
 
+    # Extract interface_path early for debug tracing
+    _entry_interface_path = kwargs.get("interface_path") or (
+        getattr(message, "interface_path", None) if message else None
+    )
+    _entry_chat_id = kwargs.get(
+        "chat_id", getattr(message, "chat_id", "unknown") if message else "unknown"
+    )
+    _entry_thread_id = kwargs.get(
+        "thread_id", getattr(message, "thread_id", None) if message else None
+    )
     log_info(
-        f"[message_chain] 🔄 ENTRY: source={source} text_len={len(text) if text else 0} chat_id={kwargs.get('chat_id', getattr(message, 'chat_id', 'unknown')) if message else kwargs.get('chat_id')}"
+        f"[message_chain] 🔄 ENTRY: source={source} text_len={len(text) if text else 0} chat_id={_entry_chat_id} interface_path={_entry_interface_path} thread_id={_entry_thread_id}"
+    )
+    log_debug(
+        f"[message_chain] ENTRY CONTEXT: kwargs_keys={list(kwargs.keys())}, context_keys={list((context or {}).keys())}, message_type={type(message).__name__ if message else None}"
     )
 
     # Trace LLM→INTERFACE flow
@@ -189,10 +309,30 @@ async def handle_incoming_message(
         pass  # Message object is immutable (Telegram Message); use ctx instead
 
     # Preserve chat_id and interface_path in context to avoid losing them during processing
-    if hasattr(message, "chat_id"):
+    # Check message attributes, kwargs, and original context (in that priority order)
+    if hasattr(message, "chat_id") and message.chat_id:
         ctx["chat_id"] = message.chat_id
-    if hasattr(message, "interface_path"):
+    elif kwargs.get("chat_id") and not ctx.get("chat_id"):
+        ctx["chat_id"] = kwargs["chat_id"]
+
+    # interface_path is CRITICAL for routing - check all sources
+    if hasattr(message, "interface_path") and message.interface_path:
         ctx["interface_path"] = message.interface_path
+    elif kwargs.get("interface_path") and not ctx.get("interface_path"):
+        ctx["interface_path"] = kwargs["interface_path"]
+    # If still not set, try to build it from interface + chat_id
+    if not ctx.get("interface_path"):
+        interface_name = ctx.get("interface") or kwargs.get("interface")
+        chat_id = ctx.get("chat_id")
+        if interface_name and chat_id:
+            ctx["interface_path"] = f"{interface_name}/{chat_id}"
+            log_debug(
+                f"[message_chain] Built interface_path from interface+chat_id: {ctx['interface_path']}"
+            )
+
+    log_debug(
+        f"[message_chain] Context preserved: interface_path={ctx.get('interface_path')}, chat_id={ctx.get('chat_id')}, interface={ctx.get('interface')}"
+    )
 
     # Process LLM messages for emotional state updates
     if ctx.get("from_llm", False) or source == "llm":
@@ -246,6 +386,22 @@ async def handle_incoming_message(
     tried_texts = set()
     attempt = 0
     max_retries = ctx.get("max_retries", int(CORRECTOR_RETRIES))
+
+    # Check for action result delivery context - these responses should have minimal retries
+    # to prevent cascading loops when processing action outputs (e.g., memory_search results)
+    is_action_result = False
+    try:
+        system_message = ctx.get("system_message", {})
+        if isinstance(system_message, dict):
+            is_action_result = system_message.get("is_action_result_delivery", False)
+            custom_max = system_message.get("max_correction_attempts")
+            if custom_max is not None and isinstance(custom_max, int):
+                max_retries = min(max_retries, custom_max)
+                log_info(
+                    f"[message_chain] Action result delivery detected - limiting retries to {max_retries}"
+                )
+    except Exception:
+        pass
 
     while True:
         log_info(
@@ -343,6 +499,15 @@ async def handle_incoming_message(
                 # Don't return here - let corrector fix it
                 parsed = None  # Force correction path
 
+            # Normalize any 'message_unknown' or other fabricated message types
+            # to the correct interface-specific action type before execution
+            if actions:
+                ctx_interface_path = ctx.get("interface_path") if ctx else None
+                actions = _normalize_message_unknown(actions, ctx_interface_path)
+                # Auto-inject interface_path into message actions that are missing it
+                # This prevents validation failures and avoids costly LLM correction calls
+                actions = _auto_inject_interface_path(actions, ctx_interface_path)
+
             # Synthera Emotion Forwarding: copy dominant feeling into tts_speak payload
             if (
                 parsed is not None
@@ -428,6 +593,42 @@ async def handle_incoming_message(
                             current_message_action_types = []
 
                     if isinstance(actions, list):
+                        # ========================================
+                        # STRIP TTS FROM AUTONOMOUS MESSAGES
+                        # ========================================
+                        # Check if any message action is autonomous (Grillo outreach, dreams, etc.)
+                        # If so, remove any tts_speak actions - they shouldn't be spoken
+                        has_autonomous_message = False
+                        for action in actions:
+                            if isinstance(action, dict):
+                                action_meta = action.get("meta", {})
+                                action_name = action.get("action") or action.get("type")
+                                # Check if this is an autonomous message action
+                                if action_meta.get("autonomous", False) is True:
+                                    if action_name and action_name.startswith(
+                                        "message_"
+                                    ):
+                                        has_autonomous_message = True
+                                        break
+
+                        if has_autonomous_message:
+                            # Remove any tts_speak actions from autonomous message responses
+                            tts_to_remove = []
+                            for i, action in enumerate(actions):
+                                if isinstance(action, dict):
+                                    action_name = action.get("action") or action.get(
+                                        "type"
+                                    )
+                                    if action_name == "tts_speak":
+                                        tts_to_remove.append(i)
+
+                            if tts_to_remove:
+                                for i in reversed(tts_to_remove):
+                                    removed = actions.pop(i)
+                                    log_debug(
+                                        f"[message_chain] 🔇 Stripped TTS from autonomous message: {removed.get('payload', {}).get('text', '')[:40]}..."
+                                    )
+
                         for action in actions:
                             # Support both 'action' and 'type' keys
                             action_name = None
@@ -452,24 +653,123 @@ async def handle_incoming_message(
                             "matrix_chat",
                             "ollama_serve",
                         ]
-                        interface_path = ctx.get("interface_path", "")
-                        is_user_facing = any(
+                        interface_path = ctx.get("interface_path") or ""
+                        chat_id = ctx.get("chat_id")
+
+                        # interface_path must have a chat_id suffix to be user-facing
+                        # e.g., "telegram_bot/5208932647" not just "telegram_bot"
+                        is_user_facing = interface_path and any(
                             interface_path.startswith(f"{iface}/")
-                            or interface_path == iface
                             for iface in user_facing_interfaces
                         )
 
-                        if is_user_facing:
-                            payload = (
-                                user_message_action.get("payload", {})
-                                if isinstance(user_message_action, dict)
-                                else {}
+                        # Check if this is an internal/system message
+                        # chat_id == -1 indicates internal system messages (Grillo beats, etc.)
+                        is_internal_chat = (
+                            chat_id == -1 or chat_id == "-1" or str(chat_id) == "-1"
+                        )
+
+                        # Check if this is a Grillo internal beat (not outreach)
+                        # Only internal Grillo beats (self_reflection, curiosity, etc.) skip TTS
+                        # Outreach beats ARE user-facing and SHOULD get TTS
+                        is_grillo_internal = ctx.get("grillo_beat", False) and ctx.get(
+                            "beat_type"
+                        ) not in ("outreach", None)
+
+                        # Check for autonomous messages (Grillo outreach, dreams, etc.)
+                        # These are system-initiated, not user-response, so they shouldn't get TTS
+                        action_meta = (
+                            user_message_action.get("meta", {})
+                            if isinstance(user_message_action, dict)
+                            else {}
+                        )
+                        is_autonomous = action_meta.get("autonomous", False) is True
+
+                        # Check for system startup/internal message patterns
+                        payload = (
+                            user_message_action.get("payload", {})
+                            if isinstance(user_message_action, dict)
+                            else {}
+                        )
+                        text_to_speak = (
+                            payload.get("text")
+                            or payload.get("content")
+                            or payload.get("message")
+                            or ""
+                        )
+                        # Patterns that indicate internal/system messages that shouldn't get TTS
+                        internal_message_patterns = [
+                            "Synthetic Heart AI online",
+                            "Action schema and system instructions",
+                            "Analysis of recent memory logs",
+                            "I have completed the analysis of memory logs",
+                            "I have successfully processed",
+                            "operational instruction",
+                            "memory consolidation",
+                            "tag elaboration",
+                            "system initialization",
+                            "configuration updated",
+                        ]
+                        is_system_message = any(
+                            pattern.lower() in text_to_speak.lower()
+                            for pattern in internal_message_patterns
+                        )
+
+                        # Check if TTS was already executed in a previous correction attempt
+                        # This prevents double-TTS when correction flow runs
+                        tts_already_executed = False
+                        correction_ctx = getattr(message, "correction_context", None)
+                        if correction_ctx:
+                            # Check if successful_actions (list) or successful_types (list) contains tts_speak
+                            successful_actions = correction_ctx.get(
+                                "successful_actions", []
                             )
-                            text_to_speak = (
-                                payload.get("text")
-                                or payload.get("content")
-                                or payload.get("message")
+                            if isinstance(successful_actions, list):
+                                for action in successful_actions:
+                                    if (
+                                        isinstance(action, dict)
+                                        and action.get("type") == "tts_speak"
+                                    ):
+                                        tts_already_executed = True
+                                        break
+                            # Also check successful_types which is populated by action_parser
+                            successful_types = correction_ctx.get(
+                                "successful_types", []
                             )
+                            if (
+                                isinstance(successful_types, list)
+                                and "tts_speak" in successful_types
+                            ):
+                                tts_already_executed = True
+
+                        # Determine if we should skip TTS
+                        # Skip for: internal grillo beats, internal chats, system messages, autonomous messages, AND already-executed TTS
+                        should_skip_tts = (
+                            is_grillo_internal
+                            or is_internal_chat
+                            or is_system_message
+                            or is_autonomous
+                            or tts_already_executed
+                        )
+
+                        if should_skip_tts:
+                            skip_reason = []
+                            if is_grillo_internal:
+                                skip_reason.append(
+                                    f"grillo_beat={ctx.get('beat_type')}"
+                                )
+                            if is_internal_chat:
+                                skip_reason.append(f"internal_chat_id={chat_id}")
+                            if is_system_message:
+                                skip_reason.append("system_message_pattern")
+                            if is_autonomous:
+                                skip_reason.append("autonomous_message")
+                            if tts_already_executed:
+                                skip_reason.append("tts_already_executed_in_correction")
+                            log_debug(
+                                f"[message_chain] Skipping TTS auto-inject: {', '.join(skip_reason)}"
+                            )
+                        elif is_user_facing:
                             if (
                                 text_to_speak
                                 and isinstance(text_to_speak, str)
@@ -595,6 +895,9 @@ async def handle_incoming_message(
                 # Execute actions regardless of whether response is included
                 if parsed is not None:
                     try:
+                        log_debug(
+                            f"[message_chain] EXECUTING ACTIONS: count={len(actions) if actions else 0}, interface_path={ctx.get('interface_path')}, chat_id={ctx.get('chat_id')}, action_types={[a.get('type') or a.get('action') for a in (actions or []) if isinstance(a, dict)]}"
+                        )
                         result = await run_actions(actions, ctx, bot, message)
                         processed = result.get("processed", [])
                         failed = result.get("failed_actions", [])
@@ -605,7 +908,25 @@ async def handle_incoming_message(
                         )
 
                         # If we had corruption recovery or validation failures, check if correction is needed
-                        needs_correction = len(failed) > 0 or metadata.get(
+                        # But SKIP correction for "unfixable" errors (policy restrictions like whitelist/suggest mode)
+                        # These can't be fixed by the LLM - they're system configuration issues
+                        fixable_failures = [
+                            f for f in failed if not f.get("unfixable", False)
+                        ]
+                        unfixable_failures = [
+                            f for f in failed if f.get("unfixable", False)
+                        ]
+
+                        if unfixable_failures:
+                            unfixable_types = [
+                                f.get("action", {}).get("type", "?")
+                                for f in unfixable_failures
+                            ]
+                            log_info(
+                                f"[message_chain] Skipping correction for {len(unfixable_failures)} unfixable policy errors: {unfixable_types}"
+                            )
+
+                        needs_correction = len(fixable_failures) > 0 or metadata.get(
                             "recovered", False
                         )
 
@@ -705,6 +1026,9 @@ async def handle_incoming_message(
         try:
             log_info(
                 f"[message_chain] Calling corrector middleware for attempt={attempt}..."
+            )
+            log_debug(
+                f"[message_chain] CORRECTOR CONTEXT: interface_path={ctx.get('interface_path')}, chat_id={getattr(message, 'chat_id', None)}, text_preview={text[:200] if text else ''}"
             )
             corrected = await run_corrector_middleware(
                 text,

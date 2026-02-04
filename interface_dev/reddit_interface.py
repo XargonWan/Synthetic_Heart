@@ -6,8 +6,10 @@ from types import SimpleNamespace
 try:
     from dotenv import load_dotenv
 except Exception:
+
     def load_dotenv(*args, **kwargs):
         return False
+
 
 load_dotenv()
 
@@ -20,7 +22,6 @@ from core.logging_utils import log_debug, log_warning, log_error, log_info
 from core.transport_layer import universal_send
 from core.core_initializer import register_interface, core_initializer
 from core.auto_response import request_llm_delivery
-import core.plugin_instance as plugin_instance
 
 
 class RedditInterface:
@@ -33,9 +34,11 @@ class RedditInterface:
         # Check required configuration
         client_id = os.getenv("REDDIT_CLIENT_ID")
         client_secret = os.getenv("REDDIT_CLIENT_SECRET")
-        
+
         if not client_id or not client_secret:
-            log_warning("[reddit_interface] REDDIT_CLIENT_ID or REDDIT_CLIENT_SECRET not configured - Reddit interface disabled")
+            log_warning(
+                "[reddit_interface] REDDIT_CLIENT_ID or REDDIT_CLIENT_SECRET not configured - Reddit interface disabled"
+            )
             self.reddit = None
             return
 
@@ -82,9 +85,22 @@ class RedditInterface:
             return {
                 "description": "Send a message or reply on Reddit.",
                 "payload": {
-                    "text": {"type": "string", "example": "Hello Reddit!", "description": "The message text to send."},
-                    "target": {"type": "string", "example": "example_user", "description": "The username or subreddit."},
-                    "reply_message_id": {"type": "string", "example": "t1_abcdef", "description": "Optional comment/message id to reply to.", "optional": True},
+                    "text": {
+                        "type": "string",
+                        "example": "Hello Reddit!",
+                        "description": "The message text to send.",
+                    },
+                    "target": {
+                        "type": "string",
+                        "example": "example_user",
+                        "description": "The username or subreddit.",
+                    },
+                    "reply_message_id": {
+                        "type": "string",
+                        "example": "t1_abcdef",
+                        "description": "Optional comment/message id to reply to.",
+                        "optional": True,
+                    },
                 },
             }
         return {}
@@ -153,9 +169,13 @@ class RedditInterface:
         text = payload.get("text", "")
         target = payload.get("target")
         reply_message_id = payload.get("reply_message_id")
-        await universal_send(self._reddit_send, target, text=text, reply_message_id=reply_message_id)
+        await universal_send(
+            self._reddit_send, target, text=text, reply_message_id=reply_message_id
+        )
 
-    async def _reddit_send(self, target: str, text: str, reply_message_id: str | None = None):
+    async def _reddit_send(
+        self, target: str, text: str, reply_message_id: str | None = None
+    ):
         if reply_message_id:
             try:
                 comment = await self.reddit.comment(reply_message_id)
@@ -183,7 +203,7 @@ class RedditInterface:
                         message=wrapper,
                         interface=self,
                         context={},
-                        reason="reddit_autonomous_response"
+                        reason="reddit_autonomous_response",
                     )
         except Exception as e:
             log_error(f"[reddit_interface] Inbox listener stopped: {e}")
@@ -201,7 +221,9 @@ class RedditInterface:
                 message_id=item.id,
                 text=getattr(item, "body", ""),
                 date=datetime.fromtimestamp(item.created_utc),
-                from_user=SimpleNamespace(id=author_name, full_name=author_name, username=author_name),
+                from_user=SimpleNamespace(
+                    id=author_name, full_name=author_name, username=author_name
+                ),
                 reply_to_message=None,
                 chat=chat,
             )
@@ -212,7 +234,9 @@ class RedditInterface:
                 message_id=item.id,
                 text=getattr(item, "body", ""),
                 date=datetime.fromtimestamp(item.created_utc),
-                from_user=SimpleNamespace(id=author_name, full_name=author_name, username=author_name),
+                from_user=SimpleNamespace(
+                    id=author_name, full_name=author_name, username=author_name
+                ),
                 reply_to_message=None,
                 chat=chat,
             )
@@ -238,23 +262,23 @@ async def start_reddit_interface():
 
     try:
         log_info("[reddit_interface] Importing core_initializer...")
-        from core.core_initializer import core_initializer
+
         log_info("[reddit_interface] Initializing Reddit interface...")
 
         reddit_interface = RedditInterface()
         if reddit_interface.reddit is None:
             log_warning("[reddit_interface] Reddit interface not properly configured")
             return
-            
+
         await reddit_interface.start()
 
         log_info("[reddit_interface] Reddit interface initialized successfully")
     except Exception as e:
-        log_error(f"[reddit_interface] Error in Reddit interface initialization: {repr(e)}")
+        log_error(
+            f"[reddit_interface] Error in Reddit interface initialization: {repr(e)}"
+        )
         raise
 
 
 INTERFACE_CLASS = RedditInterface
 __all__ = ["RedditInterface"]
-
-

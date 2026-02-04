@@ -4,6 +4,7 @@ Provides a reusable async checker to determine whether there are new messages
 since the last check. It is intended to be scheduled periodically (default
 60s) and callable by other components (e.g., Grillo observer).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -51,9 +52,15 @@ class ChatUpdateChecker:
     optionally returns the list of chats that updated since that timestamp.
     """
 
-    def __init__(self, interval: Optional[int] = None, enabled: Optional[bool] = None) -> None:
-        self.interval = int(interval) if interval is not None else int(CHAT_UPDATE_CHECK_INTERVAL)
-        self.enabled = bool(enabled) if enabled is not None else bool(CHAT_UPDATE_CHECKER_ENABLED)
+    def __init__(
+        self, interval: Optional[int] = None, enabled: Optional[bool] = None
+    ) -> None:
+        self.interval = (
+            int(interval) if interval is not None else int(CHAT_UPDATE_CHECK_INTERVAL)
+        )
+        self.enabled = (
+            bool(enabled) if enabled is not None else bool(CHAT_UPDATE_CHECKER_ENABLED)
+        )
         self._task: Optional[asyncio.Task] = None
         self._last_known_ts: float = 0.0
         self._last_checked: float = 0.0
@@ -100,10 +107,14 @@ class ChatUpdateChecker:
                     max_ts = r[0]
 
             if max_ts is None:
-                log_debug("[chat_update_checker] No non-self chat_history_cache rows found (max_ts is None)")
+                log_debug(
+                    "[chat_update_checker] No non-self chat_history_cache rows found (max_ts is None)"
+                )
             else:
                 max_ts_float = float(max_ts)
-                log_debug(f"[chat_update_checker] max_ts={max_ts_float}, last_known={self._last_known_ts}")
+                log_debug(
+                    f"[chat_update_checker] max_ts={max_ts_float}, last_known={self._last_known_ts}"
+                )
                 # Respect consume flag: if consume=True, we update the internal
                 # last_known timestamp (background checker semantics). If
                 # consume=False, perform a non-destructive peek and DO NOT update
@@ -127,7 +138,9 @@ class ChatUpdateChecker:
                             """,
                             (self._last_known_ts, "self", "synth", "self", "synth"),
                         )
-                        log_debug(f"[chat_update_checker] Found {len(rows2) if rows2 else 0} non-self messages since last_known (consume)")
+                        log_debug(
+                            f"[chat_update_checker] Found {len(rows2) if rows2 else 0} non-self messages since last_known (consume)"
+                        )
                         for r in rows2:
                             if isinstance(r, dict):
                                 interface_path = r.get("interface_path")
@@ -141,10 +154,14 @@ class ChatUpdateChecker:
                                 parts = interface_path.split("/")
                                 if len(parts) > 1:
                                     chat_id = parts[1]
-                            new_messages.append({"chat_id": chat_id, "last_active": float(last_active)})
+                            new_messages.append(
+                                {"chat_id": chat_id, "last_active": float(last_active)}
+                            )
 
                         if not new_messages:
-                            log_debug("[chat_update_checker] No non-self chat messages produced after filtering (consume)")
+                            log_debug(
+                                "[chat_update_checker] No non-self chat messages produced after filtering (consume)"
+                            )
 
                         # Update last_known to the newest timestamp
                         self._last_known_ts = max_ts_float
@@ -154,7 +171,9 @@ class ChatUpdateChecker:
                     if self._last_known_ts == 0.0:
                         # If last_known_ts is not initialized, treat peek as not reporting
                         # updates (caller may choose to initialize instead).
-                        log_debug("[chat_update_checker] Peek requested but last_known_ts not initialized; reporting no updates")
+                        log_debug(
+                            "[chat_update_checker] Peek requested but last_known_ts not initialized; reporting no updates"
+                        )
                     elif max_ts_float > self._last_known_ts:
                         updated = True
                         rows2 = await execute_query(
@@ -168,7 +187,9 @@ class ChatUpdateChecker:
                             """,
                             (self._last_known_ts, "self", "synth", "self", "synth"),
                         )
-                        log_debug(f"[chat_update_checker] Found {len(rows2) if rows2 else 0} non-self messages since last_known (peek)")
+                        log_debug(
+                            f"[chat_update_checker] Found {len(rows2) if rows2 else 0} non-self messages since last_known (peek)"
+                        )
                         for r in rows2:
                             if isinstance(r, dict):
                                 interface_path = r.get("interface_path")
@@ -182,27 +203,39 @@ class ChatUpdateChecker:
                                 parts = interface_path.split("/")
                                 if len(parts) > 1:
                                     chat_id = parts[1]
-                            new_messages.append({"chat_id": chat_id, "last_active": float(last_active)})
+                            new_messages.append(
+                                {"chat_id": chat_id, "last_active": float(last_active)}
+                            )
 
         except Exception as e:
             # DB error - fallback to in-memory recent_chats (best-effort)
-            log_warning(f"[chat_update_checker] DB query failed, falling back to in-memory check: {e}")
+            log_warning(
+                f"[chat_update_checker] DB query failed, falling back to in-memory check: {e}"
+            )
             try:
                 active = await recent_chats.get_last_active_chats()
                 if len(active) != self._last_count:
                     updated = True
                     self._last_count = len(active)
             except Exception as e2:
-                log_error(f"[chat_update_checker] Fallback recent_chats check failed: {e2}")
+                log_error(
+                    f"[chat_update_checker] Fallback recent_chats check failed: {e2}"
+                )
 
         self._last_checked = now
         iso_ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
-        result = {"updated": updated, "new_messages": new_messages, "last_checked": iso_ts}
+        result = {
+            "updated": updated,
+            "new_messages": new_messages,
+            "last_checked": iso_ts,
+        }
         log_debug(f"[chat_update_checker] check result: {result}")
         return result
 
     async def _run_loop(self) -> None:
-        log_info(f"[chat_update_checker] Background loop started (interval={self.interval}s)")
+        log_info(
+            f"[chat_update_checker] Background loop started (interval={self.interval}s)"
+        )
         while True:
             try:
                 if not self.enabled:
@@ -227,7 +260,9 @@ class ChatUpdateChecker:
             self._task = asyncio.create_task(self._run_loop())
             return self._task
         except RuntimeError:
-            log_debug("[chat_update_checker] Could not start background task (no running event loop)")
+            log_debug(
+                "[chat_update_checker] Could not start background task (no running event loop)"
+            )
             return None
 
     def stop(self) -> None:
@@ -240,11 +275,14 @@ class ChatUpdateChecker:
 # Module-level singleton
 _checker = ChatUpdateChecker()
 
+
 def get_chat_update_checker() -> ChatUpdateChecker:
     return _checker
 
+
 async def check_for_updates_once(consume: bool = True) -> Dict[str, Any]:
     return await _checker.check_for_updates(consume=consume)
+
 
 async def start_chat_update_checker() -> Optional[asyncio.Task]:
     if not _checker.enabled:

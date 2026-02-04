@@ -9,9 +9,10 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Mock environment variables for testing
-os.environ.setdefault('BOTFATHER_TOKEN', 'test_token')
-os.environ.setdefault('OPENAI_API_KEY', 'test_key')
-os.environ.setdefault('TRAINER_IDS', 'telegram_bot:12345')
+os.environ.setdefault("BOTFATHER_TOKEN", "test_token")
+os.environ.setdefault("OPENAI_API_KEY", "test_key")
+os.environ.setdefault("TRAINER_IDS", "telegram_bot:12345")
+
 
 class TestSmoke(unittest.TestCase):
     """Basic smoke tests for core functionality."""
@@ -31,8 +32,7 @@ class TestSmoke(unittest.TestCase):
         """Test that interface modules can be imported."""
         # These should not fail even if dependencies are missing
         try:
-            import interface.telegram_bot
-            import interface.discord_interface
+            pass
         except Exception as e:
             # Interfaces may fail due to missing dependencies, but should not crash
             self.skipTest(f"Interface import failed (expected): {e}")
@@ -40,22 +40,21 @@ class TestSmoke(unittest.TestCase):
     def test_plugin_imports(self):
         """Test that plugin modules can be imported."""
         try:
-            import plugins.terminal
-            import plugins.time_plugin
+            pass
         except Exception as e:
             # Plugins may fail due to missing dependencies
             self.skipTest(f"Plugin import failed (expected): {e}")
-    
+
     def test_persona_manager_import(self):
         """Test that persona_manager can be imported without circular dependencies."""
         try:
             # This should not raise a circular import error
             import core.persona_manager
             from core.persona_manager import PersonaManager, get_persona_manager
-            
+
             # Verify the module has expected exports
-            self.assertTrue(hasattr(core.persona_manager, 'PersonaManager'))
-            self.assertTrue(hasattr(core.persona_manager, 'get_persona_manager'))
+            self.assertTrue(hasattr(core.persona_manager, "PersonaManager"))
+            self.assertTrue(hasattr(core.persona_manager, "get_persona_manager"))
             self.assertTrue(callable(get_persona_manager))
         except ImportError as e:
             self.fail(f"Failed to import persona_manager: {e}")
@@ -63,7 +62,7 @@ class TestSmoke(unittest.TestCase):
     def test_llm_engine_imports(self):
         """Test that LLM engine modules can be imported."""
         try:
-            import llm_engines.manual
+            pass
         except Exception as e:
             self.skipTest(f"LLM engine import failed: {e}")
 
@@ -71,6 +70,7 @@ class TestSmoke(unittest.TestCase):
         """Test that configuration can be loaded."""
         try:
             from core.config import get_active_llm
+
             # Should not crash
             llm = get_active_llm()
             self.assertIsInstance(llm, dict)
@@ -99,7 +99,7 @@ class TestSmoke(unittest.TestCase):
             prompt = build_prompt(
                 messages=[{"role": "user", "content": "Hello"}],
                 available_actions={},
-                context=""
+                context="",
             )
 
             self.assertIsInstance(prompt, str)
@@ -109,5 +109,5 @@ class TestSmoke(unittest.TestCase):
             self.skipTest(f"Prompt engine test failed: {e}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

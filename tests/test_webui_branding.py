@@ -20,19 +20,25 @@ def test_internal_chat_name_is_webui():
 def test_no_subtitle_in_templates():
     # Ensure human-facing subtitle 'Synthetic Heart Command Console' was removed
     from pathlib import Path
-    tpl_base = Path('core/webui_templates/base.html').read_text(encoding='utf-8')
-    tpl_index = Path('core/webui_templates/synth_webui_index.html').read_text(encoding='utf-8')
-    assert 'Synthetic Heart Command Console' not in tpl_base
-    assert 'Synthetic Heart Command Console' not in tpl_index
+
+    tpl_base = Path("core/webui_templates/base.html").read_text(encoding="utf-8")
+    tpl_index = Path("core/webui_templates/synth_webui_index.html").read_text(
+        encoding="utf-8"
+    )
+    assert "Synthetic Heart Command Console" not in tpl_base
+    assert "Synthetic Heart Command Console" not in tpl_index
 
 
 def test_manifest_and_icons_present():
     from pathlib import Path
-    tpl = Path('core/webui_templates/synth_webui_index.html').read_text(encoding='utf-8')
-    assert 'manifest.webmanifest' in tpl
-    assert '/static/synth_icon_180.png' in tpl
-    assert '/static/synth_icon_192.png' in tpl
-    assert '/static/synth_icon_512.png' in tpl
+
+    tpl = Path("core/webui_templates/synth_webui_index.html").read_text(
+        encoding="utf-8"
+    )
+    assert "manifest.webmanifest" in tpl
+    assert "/static/synth_icon_180.png" in tpl
+    assert "/static/synth_icon_192.png" in tpl
+    assert "/static/synth_icon_512.png" in tpl
     # Fallback to original logo should be present
-    tpl_base = Path('core/webui_templates/base.html').read_text(encoding='utf-8')
-    assert 'synth_logo_bg.png' in tpl or '%%LOGO_URL%%' in tpl_base
+    tpl_base = Path("core/webui_templates/base.html").read_text(encoding="utf-8")
+    assert "synth_logo_bg.png" in tpl or "%%LOGO_URL%%" in tpl_base

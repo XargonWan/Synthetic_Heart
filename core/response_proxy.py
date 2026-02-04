@@ -6,6 +6,7 @@ TIMEOUT_SECONDS = 60
 # user_id: { chat_id, message_id, type, expires_at }
 pending_targets = {}
 
+
 def set_target(user_id, chat_id, message_id, content_type):
     """
     Register a temporary target for a response (e.g. a message pending training).
@@ -15,8 +16,9 @@ def set_target(user_id, chat_id, message_id, content_type):
         "chat_id": chat_id,
         "message_id": message_id,
         "type": content_type,
-        "expires_at": expires_at
+        "expires_at": expires_at,
     }
+
 
 def get_target(user_id):
     """
@@ -30,11 +32,13 @@ def get_target(user_id):
         return "EXPIRED"
     return entry
 
+
 def clear_target(user_id):
     """
     Remove an assigned target.
     """
     pending_targets.pop(user_id, None)
+
 
 def has_pending(user_id):
     """

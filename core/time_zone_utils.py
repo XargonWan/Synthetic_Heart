@@ -92,33 +92,35 @@ def get_local_location() -> str:
 
 def get_suggested_locations() -> list:
     """Return a list of suggested locations derived from timezone names.
-    
+
     Extracts city names from timezone identifiers (e.g., 'Asia/Tokyo' -> 'Tokyo')
     and formats them as 'City,Country' pairs. Filters out special timezone identifiers
     like 'Etc/GMT' that don't represent real locations.
     """
     locations = set()
-    
+
     # List of prefixes to skip (these are not real locations)
-    skip_prefixes = ('Etc', 'GMT', 'SystemV', 'US', 'MST', 'HST', 'EST', 'CST', 'PST')
-    
+    skip_prefixes = ("Etc", "GMT", "SystemV", "US", "MST", "HST", "EST", "CST", "PST")
+
     for tz_name in _AVAILABLE_TIMEZONES:
         # Skip special timezone groups
         if any(tz_name.startswith(prefix) for prefix in skip_prefixes):
             continue
-            
+
         if "/" in tz_name:
             # Extract city/area from timezone (last part)
             city_part = tz_name.split("/")[-1].replace("_", " ")
             # Extract country/region from timezone (first part)
             country_part = tz_name.split("/")[0].replace("_", " ")
-            
+
             # Skip if city or country contains numbers (like GMT+0, GMT+1, etc.)
-            if any(c.isdigit() for c in city_part) or any(c.isdigit() for c in country_part):
+            if any(c.isdigit() for c in city_part) or any(
+                c.isdigit() for c in country_part
+            ):
                 continue
-            
+
             # Format as "City,Country"
             location = f"{city_part},{country_part}"
             locations.add(location)
-    
+
     return sorted(list(locations))

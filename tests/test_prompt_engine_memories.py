@@ -1,6 +1,4 @@
 import pytest
-import json
-import asyncio
 
 from core.prompt_engine import search_memories
 
@@ -26,26 +24,33 @@ async def test_search_memories_includes_ai_diary(monkeypatch):
 
         async def __aenter__(self):
             return self
+
         async def __aexit__(self, exc_type, exc, tb):
             return False
 
     class DummyConn:
         def __init__(self):
             self.cursor_obj = DummyCursor()
+
         async def __aenter__(self):
             return self
+
         async def __aexit__(self, exc_type, exc, tb):
             return False
+
         def cursor(self):
             return self.cursor_obj
 
     conn_instance = DummyConn()
+
     def mock_get_conn_ctx():
         return conn_instance
 
     import core.db as cdb
+
     monkeypatch.setattr(cdb, "get_conn_ctx", mock_get_conn_ctx)
     import core.prompt_engine as pe
+
     monkeypatch.setattr(pe, "get_conn_ctx", mock_get_conn_ctx)
 
     results = await search_memories(tags=["food"], limit=5)

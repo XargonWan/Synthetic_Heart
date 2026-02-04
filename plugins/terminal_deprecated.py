@@ -4,4 +4,6 @@
 
 from core.logging_utils import log_warning
 
-log_warning("[terminal_deprecated] The terminal plugin has been deprecated in favor of the Agent plugin's internal executor. Remove in cleanup.")
+log_warning(
+    "[terminal_deprecated] The terminal plugin has been deprecated in favor of the Agent plugin's internal executor. Remove in cleanup."
+)

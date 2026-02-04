@@ -1,5 +1,4 @@
 import asyncio
-import pytest
 
 from core.selenium_llm_base import SeleniumLLMBase, FrozenDriverError
 from core.config_manager import config_registry
@@ -21,7 +20,7 @@ def test_selenium_driver_recovery(monkeypatch):
     monkeypatch.setattr(s, "_execute_complete_workflow", fake_execute_complete_workflow)
 
     # Ensure we try at least one recovery
-    asyncio.run(config_registry.set_value('SELENIUM_DRIVER_RECOVERY_RETRIES', 1))
+    asyncio.run(config_registry.set_value("SELENIUM_DRIVER_RECOVERY_RETRIES", 1))
 
     resp = asyncio.run(s.generate_response("hello"))
     assert resp == "OK"

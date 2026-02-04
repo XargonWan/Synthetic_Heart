@@ -15,10 +15,16 @@ def test_autonomy_has_choices_constraint_and_exposed_combobox():
     defn = config_registry._definitions.get("SYNTH_AUTONOMY_MODE")
     assert defn is not None
     assert defn.constraints and "choices" in defn.constraints
-    assert defn.constraints["choices"] == ["passive", "suggest", "whitelisted", "autonomous"]
+    assert defn.constraints["choices"] == [
+        "passive",
+        "suggest",
+        "whitelisted",
+        "autonomous",
+    ]
 
     # Check exposed var registration for combobox UI
     from core.variables_engine import exposed_vars
+
     exposed_def = exposed_vars.get_definition("SYNTH_AUTONOMY_MODE")
     assert exposed_def is not None
     assert exposed_def.ui_type == "combobox"

@@ -27,7 +27,7 @@ def _now_iso() -> str:
 
 class OllamaCompatServer:
     """Expose the synth message chain through a REST API compatible with Ollama."""
-    
+
     display_name = "Ollama Compat Server"
 
     interface_id = "ollama_serve"
@@ -38,7 +38,9 @@ class OllamaCompatServer:
         self._server_task: Optional[asyncio.Task[None]] = None
         self._startup_pending = False
         self.default_model_name = os.getenv("OLLAMA_DEFAULT_MODEL", "SyntH")
-        self.default_model_display = os.getenv("OLLAMA_DEFAULT_MODEL_DISPLAY", "Syntethic Heart")
+        self.default_model_display = os.getenv(
+            "OLLAMA_DEFAULT_MODEL_DISPLAY", "Syntethic Heart"
+        )
 
         # Context memory mirrors the structure used by other interfaces so that
         # build_json_prompt() can reuse the chat history.
@@ -138,7 +140,9 @@ class OllamaCompatServer:
         data = await request.json()
         prompt = data.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip():
-            raise HTTPException(status_code=400, detail="'prompt' must be a non-empty string")
+            raise HTTPException(
+                status_code=400, detail="'prompt' must be a non-empty string"
+            )
 
         payload = dict(data)
         payload["messages"] = [{"role": "user", "content": prompt}]
@@ -148,11 +152,15 @@ class OllamaCompatServer:
     async def _handle_chat_payload(self, data: dict[str, Any]):
         messages = data.get("messages") or []
         if not messages:
-            raise HTTPException(status_code=400, detail="'messages' must be a non-empty list")
+            raise HTTPException(
+                status_code=400, detail="'messages' must be a non-empty list"
+            )
 
         last_message = messages[-1]
         if not isinstance(last_message, dict) or last_message.get("role") != "user":
-            raise HTTPException(status_code=400, detail="Last message must be a user message")
+            raise HTTPException(
+                status_code=400, detail="Last message must be a user message"
+            )
 
         history_messages = messages[:-1]
 
@@ -200,7 +208,9 @@ class OllamaCompatServer:
             return JSONResponse(final_chunk, status_code=500)
 
         aggregated_response = "".join(
-            chunk.get("response", "") for chunk in result_chunks if not chunk.get("done")
+            chunk.get("response", "")
+            for chunk in result_chunks
+            if not chunk.get("done")
         )
         if not aggregated_response:
             aggregated_response = final_chunk.get("final_response", "")
@@ -219,7 +229,9 @@ class OllamaCompatServer:
             payload["total_duration"] = final_chunk["total_duration"]
         payload["load_duration"] = final_chunk.get("load_duration", 0)
         payload["prompt_eval_duration"] = final_chunk.get("prompt_eval_duration", 0)
-        payload["eval_duration"] = final_chunk.get("eval_duration", final_chunk.get("total_duration", 0))
+        payload["eval_duration"] = final_chunk.get(
+            "eval_duration", final_chunk.get("total_duration", 0)
+        )
         payload["prompt_eval_count"] = final_chunk.get("prompt_eval_count", 0)
         payload["eval_count"] = final_chunk.get("eval_count", 0)
         return JSONResponse(payload)
@@ -240,32 +252,40 @@ class OllamaCompatServer:
         try:
             # Build interface_path for Ollama
             from core.interface_path_utils import build_interface_path
-            interface_path = build_interface_path('ollama_serve', chat_id)
+
+            interface_path = build_interface_path("ollama_serve", chat_id)
             log_debug(f"[ollama_serve] Generated interface_path: {interface_path}")
 
             # Track context using centralized manager
             from core.chat_context_manager import add_message_to_context
+
             try:
                 await add_message_to_context(
                     interface_path=interface_path,
                     message_text=last_message.get("content", ""),
                     sender_name="user",
                     sender_id=f"ollama-user-{chat_id}",
-                    timestamp=None
+                    timestamp=None,
                 )
             except Exception as e:
                 log_warning(f"[ollama_serve] Failed to add message to context: {e}")
 
             self._populate_history(chat_id, history_messages)
             message_obj = self._build_message(chat_id, last_message)
-            
+
             # Add interface_path to message object
             message_obj.interface_path = interface_path
 
             # Update context memory with the latest user message so the prompt
             # reflects the current conversation state.
-            history = self.context_memory.setdefault(chat_id, deque(maxlen=self.max_history))
-            history.append(self._history_entry_from_message("user", last_message["content"], chat_id))
+            history = self.context_memory.setdefault(
+                chat_id, deque(maxlen=self.max_history)
+            )
+            history.append(
+                self._history_entry_from_message(
+                    "user", last_message["content"], chat_id
+                )
+            )
 
             try:
                 response = await plugin_instance.handle_incoming_message(
@@ -445,7 +465,9 @@ class OllamaCompatServer:
             chunk.setdefault("response", message["content"])
 
         if chunk.get("done"):
-            chunk.setdefault("done_reason", "stop" if not chunk.get("error") else "error")
+            chunk.setdefault(
+                "done_reason", "stop" if not chunk.get("error") else "error"
+            )
             chunk.setdefault("context", [])
             duration_ns = self._compute_duration_ns(chat_id)
             if duration_ns is not None:
@@ -522,8 +544,12 @@ class OllamaCompatServer:
         )
 
         if aggregated:
-            history = self.context_memory.setdefault(chat_id, deque(maxlen=self.max_history))
-            history.append(self._history_entry_from_message("assistant", aggregated, chat_id))
+            history = self.context_memory.setdefault(
+                chat_id, deque(maxlen=self.max_history)
+            )
+            history.append(
+                self._history_entry_from_message("assistant", aggregated, chat_id)
+            )
 
         if completion_event and not completion_event.is_set():
             completion_event.set()
@@ -577,11 +603,17 @@ class OllamaCompatServer:
             seen.add(descriptor["name"])
 
         if self.default_model_name not in seen:
-            descriptors.append(self._format_model_descriptor(self.default_model_name, display=self.default_model_display))
+            descriptors.append(
+                self._format_model_descriptor(
+                    self.default_model_name, display=self.default_model_display
+                )
+            )
 
         return descriptors
 
-    def _format_model_descriptor(self, name: str, *, display: Optional[str] = None) -> dict[str, Any]:
+    def _format_model_descriptor(
+        self, name: str, *, display: Optional[str] = None
+    ) -> dict[str, Any]:
         created = _now_iso()
         display_name = display or name
         return {
@@ -592,7 +624,9 @@ class OllamaCompatServer:
             "digest": "",
             "details": {
                 "format": "SyntH",
-                "family": "synthetic-heart" if name == self.default_model_name else "generic",
+                "family": "synthetic-heart"
+                if name == self.default_model_name
+                else "generic",
                 "parameter_size": "dynamic",
                 "quantization_level": "adaptive",
                 "display_name": display_name,
@@ -606,7 +640,9 @@ class OllamaCompatServer:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            log_debug("[ollama_serve] Event loop not running yet; deferring HTTP server startup")
+            log_debug(
+                "[ollama_serve] Event loop not running yet; deferring HTTP server startup"
+            )
             self._startup_pending = True
             return
 
@@ -679,7 +715,9 @@ class OllamaCompatServer:
         model = model or self.default_model_name
         chat_id = str(chat_id)
         if text is None and not finalize_flag:
-            log_warning("[ollama_serve] send_message missing text and final flag not set")
+            log_warning(
+                "[ollama_serve] send_message missing text and final flag not set"
+            )
             return
 
         if text:
@@ -689,15 +727,18 @@ class OllamaCompatServer:
                 conversation_id=conversation_id,
                 text=text,
             )
-            
+
             # Save SyntH's response via core chat_context_manager
             try:
                 from core.chat_context_manager import save_response_message
                 from core.interface_path_utils import build_interface_path
-                msg_interface_path = build_interface_path('ollama_serve', str(chat_id))
+
+                msg_interface_path = build_interface_path("ollama_serve", str(chat_id))
                 await save_response_message(msg_interface_path, text)
             except Exception as e:
-                log_debug(f"[ollama_serve] Failed to save response via context_manager: {e}")
+                log_debug(
+                    f"[ollama_serve] Failed to save response via context_manager: {e}"
+                )
 
         if finalize_flag:
             await self._finalize_stream(

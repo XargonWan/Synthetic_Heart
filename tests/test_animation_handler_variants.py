@@ -28,7 +28,9 @@ def test_variants_discovery(tmp_path: Path):
 
     # thinking.fbx + descriptor with loop
     (think_dir / "thinking.fbx").write_text("FBX_PLACEHOLDER")
-    write_json(think_dir / "thinking.fbx.json", {"loop": {"start_frame": 10, "end_frame": 50}})
+    write_json(
+        think_dir / "thinking.fbx.json", {"loop": {"start_frame": 10, "end_frame": 50}}
+    )
 
     # thinking_post.fbx marked with play_once
     (think_dir / "thinking_post.fbx").write_text("FBX_PLACEHOLDER")
@@ -38,9 +40,9 @@ def test_variants_discovery(tmp_path: Path):
     # set custom search path (this should be checked before Rei fallback)
     handler.set_animation_search_paths([base])
 
-    variants = handler.get_animation_variants('think')
-    assert 'thinking.fbx' in variants['loop']
-    assert 'thinking_post.fbx' in variants['post']
+    variants = handler.get_animation_variants("think")
+    assert "thinking.fbx" in variants["loop"]
+    assert "thinking_post.fbx" in variants["post"]
 
 
 def test_exact_file_match_and_aliases(tmp_path: Path):
@@ -53,18 +55,20 @@ def test_exact_file_match_and_aliases(tmp_path: Path):
     handler = get_animation_handler()
     handler.set_animation_search_paths([base])
 
-    variants = handler.get_animation_variants('eat')
-    assert 'eat.fbx' in variants['loop']
+    variants = handler.get_animation_variants("eat")
+    assert "eat.fbx" in variants["loop"]
 
     # register alias: chow -> eat
-    handler.register_state_aliases({'chow': ['eat']})
-    variants_alias = handler.get_animation_variants('chow')
-    assert 'eat.fbx' in variants_alias['loop']
+    handler.register_state_aliases({"chow": ["eat"]})
+    variants_alias = handler.get_animation_variants("chow")
+    assert "eat.fbx" in variants_alias["loop"]
 
 
 def test_register_state_animations_override():
     handler = get_animation_handler()
-    handler.register_state_animations('think', {'loop': ['override_loop.fbx'], 'post': ['override_post.fbx']})
-    variants = handler.get_animation_variants('think')
-    assert variants['loop'] == ['override_loop.fbx']
-    assert variants['post'] == ['override_post.fbx']
+    handler.register_state_animations(
+        "think", {"loop": ["override_loop.fbx"], "post": ["override_post.fbx"]}
+    )
+    variants = handler.get_animation_variants("think")
+    assert variants["loop"] == ["override_loop.fbx"]
+    assert variants["post"] == ["override_post.fbx"]

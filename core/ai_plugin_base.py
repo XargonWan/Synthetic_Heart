@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, List
 
-from core.prompt_engine import build_prompt
 
 if TYPE_CHECKING:  # pragma: no cover
     from core.history_types import HistoryContribution
@@ -35,9 +34,9 @@ class AIPluginBase:
     def get_supported_models(self) -> list[str]:
         """Optional. Return the list of available models."""
         return []
+
     def get_rate_limit(self):
         return (80, 10800, 0.5)
-
 
     def set_notify_fn(self, notify_fn):
         """Optional: dynamically update the notification function."""
@@ -69,7 +68,7 @@ class AIPluginBase:
         """Return prompt instructions for the given action."""
         return {}
 
-    def get_history_contributions(self, **kwargs) -> List['HistoryContribution']:
+    def get_history_contributions(self, **kwargs) -> List["HistoryContribution"]:
         """Optional: provide history contributions for prompt context.
 
         Engines may choose to contribute context (e.g., model notes). The core

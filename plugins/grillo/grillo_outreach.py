@@ -326,19 +326,47 @@ RESPOND ONLY WITH VALID JSON:
         # Enqueue as low-priority
         try:
             from core.message_queue import enqueue_low_priority
+            from types import SimpleNamespace
+
+            # Build a proper message object for the queue (not just a string)
+            grillo_message = SimpleNamespace(
+                text=prompt,
+                chat_id=chat_id or -1,
+                message_id=f"grillo_outreach_{activity_id or 0}",
+                from_user=SimpleNamespace(
+                    id=-1,
+                    username="grillo",
+                    full_name="G.R.I.L.L.O.",
+                    is_bot=True,
+                ),
+                chat=SimpleNamespace(
+                    id=chat_id or -1,
+                    type="private",
+                    title=None,
+                    username="grillo",
+                    first_name="G.R.I.L.L.O.",
+                ),
+                date=None,
+                thread_id=None,
+                interface_path=f"{interface}/{chat_id}" if chat_id else interface,
+            )
+
+            # Context with grillo beat metadata
+            context_memory = {
+                "grillo_beat": True,
+                "beat_type": "outreach",
+                "activity_log_id": activity_id,
+                "target_interface": interface,
+                "target_chat_id": chat_id,
+                "interface_path": grillo_message.interface_path,
+            }
 
             await enqueue_low_priority(
                 bot=None,
-                message=prompt,
-                context_memory=None,
-                interface_id="grillo_outreach",
-                original_message={
-                    "grillo_beat": True,
-                    "beat_type": "outreach",
-                    "activity_log_id": activity_id,
-                    "target_interface": interface,
-                    "target_chat_id": chat_id,
-                },
+                message=grillo_message,
+                context_memory=context_memory,
+                interface_id=interface,
+                original_message=None,
             )
             log_info(f"[grillo_outreach] 🎵 Outreach beat enqueued for {interface}")
         except Exception as e:

@@ -1,4 +1,3 @@
-import asyncio
 import os
 from collections import deque
 from types import SimpleNamespace

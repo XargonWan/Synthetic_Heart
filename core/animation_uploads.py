@@ -14,7 +14,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from core.logging_utils import log_debug, log_info, log_warning
+from core.logging_utils import log_info, log_warning
 
 UPLOADS_ROOT = Path("skins/temp")
 META_FILENAME = "meta.json"
@@ -186,7 +186,9 @@ def promote_upload(
             # Copy descriptor if present
             descriptor = source_path.with_suffix(source_path.suffix + ".json")
             if descriptor.exists():
-                shutil.copy2(descriptor, dest_path.with_suffix(dest_path.suffix + ".json"))
+                shutil.copy2(
+                    descriptor, dest_path.with_suffix(dest_path.suffix + ".json")
+                )
 
     return promoted
 

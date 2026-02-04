@@ -1,5 +1,4 @@
 import pytest
-import asyncio
 from plugins.grillo.grillo_impl import GrilloPlugin
 
 
@@ -8,9 +7,11 @@ async def test_create_action_exec_handles_db_failure(monkeypatch):
     async def fake_get_conn_ctx():
         raise Exception("db unavailable")
 
-    monkeypatch.setattr('core.db.get_conn_ctx', fake_get_conn_ctx)
+    monkeypatch.setattr("core.db.get_conn_ctx", fake_get_conn_ctx)
 
-    res = await GrilloPlugin.create_action_exec(activity_log_id=1, action_index=0, action_type='test', payload={'a': 1})
+    res = await GrilloPlugin.create_action_exec(
+        activity_log_id=1, action_index=0, action_type="test", payload={"a": 1}
+    )
     assert res is None
 
 
@@ -19,7 +20,7 @@ async def test_fetch_action_execs_handles_db_failure(monkeypatch):
     async def fake_get_conn_ctx():
         raise Exception("db unavailable")
 
-    monkeypatch.setattr('core.db.get_conn_ctx', fake_get_conn_ctx)
+    monkeypatch.setattr("core.db.get_conn_ctx", fake_get_conn_ctx)
 
     res = await GrilloPlugin.fetch_action_execs([1, 2, 3])
     assert isinstance(res, dict)

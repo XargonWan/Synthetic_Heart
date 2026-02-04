@@ -1,6 +1,3 @@
-import os
-import json
-
 import pytest
 
 from core import persona_manager
@@ -17,7 +14,9 @@ def test_rekku_profile_contains_parts():
     pm = persona_manager.PersonaManager(config={})
     pj, profile = _assemble_for_skin(pm, "Rekku")
     # Base template must be present
-    base = persona_manager.SYNTH_BASE_PROFILE_TEMPLATE.format(name=pj.get("name", "SyntH"))
+    base = persona_manager.SYNTH_BASE_PROFILE_TEMPLATE.format(
+        name=pj.get("name", "SyntH")
+    )
     assert base in profile
     # description and appearance must be included
     assert pj.get("description", "") in profile
@@ -28,7 +27,9 @@ def test_rekku_profile_contains_parts():
 def test_other_skins_profile_contains_parts(skin):
     pm = persona_manager.PersonaManager(config={})
     pj, profile = _assemble_for_skin(pm, skin)
-    base = persona_manager.SYNTH_BASE_PROFILE_TEMPLATE.format(name=pj.get("name", "SyntH"))
+    base = persona_manager.SYNTH_BASE_PROFILE_TEMPLATE.format(
+        name=pj.get("name", "SyntH")
+    )
     assert base in profile
     assert pj.get("description", "") in profile
     assert pj.get("attributes", {}).get("appearance", "") in profile

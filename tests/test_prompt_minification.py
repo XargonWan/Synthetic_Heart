@@ -7,7 +7,6 @@ reduction strategies to ensure prompts stay under character limits.
 
 import pytest
 import sys
-import json
 import copy
 from pathlib import Path
 
@@ -17,7 +16,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from core.prompt_engine import (
     load_json_instructions,
     reduce_prompt_for_llm_limit,
-    minify_actions_block,
     build_json_prompt,
 )
 from core.json_utils import dumps as json_dumps
@@ -25,38 +23,42 @@ from core.json_utils import dumps as json_dumps
 
 class TestLoadJsonInstructions:
     """Test the load_json_instructions() function for minification."""
-    
+
     def test_instructions_are_minified(self):
         """Instructions should be minified (no excessive whitespace/newlines)."""
         instructions = load_json_instructions()
-        
+
         # Should be a string
         assert isinstance(instructions, str)
-        
+
         # Should contain critical keywords
         assert "MASTER INSTRUCTION" in instructions
         assert "RESPOND ONLY WITH VALID JSON" in instructions
         assert "thread_id" in instructions
-        
+
         # Should NOT have excessive newlines (minified)
-        assert instructions.count('\n') == 0, "Minified instructions should not contain newlines"
-        
+        assert instructions.count("\n") == 0, (
+            "Minified instructions should not contain newlines"
+        )
+
         # Should NOT have multiple consecutive spaces
-        assert '  ' not in instructions, "Minified instructions should not have double spaces"
-    
+        assert "  " not in instructions, (
+            "Minified instructions should not have double spaces"
+        )
+
     def test_instructions_size_reasonable(self):
         """Minified instructions should be reasonably sized (not > 1600 chars)."""
         instructions = load_json_instructions()
         size = len(instructions)
-        
+
         # Should be much smaller than raw multi-line version
         assert size < 1600, f"Instructions too large: {size} chars (expected < 1600)"
         print(f"✅ Minified instructions: {size} chars")
-    
+
     def test_instructions_preserves_meaning(self):
         """Minified instructions should preserve all critical rules."""
         instructions = load_json_instructions()
-        
+
         critical_rules = [
             "MASTER INSTRUCTION",
             "RESPOND ONLY WITH VALID JSON",
@@ -66,14 +68,14 @@ class TestLoadJsonInstructions:
             "actions",
             "Do NOT add any text",
         ]
-        
+
         for rule in critical_rules:
             assert rule in instructions, f"Critical rule missing: {rule}"
 
 
 class TestReducePromptForLLMLimit:
     """Test the reduce_prompt_for_llm_limit() function."""
-    
+
     def create_test_prompt(self, num_memories=3, num_chat_messages=5):
         """Create a test prompt with configurable sections."""
         return {
@@ -83,13 +85,12 @@ class TestReducePromptForLLMLimit:
                     for i in range(num_chat_messages)
                 ],
                 "memories": [
-                    f"Memory {i}: " + ("x" * 300)
-                    for i in range(num_memories)
+                    f"Memory {i}: " + ("x" * 300) for i in range(num_memories)
                 ],
                 "diary_entries": [
                     {
                         "timestamp": "2025-01-01T12:00:00",
-                        "content": "Diary entry " + ("y" * 200)
+                        "content": "Diary entry " + ("y" * 200),
                     }
                     for i in range(3)
                 ],
@@ -103,44 +104,48 @@ class TestReducePromptForLLMLimit:
             "actions": {
                 "send_message": {"required": ["text"]},
                 "log_event": {"required": ["event_type"]},
-            }
+            },
         }
-    
+
     def test_prompt_under_limit_not_modified(self):
         """If prompt is already under limit, should not be modified."""
         prompt = self.create_test_prompt(num_memories=1, num_chat_messages=1)
         original_size = len(json_dumps(prompt))
-        
+
         # Reduce with a high limit (shouldn't change anything)
         reduced = reduce_prompt_for_llm_limit(prompt, 100000)
         reduced_size = len(json_dumps(reduced))
-        
+
         # Should be same size (or very close due to JSON formatting)
-        assert reduced_size == original_size, "Prompt should not be modified if under limit"
-    
+        assert reduced_size == original_size, (
+            "Prompt should not be modified if under limit"
+        )
+
     def test_prompt_reduction_removes_memories(self):
         """If prompt exceeds limit, should remove memories first."""
         prompt = self.create_test_prompt(num_memories=5, num_chat_messages=3)
         original_size = len(json_dumps(prompt))
-        
+
         # Set a limit that forces reduction
         tight_limit = original_size - 2000
-        
+
         reduced = reduce_prompt_for_llm_limit(prompt, tight_limit)
         reduced_size = len(json_dumps(reduced))
-        
-        print(f"Original: {original_size} -> Reduced: {reduced_size} (limit: {tight_limit})")
-        
+
+        print(
+            f"Original: {original_size} -> Reduced: {reduced_size} (limit: {tight_limit})"
+        )
+
         # Should be reduced
         assert reduced_size < original_size, "Prompt should be reduced"
-        
+
         # Memories should be fewer (or removed)
         assert len(reduced.get("context", {}).get("memories", [])) <= 5
-    
+
     def test_minify_instructions_happens_first(self):
         """Minified instructions should be applied during reduction."""
         prompt = self.create_test_prompt()
-        
+
         # Create a bloated instruction for comparison
         bloated_instructions = """
         
@@ -151,50 +156,50 @@ class TestReducePromptForLLMLimit:
         
         and multiple spaces    between    words
         """
-        
+
         prompt["instructions"] = bloated_instructions
         bloated_size = len(json_dumps(prompt))
-        
+
         # Reduce it
         reduced = reduce_prompt_for_llm_limit(prompt, bloated_size - 500)
         reduced_size = len(json_dumps(reduced))
-        
+
         # Instructions should be minified in the reduced version
         minified_inst = reduced.get("instructions", "")
-        
+
         # Should have no leading/trailing newlines in each section
         # (minified version should be compact)
         assert reduced_size < bloated_size, "Reduction should happen"
-    
+
     def test_emergency_context_removal(self):
         """If still over limit after memory removal, context should be removed."""
         # Create a massive prompt
         prompt = self.create_test_prompt(num_memories=10, num_chat_messages=20)
-        
+
         # Set an extremely low limit to force emergency removal
         emergency_limit = 500
-        
+
         reduced = reduce_prompt_for_llm_limit(prompt, emergency_limit)
         reduced_size = len(json_dumps(reduced))
-        
+
         # Context should be removed
         if reduced_size > emergency_limit:
             # At extreme limits, context might be gone
             assert "context" not in reduced or reduced.get("context") == {}
-    
+
     def test_preserves_critical_sections(self):
         """Should preserve input and instructions even during reduction."""
         prompt = self.create_test_prompt(num_memories=5, num_chat_messages=5)
         original_input = copy.deepcopy(prompt.get("input"))
         original_instructions = prompt.get("instructions")
-        
+
         original_size = len(json_dumps(prompt))
         reduced = reduce_prompt_for_llm_limit(prompt, original_size - 3000)
-        
+
         # Input and instructions should still be there
         assert "input" in reduced, "Input section should be preserved"
         assert "instructions" in reduced, "Instructions section should be preserved"
-        
+
         # Input should be identical
         assert reduced["input"] == original_input, "Input should not be modified"
 
@@ -202,7 +207,9 @@ class TestReducePromptForLLMLimit:
         """If an unminified instructions_verbose exists it should be preserved."""
         prompt = self.create_test_prompt(num_memories=5, num_chat_messages=5)
         # Add an unminified verbose instruction as would be created for chat interfaces
-        prompt["instructions_verbose"] = "You are participating in a live chat conversation. Be concise. THIS TEXT MUST NOT BE MINIFIED."
+        prompt["instructions_verbose"] = (
+            "You are participating in a live chat conversation. Be concise. THIS TEXT MUST NOT BE MINIFIED."
+        )
 
         original_size = len(json_dumps(prompt))
         reduced = reduce_prompt_for_llm_limit(prompt, original_size - 3000)
@@ -214,7 +221,7 @@ class TestReducePromptForLLMLimit:
 
 class TestIntegrationMinificationWithReduction:
     """Integration tests for the full flow."""
-    
+
     @pytest.mark.asyncio
     async def test_full_minification_pipeline(self):
         """Test that minified instructions + reduction work together."""
@@ -226,23 +233,25 @@ class TestIntegrationMinificationWithReduction:
             },
             "input": {"type": "message", "payload": {}},
             "instructions": load_json_instructions(),  # Should be minified
-            "actions": {"test": {}}
+            "actions": {"test": {}},
         }
-        
+
         size_before = len(json_dumps(prompt))
-        
+
         # The instructions should already be minified from load_json_instructions()
         instructions = prompt["instructions"]
-        assert '\n' not in instructions, "Instructions should be minified (no newlines)"
-        
+        assert "\n" not in instructions, "Instructions should be minified (no newlines)"
+
         # Now reduce further if needed
         reduced = reduce_prompt_for_llm_limit(prompt, 52000)
         size_after = len(json_dumps(reduced))
-        
+
         print(f"Before: {size_before} -> After: {size_after}")
-        
+
         # Should fit in reasonable size
-        assert size_after < 52000, f"Reduced prompt should be under 52k, got {size_after}"
+        assert size_after < 52000, (
+            f"Reduced prompt should be under 52k, got {size_after}"
+        )
 
 
 def test_quick_sanity_check():
@@ -288,25 +297,27 @@ Key rules:
 - Do NOT include "description" or "instructions" in your response
 - The "type" must match exactly one from the 'actions' block
 """
-    
+
     original_size = len(original_raw)
-    
+
     instructions = load_json_instructions()
     minified_size = len(instructions)
-    
+
     assert minified_size > 0
     assert "RESPOND ONLY WITH VALID JSON" in instructions
-    
+
     reduction_percent = ((original_size - minified_size) / original_size) * 100
-    
-    print(f"\n{'='*70}")
-    print(f"📊 INSTRUCTION MINIFICATION RESULTS:")
-    print(f"{'='*70}")
+
+    print(f"\n{'=' * 70}")
+    print("📊 INSTRUCTION MINIFICATION RESULTS:")
+    print(f"{'=' * 70}")
     print(f"  Original (with whitespace): {original_size:,} chars")
     print(f"  Minified (compact format):  {minified_size:,} chars")
-    print(f"  Reduction:                  {original_size - minified_size:,} chars ({reduction_percent:.1f}%)")
-    print(f"{'='*70}\n")
-    
+    print(
+        f"  Reduction:                  {original_size - minified_size:,} chars ({reduction_percent:.1f}%)"
+    )
+    print(f"{'=' * 70}\n")
+
     assert minified_size < original_size, "Minification should reduce size"
 
 
@@ -323,7 +334,8 @@ def test_full_prompt_reduction_70k():
             "chat_history": [
                 {
                     "role": "user",
-                    "content": f"User message {i}: " + ("Lorem ipsum dolor sit amet. " * 50)
+                    "content": f"User message {i}: "
+                    + ("Lorem ipsum dolor sit amet. " * 50),
                 }
                 for i in range(50)  # 50 messages of ~1.5k each = 75k
             ],
@@ -334,7 +346,7 @@ def test_full_prompt_reduction_70k():
             "diary_entries": [
                 {
                     "timestamp": f"2025-01-{i:02d}T12:00:00",
-                    "content": f"Diary entry {i}: " + ("x" * 500)
+                    "content": f"Diary entry {i}: " + ("x" * 500),
                 }
                 for i in range(5)
             ],
@@ -355,50 +367,58 @@ def test_full_prompt_reduction_70k():
         "instructions": load_json_instructions(),  # Should be minified
         "actions": {
             "send_message": {"required": ["text"], "description": "description" * 100},
-            "log_event": {"required": ["event_type"], "description": "description" * 100},
-            "create_diary": {"required": ["content"], "description": "description" * 100},
-        }
+            "log_event": {
+                "required": ["event_type"],
+                "description": "description" * 100,
+            },
+            "create_diary": {
+                "required": ["content"],
+                "description": "description" * 100,
+            },
+        },
     }
-    
+
     # Calculate original size
     original_size = len(json_dumps(large_prompt))
-    print(f"\n{'='*70}")
-    print(f"📊 LARGE PROMPT REDUCTION TEST (70k+ chars):")
-    print(f"{'='*70}")
+    print(f"\n{'=' * 70}")
+    print("📊 LARGE PROMPT REDUCTION TEST (70k+ chars):")
+    print(f"{'=' * 70}")
     print(f"  Original size: {original_size:,} chars")
-    
+
     # This should be > 70k
     assert original_size > 70000, f"Test prompt should be >70k, got {original_size}"
     print(f"  ✅ Generated prompt is {original_size:,} chars (as expected, >70k)")
-    
+
     # Reduce to 52k limit
     reduced = reduce_prompt_for_llm_limit(large_prompt, 52000)
     reduced_size = len(json_dumps(reduced))
-    
+
     print(f"  Reduced size:  {reduced_size:,} chars (limit: 52,000)")
-    print(f"  Reduction:     {original_size - reduced_size:,} chars ({((original_size - reduced_size) / original_size * 100):.1f}%)")
-    
+    print(
+        f"  Reduction:     {original_size - reduced_size:,} chars ({((original_size - reduced_size) / original_size * 100):.1f}%)"
+    )
+
     # Check that reduction happened
     assert reduced_size < original_size, "Prompt should be reduced"
     print(f"  ✅ Reduction successful: {original_size:,} → {reduced_size:,}")
-    
+
     # The reduced prompt should fit within limit (or very close)
     # Some overshoot is acceptable due to JSON formatting
     assert reduced_size <= 53000, f"Reduced prompt too large: {reduced_size} > 53000"
-    print(f"  ✅ Final size within acceptable range (≤53k)")
-    
+    print("  ✅ Final size within acceptable range (≤53k)")
+
     # Check that critical sections are preserved
     assert "input" in reduced, "Input section should be preserved"
     assert "instructions" in reduced, "Instructions should be preserved"
-    print(f"  ✅ Critical sections (input, instructions) preserved")
-    
-    print(f"{'='*70}\n")
+    print("  ✅ Critical sections (input, instructions) preserved")
+
+    print(f"{'=' * 70}\n")
 
 
 def test_end_to_end_prompt_construction():
     """
     End-to-end test simulating a real message flowing through build_json_prompt().
-    
+
     This test:
     1. Creates a fake message object (simulating Telegram interface)
     2. Creates massive chat history to simulate real usage
@@ -407,13 +427,13 @@ def test_end_to_end_prompt_construction():
     """
     import asyncio
     from datetime import datetime
-    
+
     # Create a minimal fake message object
     class FakeUser:
         def __init__(self):
             self.username = "testuser"
             self.full_name = "Test User"
-    
+
     class FakeMessage:
         def __init__(self):
             self.chat_id = 12345
@@ -423,31 +443,33 @@ def test_end_to_end_prompt_construction():
             self.date = datetime.now()
             self.thread_id = None
             self.reply_to_message = None
-    
+
     # Create massive context history (simulating lots of chat)
     massive_context = {}
     chat_id = 12345
-    
+
     # Generate 100 messages of ~200 chars each = ~20k chars just in chat history
     massive_context[chat_id] = [
-        {"role": "user", "content": f"Message {i}: " + ("Lorem ipsum dolor sit amet consectetur. " * 5)}
+        {
+            "role": "user",
+            "content": f"Message {i}: "
+            + ("Lorem ipsum dolor sit amet consectetur. " * 5),
+        }
         for i in range(100)
     ]
     from collections import deque
+
     massive_context[chat_id] = deque(massive_context[chat_id])
-    
+
     message = FakeMessage()
-    
+
     # Now run build_json_prompt asynchronously
     async def run_build():
         prompt = await build_json_prompt(
-            message,
-            massive_context,
-            interface_name="telegram",
-            max_chars=52000
+            message, massive_context, interface_name="telegram", max_chars=52000
         )
         return prompt
-    
+
     # Run the async function
     try:
         prompt = asyncio.run(run_build())
@@ -455,27 +477,29 @@ def test_end_to_end_prompt_construction():
         # If asyncio fails, skip this test (DB connection issues in test environment)
         print(f"\n⚠️  Skipping end-to-end test (DB issue in test env): {e}")
         return
-    
+
     final_size = len(json_dumps(prompt))
-    
-    print(f"\n{'='*70}")
-    print(f"📊 END-TO-END PROMPT CONSTRUCTION TEST:")
-    print(f"{'='*70}")
+
+    print(f"\n{'=' * 70}")
+    print("📊 END-TO-END PROMPT CONSTRUCTION TEST:")
+    print(f"{'=' * 70}")
     print(f"  Chat messages:     {len(massive_context[chat_id])} messages")
     print(f"  Final prompt size: {final_size:,} chars")
-    
+
     # Verify structure
     assert "input" in prompt, "Input section should exist"
     assert "instructions" in prompt, "Instructions should exist"
     assert "context" in prompt, "Context should exist"
-    print(f"  ✅ Prompt structure valid (input, instructions, context)")
-    
+    print("  ✅ Prompt structure valid (input, instructions, context)")
+
     # Verify minification happened on instructions
-    assert "\n" not in prompt["instructions"], "Instructions should be minified (no newlines)"
-    print(f"  ✅ Instructions minified (no newlines)")
-    
+    assert "\n" not in prompt["instructions"], (
+        "Instructions should be minified (no newlines)"
+    )
+    print("  ✅ Instructions minified (no newlines)")
+
     # Verify we're under the limit
     assert final_size <= 53000, f"Final prompt too large: {final_size} > 53000"
     print(f"  ✅ Final prompt within 52k limit: {final_size:,} chars")
-    
-    print(f"{'='*70}\n")
+
+    print(f"{'=' * 70}\n")

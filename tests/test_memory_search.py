@@ -15,7 +15,13 @@ def test_build_query_tags():
     )
 
     assert union_q == expected_q
-    assert params == [json.dumps("Mostro"), json.dumps("Austriaco"), json.dumps("Mostro"), json.dumps("Austriaco"), 5]
+    assert params == [
+        json.dumps("Mostro"),
+        json.dumps("Austriaco"),
+        json.dumps("Mostro"),
+        json.dumps("Austriaco"),
+        5,
+    ]
 
 
 def test_build_query_free_includes_chat():
@@ -32,10 +38,18 @@ def test_build_query_free_includes_chat():
 
     assert union_q == expected_q
     assert params == [
-        '%mostro%', '%austriaco%',
-        '%mostro%', '%mostro%', '%mostro%', '%mostro%',
-        '%austriaco%', '%austriaco%', '%austriaco%', '%austriaco%',
-        '%mostro%', '%austriaco%',
+        "%mostro%",
+        "%austriaco%",
+        "%mostro%",
+        "%mostro%",
+        "%mostro%",
+        "%mostro%",
+        "%austriaco%",
+        "%austriaco%",
+        "%austriaco%",
+        "%austriaco%",
+        "%mostro%",
+        "%austriaco%",
         10,
     ]
 
@@ -71,7 +85,9 @@ def test_build_query_includes_timestamp_for_time_only():
     # Should include timestamp clause
     assert "timestamp" in q
     # Params should contain at least one ISO-like timestamp
-    found_iso = any(re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", str(x)) for x in params)
+    found_iso = any(
+        re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", str(x)) for x in params
+    )
     assert found_iso
 
 
@@ -84,8 +100,6 @@ def test_validate_payload_allows_time_only_free_mode():
 
 
 def test_parse_iso_range_string():
-    from datetime import timezone
-
     plugin = MemorySearchPlugin()
     # Use a fixed ISO range
     spec = "2026-01-10T00:00:00Z/2026-01-12T23:59:59Z"

@@ -89,6 +89,7 @@ class AgentPlugin(AIPluginBase):
         else:
             try:
                 from core.notifier import notify_trainer
+
                 self._notify_fn = notify_trainer
             except Exception:
                 self._notify_fn = lambda msg: log_info(f"[NOTIFY fallback] {msg}")
@@ -96,17 +97,31 @@ class AgentPlugin(AIPluginBase):
 
         # Config-derived state
         self._in_container = _in_container()
-        self._enabled = bool(config_registry.get_var("AGENT_ENABLED", True)) and self._in_container
-        self._approval_mode = str(config_registry.get_var("AGENT_APPROVAL_MODE", "whitelist"))
-        self._whitelist_raw = str(config_registry.get_var("AGENT_SHELL_WHITELIST", "ls,cat,df -h,free -m,uptime,whoami,id"))
-        self._whitelist = [c.strip() for c in self._whitelist_raw.split(",") if c.strip()]
-        self._container_required = bool(config_registry.get_var("AGENT_CONTAINER_REQUIRED", True))
+        self._enabled = (
+            bool(config_registry.get_var("AGENT_ENABLED", True)) and self._in_container
+        )
+        self._approval_mode = str(
+            config_registry.get_var("AGENT_APPROVAL_MODE", "whitelist")
+        )
+        self._whitelist_raw = str(
+            config_registry.get_var(
+                "AGENT_SHELL_WHITELIST", "ls,cat,df -h,free -m,uptime,whoami,id"
+            )
+        )
+        self._whitelist = [
+            c.strip() for c in self._whitelist_raw.split(",") if c.strip()
+        ]
+        self._container_required = bool(
+            config_registry.get_var("AGENT_CONTAINER_REQUIRED", True)
+        )
 
         # If not in container and container_required => disable shell execution by default
         if not self._in_container and self._container_required:
             self._enabled = False
 
-        log_info(f"[agent] Initialized. in_container={self._in_container} enabled={self._enabled} approval_mode={self._approval_mode}")
+        log_info(
+            f"[agent] Initialized. in_container={self._in_container} enabled={self._enabled} approval_mode={self._approval_mode}"
+        )
 
     @staticmethod
     def get_supported_action_types() -> list[str]:
@@ -142,9 +157,15 @@ class AgentPlugin(AIPluginBase):
             from core.plugin_instance import handle_incoming_message as llm_handle
 
             # Assume prompt is dict or string; normalize
-            data = prompt if isinstance(prompt, dict) else {"input": {"payload": {"description": str(prompt)}}}
+            data = (
+                prompt
+                if isinstance(prompt, dict)
+                else {"input": {"payload": {"description": str(prompt)}}}
+            )
 
-            res = await llm_handle(bot=None, message=None, context_memory_or_prompt=data)
+            res = await llm_handle(
+                bot=None, message=None, context_memory_or_prompt=data
+            )
 
             # Try to parse as JSON actions
             try:
@@ -182,7 +203,12 @@ class AgentPlugin(AIPluginBase):
         return False
 
     # --- DB persistence helpers for audit logging ---
-    async def _create_activity_log(self, command: str, proposer: Optional[str] = None, metadata: Optional[dict] = None) -> Optional[int]:
+    async def _create_activity_log(
+        self,
+        command: str,
+        proposer: Optional[str] = None,
+        metadata: Optional[dict] = None,
+    ) -> Optional[int]:
         try:
             import json
             from core.db import get_conn_ctx
@@ -197,7 +223,7 @@ class AgentPlugin(AIPluginBase):
                         (
                             command,
                             proposer,
-                            'proposed',
+                            "proposed",
                             json.dumps(metadata) if metadata else None,
                         ),
                     )
@@ -207,11 +233,19 @@ class AgentPlugin(AIPluginBase):
             log_error(f"[agent] _create_activity_log failed: {e}")
             return None
 
-    async def _update_activity_log(self, activity_id: int, *, status: Optional[str] = None, trainer_id: Optional[str] = None, result: Optional[str] = None) -> None:
+    async def _update_activity_log(
+        self,
+        activity_id: int,
+        *,
+        status: Optional[str] = None,
+        trainer_id: Optional[str] = None,
+        result: Optional[str] = None,
+    ) -> None:
         if not activity_id:
             return
         try:
             from core.db import get_conn_ctx
+
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     updates = []
@@ -228,17 +262,30 @@ class AgentPlugin(AIPluginBase):
                         updates.append("response_ts=CURRENT_TIMESTAMP")
                     if not updates:
                         return
-                    sql = "UPDATE agent_activity_log SET " + ", ".join(updates) + " WHERE id=%s"
+                    sql = (
+                        "UPDATE agent_activity_log SET "
+                        + ", ".join(updates)
+                        + " WHERE id=%s"
+                    )
                     params.append(activity_id)
                     await cur.execute(sql, tuple(params))
                     await conn.commit()
         except Exception as e:
             log_error(f"[agent] _update_activity_log failed: {e}")
 
-    async def _insert_action_exec(self, activity_log_id: int, command: str, *, status: str = 'pending', error_text: Optional[str] = None, result: Optional[dict] = None) -> Optional[int]:
+    async def _insert_action_exec(
+        self,
+        activity_log_id: int,
+        command: str,
+        *,
+        status: str = "pending",
+        error_text: Optional[str] = None,
+        result: Optional[dict] = None,
+    ) -> Optional[int]:
         try:
             import json
             from core.db import get_conn_ctx
+
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
@@ -272,7 +319,9 @@ class AgentPlugin(AIPluginBase):
 
             # Check global enabled flag
             if not self._enabled:
-                log_warning("[agent] Agent execution disabled by configuration or not running in container")
+                log_warning(
+                    "[agent] Agent execution disabled by configuration or not running in container"
+                )
                 return "Agent execution is disabled by configuration or runtime environment"
 
             mode = self._approval_mode or "whitelist"
@@ -289,10 +338,14 @@ class AgentPlugin(AIPluginBase):
                 # Record action exec and update activity log
                 try:
                     if activity_id is None:
-                        activity_id = await self._create_activity_log(command, proposer='system', metadata=None)
+                        activity_id = await self._create_activity_log(
+                            command, proposer="system", metadata=None
+                        )
                         # Mark it approved/executed immediately
-                        await self._update_activity_log(activity_id, status='executed')
-                    await self._insert_action_exec(activity_id, command, status='executed', result={'output': res})
+                        await self._update_activity_log(activity_id, status="executed")
+                    await self._insert_action_exec(
+                        activity_id, command, status="executed", result={"output": res}
+                    )
                 except Exception as e:
                     log_warning(f"[agent] Failed to persist execution record: {e}")
                 return res
@@ -308,18 +361,26 @@ class AgentPlugin(AIPluginBase):
                 else:
                     log_warning(f"[agent] Command not in whitelist: {cmd}")
                     # Create a proposal and notify trainer
-                    activity_id = await self._create_activity_log(cmd, proposer='system')
+                    activity_id = await self._create_activity_log(
+                        cmd, proposer="system"
+                    )
                     try:
-                        self._notify_fn(f"Agent proposes command #{activity_id} (awaiting approval): {cmd}\nReply with '/agent approve {activity_id}' to approve.")
+                        self._notify_fn(
+                            f"Agent proposes command #{activity_id} (awaiting approval): {cmd}\nReply with '/agent approve {activity_id}' to approve."
+                        )
                     except Exception:
                         pass
-                    return f"Command not allowed without approval: proposal #{activity_id}"
+                    return (
+                        f"Command not allowed without approval: proposal #{activity_id}"
+                    )
 
             if mode == "always_ask":
                 # Create a proposal and notify trainer
-                activity_id = await self._create_activity_log(cmd, proposer='system')
+                activity_id = await self._create_activity_log(cmd, proposer="system")
                 try:
-                    self._notify_fn(f"Agent proposes command #{activity_id} (awaiting approval): {cmd}\nReply with '/agent approve {activity_id}' to approve.")
+                    self._notify_fn(
+                        f"Agent proposes command #{activity_id} (awaiting approval): {cmd}\nReply with '/agent approve {activity_id}' to approve."
+                    )
                 except Exception:
                     pass
                 return f"Command proposal sent for approval: proposal #{activity_id}"
@@ -332,9 +393,13 @@ class AgentPlugin(AIPluginBase):
             proposer = payload.get("proposer") or "system"
             if not cmd:
                 return {"status": "error", "reason": "no command provided"}
-            activity_id = await self._create_activity_log(cmd, proposer=proposer, metadata={'origin': 'propose_action'})
+            activity_id = await self._create_activity_log(
+                cmd, proposer=proposer, metadata={"origin": "propose_action"}
+            )
             try:
-                self._notify_fn(f"Agent proposed action #{activity_id}: {cmd}\nReply with '/agent approve {activity_id}' to approve.")
+                self._notify_fn(
+                    f"Agent proposed action #{activity_id}: {cmd}\nReply with '/agent approve {activity_id}' to approve."
+                )
             except Exception:
                 pass
             return {"status": "proposed", "command": cmd, "proposal_id": activity_id}
@@ -348,7 +413,11 @@ class AgentPlugin(AIPluginBase):
             try:
                 if original_message and isinstance(original_message, dict):
                     # Accept multiple potential fields
-                    trainer_id = original_message.get("sender_id") or original_message.get("user_id") or None
+                    trainer_id = (
+                        original_message.get("sender_id")
+                        or original_message.get("user_id")
+                        or None
+                    )
                     if trainer_id is not None:
                         trainer_id = str(trainer_id)
             except Exception:
@@ -358,16 +427,26 @@ class AgentPlugin(AIPluginBase):
                 # Lookup the proposal in DB to find the command
                 try:
                     from core.db import get_conn_ctx
+
                     async with get_conn_ctx() as conn:
                         async with conn.cursor() as cur:
-                            await cur.execute("SELECT command, status FROM agent_activity_log WHERE id=%s", (int(proposal_id),))
+                            await cur.execute(
+                                "SELECT command, status FROM agent_activity_log WHERE id=%s",
+                                (int(proposal_id),),
+                            )
                             row = await cur.fetchone()
                             if not row:
-                                return {"status": "error", "reason": "proposal not found"}
+                                return {
+                                    "status": "error",
+                                    "reason": "proposal not found",
+                                }
                             cmd = row[0]
                             current_status = row[1]
-                            if current_status != 'proposed':
-                                return {"status": "error", "reason": f"proposal not in proposed state: {current_status}"}
+                            if current_status != "proposed":
+                                return {
+                                    "status": "error",
+                                    "reason": f"proposal not in proposed state: {current_status}",
+                                }
                 except Exception as e:
                     log_error(f"[agent] approve_action lookup failed: {e}")
                     return {"status": "error", "reason": "db lookup failed"}
@@ -378,11 +457,17 @@ class AgentPlugin(AIPluginBase):
             # Mark as approved
             try:
                 if proposal_id:
-                    await self._update_activity_log(int(proposal_id), status='approved', trainer_id=trainer_id)
+                    await self._update_activity_log(
+                        int(proposal_id), status="approved", trainer_id=trainer_id
+                    )
                 else:
                     # Create a new activity row marked as approved
-                    proposal_id = await self._create_activity_log(cmd, proposer='trainer')
-                    await self._update_activity_log(proposal_id, status='approved', trainer_id=trainer_id)
+                    proposal_id = await self._create_activity_log(
+                        cmd, proposer="trainer"
+                    )
+                    await self._update_activity_log(
+                        proposal_id, status="approved", trainer_id=trainer_id
+                    )
             except Exception as e:
                 log_warning(f"[agent] Failed to update proposal status: {e}")
 
@@ -391,8 +476,12 @@ class AgentPlugin(AIPluginBase):
 
             # Persist execution details and mark executed
             try:
-                await self._insert_action_exec(proposal_id, cmd, status='executed', result={'output': res})
-                await self._update_activity_log(proposal_id, status='executed', result=res)
+                await self._insert_action_exec(
+                    proposal_id, cmd, status="executed", result={"output": res}
+                )
+                await self._update_activity_log(
+                    proposal_id, status="executed", result=res
+                )
             except Exception as e:
                 log_warning(f"[agent] Failed to persist approval execution: {e}")
 

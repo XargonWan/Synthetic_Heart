@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 
 from core.time_zone_utils import get_local_timezone, format_dual_time

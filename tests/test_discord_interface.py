@@ -1,5 +1,4 @@
 import asyncio
-import pytest
 from interface.discord_interface import DiscordInterface
 
 
@@ -9,18 +8,18 @@ def test_execute_action_with_interface_path(monkeypatch):
     called = {}
 
     async def fake_send_message(arg1, arg2=None, **kwargs):
-        called['arg1'] = arg1
-        called['arg2'] = arg2
+        called["arg1"] = arg1
+        called["arg2"] = arg2
         called.update(kwargs)
 
-    monkeypatch.setattr(di, 'send_message', fake_send_message)
+    monkeypatch.setattr(di, "send_message", fake_send_message)
 
     action = {
-        'type': 'message_discord_bot',
-        'payload': {
-            'interface_path': 'discord_bot/111111111/222222222',
-            'text': 'hello from test'
-        }
+        "type": "message_discord_bot",
+        "payload": {
+            "interface_path": "discord_bot/111111111/222222222",
+            "text": "hello from test",
+        },
     }
 
     loop = asyncio.new_event_loop()
@@ -28,11 +27,11 @@ def test_execute_action_with_interface_path(monkeypatch):
     loop.run_until_complete(di.execute_action(action, context={}, bot=None))
     loop.close()
 
-    assert 'arg1' in called
+    assert "arg1" in called
     # when interface_path provided, we expect send_message called with dict containing interface_path
-    assert isinstance(called['arg1'], dict)
-    assert called['arg1']['interface_path'] == 'discord_bot/111111111/222222222'
-    assert called['arg1']['text'] == 'hello from test'
+    assert isinstance(called["arg1"], dict)
+    assert called["arg1"]["interface_path"] == "discord_bot/111111111/222222222"
+    assert called["arg1"]["text"] == "hello from test"
 
 
 async def _async_noop(*args, **kwargs):
@@ -66,7 +65,7 @@ def test_send_dm_to_user_id(monkeypatch):
     # Run the send via the internal method
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(di._discord_send('111111111', 'hello dm'))
+    loop.run_until_complete(di._discord_send("111111111", "hello dm"))
     loop.close()
 
     # Verify that the fake user's send was called by checking the object returned
@@ -77,7 +76,7 @@ def test_send_dm_to_user_id(monkeypatch):
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(di._discord_send('222222222', 'second dm'))
+    loop.run_until_complete(di._discord_send("222222222", "second dm"))
     loop.close()
 
-    assert shared_user.sent == ['second dm']
+    assert shared_user.sent == ["second dm"]

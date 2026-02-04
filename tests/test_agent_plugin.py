@@ -1,5 +1,4 @@
 import pytest
-import asyncio
 
 from plugins.agent_plugin import AgentPlugin
 
@@ -16,7 +15,9 @@ async def test_whitelist_mode_executes_whitelisted_command(monkeypatch):
 
     monkeypatch.setattr(p, "_run_command", fake_run)
 
-    res = await p.execute_action({"type": "agent_execute", "payload": {"command": "echo hello"}}, {}, None, None)
+    res = await p.execute_action(
+        {"type": "agent_execute", "payload": {"command": "echo hello"}}, {}, None, None
+    )
     assert res == "OK: echo hello"
 
 
@@ -27,7 +28,9 @@ async def test_whitelist_mode_rejects_non_whitelisted(monkeypatch):
     p._approval_mode = "whitelist"
     p._whitelist = ["ls"]
 
-    res = await p.execute_action({"type": "agent_execute", "payload": {"command": "rm -rf /"}}, {}, None, None)
+    res = await p.execute_action(
+        {"type": "agent_execute", "payload": {"command": "rm -rf /"}}, {}, None, None
+    )
     assert "not allowed" in str(res).lower()
 
 
@@ -36,15 +39,20 @@ async def test_always_ask_mode_proposes(monkeypatch):
     called = {}
 
     def notify(msg):
-        called['msg'] = msg
+        called["msg"] = msg
 
     p = AgentPlugin(notify_fn=notify)
     p._enabled = True
     p._approval_mode = "always_ask"
 
-    res = await p.execute_action({"type": "agent_execute", "payload": {"command": "do something"}}, {}, None, None)
+    res = await p.execute_action(
+        {"type": "agent_execute", "payload": {"command": "do something"}},
+        {},
+        None,
+        None,
+    )
     assert "proposal" in str(res).lower() or "awaiting" in str(res).lower()
-    assert 'msg' in called
+    assert "msg" in called
 
 
 @pytest.mark.asyncio
@@ -53,7 +61,9 @@ async def test_disabled_mode_rejects(monkeypatch):
     p._enabled = True
     p._approval_mode = "disabled"
 
-    res = await p.execute_action({"type": "agent_execute", "payload": {"command": "ls"}}, {}, None, None)
+    res = await p.execute_action(
+        {"type": "agent_execute", "payload": {"command": "ls"}}, {}, None, None
+    )
     assert "disabled" in str(res).lower()
 
 
@@ -62,7 +72,7 @@ async def test_propose_action_creates_proposal_and_notifies(monkeypatch):
     called = {}
 
     def notify(msg):
-        called['msg'] = msg
+        called["msg"] = msg
 
     p = AgentPlugin(notify_fn=notify)
     p._enabled = True
@@ -73,10 +83,15 @@ async def test_propose_action_creates_proposal_and_notifies(monkeypatch):
 
     monkeypatch.setattr(p, "_create_activity_log", fake_create)
 
-    res = await p.execute_action({"type": "propose_action", "payload": {"command": "touch /tmp/test"}}, {}, None, None)
+    res = await p.execute_action(
+        {"type": "propose_action", "payload": {"command": "touch /tmp/test"}},
+        {},
+        None,
+        None,
+    )
     assert res.get("status") == "proposed"
     assert res.get("proposal_id") == 123
-    assert 'msg' in called
+    assert "msg" in called
 
 
 @pytest.mark.asyncio
@@ -87,14 +102,14 @@ async def test_approve_action_executes_and_persists(monkeypatch):
     recorded = {}
 
     async def fake_create(cmd, proposer=None, metadata=None):
-        recorded['created'] = cmd
+        recorded["created"] = cmd
         return 200
 
     async def fake_update(aid, **kwargs):
-        recorded['updated'] = (aid, kwargs)
+        recorded["updated"] = (aid, kwargs)
 
     async def fake_insert_exec(aid, cmd, **kwargs):
-        recorded['exec'] = (aid, cmd, kwargs)
+        recorded["exec"] = (aid, cmd, kwargs)
         return 555
 
     async def fake_run(cmd, timeout=30.0):
@@ -105,32 +120,44 @@ async def test_approve_action_executes_and_persists(monkeypatch):
     monkeypatch.setattr(p, "_insert_action_exec", fake_insert_exec)
     monkeypatch.setattr(p, "_run_command", fake_run)
 
-    res = await p.execute_action({"type": "approve_action", "payload": {"command": "echo approved"}}, {}, None, None)
+    res = await p.execute_action(
+        {"type": "approve_action", "payload": {"command": "echo approved"}},
+        {},
+        None,
+        None,
+    )
     assert res.get("status") == "executed"
     assert res.get("proposal_id") == 200
-    assert "echo approved" in recorded.get('created')
-    assert recorded.get('exec')[0] == 200
-    assert recorded.get('exec')[1] == "echo approved"
+    assert "echo approved" in recorded.get("created")
+    assert recorded.get("exec")[0] == 200
+    assert recorded.get("exec")[1] == "echo approved"
 
 
 @pytest.mark.asyncio
 async def test_agent_command_approve_calls_plugin(monkeypatch):
     from types import SimpleNamespace
+
     called = {}
 
     class FakeAgent:
         async def execute_action(self, action, context, bot, original_message):
-            called['action'] = action
-            called['original'] = original_message
-            return {'status': 'executed', 'proposal_id': action.get('payload', {}).get('proposal_id')}
+            called["action"] = action
+            called["original"] = original_message
+            return {
+                "status": "executed",
+                "proposal_id": action.get("payload", {}).get("proposal_id"),
+            }
 
-    fake_registry = {'agent': FakeAgent()}
-    monkeypatch.setattr('core.core_initializer.PLUGIN_REGISTRY', fake_registry)
+    fake_registry = {"agent": FakeAgent()}
+    monkeypatch.setattr("core.core_initializer.PLUGIN_REGISTRY", fake_registry)
 
-    interface_context = {'update': SimpleNamespace(effective_user=SimpleNamespace(id=42))}
+    interface_context = {
+        "update": SimpleNamespace(effective_user=SimpleNamespace(id=42))
+    }
 
     from core.command_registry import agent_command
-    res = await agent_command('approve', '123', interface_context=interface_context)
-    assert 'Approval result' in res
-    assert called['action']['type'] == 'approve_action'
-    assert called['original']['sender_id'] == 42
+
+    res = await agent_command("approve", "123", interface_context=interface_context)
+    assert "Approval result" in res
+    assert called["action"]["type"] == "approve_action"
+    assert called["original"]["sender_id"] == 42

@@ -9,6 +9,7 @@ from core.ai_plugin_base import AIPluginBase
 display_name = "G.R.I.L.L.O Self Reflection"
 BEAT_TYPE = "self_reflection"
 
+
 class GrilloSelfReflectionPlugin(AIPluginBase):
     display_name = display_name
     BEAT_TYPE = BEAT_TYPE
@@ -23,5 +24,6 @@ class GrilloSelfReflectionPlugin(AIPluginBase):
             "End with a JSON action to create a diary entry with your self-reflection."
             '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content": "your reflection"}}]}'
         )
+
 
 PLUGIN_CLASS = GrilloSelfReflectionPlugin

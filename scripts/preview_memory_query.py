@@ -2,6 +2,7 @@
 """Quick script to preview the SQL query and params produced for a given payload.
 This avoids importing the full project (no DB or aiomysql required).
 """
+
 import json
 from typing import Any, Dict, List
 
@@ -61,10 +62,14 @@ def build_query_and_params(payload: Dict[str, Any], max_results: int):
     queries: List[str] = []
     if where_clauses_mem:
         mem_where = " AND ".join(where_clauses_mem)
-        queries.append(f"SELECT 'memories' AS source, id, timestamp, content FROM memories WHERE {mem_where}")
+        queries.append(
+            f"SELECT 'memories' AS source, id, timestamp, content FROM memories WHERE {mem_where}"
+        )
     if where_clauses_diary:
         diary_where = " AND ".join(where_clauses_diary)
-        queries.append(f"SELECT 'ai_diary' AS source, id, timestamp, content FROM ai_diary WHERE {diary_where}")
+        queries.append(
+            f"SELECT 'ai_diary' AS source, id, timestamp, content FROM ai_diary WHERE {diary_where}"
+        )
 
     if not queries:
         return "", []

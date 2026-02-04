@@ -28,7 +28,7 @@ register_exposed_var(
 register_exposed_var(
     "TTS_TIMEOUT_SECONDS",
     label="TTS Timeout (s)",
-    default=60,
+    default=300,
     value_type=int,
     ui_type="number",
     description="Timeout for TTS HTTP requests in seconds.",
@@ -104,7 +104,7 @@ class TTSLipSyncPlugin(AIPluginBase):
         self.endpoints = self._load_endpoints()
         self.timeout_s = config_registry.get_value(
             "TTS_TIMEOUT_SECONDS",
-            30,
+            60,
             value_type=int,
             group="plugins",
             component="tts_lipsync",
@@ -122,8 +122,38 @@ class TTSLipSyncPlugin(AIPluginBase):
 
     async def execute_action(self, action: dict, context: dict, bot, original_message):
         """Execute TTS action and optionally dispatch to interface."""
-        # 1. Generate Audio via standard handler
+        # Check if this is a Grillo internal beat (not outreach) - skip TTS
+        is_grillo_internal = context.get("grillo_beat", False) and context.get(
+            "beat_type"
+        ) not in ("outreach", None)
+        if is_grillo_internal:
+            log_info(
+                f"[tts_lipsync] Skipping TTS for Grillo internal beat: {context.get('beat_type')}"
+            )
+            return {"status": "skipped", "reason": "grillo_internal_beat"}
+
+        # Check if message text is an internal confirmation (plugin result feedback)
+        # These should not trigger TTS as they are system confirmations
         payload = action.get("payload", {})
+        msg_text = payload.get("text", "") if isinstance(payload, dict) else ""
+        if isinstance(msg_text, str) and msg_text:
+            internal_patterns = [
+                "I have successfully recorded",
+                "diary entry",
+                "System check complete",
+                "system initialized",
+                "action executed",
+                "successfully completed",
+            ]
+            if any(
+                pattern.lower() in msg_text.lower() for pattern in internal_patterns
+            ):
+                log_info(
+                    f"[tts_lipsync] Skipping TTS for internal confirmation: '{msg_text[:50]}...'"
+                )
+                return {"status": "skipped", "reason": "internal_confirmation"}
+
+        # 1. Generate Audio via standard handler
         result = await self.handle_custom_action(action.get("type"), payload)
 
         if result.get("status") != "success":

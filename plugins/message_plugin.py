@@ -155,7 +155,6 @@ class MessagePlugin:
             else:
                 rebuilt_interface_path = f"{interface_name}/{target}"
 
-
         # --- Grillo Suppression Logic ---
         if isinstance(context, dict) and (
             context.get("grillo_beat")

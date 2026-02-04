@@ -28,8 +28,10 @@ async def test_attach_to_engine_calls_attach(monkeypatch):
         def load_engine(self, name):
             return fake_engine
 
-    monkeypatch.setattr('core.config.get_active_llm', lambda: asyncio.sleep(0, result='gemini_api'))
-    monkeypatch.setattr('core.llm_registry.get_llm_registry', lambda: FakeRegistry())
+    monkeypatch.setattr(
+        "core.config.get_active_llm", lambda: asyncio.sleep(0, result="gemini_api")
+    )
+    monkeypatch.setattr("core.llm_registry.get_llm_registry", lambda: FakeRegistry())
 
     agent = AgentCore()
     agent._enabled = True
@@ -45,21 +47,21 @@ async def test_propose_and_approve_flow(monkeypatch):
     called = {}
 
     async def fake_create(command, proposer=None, metadata=None):
-        called['created'] = command
+        called["created"] = command
         return 555
 
     async def fake_update(aid, **kwargs):
-        called.setdefault('updates', []).append((aid, kwargs))
+        called.setdefault("updates", []).append((aid, kwargs))
 
     async def fake_insert(aid, cmd, **kwargs):
-        called.setdefault('execs', []).append((aid, cmd, kwargs))
+        called.setdefault("execs", []).append((aid, cmd, kwargs))
         return 999
 
     def fake_notify(msg):
-        called['notify'] = msg
+        called["notify"] = msg
 
     async def fake_run(cmd, timeout=30.0):
-        called['ran'] = cmd
+        called["ran"] = cmd
         return "OUTPUT: " + cmd
 
     agent = AgentCore()
@@ -71,14 +73,27 @@ async def test_propose_and_approve_flow(monkeypatch):
     agent._enabled = True
 
     # Propose
-    res = await agent.execute_action({"type": "propose_action", "payload": {"command": "touch /tmp/test"}}, {}, None, None)
-    assert res.get('status') == 'proposed'
-    assert res.get('proposal_id') == 555
-    assert 'notify' in called
+    res = await agent.execute_action(
+        {"type": "propose_action", "payload": {"command": "touch /tmp/test"}},
+        {},
+        None,
+        None,
+    )
+    assert res.get("status") == "proposed"
+    assert res.get("proposal_id") == 555
+    assert "notify" in called
 
     # Approve (provide command directly to avoid real DB lookup in unit test)
-    res2 = await agent.execute_action({"type": "approve_action", "payload": {"proposal_id": 555, "command": "echo approved"}}, {}, None, {'sender_id': 42})
-    assert res2.get('status') == 'executed'
-    assert res2.get('proposal_id') == 555
-    assert called.get('ran') is not None
-    assert 'execs' in called
+    res2 = await agent.execute_action(
+        {
+            "type": "approve_action",
+            "payload": {"proposal_id": 555, "command": "echo approved"},
+        },
+        {},
+        None,
+        {"sender_id": 42},
+    )
+    assert res2.get("status") == "executed"
+    assert res2.get("proposal_id") == 555
+    assert called.get("ran") is not None
+    assert "execs" in called

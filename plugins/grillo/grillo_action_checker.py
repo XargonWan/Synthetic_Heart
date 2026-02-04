@@ -8,7 +8,6 @@ Importante: il prompt chiede di *generare* azioni che implementino la richiesta 
 non di valutare se l'assistente abbia effettivamente detto qualcosa.
 """
 
-import re
 from types import SimpleNamespace
 from typing import Optional, List, Dict, Any
 
@@ -22,8 +21,9 @@ class GrilloActionChecker:
     or "I'll remind".
     """
 
-    async def inspect_reply_and_suggest_actions(self, llm_reply: str, original_user_message: str, context: dict, message: Any) -> Optional[List[Dict[str, Any]]]:
-
+    async def inspect_reply_and_suggest_actions(
+        self, llm_reply: str, original_user_message: str, context: dict, message: Any
+    ) -> Optional[List[Dict[str, Any]]]:
         """Ask the LLM to compare the original user message and the synth reply
         and, if the synth promised an action but did not produce it, return a
         JSON object containing the actions to implement the promise.
@@ -46,12 +46,16 @@ class GrilloActionChecker:
             if not llm_reply or not llm_reply.strip():
                 return None
 
-            log_info(f"[grillo.checker] Invoked for chat_id={getattr(message,'chat_id',None)} reply_len={len(llm_reply)}")
+            log_info(
+                f"[grillo.checker] Invoked for chat_id={getattr(message, 'chat_id', None)} reply_len={len(llm_reply)}"
+            )
 
             # Avoid calling the LLM if we've already checked this message
             try:
-                if getattr(message, 'grillo_checked', False):
-                    log_debug('[grillo.checker] Message already checked by Grillo; skipping')
+                if getattr(message, "grillo_checked", False):
+                    log_debug(
+                        "[grillo.checker] Message already checked by Grillo; skipping"
+                    )
                     return None
             except Exception:
                 pass
@@ -65,27 +69,27 @@ class GrilloActionChecker:
             actions_snippet = self._build_available_actions_snippet()
 
             # Include execution metadata to help the LLM decide whether actions are missing
-            chain_result = context.get('chain_result') if context else None
-            last_action_result = getattr(message, 'last_action_result', None)
+            chain_result = context.get("chain_result") if context else None
+            last_action_result = getattr(message, "last_action_result", None)
 
             prompt = (
-                f"User message: \"{(original_user_message or '').strip()}\"\n"
-                f"Assistant reply: \"{llm_reply.strip()}\"\n\n"
+                f'User message: "{(original_user_message or "").strip()}"\n'
+                f'Assistant reply: "{llm_reply.strip()}"\n\n'
                 f"Execution summary:\n  chain_result: {chain_result}\n  last_action_result: {last_action_result}\n\n"
                 f"Relevant actions:\n{actions_snippet}\n"
                 "Task: Compare the user's message, the assistant's reply, and the execution summary. "
                 "If the assistant promised to perform an action but did not create "
                 "the corresponding actions, RETURN ONLY a JSON object with an array "
                 "called 'actions' that implements what was promised. If there is nothing "
-                "to do, RETURN {\"actions\": []}. Do NOT include any text outside the JSON. "
+                'to do, RETURN {"actions": []}. Do NOT include any text outside the JSON. '
                 "Do NOT create diary entries, thoughts, or unrelated logs—only actionable items."
             )
 
             # Build a lightweight message so plugins keep context (chat/thread)
             msg = SimpleNamespace()
-            msg.chat_id = getattr(message, 'chat_id', None)
+            msg.chat_id = getattr(message, "chat_id", None)
             msg.text = llm_reply
-            msg.thread_id = getattr(message, 'thread_id', None)
+            msg.thread_id = getattr(message, "thread_id", None)
 
             try:
                 import core.plugin_instance as plugin_instance
@@ -94,14 +98,16 @@ class GrilloActionChecker:
                 return None
 
             try:
-                suggested = await plugin_instance.handle_incoming_message(None, msg, prompt)
+                suggested = await plugin_instance.handle_incoming_message(
+                    None, msg, prompt
+                )
             except Exception as e:
                 log_warning(f"[grillo.checker] LLM plugin call failed: {e}")
                 return None
 
             # Mark/check that we've asked for actions based on available schemas
             try:
-                if hasattr(message, '__dict__'):
+                if hasattr(message, "__dict__"):
                     message.grillo_prompt_included_actions = True
                     message.grillo_checked = True
             except Exception:
@@ -117,11 +123,15 @@ class GrilloActionChecker:
             except Exception as e:
                 log_warning(f"[grillo.checker] extract_json_from_text failed: {e}")
 
-            if not json_obj or not isinstance(json_obj, dict) or 'actions' not in json_obj:
+            if (
+                not json_obj
+                or not isinstance(json_obj, dict)
+                or "actions" not in json_obj
+            ):
                 log_debug("[grillo.checker] No 'actions' array found in LLM suggestion")
                 return None
 
-            actions = json_obj.get('actions')
+            actions = json_obj.get("actions")
             if not isinstance(actions, list):
                 log_debug("[grillo.checker] 'actions' is not a list")
                 return None
@@ -142,7 +152,8 @@ class GrilloActionChecker:
         """
         try:
             from core.core_initializer import core_initializer
-            actions = core_initializer.actions_block.get('available_actions', {})
+
+            actions = core_initializer.actions_block.get("available_actions", {})
         except Exception:
             actions = {}
 
@@ -150,7 +161,18 @@ class GrilloActionChecker:
         relevant = []
         for atype, desc in actions.items():
             low = atype.lower()
-            if any(k in low for k in ('schedule', 'event', 'message', 'send', 'notify', 'calendar', 'remind')):
+            if any(
+                k in low
+                for k in (
+                    "schedule",
+                    "event",
+                    "message",
+                    "send",
+                    "notify",
+                    "calendar",
+                    "remind",
+                )
+            ):
                 relevant.append((atype, desc))
 
         # Limit number of actions included
@@ -159,9 +181,17 @@ class GrilloActionChecker:
         lines = []
         for atype, desc in relevant:
             try:
-                schema = desc.get('schema', {})
-                required = schema.get('required', []) if isinstance(schema.get('required', []), list) else []
-                props = list(schema.get('properties', {}).keys()) if schema.get('properties') else []
+                schema = desc.get("schema", {})
+                required = (
+                    schema.get("required", [])
+                    if isinstance(schema.get("required", []), list)
+                    else []
+                )
+                props = (
+                    list(schema.get("properties", {}).keys())
+                    if schema.get("properties")
+                    else []
+                )
                 optional = [p for p in props if p not in required]
                 lines.append(f"- {atype}: required={required}, optional={optional}")
             except Exception:
@@ -169,5 +199,4 @@ class GrilloActionChecker:
 
         if not lines:
             return "(no compact action schemas available)"
-        return '\n'.join(lines)
-
+        return "\n".join(lines)

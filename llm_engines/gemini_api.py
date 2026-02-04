@@ -5,6 +5,11 @@ Gemini API LLM Engine for Synthetic Heart.
 This engine uses the Gemini REST API to communicate with Gemini models.
 It follows the standard LLM engine architecture to ensure all plugins
 (diary, emotions, bio_manager, etc.) work properly.
+
+Supports multimodal inputs:
+- Images: JPEG, PNG, GIF, WebP
+- Audio: MP3, WAV, OGG, FLAC, AAC, M4A
+- Documents: PDF, TXT, HTML, CSS, JS, Python, Markdown, JSON, XML, CSV
 """
 
 from core.ai_plugin_base import AIPluginBase
@@ -13,6 +18,9 @@ from core.logging_utils import log_debug, log_info, log_warning, log_error
 import json
 import asyncio
 import requests
+import base64
+import mimetypes
+from pathlib import Path
 
 # Register Gemini API Key configuration (always visible so it can be set before activation)
 try:
@@ -435,10 +443,14 @@ class GeminiAPIPlugin(AIPluginBase):
             system_instruction = self._build_system_instruction(prompt)
             config_args["system_instruction"] = system_instruction
 
+            # Extract multimodal parts from the prompt
+            multimodal_parts = self._extract_multimodal_parts(prompt)
+
             response_text = await self._http_generate_content(
                 prompt_text=prompt_text,
                 system_instruction=system_instruction,
-                max_output_tokens=config_args.get("max_output_tokens", 8192),
+                max_output_tokens=int(config_args.get("max_output_tokens", 8192)),
+                multimodal_parts=multimodal_parts if multimodal_parts else None,
             )
 
             log_debug(f"[gemini_api] Received response ({len(response_text)} chars)")
@@ -542,9 +554,20 @@ class GeminiAPIPlugin(AIPluginBase):
         return system_instruction
 
     async def _http_generate_content(
-        self, prompt_text: str, system_instruction: str, max_output_tokens: int
+        self,
+        prompt_text: str,
+        system_instruction: str,
+        max_output_tokens: int,
+        multimodal_parts: list[dict] | None = None,
     ) -> str:
-        """Generate content using the Gemini REST API."""
+        """Generate content using the Gemini REST API.
+
+        Args:
+            prompt_text: The text prompt to send
+            system_instruction: System instruction for the model
+            max_output_tokens: Maximum tokens in response
+            multimodal_parts: Optional list of multimodal inline_data parts
+        """
         base_url = (
             str(GEMINI_API_BASE_URL).strip()
             or "https://generativelanguage.googleapis.com"
@@ -556,11 +579,20 @@ class GeminiAPIPlugin(AIPluginBase):
             versioned_base = f"{base_url}/v1beta"
         url = f"{versioned_base}/models/{self._current_model}:generateContent"
 
+        # Build the parts list - multimodal content first, then text
+        user_parts = []
+        if multimodal_parts:
+            user_parts.extend(multimodal_parts)
+            log_debug(
+                f"[gemini_api] Including {len(multimodal_parts)} multimodal parts in request"
+            )
+        user_parts.append({"text": prompt_text})
+
         payload = {
             "contents": [
                 {
                     "role": "user",
-                    "parts": [{"text": prompt_text}],
+                    "parts": user_parts,
                 }
             ],
             "systemInstruction": {
@@ -577,7 +609,7 @@ class GeminiAPIPlugin(AIPluginBase):
                 url,
                 params={"key": api_key},
                 json=payload,
-                timeout=30,
+                timeout=120,  # Increased timeout for multimodal requests
             )
 
         retryable_statuses = {429, 500, 503, 504}
@@ -710,6 +742,185 @@ class GeminiAPIPlugin(AIPluginBase):
 
         return response_text
 
+    # -------------------------------------------------------------------------
+    # Multimodal Support Methods
+    # -------------------------------------------------------------------------
+
+    # Supported MIME types for multimodal inputs
+    SUPPORTED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+    SUPPORTED_AUDIO_TYPES = {
+        "audio/mpeg",
+        "audio/mp3",
+        "audio/wav",
+        "audio/ogg",
+        "audio/flac",
+        "audio/aac",
+        "audio/mp4",
+        "audio/x-m4a",
+    }
+    SUPPORTED_DOCUMENT_TYPES = {
+        "application/pdf",
+        "text/plain",
+        "text/html",
+        "text/css",
+        "text/javascript",
+        "application/javascript",
+        "text/x-python",
+        "text/markdown",
+        "application/json",
+        "application/xml",
+        "text/xml",
+        "text/csv",
+    }
+
+    def _get_mime_type(self, file_path: str | Path) -> str:
+        """Determine MIME type from file path or extension."""
+        path = Path(file_path) if isinstance(file_path, str) else file_path
+
+        # Try mimetypes first
+        mime_type, _ = mimetypes.guess_type(str(path))
+        if mime_type:
+            return mime_type
+
+        # Fallback mapping for common extensions
+        ext_map = {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".gif": "image/gif",
+            ".webp": "image/webp",
+            ".mp3": "audio/mpeg",
+            ".wav": "audio/wav",
+            ".ogg": "audio/ogg",
+            ".flac": "audio/flac",
+            ".aac": "audio/aac",
+            ".m4a": "audio/mp4",
+            ".pdf": "application/pdf",
+            ".txt": "text/plain",
+            ".html": "text/html",
+            ".htm": "text/html",
+            ".css": "text/css",
+            ".js": "text/javascript",
+            ".py": "text/x-python",
+            ".md": "text/markdown",
+            ".json": "application/json",
+            ".xml": "application/xml",
+            ".csv": "text/csv",
+        }
+
+        suffix = path.suffix.lower()
+        return ext_map.get(suffix, "application/octet-stream")
+
+    def _encode_file_to_base64(self, file_path: str | Path) -> str | None:
+        """Read a file and encode it to base64."""
+        try:
+            path = Path(file_path) if isinstance(file_path, str) else file_path
+            if not path.exists():
+                log_warning(f"[gemini_api] File not found: {path}")
+                return None
+
+            with open(path, "rb") as f:
+                return base64.b64encode(f.read()).decode("utf-8")
+        except Exception as e:
+            log_error(f"[gemini_api] Failed to encode file {file_path}: {e}")
+            return None
+
+    def _is_supported_multimodal_type(self, mime_type: str) -> bool:
+        """Check if a MIME type is supported for multimodal input."""
+        return (
+            mime_type in self.SUPPORTED_IMAGE_TYPES
+            or mime_type in self.SUPPORTED_AUDIO_TYPES
+            or mime_type in self.SUPPORTED_DOCUMENT_TYPES
+        )
+
+    def _extract_multimodal_parts(self, prompt: dict | str) -> list[dict]:
+        """Extract multimodal parts from the prompt context.
+
+        Looks for attachments in the prompt dict under keys like:
+        - 'attachments': list of {path, mime_type, data} or {path, mime_type}
+        - 'images': list of image paths or base64 data
+        - 'audio': list of audio paths or base64 data
+        - 'documents': list of document paths or base64 data
+
+        Returns a list of Gemini API inline_data parts.
+        """
+        parts = []
+
+        if isinstance(prompt, str):
+            try:
+                prompt = json.loads(prompt)
+            except (json.JSONDecodeError, ValueError):
+                return parts
+
+        if not isinstance(prompt, dict):
+            return parts
+
+        # Check for attachments in various locations
+        attachments = []
+
+        # Direct attachments key
+        if "attachments" in prompt:
+            attachments.extend(prompt["attachments"])
+
+        # Check inside input section
+        if "input" in prompt and isinstance(prompt["input"], dict):
+            input_section = prompt["input"]
+            if "attachments" in input_section:
+                attachments.extend(input_section["attachments"])
+            # Legacy image support
+            if "images" in input_section:
+                for img in input_section["images"]:
+                    if isinstance(img, dict):
+                        attachments.append(img)
+                    elif isinstance(img, str):
+                        attachments.append({"path": img, "mime_type": "image/jpeg"})
+
+        # Process each attachment
+        for attachment in attachments:
+            if not isinstance(attachment, dict):
+                continue
+
+            # Get or determine MIME type
+            mime_type = attachment.get("mime_type") or attachment.get("mimeType")
+            file_path = attachment.get("path") or attachment.get("file_path")
+
+            if file_path and not mime_type:
+                mime_type = self._get_mime_type(file_path)
+
+            if not mime_type:
+                log_warning(
+                    f"[gemini_api] Skipping attachment without MIME type: {attachment}"
+                )
+                continue
+
+            if not self._is_supported_multimodal_type(mime_type):
+                log_warning(f"[gemini_api] Unsupported MIME type: {mime_type}")
+                continue
+
+            # Get base64 data - either provided or read from file
+            base64_data = attachment.get("data") or attachment.get("base64")
+
+            if not base64_data and file_path:
+                base64_data = self._encode_file_to_base64(file_path)
+
+            if not base64_data:
+                log_warning(f"[gemini_api] No data for attachment: {attachment}")
+                continue
+
+            # Create inline_data part for Gemini API
+            parts.append(
+                {
+                    "inline_data": {
+                        "mime_type": mime_type,
+                        "data": base64_data,
+                    }
+                }
+            )
+
+            log_debug(f"[gemini_api] Added multimodal part: {mime_type}")
+
+        return parts
+
     async def _handle_correction_prompt(self, prompt: dict) -> str:
         """Handle a correction/system_message prompt.
 
@@ -724,12 +935,71 @@ class GeminiAPIPlugin(AIPluginBase):
         required_format = system_message.get("required_format", {})
         # action_full_schema available via system_message.get("action_full_schema", {}) if needed
 
-        # Extract interface from the prompt or system_message
+        # Extract interface from the prompt or system_message - check multiple fields
+        # Priority: target_interface > interface > infer from action_type_hint > fallback
         interface = (
-            system_message.get("interface") or prompt.get("interface") or "synth_webui"
+            system_message.get("target_interface")
+            or system_message.get("interface")
+            or prompt.get("interface")
+            or None
         )
 
+        # If still no interface, try to extract from action_type_hint
+        if not interface:
+            action_hint = system_message.get("action_type_hint", "")
+            if "message_telegram_bot" in action_hint:
+                interface = "telegram_bot"
+            elif "message_discord_bot" in action_hint:
+                interface = "discord_bot"
+            elif "message_synth_webui" in action_hint:
+                interface = "synth_webui"
+            else:
+                interface = "synth_webui"  # Final fallback
+
+        # Grillo is an internal beat system, not a real interface
+        # When the interface is "grillo", use synth_webui or skip messaging entirely
+        if interface == "grillo":
+            log_debug(
+                "[gemini_api] Grillo beat detected - internal messages don't need interface routing"
+            )
+            # For grillo beats, we don't need to send external messages
+            # The LLM should only create diary entries, not try to send messages
+            interface = None  # Signal that no message action is needed
+
         log_warning(f"[gemini_api] Handling correction prompt: {error_type}")
+        log_debug(
+            f"[gemini_api] Correction interface resolved: {interface}, target_interface={system_message.get('target_interface')}, action_type_hint={system_message.get('action_type_hint')}"
+        )
+
+        # For Grillo internal beats (interface=None after grillo detection), just fix JSON without message action
+        if interface is None:
+            # Tell the LLM to produce valid JSON without a message action
+            correction_prompt = f"""CORRECTION REQUIRED - INTERNAL BEAT
+
+Error: {error_message}
+
+This is an internal Grillo beat. You should NOT output any message action.
+Just output a valid JSON with internal actions like 'create_personal_diary_entry'.
+
+Your previous (invalid) reply:
+{your_reply[:500] if your_reply else "(none)"}...
+
+Respond with ONLY valid JSON containing internal actions (like create_personal_diary_entry).
+Do NOT include any message_* actions.
+"""
+            config_args = {
+                "max_output_tokens": 4096,
+                "system_instruction": (
+                    "You are a JSON correction assistant for internal Grillo beats. "
+                    "Output ONLY valid JSON with internal actions like 'create_personal_diary_entry'. "
+                    "Do NOT output any message_* actions - this is an internal introspection beat."
+                ),
+            }
+            return await self._http_generate_content(
+                prompt_text=correction_prompt,
+                system_instruction=config_args["system_instruction"],
+                max_output_tokens=config_args.get("max_output_tokens", 4096),
+            )
 
         # Map interface to the correct message action type
         interface_to_action = {
