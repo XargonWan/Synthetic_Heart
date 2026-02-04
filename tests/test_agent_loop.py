@@ -15,8 +15,14 @@ class FakeCursor:
         self.queries.append((sql, params))
 
     async def fetchone(self):
-        # If the query looks like agent_activity_log select, return a proposed row
-        if any('agent_activity_log' in (q[0] or '') and 'WHERE status=%s' in (q[0] or '') for q in self.queries[-4:]):
+        # Prefer to inspect the most recent query to avoid ambiguity
+        last_sql = (self.queries[-1][0] if self.queries else '')
+        if 'agent_activity_log' in last_sql and 'WHERE status=%s' in last_sql:
+            return (321, 'echo approved', datetime.datetime.utcnow())
+        if 'SELECT command, status, metadata FROM agent_activity_log' in last_sql or ('WHERE id=%s' in last_sql and 'agent_activity_log' in last_sql):
+            return ('echo approved', 'proposed', '{"task_id": 123}')
+        # Fallback: if a recent agent_activity_log status scan appears anywhere in the last queries
+        if any('agent_activity_log' in (q[0] or '') and 'WHERE status=%s' in (q[0] or '') for q in self.queries[-8:]):
             return (321, 'echo approved', datetime.datetime.utcnow())
         # Return JSON array placeholder for iterations_meta by default
         return ('[]',)
@@ -128,7 +134,11 @@ async def test_proposal_links_to_task_and_resume(monkeypatch):
     monkeypatch.setattr(plugin, '_run_command', lambda cmd, timeout=30.0: asyncio.sleep(0, result='ok'))
 
     # We need to know the proposal id - fake cursor's fetchone returned 321 in earlier tests
+    # DEBUG: print queries to understand why approve_action may fail
+    cursor = fake_pool.conn.cur
+    print('DEBUG: recorded queries:', cursor.queries)
     res = await plugin.execute_action({"type": "approve_action", "payload": {"proposal_id": 321}}, {}, None, {"sender_id": "trainer"})
+    print('DEBUG: approve_action result:', res)
     assert res.get('status') == 'executed'
 
     # Ensure the manager resumed the task (no paused event should remain)

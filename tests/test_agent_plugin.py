@@ -69,6 +69,35 @@ async def test_execute_notifies_trainer_when_enabled(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_execute_delivers_output_to_interface(monkeypatch):
+    called = {}
+
+    async def fake_run(cmd, timeout=30.0):
+        return "OUT: " + cmd
+
+    async def fake_request_llm_delivery(action_outputs=None, original_context=None, action_type=None, **kwargs):
+        called['args'] = {'action_outputs': action_outputs, 'original_context': original_context, 'action_type': action_type}
+        return True
+
+    p = AgentPlugin()
+    p._enabled = True
+    p._approval_mode = "whitelist"
+    p._whitelist = ["echo"]
+
+    monkeypatch.setattr(p, "_run_command", fake_run)
+    monkeypatch.setattr('core.auto_response.request_llm_delivery', fake_request_llm_delivery)
+
+    context = {'interface': 'telegram_bot'}
+    original_message = {'chat_id': 42, 'message_id': 100, 'interface_path': 'telegram_bot:42'}
+
+    res = await p.execute_action({"type": "agent_execute", "payload": {"command": "echo hi"}}, context, None, original_message)
+    assert 'OUT: echo hi' in res
+    assert 'args' in called and called['args']['action_type'] == 'agent_execute'
+    assert called['args']['original_context']['interface_name'] == 'telegram_bot'
+    assert 'OUT: echo hi' in called['args']['action_outputs'][0]['output']
+
+
+@pytest.mark.asyncio
 async def test_disabled_mode_rejects(monkeypatch):
     p = AgentPlugin()
     p._enabled = True

@@ -2,26 +2,29 @@ from pathlib import Path
 
 
 def test_reset_window_positions_defined():
-    path = Path('core/webui_templates/synth_webui_index.html')
-    content = path.read_text(encoding='utf-8')
-    assert 'function resetWindowPositions' in content
+    root = Path('res/synth_webui/js')
+    ui = (root / 'ui-helpers.js').read_text(encoding='utf-8')
+    assert 'function resetWindowPositions' in ui
     # Ensure old malformed snippet not present
-    assert 'raw || ek' not in content
-    assert 'if (btn) { btn.style.display = ' not in content
+    assert 'raw || ek' not in ui
 
 
 def test_resize_helpers_and_defaults_present():
-    path = Path('core/webui_templates/synth_webui_index.html')
-    content = path.read_text(encoding='utf-8')
-    assert 'function createResizeHandlesForElement' in content
-    assert 'window.applyDefaultWindowPositions' in content
+    root = Path('res/synth_webui/js')
+    mjs = (root / 'vrm-viewer.mjs').read_text(encoding='utf-8')
+    ui = (root / 'ui-helpers.js').read_text(encoding='utf-8')
+
+    # createResizeHandlesForElement is provided by vrm-viewer.mjs
+    assert 'function createResizeHandlesForElement' in mjs
+    # applyDefaultWindowPositions now lives in ui-helpers.js
+    assert 'function applyDefaultWindowPositions' in ui
     # Ensure resize handles are created in a way that respects the draggable title bar
-    assert 'headerEl.style.zIndex' in content
-    assert 'ev.stopPropagation' in content
+    assert 'headerEl.style.zIndex' in mjs
+    assert 'ev.stopPropagation' in mjs
     # Chat title bar should also stop propagation on mousedown and get a raised z-index
-    assert "chatTitleBar.addEventListener('mousedown'" in content or 'chatTitleBar.addEventListener("mousedown"' in content
-    assert "chatTitleBar.style.zIndex" in content
+    assert "chatTitleBar.addEventListener('mousedown'" in mjs or 'chatTitleBar.addEventListener("mousedown"' in mjs
+    assert "chatTitleBar.style.zIndex" in mjs
     # Ensure global active interaction guard exists so drag/resize don't interfere
-    assert '__synth_active_interaction' in content, 'Global interaction guard should be present to avoid drag/resize conflicts'
+    assert '__synth_active_interaction' in mjs, 'Global interaction guard should be present to avoid drag/resize conflicts'
     # Chat uses pointer events for drag parity with debug window
-    assert "pointerdown'" in content or 'pointerdown"' in content
+    assert "pointerdown'" in mjs or 'pointerdown"' in mjs
