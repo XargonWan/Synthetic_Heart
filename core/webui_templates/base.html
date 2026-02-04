@@ -1511,23 +1511,26 @@
                 const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
                 const ws = new WebSocket(`${protocol}://${window.location.host}/ws`);
                 ws.onopen = () => {
+                    console.log('[synth_webui ws] onopen');
                     updateDebug('Chat WebSocket connected');
                     if (statusLabel) statusLabel.textContent = 'Connected';
                     if (statusIndicator) statusIndicator.classList.add('online');
                 };
                 ws.onmessage = (event) => {
+                    try { console.log('[synth_webui ws] onmessage', event && event.data ? event.data.toString().slice(0,200) : event); } catch (e) {}
                     // Handle incoming messages
                     const data = JSON.parse(event.data);
                     // Simplified message handling
                     updateDebug('Received WebSocket message: ' + data.type);
                 };
-                ws.onclose = () => {
+                ws.onclose = (ev) => {
+                    console.log('[synth_webui ws] onclose', ev && ev.code ? ev.code : ev);
                     updateDebug('Chat WebSocket disconnected');
                     if (statusLabel) statusLabel.textContent = 'Disconnected';
                     if (statusIndicator) statusIndicator.classList.remove('online');
                 };
                 ws.onerror = (error) => {
-                    console.error('WebSocket error:', error);
+                    console.error('[synth_webui ws] WebSocket error:', error);
                     updateDebug('Chat WebSocket error');
                 };
 

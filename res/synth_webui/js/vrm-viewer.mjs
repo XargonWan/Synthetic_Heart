@@ -2211,10 +2211,12 @@ import * as THREE from 'three';
                         if (typeof cleanAnim === 'string' && (cleanAnim.includes('/') || cleanAnim.startsWith('http'))) {
                             descriptorPath = `${cleanAnim}.json`;
                         } else {
-                            // Build path to descriptor file: /skins/{skin}/animations/{actionType}/{file}.json
+                            // Prefer API endpoint for descriptors. The API will return
+                            // the on-disk descriptor if present or an implicit descriptor
+                            // when the .json file is missing (avoids client-side 404s).
                             const skinName = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
                             const encodedFile = encodeURIComponent(String(cleanAnim) + '.json');
-                            descriptorPath = `/skins/${skinName}/animations/${actionName}/${encodedFile}`;
+                            descriptorPath = `/api/skins/${skinName}/animations/${actionName}/${encodedFile}`;
                         }
                         // Cache descriptors (including null when missing) to avoid repeated 404 fetches.
                         if (descriptorPath && Object.prototype.hasOwnProperty.call(this.loadedDescriptors, descriptorPath)) {
@@ -4481,10 +4483,12 @@ import * as THREE from 'three';
 
                     // Process any pending animation commands that arrived while loading.
                     // Only apply the last (authoritative) command to avoid replay storms and T-pose flashes.
-                    if (pendingAnimationCommands.length > 0) {
-                        const last = pendingAnimationCommands[pendingAnimationCommands.length - 1];
-                        const count = pendingAnimationCommands.length;
-                        pendingAnimationCommands.length = 0;
+                    const _pendingArray = (typeof pendingAnimationCommands !== 'undefined' && Array.isArray(pendingAnimationCommands)) ? pendingAnimationCommands : (window.pendingAnimationCommands && Array.isArray(window.pendingAnimationCommands) ? window.pendingAnimationCommands : []);
+                    if (_pendingArray.length > 0) {
+                        const last = _pendingArray[_pendingArray.length - 1];
+                        const count = _pendingArray.length;
+                        // Clear the authoritative storage we found so we don't reprocess
+                        if (typeof pendingAnimationCommands !== 'undefined' && Array.isArray(pendingAnimationCommands)) pendingAnimationCommands.length = 0; else if (window.pendingAnimationCommands && Array.isArray(window.pendingAnimationCommands)) window.pendingAnimationCommands.length = 0;
                         console.log('[synth_webui] Processing last pending animation command (dropped', Math.max(0, count - 1), '):', last?.state, last?.animation);
                         if (last && last.state && animationHandler) {
                             // If WEB_DEBUG pause is active, keep last remote payload for resync but do not apply.
@@ -5941,7 +5945,7 @@ import * as THREE from 'three';
                             let descriptor = null;
                             try {
                                 const skin = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm','') : 'Rei';
-                                const descUrl = `/skins/${skin}/animations/touch/${encodeURIComponent(animationFile)}.json`;
+                                const descUrl = `/api/skins/${skin}/animations/touch/${encodeURIComponent(animationFile)}.json`;
                                 const resp = await fetch(descUrl);
                                 if (resp.ok) descriptor = await resp.json();
                             } catch (err) {
@@ -6040,16 +6044,25 @@ import * as THREE from 'three';
                 });
             }
 
-            refreshConfig().catch((error) => console.error(error));
+            // Call refreshConfig if available, otherwise skip silently to avoid
+            // hard dependency on load ordering between modules.
+            (typeof window !== 'undefined' && typeof window.refreshConfig === 'function' ? window.refreshConfig() : Promise.resolve()).catch((error) => console.error(error));
 
-            // Restore chat state on page load if we're on home tab
-            if (activeTab === 'home') {
+            // Restore chat state on page load if we're on home tab. Use a safe lookup
+            // that tolerates missing globals (modules may not see non-module globals).
+            (function(){
                 try {
-                    restoreChatState();
-                } catch (error) {
-                    console.error('[synth_webui] Failed to restore chat state on load:', error);
-                }
-            }
+                    const _activeTab = (typeof activeTab !== 'undefined') ? activeTab : (typeof window !== 'undefined' ? (window.activeTab || (localStorage && localStorage.getItem && localStorage.getItem('synth-webui-active-tab')) || (document.querySelector && document.querySelector('.nav-btn.active') && document.querySelector('.nav-btn.active').getAttribute('data-tab')) || 'home') : 'home');
+                    if (_activeTab === 'home') {
+                        try {
+                            const restoreFn = (typeof window !== 'undefined' && typeof window.restoreChatState === 'function') ? window.restoreChatState : null;
+                            if (restoreFn) restoreFn();
+                        } catch (error) {
+                            console.error('[synth_webui] Failed to restore chat state on load:', error);
+                        }
+                    }
+                } catch (e) { /* ignore */ }
+            })();
 
             // Diary functionality
             let diaryEntries = [];
@@ -6485,7 +6498,7 @@ import * as THREE from 'three';
         // Use `let` so the runtime toggle can enable/disable the feature by
         // updating the variable. Also expose the creator as a global function
         // so `setChatResizable` can recreate handles at runtime.
-        let CHAT_RESIZABLE = %%CHAT_RESIZABLE%%; // server-controlled: toggle to true to allow manual resizing
+        let CHAT_RESIZABLE = (typeof window !== 'undefined' && window.__SYNTH_CONFIG && window.__SYNTH_CONFIG.CHAT_RESIZABLE !== undefined) ? !!window.__SYNTH_CONFIG.CHAT_RESIZABLE : true; // server-controlled at render time, default true
 
         function createChatResizeHandles() {
             if (!CHAT_RESIZABLE) {

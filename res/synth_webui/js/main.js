@@ -12,6 +12,10 @@
             if (!panel) return null;
             // If panel already contains substantial content, skip
             if (panel.dataset.loaded === '1') return panel;
+            if (panel.children && panel.children.length > 0) {
+                panel.dataset.loaded = '1';
+                return panel;
+            }
 
             const resp = await fetch(`/templates/${section}.html`);
             if (!resp.ok) throw new Error('HTTP ' + resp.status);
@@ -74,9 +78,46 @@
             btn.addEventListener('click', async (ev) => {
                 const tab = btn.getAttribute('data-tab');
                 if (!tab) return;
-                try { await loadSection(tab); } catch (e) { /* ignore */ }
+                try {
+                    // Persist and expose active tab globally for other modules
+                    try { window.activeTab = tab; if (localStorage && localStorage.setItem) localStorage.setItem(TAB_KEY, tab); } catch (e) { /* ignore */ }
+                    await loadSection(tab);
+                } catch (e) { /* ignore */ }
             });
         });
+
+        // DIAGNOSTICS: capture top-level clicks and report overlay/pointer state to console.
+        try {
+            setTimeout(() => {
+                try {
+                    console.log('[synth_webui diagnostics] navButtons:', document.querySelectorAll('.nav-btn').length);
+                    const overlay = document.getElementById('synth-error-overlay');
+                    console.log('[synth_webui diagnostics] synth-error-overlay display:', overlay ? window.getComputedStyle(overlay).display : 'not-present');
+                    console.log('[synth_webui diagnostics] body pointer-events:', window.getComputedStyle(document.body).pointerEvents);
+                    // Find any visible fixed element with high z-index
+                    const candidates = Array.from(document.querySelectorAll('*')).filter(el => {
+                        try {
+                            const cs = window.getComputedStyle(el);
+                            return cs && cs.position === 'fixed' && cs.display !== 'none' && parseInt(cs.zIndex || '0') >= 1000;
+                        } catch (e) { return false; }
+                    });
+                    if (candidates.length) {
+                        const top = candidates[0];
+                        console.log('[synth_webui diagnostics] top fixed candidate:', top.tagName, 'id=', top.id || '(no-id)', 'class=', top.className, 'z=', window.getComputedStyle(top).zIndex);
+                    } else {
+                        console.log('[synth_webui diagnostics] no high-z fixed element found');
+                    }
+                } catch (e) {}
+            }, 300);
+
+            // Also log any click events so we know they reach the document
+            document.addEventListener('click', (ev) => {
+                try {
+                    const t = ev.target || {};
+                    console.log('[synth_webui diagnostics] click at', Date.now(), 'target=', t.tagName, 'id=', t.id, 'class=', t.className);
+                } catch (e) {}
+            }, true); // capture phase
+        } catch (e) { /* ignore diagnostics failures */ }
     });
 })();
 
@@ -130,7 +171,7 @@ try {
         const componentsLLMList = document.getElementById('components-llm-list');
         const componentsInterfacesList = document.getElementById('components-interfaces-list');
         const componentsPluginsList = document.getElementById('components-plugins-list');
-        const configGeneralList = document.getElementById('config-sections-container');
+        const configGeneralList = document.getElementById('config-general-list');
         const configAdvancedList = document.getElementById('config-advanced-list');
         const configDisclaimer = document.getElementById('config-env-disclaimer');
         const configAdvancedWarning = document.getElementById('config-advanced-warning');
@@ -144,7 +185,19 @@ try {
         const NOTIFY_ASKED_KEY = 'synth-webui-notify-asked';
         const HISTORY_KEY = 'synth-webui-history';
         const TAB_KEY = 'synth-webui-active-tab';
-        
+        // Initialize global activeTab from localStorage or DOM so modules can
+        // safely reference current tab. We expose both `window.activeTab` and
+        // a bare `activeTab` var to maximize compatibility with legacy code.
+        try {
+            const _initial = (localStorage && localStorage.getItem && localStorage.getItem(TAB_KEY)) || (document.querySelector && document.querySelector('.nav-btn.active') && document.querySelector('.nav-btn.active').getAttribute('data-tab')) || 'home';
+            window.activeTab = window.activeTab || _initial;
+            // Create a global var for non-module scripts
+            if (typeof activeTab === 'undefined') {
+                // eslint-disable-next-line no-unused-vars
+                var activeTab = window.activeTab;
+            }
+        } catch (e) { /* ignore */ }
+
         const CHAT_WINDOW_STATE_KEY = 'synth-webui-window-state';
         const CHAT_MESSAGES_KEY = 'synth-webui-chat-messages';
         const CHAT_RECT_KEY = 'synth-webui-chat-rect';
@@ -152,8 +205,8 @@ try {
         const VRM_MODEL_KEY = 'synth-webui-vrm-model';
         const HISTORY_LIMIT = 200;
         const LOG_BUFFER_LIMIT = 2000;
-        const IS_SECURE = window.isSecureContext || window.location.protocol === 'https:' || window.location.hostna
-me === 'localhost' || window.location.hostname === '127.0.0.1';                                                            let ws = null;
+        const IS_SECURE = window.isSecureContext || window.location.protocol === 'https:' || window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+        let ws = null;
         // Expose sessionId as a true global var so other scripts can reference it
         var sessionId = window.sessionId = window.sessionId || null;
         let notificationsEnabled = false;
@@ -168,10 +221,128 @@ me === 'localhost' || window.location.hostname === '127.0.0.1';                 
         // Preloads are still accepted so cache stays warm.
         window.__synth_web_debug_enabled = window.__synth_web_debug_enabled || false;
         window.__synth_debug_pause_all = window.__synth_debug_pause_all || false;
-        window.__synth_debug_last_remote = window.__synth_debug_last_remote || { animation: null, animation_state: 
-null, action_state: null };                                                                                                window.__synth_debug_last_remote_at = window.__synth_debug_last_remote_at || { animation: 0, animation_stat
-e: 0, action_state: 0 };                                                                                                   // Queue preload requests received before VRM/AnimationHandler is ready.
-        window.__synth_pending_preloads = window.__synth_pending_preloads || {};
+        window.__synth_debug_last_remote = window.__synth_debug_last_remote || { animation: null, animation_state: null, action_state: null };
+        window.__synth_debug_last_remote_at = window.__synth_debug_last_remote_at || { animation: 0, animation_state: 0, action_state: 0 };
+        // Queue preload requests received before VRM/AnimationHandler is ready.
+        window.__synth_pending_preloads = window.__synth_pending_preloads || {}; 
+
+        // -----------------------------------------------------------------------------
+        // Chat state helpers (restore/save/typing indicator)
+        // -----------------------------------------------------------------------------
+        function addTypingIndicator() {
+            try {
+                const messagesEl = messages || document.getElementById('messages');
+                if (!messagesEl) return;
+                if (messagesEl.querySelector('.typing-indicator')) return;
+                const container = document.createElement('div');
+                container.className = 'message-container synth';
+                const bubble = document.createElement('div');
+                bubble.className = 'bubble synth typing-indicator';
+                bubble.innerHTML = '<span class="dot"></span><span class="dot"></span><span class="dot"></span>';
+                container.appendChild(bubble);
+                messagesEl.appendChild(container);
+                messagesEl.scrollTop = messagesEl.scrollHeight;
+                try { localStorage.setItem(TYPING_INDICATOR_KEY, '1'); } catch (e) { /* ignore */ }
+            } catch (e) { /* ignore */ }
+        }
+
+        function removeTypingIndicator() {
+            try {
+                const messagesEl = messages || document.getElementById('messages');
+                if (!messagesEl) return;
+                const indicator = messagesEl.querySelector('.typing-indicator');
+                if (indicator && indicator.parentElement) indicator.parentElement.remove();
+                try { localStorage.removeItem(TYPING_INDICATOR_KEY); } catch (e) { /* ignore */ }
+            } catch (e) { /* ignore */ }
+        }
+
+        function saveChatState() {
+            try {
+                const chatEl = chatPanel || document.getElementById('chat');
+                if (!chatEl) return;
+                const device = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768) ? 'mobile' : 'desktop';
+                const stateKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}-${device}` : `${CHAT_WINDOW_STATE_KEY}-${device}`;
+                let state = 'normal';
+                if (chatEl.classList.contains('minimized')) state = 'minimized';
+                else if (chatEl.classList.contains('maximized')) state = 'maximized';
+                else if (chatEl.classList.contains('expanded')) state = 'expanded';
+                try { localStorage.setItem(stateKey, state); } catch (e) { /* ignore */ }
+
+                const rectKey = sessionId ? `${CHAT_RECT_KEY}-${sessionId}-${device}` : `${CHAT_RECT_KEY}-${device}`;
+                try {
+                    const rect = chatEl.getBoundingClientRect();
+                    const payload = {
+                        left: Math.round(rect.left),
+                        top: Math.round(rect.top),
+                        width: Math.round(rect.width),
+                        height: Math.round(rect.height)
+                    };
+                    localStorage.setItem(rectKey, JSON.stringify(payload));
+                } catch (e) { /* ignore */ }
+            } catch (e) { /* ignore */ }
+        }
+
+        function restoreChatState() {
+            try {
+                const chatEl = chatPanel || document.getElementById('chat');
+                if (!chatEl) return;
+                const device = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768) ? 'mobile' : 'desktop';
+
+                // Restore rect
+                try {
+                    const rectKey = sessionId ? `${CHAT_RECT_KEY}-${sessionId}-${device}` : `${CHAT_RECT_KEY}-${device}`;
+                    const rectRaw = localStorage.getItem(rectKey) || localStorage.getItem(sessionId ? `${CHAT_RECT_KEY}-${sessionId}` : CHAT_RECT_KEY) || localStorage.getItem(CHAT_RECT_KEY);
+                    if (rectRaw) {
+                        const rect = JSON.parse(rectRaw);
+                        if (typeof rect.left === 'number') chatEl.style.left = rect.left + 'px';
+                        if (typeof rect.top === 'number') chatEl.style.top = rect.top + 'px';
+                        if (typeof rect.width === 'number' && rect.width >= 260) chatEl.style.width = rect.width + 'px';
+                        if (typeof rect.height === 'number' && rect.height >= 180) chatEl.style.height = rect.height + 'px';
+                        chatEl.style.right = 'auto';
+                        chatEl.style.bottom = 'auto';
+                    }
+                } catch (e) { /* ignore */ }
+
+                // Restore window state
+                try {
+                    const stateKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}-${device}` : `${CHAT_WINDOW_STATE_KEY}-${device}`;
+                    const localState = localStorage.getItem(stateKey) || localStorage.getItem(sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}` : CHAT_WINDOW_STATE_KEY) || localStorage.getItem(CHAT_WINDOW_STATE_KEY);
+                    if (localState === 'minimized') {
+                        chatEl.classList.add('hidden');
+                        chatEl.classList.remove('maximized', 'expanded', 'minimized');
+                        if (chatToggleBtn) chatToggleBtn.style.display = 'flex';
+                    } else if (localState === 'maximized') {
+                        chatEl.classList.remove('hidden', 'expanded', 'minimized');
+                        chatEl.classList.add('maximized');
+                        if (chatToggleBtn) chatToggleBtn.style.display = 'none';
+                    } else if (localState === 'expanded') {
+                        chatEl.classList.remove('hidden', 'maximized', 'minimized');
+                        chatEl.classList.add('expanded');
+                        if (chatToggleBtn) chatToggleBtn.style.display = 'none';
+                    } else {
+                        chatEl.classList.remove('maximized', 'expanded', 'hidden', 'minimized');
+                        if (chatToggleBtn) chatToggleBtn.style.display = 'none';
+                    }
+                } catch (e) { /* ignore */ }
+
+                // Restore typing indicator if server indicates processing
+                (async () => {
+                    try {
+                        if (!sessionId) return;
+                        const res = await fetch('/api/chat/session_meta?session_id=' + encodeURIComponent(sessionId));
+                        if (!res.ok) return;
+                        const out = await res.json();
+                        const meta = out && out.meta ? out.meta : {};
+                        if (meta && meta.processing) addTypingIndicator();
+                    } catch (e) { /* ignore */ }
+                })();
+            } catch (e) { /* ignore */ }
+        }
+
+        window.addTypingIndicator = window.addTypingIndicator || addTypingIndicator;
+        window.removeTypingIndicator = window.removeTypingIndicator || removeTypingIndicator;
+        window.saveChatState = window.saveChatState || saveChatState;
+        window.restoreChatState = window.restoreChatState || restoreChatState;
         // Phase priorities mirrored from server-side ActionStateManager
         const PHASE_PRIORITIES = {
             'IDLE': 0,
@@ -179,4 +350,377 @@ e: 0, action_state: 0 };                                                        
             'TALKING': 5,
             'CORRECTING': 7,
             'THINKING': 10
-        },
+        };
+
+        // Expose a lightweight config refresh helper so modules can request an
+        // update of runtime UI-config without hard dependency ordering. The
+        // function is intentionally minimal: engines or other modules can
+        // override `window.refreshConfig` with a richer implementation when
+        // available.
+        async function refreshConfig() {
+            try {
+                if (!configGeneralList || !configAdvancedList) return;
+                const response = await fetch('/api/config');
+                if (!response.ok) throw new Error('HTTP ' + response.status);
+                const payload = await response.json();
+                const items = Array.isArray(payload.items) ? payload.items : [];
+
+                if (payload.messages && configDisclaimer) {
+                    if (payload.messages.env_override) configDisclaimer.textContent = payload.messages.env_override;
+                }
+                if (payload.messages && configAdvancedWarning) {
+                    if (payload.messages.advanced_warning) configAdvancedWarning.textContent = payload.messages.advanced_warning;
+                }
+
+                const renderList = (list, container) => {
+                    container.innerHTML = '';
+                    if (!list.length) {
+                        const empty = document.createElement('div');
+                        empty.className = 'meta';
+                        empty.textContent = 'No configuration entries found.';
+                        container.appendChild(empty);
+                        return;
+                    }
+                    list.forEach((item) => {
+                        const row = document.createElement('div');
+                        row.className = 'config-row';
+
+                        const labelLine = document.createElement('div');
+                        labelLine.className = 'config-label-line';
+                        const label = document.createElement('span');
+                        label.textContent = item.label || item.key || 'Unnamed';
+                        labelLine.appendChild(label);
+                        if (item.env_override) {
+                            const override = document.createElement('span');
+                            override.className = 'override-icon';
+                            override.textContent = '⚠️';
+                            labelLine.appendChild(override);
+                        }
+                        row.appendChild(labelLine);
+
+                        if (item.description) {
+                            const desc = document.createElement('div');
+                            desc.className = 'config-description';
+                            desc.textContent = item.description;
+                            row.appendChild(desc);
+                        }
+
+                        const inputWrap = document.createElement('div');
+                        inputWrap.className = 'config-input';
+
+                        const value = item.value === null || item.value === undefined ? '' : item.value;
+                        const isEditable = !!item.editable && !item.env_override;
+
+                        let inputEl = null;
+                        if (item.ui_type === 'bool' || item.value_type === 'bool') {
+                            const checkbox = document.createElement('input');
+                            checkbox.type = 'checkbox';
+                            checkbox.checked = value === true || value === 1 || value === '1' || value === 'true';
+                            checkbox.disabled = !isEditable;
+                            inputEl = checkbox;
+                        } else if (item.ui_type === 'select' && Array.isArray(item.options) && item.options.length) {
+                            const select = document.createElement('select');
+                            item.options.forEach((opt) => {
+                                const option = document.createElement('option');
+                                option.value = opt;
+                                option.textContent = opt;
+                                if (String(value) === String(opt)) option.selected = true;
+                                select.appendChild(option);
+                            });
+                            select.disabled = !isEditable;
+                            inputEl = select;
+                        } else if (item.ui_type === 'textarea' || item.value_type === 'json') {
+                            const textarea = document.createElement('textarea');
+                            textarea.rows = 3;
+                            textarea.value = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+                            textarea.disabled = !isEditable;
+                            inputEl = textarea;
+                        } else {
+                            const input = document.createElement('input');
+                            input.type = item.ui_type === 'password' ? 'password' : (item.value_type === 'int' || item.value_type === 'float' || item.ui_type === 'number' ? 'number' : 'text');
+                            input.value = typeof value === 'string' ? value : JSON.stringify(value);
+                            input.disabled = !isEditable;
+                            inputEl = input;
+                        }
+
+                        if (inputEl) inputWrap.appendChild(inputEl);
+                        row.appendChild(inputWrap);
+                        container.appendChild(row);
+                    });
+                };
+
+                const general = items.filter((item) => !item.advanced);
+                const advanced = items.filter((item) => item.advanced);
+                renderList(general, configGeneralList);
+                renderList(advanced, configAdvancedList);
+            } catch (e) {
+                console.error('[synth_webui] Failed to load configuration', e);
+                if (configGeneralList) configGeneralList.innerHTML = '<div class="meta">Failed to load configuration.</div>';
+                if (configAdvancedList) configAdvancedList.innerHTML = '<div class="meta">Failed to load configuration.</div>';
+            }
+        }
+        window.refreshConfig = window.refreshConfig || refreshConfig;
+
+        // -----------------------------------------------------------------------------
+        // Core UI wiring (navigation + chat controls + WebSocket)
+        // -----------------------------------------------------------------------------
+        (function(){
+            'use strict';
+
+            async function loadComponentsSummary() {
+                try {
+                    if (!componentsLLMList || !componentsInterfacesList || !componentsPluginsList) return;
+                    const res = await fetch('/api/components');
+                    if (!res.ok) throw new Error('HTTP ' + res.status);
+                    const data = await res.json();
+
+                    if (componentsLLMSummary && data.llm) {
+                        componentsLLMSummary.textContent = `Active engine: ${data.llm.active || '—'}`;
+                    }
+
+                    const renderDetailsList = (items, container) => {
+                        container.innerHTML = '';
+                        if (!items || !items.length) {
+                            const empty = document.createElement('div');
+                            empty.className = 'meta';
+                            empty.textContent = 'No components found.';
+                            container.appendChild(empty);
+                            return;
+                        }
+                        items.forEach((item) => {
+                            const details = document.createElement('details');
+                            details.className = 'component-item';
+                            const summary = document.createElement('summary');
+                            const name = document.createElement('span');
+                            name.textContent = item.display_name || item.name || 'Component';
+                            summary.appendChild(name);
+                            const status = document.createElement('span');
+                            status.className = 'component-status component-status-' + (item.status || 'unknown');
+                            status.textContent = item.status || 'unknown';
+                            summary.appendChild(status);
+                            details.appendChild(summary);
+
+                            const desc = document.createElement('div');
+                            desc.className = 'component-description';
+                            desc.textContent = item.details || item.description || '';
+                            details.appendChild(desc);
+                            container.appendChild(details);
+                        });
+                    };
+
+                    renderDetailsList(data.llm && data.llm.engines ? data.llm.engines : [], componentsLLMList);
+                    renderDetailsList(data.interfaces || [], componentsInterfacesList);
+                    renderDetailsList(data.plugins || [], componentsPluginsList);
+                } catch (e) {
+                    console.error('[synth_webui] Failed to load components', e);
+                    if (componentsLLMList) componentsLLMList.innerHTML = '<div class="meta">Failed to load components.</div>';
+                    if (componentsInterfacesList) componentsInterfacesList.innerHTML = '<div class="meta">Failed to load components.</div>';
+                    if (componentsPluginsList) componentsPluginsList.innerHTML = '<div class="meta">Failed to load components.</div>';
+                }
+            }
+
+            function safeEscapeHtml(text) {
+                try {
+                    if (window.SynthUtils && typeof window.SynthUtils.escapeHtml === 'function') {
+                        return window.SynthUtils.escapeHtml(text);
+                    }
+                } catch (e) { /* ignore */ }
+                const div = document.createElement('div');
+                div.textContent = text === undefined || text === null ? '' : String(text);
+                return div.innerHTML;
+            }
+
+            function setActiveTab(tab) {
+                if (!tab) return;
+                const buttons = document.querySelectorAll('.nav-btn[data-tab]');
+                const panels = document.querySelectorAll('.tab-panel[data-tab]');
+                buttons.forEach(btn => {
+                    const isActive = btn.getAttribute('data-tab') === tab;
+                    btn.classList.toggle('active', isActive);
+                    btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+                });
+                panels.forEach(panel => {
+                    const isActive = panel.getAttribute('data-tab') === tab;
+                    panel.classList.toggle('active', isActive);
+                    if (isActive) {
+                        panel.removeAttribute('aria-hidden');
+                    } else {
+                        panel.setAttribute('aria-hidden', 'true');
+                    }
+                });
+            }
+
+            function setupNavigation() {
+                const navButtons = document.querySelectorAll('.nav-btn[data-tab]');
+                const hamburger = document.querySelector('.hamburger');
+                const nav = document.querySelector('nav.main-nav');
+
+                navButtons.forEach(btn => {
+                    btn.addEventListener('click', async () => {
+                        const tab = btn.getAttribute('data-tab');
+                        if (!tab) return;
+                        try {
+                            setActiveTab(tab);
+                            try { window.activeTab = tab; if (localStorage && localStorage.setItem) localStorage.setItem('synth-webui-active-tab', tab); } catch (e) { /* ignore */ }
+                            if (window.SynthWebUI && typeof window.SynthWebUI.loadSection === 'function') {
+                                await window.SynthWebUI.loadSection(tab);
+                            }
+                        } catch (e) {
+                            console.warn('[synth_webui] tab switch failed', e);
+                        }
+                        if (nav && nav.classList.contains('open')) {
+                            nav.classList.remove('open');
+                        }
+                    });
+                });
+
+                if (hamburger && nav) {
+                    hamburger.addEventListener('click', () => {
+                        nav.classList.toggle('open');
+                    });
+                }
+
+                // Restore last active tab
+                try {
+                    const saved = (localStorage && localStorage.getItem && localStorage.getItem('synth-webui-active-tab')) || 'home';
+                    setActiveTab(saved);
+                } catch (e) {
+                    setActiveTab('home');
+                }
+            }
+
+            function appendMessage(container, sender, text) {
+                if (!container) return;
+                const wrapper = document.createElement('div');
+                wrapper.className = `message-container ${sender}`;
+
+                const bubble = document.createElement('div');
+                bubble.className = `bubble ${sender}`;
+                bubble.innerHTML = `<div class="bubble-sender">${sender === 'synth' ? 'SyntH' : 'You'}</div>${safeEscapeHtml(text)}`;
+                wrapper.appendChild(bubble);
+                container.appendChild(wrapper);
+                container.scrollTop = container.scrollHeight;
+            }
+
+            function setupChatControls() {
+                const chatPanel = document.getElementById('chat');
+                const chatToggleBtn = document.getElementById('chat-toggle');
+                const chatMinBtn = document.getElementById('chat-minimize');
+                const chatMaxBtn = document.getElementById('chat-maximize');
+
+                function showChat() {
+                    if (!chatPanel) return;
+                    chatPanel.classList.remove('minimized');
+                    chatPanel.classList.remove('hidden');
+                    if (chatToggleBtn) chatToggleBtn.style.display = 'none';
+                }
+
+                function hideChat() {
+                    if (!chatPanel) return;
+                    chatPanel.classList.add('minimized');
+                    if (chatToggleBtn) chatToggleBtn.style.display = 'flex';
+                }
+
+                function toggleMaximize() {
+                    if (!chatPanel) return;
+                    const isMax = chatPanel.classList.contains('maximized');
+                    chatPanel.classList.toggle('maximized', !isMax);
+                    if (!isMax) {
+                        chatPanel.classList.remove('minimized');
+                        if (chatToggleBtn) chatToggleBtn.style.display = 'none';
+                    }
+                }
+
+                if (chatToggleBtn) chatToggleBtn.addEventListener('click', showChat);
+                if (chatMinBtn) chatMinBtn.addEventListener('click', hideChat);
+                if (chatMaxBtn) chatMaxBtn.addEventListener('click', toggleMaximize);
+            }
+
+            function setupChatMessaging() {
+                const statusLabel = document.getElementById('status-label');
+                const statusIndicator = document.querySelector('.connection-status .indicator');
+                const messages = document.getElementById('messages');
+                const input = document.getElementById('input');
+                const form = document.getElementById('composer');
+                const sendBtn = document.getElementById('send');
+
+                let ws = null;
+
+                function updateSendState() {
+                    if (!sendBtn || !input) return;
+                    const hasText = input.value.trim().length > 0;
+                    const wsReady = ws && ws.readyState === WebSocket.OPEN;
+                    sendBtn.disabled = !(hasText && wsReady);
+                }
+
+                function connectWs() {
+                    try {
+                        const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+                        ws = new WebSocket(`${protocol}://${window.location.host}/ws`);
+                        window.chatWs = ws;
+
+                        ws.onopen = () => {
+                            if (statusLabel) statusLabel.textContent = 'Connected';
+                            if (statusIndicator) statusIndicator.classList.add('online');
+                            updateSendState();
+                        };
+                        ws.onclose = () => {
+                            if (statusLabel) statusLabel.textContent = 'Disconnected';
+                            if (statusIndicator) statusIndicator.classList.remove('online');
+                            updateSendState();
+                        };
+                        ws.onerror = () => {
+                            if (statusLabel) statusLabel.textContent = 'Disconnected';
+                            if (statusIndicator) statusIndicator.classList.remove('online');
+                            updateSendState();
+                        };
+                        ws.onmessage = (event) => {
+                            try {
+                                const data = JSON.parse(event.data);
+                                if (data && data.type === 'message') {
+                                    appendMessage(messages, data.sender === 'synth' ? 'synth' : 'user', data.text || '');
+                                }
+                            } catch (e) {
+                                // ignore non-JSON
+                            }
+                        };
+                    } catch (e) {
+                        console.error('[synth_webui] WebSocket init failed', e);
+                    }
+                }
+
+                if (input) {
+                    input.addEventListener('input', updateSendState);
+                }
+
+                if (form) {
+                    form.addEventListener('submit', (e) => {
+                        e.preventDefault();
+                        if (!input || !ws || ws.readyState !== WebSocket.OPEN) return;
+                        const text = input.value.trim();
+                        if (!text) return;
+                        try {
+                            ws.send(JSON.stringify({ text }));
+                            appendMessage(messages, 'user', text);
+                            input.value = '';
+                            updateSendState();
+                        } catch (e) {
+                            console.warn('[synth_webui] send failed', e);
+                        }
+                    });
+                }
+
+                connectWs();
+            }
+
+            document.addEventListener('DOMContentLoaded', () => {
+                setupNavigation();
+                setupChatControls();
+                setupChatMessaging();
+            });
+            // Initial data loads
+            document.addEventListener('DOMContentLoaded', () => {
+                refreshConfig();
+                loadComponentsSummary();
+            });
+        })();

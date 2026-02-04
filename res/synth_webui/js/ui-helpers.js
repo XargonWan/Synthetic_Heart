@@ -40,4 +40,6 @@ window.resetWindowPositions = window.resetWindowPositions || resetWindowPosition
 window.addCardCollapsers = window.addCardCollapsers || addCardCollapsers;
 window.applyDefaultWindowPositions = window.applyDefaultWindowPositions || applyDefaultWindowPositions;
 
-export { resetWindowPositions, addCardCollapsers, applyDefaultWindowPositions };
+// Note: this file is intended to be loaded as a regular script (not necessarily an ES module).
+// If module semantics are required, load it via <script type="module"> and add exports there.
+

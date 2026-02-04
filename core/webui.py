@@ -34,7 +34,7 @@ from fastapi import (
     HTTPException,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from core.core_initializer import register_interface
@@ -78,6 +78,27 @@ class SynthWebUIInterface:
     def __init__(self, autostart: bool = True) -> None:
         self.app = FastAPI(title=BRAND_NAME, version="1.0")
         self.start_time = datetime.utcnow()
+
+        # Lightweight request logger middleware to capture client static/resource requests
+        try:
+            from starlette.middleware.base import BaseHTTPMiddleware
+
+            class _RequestLoggerMiddleware(BaseHTTPMiddleware):
+                async def dispatch(inner_self, request, call_next):
+                    response = await call_next(request)
+                    try:
+                        path = request.url.path or ''
+                        interesting = path.startswith('/js') or path.startswith('/static') or path == '/service-worker.js' or path.startswith('/api')
+                        if interesting:
+                            log_info(f"{LOG_PREFIX} HTTP {request.method} {path} -> {response.status_code}", log_file=WEBUI_LOG)
+                    except Exception:
+                        pass
+                    return response
+
+            self.app.add_middleware(_RequestLoggerMiddleware)
+        except Exception:
+            # Don't fail initialization if middleware cannot be added
+            pass
         self.connections: Dict[str, WebSocket] = {}
         self.message_history: Dict[str, Deque[dict]] = {}
         self.max_history = 100
@@ -372,6 +393,8 @@ class SynthWebUIInterface:
         self.app.get("/api/agent/proposals")(self.list_agent_proposals)
         self.app.post("/api/agent/proposals/{proposal_id}/approve")(self.approve_agent_proposal)
         self.app.get("/api/animations/{skin}/{animation_type}")(self.get_animations_for_type)
+        self.app.get("/api/skins/{skin}/animations/{animation_type}/{animation_file}.json")(self.get_animation_descriptor)
+        self.app.get("/service-worker.js")(self.service_worker)
         self.app.post("/api/animations/upload")(self.upload_animation)
         self.app.get("/api/animations/uploads")(self.list_animation_uploads)
         self.app.delete("/api/animations/uploads/{upload_id}")(self.delete_animation_upload)
@@ -1009,6 +1032,11 @@ class SynthWebUIInterface:
     # WebSocket logic
     # ------------------------------------------------------------------
     async def websocket_endpoint(self, websocket: WebSocket):
+        try:
+            client_info = getattr(websocket, 'client', None)
+            log_debug(f"{LOG_PREFIX} Incoming websocket connection from: {client_info}")
+        except Exception:
+            pass
         await websocket.accept()
         # Use persistent session id when available (single session per deploy)
         session_id = self.session_id or str(uuid.uuid4())
@@ -2403,6 +2431,64 @@ class SynthWebUIInterface:
         except Exception as e:
             log_error(f"{LOG_PREFIX} Error listing animations for {skin}/{animation_type}: {e}")
             return JSONResponse({"animations": []}, status_code=500)
+
+    async def get_animation_descriptor(self, skin: str, animation_type: str, animation_file: str):
+        """Return the animation descriptor JSON for a given animation.
+
+        This endpoint will return the on-disk descriptor if present (e.g.,
+        ``<animation>.fbx.json``). If no descriptor file exists the endpoint
+        returns an implicit descriptor with sensible defaults (see AGENTS.md):
+        - `idle` animations default to looping (``play_once=false``)
+        - non-idle animations default to playing once (``play_once=true``)
+        """
+        try:
+            # Basic validation to prevent directory traversal
+            if ".." in skin or ".." in animation_type or ".." in animation_file:
+                raise HTTPException(status_code=400, detail="Invalid skin or animation type")
+
+            anim_dir = Path(__file__).parent.parent / "skins" / skin / "animations" / animation_type
+            if not anim_dir.exists() or not anim_dir.is_dir():
+                log_debug(f"{LOG_PREFIX} Animation directory not found for descriptor request: {anim_dir}")
+                raise HTTPException(status_code=404, detail="Animation type not found")
+
+            # Descriptor file is expected to be the animation filename + '.json'
+            # e.g., 'Idle2.fbx.json' or 'Look Around.fbx.json'. Try the JSON
+            # descriptor first (safe), and only fall back to implicit defaults
+            # if the JSON descriptor is missing. Avoid opening the raw .fbx binary
+            # which would cause JSON parsing errors and 500 responses.
+            # Handle cases where the incoming `animation_file` already includes
+            # the '.json' suffix just in case.
+            base_name = animation_file[:-5] if animation_file.endswith('.json') else animation_file
+            desc_json_path = anim_dir / (base_name + '.json')
+
+            log_debug(f"{LOG_PREFIX} Resolving descriptor: json={desc_json_path}")
+
+            if desc_json_path.exists() and desc_json_path.is_file():
+                try:
+                    content = desc_json_path.read_text(encoding='utf-8')
+                    return JSONResponse(json.loads(content))
+                except Exception as exc:  # pragma: no cover - defensive
+                    log_warning(f"{LOG_PREFIX} Failed to read/parse descriptor {desc_json_path}: {exc}")
+                    raise HTTPException(status_code=500, detail="Descriptor read error")
+
+
+            # No descriptor file found: return an implicit descriptor based
+            # on animation_type (idle -> loop by default; others play_once).
+            play_once_default = False if animation_type.lower() == 'idle' else True
+            implicit = {"play_once": play_once_default}
+            return JSONResponse(implicit)
+        except HTTPException:
+            raise
+        except Exception as exc:  # pragma: no cover - defensive
+            log_error(f"{LOG_PREFIX} Error resolving animation descriptor for {skin}/{animation_type}/{animation_file}: {exc}")
+            return JSONResponse({"error": str(exc)}, status_code=500)
+
+    async def service_worker(self) -> FileResponse:
+        """Serve the WebUI service worker script at the root path."""
+        sw_path = Path(__file__).parent.parent / "res" / "synth_webui" / "static" / "service-worker.js"
+        if not sw_path.exists() or not sw_path.is_file():
+            raise HTTPException(status_code=404, detail="Service worker not found")
+        return FileResponse(sw_path, media_type="application/javascript")
 
     async def upload_animation(
         self,

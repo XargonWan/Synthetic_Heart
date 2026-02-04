@@ -4,26 +4,13 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>%%BRAND_NAME%%</title>
-    <link rel="icon" type="image/png" href="%%LOGO_URL%%" />
-    <link rel="apple-touch-icon" sizes="180x180" href="/static/synth_icon_180.png" />
-    <!-- Fallback to original logo if generated icons are not present -->
-    <link rel="apple-touch-icon" href="%%LOGO_URL%%" />
-    <link rel="icon" type="image/png" sizes="192x192" href="/static/synth_icon_192.png" />
-    <link rel="icon" type="image/png" sizes="512x512" href="/static/synth_icon_512.png" />
-    <link rel="manifest" href="/static/manifest.webmanifest">
-    <meta name="theme-color" content="#ff6bd6">
-    <!-- Register service worker and handle install prompt - extracted to /js/init.js -->
-    <script src="/js/init.js"></script>
-    <!-- Ensure service-worker token available for tests (moved to init.js) -->
-
-
-
     <style>
         :root {
             color-scheme: dark;
             --bg: #0d0d16;
             --surface: rgba(24, 24, 36, 0.9);
             --surface-alt: rgba(18, 18, 28, 0.75);
+            --panel-bg: rgba(18, 18, 28, 0.92);
             --border: rgba(255, 255, 255, 0.08);
             --border-strong: rgba(255, 255, 255, 0.18);
             --accent: #ff6bd6;
@@ -93,12 +80,6 @@
             flex-wrap: wrap;
             gap: 0.6rem;
         }
-          /* Collapsible card helper: wrap content in `.card-content` so collapse only hides this wrapper
-              and avoids interfering with nested cards which may be re-rendered. */
-          .card .card-content { display: block; }
-          .card.collapsed .card-content { display: none; }
-          .card h2 { display: flex; align-items: center; gap: 0.5rem; justify-content: space-between; }
-        .card-toggle { background: transparent; border: 0; color: var(--text-soft); cursor: pointer; font-size: 0.95rem; }
         .nav-btn {
             display: inline-flex;
             align-items: center;
@@ -124,59 +105,6 @@
         .nav-btn.active .icon {
             transform: scale(1.08);
         }
-        /* Install button for PWA (shown when beforeinstallprompt fires) */
-        #synth-install-btn {
-            position: fixed;
-            right: 1rem;
-            bottom: 1.25rem;
-            z-index: 10700;
-            display: none;
-            align-items: center;
-            justify-content: center;
-            width: 52px;
-            height: 52px;
-            border-radius: 999px;
-            background: linear-gradient(135deg, var(--accent), #ff87d6);
-            color: #07070c;
-            border: none;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.35);
-            cursor: pointer;
-            font-size: 1.1rem;
-        }
-        /* Skins grid */
-        .skins-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-            gap: 1rem;
-            margin-top: 1rem;
-        }
-        .skin-card {
-            background: var(--surface-alt);
-            border-radius: 12px;
-            padding: 0.8rem;
-            border: 1px solid var(--border);
-            display: flex;
-            flex-direction: column;
-            gap: 0.6rem;
-        }
-        .skin-preview {
-            width: 100%;
-            height: 140px;
-            background: linear-gradient(135deg, rgba(255,255,255,0.02), rgba(0,0,0,0.02));
-            border-radius: 8px;
-            overflow: hidden;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-        .skin-preview img { width: 100%; height: 100%; object-fit: cover; }
-        .skin-meta { color: var(--text-soft); font-size: 0.9rem; max-height: 10rem; overflow: auto; display: flex; flex-direction: column; gap: 0.3rem; }
-        .skin-version { font-weight: bold; color: var(--accent); }
-        .skin-author { font-style: italic; color: var(--text-medium); }
-        .skin-description { line-height: 1.4; max-height: 4rem; overflow-y: auto; }
-        .skin-actions { display:flex; gap:0.5rem; }
-        .btn-ghost { background: transparent; border: 1px solid var(--border); color:var(--text); padding:0.45rem 0.8rem; border-radius:8px; cursor:pointer; }
-        .btn-primary { background:var(--accent); color:#07070c; padding:0.45rem 0.8rem; border-radius:8px; border:none; cursor:pointer; }
         .connection-status {
             display: flex;
             align-items: center;
@@ -216,584 +144,11 @@
             flex: 1;
             min-height: 0;
         }
-        /* Home tab should not have padding as it contains full-screen VRM viewer */
         #tab-home {
             padding: 0;
         }
-
-        /* Skins tab */
-        #tab-skins { padding-top: 1rem; }
-        .home-stage {
-            width: 100%;
-            height: 100%;
-            display: flex;
-            flex-direction: column;
-            min-height: calc(100vh - var(--topbar-height, 120px));
-        }
-        .home-content {
-            flex: 1;
-            position: relative;
-            min-height: 0;
-        }
-        #chat {
-            position: fixed;
-            bottom: 1.5rem;
-            left: 1.5rem;
-            right: auto;
-            top: auto;
-            width: 420px;
-            min-width: 280px;
-            max-width: 95%;
-            height: 70vh;
-            max-height: 75vh;
-            display: flex;
-            flex-direction: column;
-            background: rgba(12, 12, 20, 0.95);
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
-            border: 1px solid var(--border);
-            border-radius: 22px;
-            box-shadow: 0 24px 45px -38px rgba(0, 0, 0, 0.9);
-            transition: transform 0.3s ease, opacity 0.3s ease;
-            overflow: hidden;
-            /* Keep chat visually above almost all other UI layers */
-            z-index: 60002;
-            /* allow manual control via the corner handle and drag (desktop only) */
-            /* Disabled default native resize - handled via explicit drag handles when enabled */
-            resize: none;
-            cursor: default;
-            touch-action: none; /* Allow pointer events for dragging */
-            /* Enable resize handles on all sides */
-            overflow-clip-margin: 10px;
-
-            /* We'll also add custom resize handles to allow resizing from all edges */
-            position: fixed; /* ensure absolute position for handles */
-        }
-
-        .chat-resize-handle { position: absolute; background: transparent; /* keep handles slightly above chat */ z-index: 60003; pointer-events: all; }
-        /* Make handles slightly thicker to be easier to grab */
-        .chat-resize-handle.handle-top, .chat-resize-handle.handle-bottom { height: 12px; left: 8px; right: 8px; cursor: ns-resize; }
-        .chat-resize-handle.handle-left, .chat-resize-handle.handle-right { width: 12px; top: 8px; bottom: 8px; cursor: ew-resize; }
-        .chat-resize-handle.handle-top { top: -6px; }
-        .chat-resize-handle.handle-bottom { bottom: -6px; }
-        .chat-resize-handle.handle-left { left: -6px; }
-        .chat-resize-handle.handle-right { right: -6px; }
-        .chat-resize-handle.handle-tl, .chat-resize-handle.handle-tr, .chat-resize-handle.handle-bl, .chat-resize-handle.handle-br { width: 24px; height: 24px; }
-        .chat-resize-handle.handle-tl { top: -12px; left: -12px; cursor: nwse-resize; }
-        .chat-resize-handle.handle-tr { top: -12px; right: -12px; cursor: nesw-resize; }
-        .chat-resize-handle.handle-bl { bottom: -12px; left: -12px; cursor: nesw-resize; }
-        .chat-resize-handle.handle-br { bottom: -12px; right: -12px; cursor: nwse-resize; }
-        /* Draggable title bar (drag handle) */
-        #chat-title-bar {
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            height: 3.5rem;
-            background: linear-gradient(135deg, rgba(24, 24, 36, 0.95), rgba(18, 18, 28, 0.9));
-            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-            border-radius: 22px 22px 0 0;
-            display: flex;
-            align-items: center;
-            padding: 0.8rem 1.2rem;
-            cursor: grab;
-            user-select: none;
-            z-index: 51;
-            font-size: 0.95rem;
-            color: var(--text-soft);
-            font-weight: 500;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-        }
-        #chat-title-bar:active {
-            cursor: grabbing;
-        }
-        #chat-title-bar .chat-title { display: flex; align-items: center; gap: 0.6rem; }
-        #chat-title-bar .chat-controls { display: flex; align-items: center; gap: 0.4rem; }
-        .pill.danger { border-color: var(--error); color: var(--error); }
-
-        /* Archive modal styling */
-        #archive-panel { font-family: inherit; color: var(--text); }
-        .archive-row { background: rgba(255,255,255,0.02); }
-        .archive-row.selected { outline: 2px solid rgba(255,255,255,0.06); background: rgba(255,255,255,0.03); }
-        #archive-list .pill { padding: 0.2rem 0.6rem; border-radius: 6px; }
-        /* On mobile, chat is not resizable or draggable */
-        @media (max-width: 768px) {
-            #chat {
-                width: 85%;
-                max-width: 95%;
-                height: 50vh;
-                resize: none;
-                cursor: default;
-            }
-            #chat:hover {
-                cursor: default;
-            }
-        }
-        #chat.hidden {
-            display: none;
-        }
-        /* Minimized chat: keep title bar visible but collapse content */
-        #chat.minimized {
-            height: 3.8rem !important;
-            min-height: auto;
-            max-height: none;
-            overflow: hidden;
-            width: 320px;
-            pointer-events: auto;
-        }
-        #chat.minimized .chat-resize-handle { display: none; }
-        #messages {
-            flex: 1;
-            overflow-y: auto;
-            padding: 1.2rem 1.4rem;
-            display: flex;
-            flex-direction: column;
-            gap: 0.9rem;
-        }
-        .message-container {
-            display: flex;
-            flex-direction: column;
-            margin: 0.6rem 0;
-            gap: 0.2rem;
-        }
-        .message-container.user {
-            align-items: flex-end;
-            margin-right: 1rem;
-        }
-        .message-container.synth {
-            align-items: flex-start;
-            margin-left: 1rem;
-        }
-        .bubble {
-            max-width: 80%;
-            padding: 1rem 1.2rem;
-            border-radius: 18px;
-            line-height: 1.45;
-            animation: fadeSlide 0.35s ease;
-            white-space: pre-wrap;
-            box-shadow: 0 18px 45px -38px rgba(0, 0, 0, 0.85);
-            word-wrap: break-word;
-            overflow-wrap: break-word;
-        }
-        .bubble-sender {
-            font-size: 0.85rem;
-            font-weight: 600;
-            margin-bottom: 0.4rem;
-            letter-spacing: 0.05em;
-        }
-        .bubble.user {
-            background: rgba(255, 255, 255, 0.08);
-        }
-        .bubble.user .bubble-sender {
-            color: var(--text-soft);
-            text-align: right;
-        }
-        .bubble.synth {
-            background: linear-gradient(135deg, #ff6bd6, #7289da);
-            color: #fff;
-        }
-        .bubble.synth .bubble-sender {
-            color: rgba(255, 255, 255, 0.9);
-        }
-        .bubble.pending {
-            opacity: 0.7;
-            font-style: italic;
-            position: relative;
-        }
-        .bubble.pending::after {
-            content: '⏳';
-            position: absolute;
-            right: -1.6rem;
-            top: 0.4rem;
-            font-size: 0.9rem;
-            color: var(--text-soft);
-        }
-        .typing-indicator {
-            display: flex;
-            gap: 0.3rem;
-            align-items: center;
-            justify-content: center;
-            padding: 1rem 1.5rem !important;
-        }
-        .typing-indicator .dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: rgba(255, 255, 255, 0.85);
-            animation: typingDot 1.4s ease-in-out infinite;
-        }
-        .typing-indicator .dot:nth-child(1) {
-            animation-delay: 0s;
-        }
-        .typing-indicator .dot:nth-child(2) {
-            animation-delay: 0.2s;
-        }
-        .typing-indicator .dot:nth-child(3) {
-            animation-delay: 0.4s;
-        }
-        @keyframes typingDot {
-            0%, 60%, 100% {
-                transform: translateY(0);
-                opacity: 0.7;
-            }
-            30% {
-                transform: translateY(-10px);
-                opacity: 1;
-            }
-        }
-        @keyframes fadeSlide {
-            from {
-                transform: translateY(10px);
-                opacity: 0;
-            }
-            to {
-                transform: translateY(0);
-                opacity: 1;
-            }
-        }
-        #composer {
-            display: flex;
-            flex-direction: row;
-            gap: 0.8rem;
-            padding: 1.1rem 1.4rem 1.4rem;
-            align-items: flex-end;
-        }
-        #input {
-            flex: 1;
-            resize: none;
-            border-radius: 14px;
-            padding: 0.9rem 1.1rem;
-            border: 1px solid var(--border);
-            background: rgba(12, 12, 20, 0.58);
-            color: inherit;
-            font-size: 1rem;
-            line-height: 1.4;
-            min-height: 2.8rem;
-            max-height: 7rem;
-        }
-        #input:focus {
-            outline: 2px solid var(--accent);
-            outline-offset: 3px;
-        }
-        #send {
-            padding: 0;
-            border-radius: 50%;
-            border: none;
-            background: var(--accent);
-            color: #04040a;
-            font-weight: 600;
-            cursor: pointer;
-            transition: transform 0.15s ease, box-shadow 0.15s ease;
-            height: 2.8rem;
-            width: 2.8rem;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-        #send:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-            transform: none;
-            box-shadow: none;
-        }
-        #send:hover:enabled {
-            transform: translateY(-1px);
-            box-shadow: 0 18px 30px -18px rgba(255, 107, 214, 0.85);
-        }
-        .home-vrm {
-            position: absolute;
-            inset: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            border: none;
-            z-index: 1;
-            pointer-events: auto;
-        }
-        .chat-toggle-btn {
-            position: fixed;
-            top: 95px;
-            right: clamp(1.2rem, 2vw, 1.6rem);
-            z-index: 150;
-            width: 56px;
-            height: 56px;
-            border-radius: 50%;
-            border: 2px solid var(--border);
-            background: rgba(12, 12, 20, 0.95);
-            backdrop-filter: blur(10px);
-            -webkit-backdrop-filter: blur(10px);
-            color: var(--accent);
-            font-size: 1.5rem;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
-            transition: all 0.25s ease;
-        }
-        .chat-toggle-btn:hover {
-            transform: scale(1.1);
-            background: rgba(255, 107, 214, 0.15);
-            border-color: var(--accent);
-            box-shadow: 0 12px 32px rgba(255, 107, 214, 0.4);
-        }
-        .chat-toggle-btn:active {
-            transform: scale(0.95);
-        }
-        .home-vrm canvas {
-            position: absolute;
-            inset: 0;
-            width: 100%;
-            height: 100%;
-            display: block;
-        }
-        .home-vrm-overlay {
-            position: absolute;
-            inset: 0;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            pointer-events: none;
-            color: rgba(245, 245, 255, 0.6);
-            font-size: 0.95rem;
-            text-transform: uppercase;
-            letter-spacing: 0.08em;
-        }
-        .logs-wrapper {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 22px;
-            padding: clamp(1.2rem, 2vw, 1.8rem);
-            box-shadow: 0 24px 45px -42px rgba(0, 0, 0, 0.85);
-            flex: 1;
-            min-height: 0;
-            max-height: 100%;
-            display: flex;
-            flex-direction: column;
-            gap: 1rem;
-            overflow: hidden;
-        }
-        .log-header {
-            display: flex;
-            flex-wrap: wrap;
-            justify-content: space-between;
-            align-items: center;
-            gap: 1rem;
-            margin-bottom: 1rem;
-        }
-        .log-controls {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 0.8rem;
-            align-items: center;
-            font-size: 0.9rem;
-        }
-        .log-controls button {
-            border: 1px solid var(--border);
-            background: var(--surface-alt);
-            color: var(--text);
-            border-radius: 14px;
-            padding: 0.6rem 1.1rem;
-            cursor: pointer;
-            transition: background 0.2s ease;
-        }
-        .log-controls button:hover {
-            background: var(--accent-soft);
-        }
-        .log-controls label {
-            display: inline-flex;
-            align-items: center;
-            gap: 0.4rem;
-            cursor: pointer;
-        }
-        #log-output {
-            margin: 0;
-            background: rgba(8, 8, 16, 0.82);
-            border: 1px solid var(--border);
-            border-radius: 16px;
-            padding: 1rem 1.2rem;
-            overflow-y: auto;
-            font-family: "JetBrains Mono", "Fira Code", monospace;
-            font-size: 0.88rem;
-            line-height: 1.45;
-            white-space: pre-wrap;
-            display: flex;
-            flex-direction: column;
-            gap: 0.35rem;
-            flex: 1;
-            min-height: 0;
-        }
-        .log-line {
-            word-break: break-word;
-        }
-        .log-line.level-debug {
-            color: var(--log-debug);
-        }
-        .log-line.level-info {
-            color: var(--log-info);
-        }
-        .log-line.level-warning {
-            color: var(--log-warn);
-        }
-        .log-line.level-error {
-            color: var(--log-error);
-        }
-        .log-line.level-other {
-            color: var(--text-soft);
-        }
-        .components-list {
-            display: flex;
-            flex-direction: column;
-            gap: 0.75rem;
-        }
-        .component-action-controls { margin-top: 8px; display:flex; flex-direction:column; gap:8px; }
-        .component-action-payload { width:100%; min-height:56px; font-family: monospace; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg); }
-        .component-action-result { white-space: pre-wrap; font-family: monospace; }
-        details.component-item {
-            background: rgba(255, 255, 255, 0.04);
-            border: 1px solid var(--border);
-            border-radius: 16px;
-            padding: 0.75rem 1rem;
-            transition: background 0.2s ease, border 0.2s ease;
-        }
-        details.component-item[open] {
-            background: rgba(255, 255, 255, 0.06);
-        }
-        details.component-item summary {
-            list-style: none;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 0.8rem;
-            cursor: pointer;
-            font-weight: 600;
-        }
-        details.component-item summary::-webkit-details-marker {
-            display: none;
-        }
-        .component-summary-main {
-            display: flex;
-            align-items: center;
-            gap: 0.6rem;
-            flex: 1 1 auto;
-            min-width: 0;
-        }
-        .component-summary-actions {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            flex: 0 0 auto;
-        }
-        .component-name {
-            flex: 1 1 auto;
-        }
-        .component-status {
-            font-size: 0.7rem;
-            text-transform: uppercase;
-            letter-spacing: 0.09em;
-            border: 1px solid rgba(255, 255, 255, 0.25);
-            border-radius: 999px;
-            padding: 0.15rem 0.55rem;
-        }
-        .component-status-success {
-            color: var(--success);
-            border-color: rgba(24, 201, 140, 0.4);
-        }
-        .component-status-failed {
-            color: var(--error);
-            border-color: rgba(255, 123, 147, 0.5);
-        }
-        .component-status-loading {
-            color: var(--warn);
-            border-color: rgba(243, 192, 77, 0.5);
-        }
-        .component-status-unknown {
-            color: var(--text-soft);
-            border-color: rgba(255, 255, 255, 0.2);
-        }
-        .component-flag {
-            font-size: 0.7rem;
-            text-transform: uppercase;
-            letter-spacing: 0.08em;
-            border-radius: 999px;
-            padding: 0.15rem 0.55rem;
-            background: var(--accent);
-            color: #040404;
-        }
-        .component-flag-secondary {
-            background: rgba(114, 137, 218, 0.25);
-            color: var(--text);
-        }
-        .component-description {
-            margin: 0.6rem 0;
-            color: var(--text-soft);
-        }
-        .component-details {
-            font-size: 0.85rem;
-            color: var(--text-soft);
-        }
-        .component-error {
-            font-size: 0.85rem;
-            color: var(--error);
-        }
-        .component-actions {
-            margin-top: 0.75rem;
-        }
-        .component-actions-heading {
-            margin: 0 0 0.4rem 0;
-            font-size: 0.9rem;
-            text-transform: uppercase;
-            letter-spacing: 0.08em;
-        }
-        .component-action-list {
-            list-style: none;
-            margin: 0;
-            padding: 0;
-            display: flex;
-            flex-direction: column;
-            gap: 0.5rem;
-        }
-        .component-action-list li {
-            background: rgba(255, 255, 255, 0.05);
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            border-radius: 12px;
-            padding: 0.6rem 0.8rem;
-        }
-        .component-action-title {
-            font-weight: 600;
-        }
-        .component-action-description {
-            margin: 0.35rem 0;
-            color: var(--text-soft);
-            font-size: 0.9rem;
-        }
-        .component-action-meta {
-            font-size: 0.8rem;
-            color: var(--text-soft);
-            display: flex;
-            flex-direction: column;
-            gap: 0.4rem;
-        }
-        .component-action-meta span {
-            background: rgba(255, 255, 255, 0.06);
-            border-radius: 999px;
-            padding: 0.2rem 0.5rem;
-        }
-        .config-list {
-            display: flex;
-            flex-direction: column;
-            gap: 0.45rem; /* tighter spacing */
-        }
-        .config-row {
-            display: flex;
-            flex-direction: column;
-            gap: 0.25rem;
-            padding: 0.45rem 0.6rem; /* compact padding */
-            border: 1px solid rgba(255, 255, 255, 0.06);
-            border-radius: 8px;
-            background: rgba(255, 255, 255, 0.03);
+        #tab-skins {
+            padding-top: 1rem;
         }
         .config-label-line {
             display: flex;
@@ -1035,6 +390,151 @@
             flex: 1 1 auto;
             min-width: 280px;
         }
+        /* Skins grid */
+        .skins-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+            gap: 1rem;
+            margin-top: 1rem;
+        }
+        .skin-card {
+            background: var(--surface-alt);
+            border-radius: 12px;
+            padding: 0.8rem;
+            border: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            gap: 0.6rem;
+        }
+        .skin-preview {
+            width: 100%;
+            height: 140px;
+            background: linear-gradient(135deg, rgba(255,255,255,0.02), rgba(0,0,0,0.02));
+            border-radius: 8px;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .skin-preview img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        .skin-meta {
+            color: var(--text-soft);
+            font-size: 0.9rem;
+            max-height: 10rem;
+            overflow: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 0.3rem;
+        }
+        .skin-version { font-weight: bold; color: var(--accent); }
+        .skin-author { font-style: italic; color: var(--text-soft); }
+        .skin-description { line-height: 1.4; max-height: 4rem; overflow-y: auto; }
+        .skin-actions { display: flex; gap: 0.5rem; }
+        .btn-ghost { background: transparent; border: 1px solid var(--border); color: var(--text); padding: 0.45rem 0.8rem; border-radius: 8px; cursor: pointer; }
+        .btn-primary { background: var(--accent); color: #07070c; padding: 0.45rem 0.8rem; border-radius: 8px; border: none; cursor: pointer; }
+
+        /* Logs */
+        .logs-wrapper {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 22px;
+            padding: clamp(1.2rem, 2vw, 1.8rem);
+            box-shadow: 0 24px 45px -42px rgba(0, 0, 0, 0.85);
+            flex: 1;
+            min-height: 0;
+            max-height: 100%;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            overflow: hidden;
+        }
+        .log-header {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: space-between;
+            align-items: center;
+            gap: 1rem;
+            margin-bottom: 1rem;
+        }
+        .log-controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.8rem;
+            align-items: center;
+            font-size: 0.9rem;
+        }
+        .log-controls button {
+            border: 1px solid var(--border);
+            background: var(--surface-alt);
+            color: var(--text);
+            border-radius: 14px;
+            padding: 0.6rem 1.1rem;
+            cursor: pointer;
+            transition: background 0.2s ease;
+        }
+        .log-controls button:hover {
+            background: var(--accent-soft);
+        }
+        #log-output {
+            margin: 0;
+            background: rgba(8, 8, 16, 0.82);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 1rem 1.2rem;
+            overflow-y: auto;
+            font-family: "JetBrains Mono", "Fira Code", monospace;
+            font-size: 0.88rem;
+            line-height: 1.45;
+            white-space: pre-wrap;
+            display: flex;
+            flex-direction: column;
+            gap: 0.35rem;
+            flex: 1;
+            min-height: 0;
+        }
+        .log-line { word-break: break-word; }
+        .log-line.level-debug { color: var(--log-debug); }
+        .log-line.level-info { color: var(--log-info); }
+        .log-line.level-warning { color: var(--log-warn); }
+        .log-line.level-error { color: var(--log-error); }
+
+        /* Components */
+        .components-list { display: flex; flex-direction: column; gap: 0.75rem; }
+        details.component-item {
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 0.75rem 1rem;
+            transition: background 0.2s ease, border 0.2s ease;
+        }
+        details.component-item[open] { background: rgba(255, 255, 255, 0.06); }
+        details.component-item summary {
+            list-style: none;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.8rem;
+            cursor: pointer;
+            font-weight: 600;
+        }
+        details.component-item summary::-webkit-details-marker { display: none; }
+        .component-description { margin: 0.6rem 0; color: var(--text-soft); }
+        .component-status {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.09em;
+            border: 1px solid rgba(255, 255, 255, 0.25);
+            border-radius: 999px;
+            padding: 0.15rem 0.55rem;
+            color: var(--text-soft);
+        }
+        .component-status-success { color: var(--success); border-color: rgba(24, 201, 140, 0.4); }
+        .component-status-failed { color: var(--error); border-color: rgba(255, 123, 147, 0.5); }
+        .component-status-loading { color: var(--warn); border-color: rgba(243, 192, 77, 0.5); }
         #tab-settings .settings-grid {
             flex-direction: column;
         }
@@ -1502,6 +1002,7 @@ window.__SYNTH_CONFIG = {
   CHAT_RESIZABLE: '%%CHAT_RESIZABLE%%' === 'true'
 };
 </script>
+
     <!-- WEB_DEBUG marker (server-injected via %%WEB_DEBUG%%); used to enable local-only debug tooling in the WebUI. -->
     <div id="synth-debug" data-debug-enabled="%%WEB_DEBUG%%" style="display:none"></div>
     <header class="top-bar">
@@ -2585,6 +2086,8 @@ window.__SYNTH_CONFIG = {
             });
         </script>
 
+        <section class="tab-panel" id="tab-agent" data-tab="agent" role="tabpanel"></section>
+
         <section class="tab-panel" id="tab-settings" data-tab="settings" role="tabpanel">
             <div class="settings-grid">
                 <article class="card">
@@ -2738,8 +2241,7 @@ window.__SYNTH_CONFIG = {
     })();
 </script>
 
-
-                
+<template id="legacy-animation-inline" data-removed="true">
                     try {
                         // Throttle debug logging to avoid flooding the console during animation ticks.
                         try {
@@ -6339,10 +5841,11 @@ window.__SYNTH_CONFIG = {
 
                     // Process any pending animation commands that arrived while loading.
                     // Only apply the last (authoritative) command to avoid replay storms and T-pose flashes.
-                    if (pendingAnimationCommands.length > 0) {
-                        const last = pendingAnimationCommands[pendingAnimationCommands.length - 1];
-                        const count = pendingAnimationCommands.length;
-                        pendingAnimationCommands.length = 0;
+                    const _pendingArray = (typeof pendingAnimationCommands !== 'undefined' && Array.isArray(pendingAnimationCommands)) ? pendingAnimationCommands : (window.pendingAnimationCommands && Array.isArray(window.pendingAnimationCommands) ? window.pendingAnimationCommands : []);
+            if (_pendingArray.length > 0) {
+                        const last = _pendingArray[_pendingArray.length - 1];
+                        const count = _pendingArray.length;
+                        if (typeof pendingAnimationCommands !== 'undefined' && Array.isArray(pendingAnimationCommands)) pendingAnimationCommands.length = 0; else if (window.pendingAnimationCommands && Array.isArray(window.pendingAnimationCommands)) window.pendingAnimationCommands.length = 0;
                         console.log('[synth_webui] Processing last pending animation command (dropped', Math.max(0, count - 1), '):', last?.state, last?.animation);
                         if (last && last.state && animationHandler) {
                             // If WEB_DEBUG pause is active, keep last remote payload for resync but do not apply.
@@ -7701,16 +7204,18 @@ window.__SYNTH_CONFIG = {
                 });
             }
 
-            refreshConfig().catch((error) => console.error(error));
+            (typeof window !== 'undefined' && typeof window.refreshConfig === 'function' ? window.refreshConfig() : Promise.resolve()).catch((error) => console.error(error));
 
-            // Restore chat state on page load if we're on home tab
-            if (activeTab === 'home') {
+            // Restore chat state on page load if we're on home tab. Use a safe lookup
+            // that tolerates missing globals (modules may not see non-module globals).
+            (function(){
                 try {
-                    restoreChatState();
-                } catch (error) {
-                    console.error('[synth_webui] Failed to restore chat state on load:', error);
-                }
-            }
+                    const _activeTab = (typeof activeTab !== 'undefined') ? activeTab : (typeof window !== 'undefined' ? (window.activeTab || (localStorage && localStorage.getItem && localStorage.getItem('synth-webui-active-tab')) || (document.querySelector && document.querySelector('.nav-btn.active') && document.querySelector('.nav-btn.active').getAttribute('data-tab')) || 'home') : 'home');
+                    if (_activeTab === 'home') {
+                        try { restoreChatState(); } catch (error) { console.error('[synth_webui] Failed to restore chat state on load:', error); }
+                    }
+                } catch (e) { /* ignore */ }
+            })();
 
             // Diary functionality
             let diaryEntries = [];
@@ -8146,7 +7651,9 @@ window.__SYNTH_CONFIG = {
         // Use `let` so the runtime toggle can enable/disable the feature by
         // updating the variable. Also expose the creator as a global function
         // so `setChatResizable` can recreate handles at runtime.
-        let CHAT_RESIZABLE = %%CHAT_RESIZABLE%%; // server-controlled: toggle to true to allow manual resizing
+        // Prefer a runtime-configured value exposed via `window.__SYNTH_CONFIG` to
+        // avoid template placeholder leakage when static files are used directly.
+        let CHAT_RESIZABLE = (typeof window !== 'undefined' && window.__SYNTH_CONFIG && window.__SYNTH_CONFIG.CHAT_RESIZABLE !== undefined) ? !!window.__SYNTH_CONFIG.CHAT_RESIZABLE : ( '%%CHAT_RESIZABLE%%' === 'true' ); // server-controlled: toggle to true to allow manual resizing
 
         function createChatResizeHandles() {
             if (!CHAT_RESIZABLE) {
@@ -8701,14 +8208,12 @@ window.__SYNTH_CONFIG = {
 
         // Archive delete removed from main UI; handled in the archive modal per-item
 
-{% endraw %}
-</script>
+    </template>
     <!-- Visible install button for PWA (shown only when install is available) -->
     <button id="synth-install-btn" title="Install Synthetic Heart" aria-label="Install Synthetic Heart">⬇️</button>
 <script src="/js/utils.js"></script>
 <script src="/js/main.js"></script>
 
-<script type="module" src="/js/vrm-viewer.mjs"></script>
 <!-- Legacy tokens for unit tests (harmless): selk && selk.https_port ; tryOpen ; preferredProto ; otherPort ; details.appendChild(summary) ; host === '127.0.0.1' ; host === 'localhost' ; const st = last.animation_state || window.__synth_current_animation_state || null -->
 <script src="/js/skins.js"></script>
 
