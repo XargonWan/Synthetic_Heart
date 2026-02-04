@@ -1,10 +1,19 @@
-<div class="tab-panel" id="tab-skins" data-tab="skins" role="tabpanel">
-  <div class="settings-grid">
-    <article class="card">
-      <h2>Skins</h2>
-      <p>Skins content is loaded here.</p>
-      <div id="skins-grid" class="skins-grid">Loading skins…</div>
-    </article>
-  </div>
-</div>
-<script src="/js/skins.js"></script>
+<section class="tab-panel" id="tab-skins" data-tab="skins" role="tabpanel">
+    <div class="settings-grid">
+        <article class="card">
+            <h2>Skins</h2>
+            <p>Manage installed skins. Each skin should include at least one <code>.vrm</code> file. If a skin lacks animations, Rei will be used as fallback.</p>
+            <div style="margin-top:0.6rem; margin-bottom:0.6rem;">
+                <label for="skin-vrm-upload" class="pill">Select a skin or load a single VRM file</label>
+                <input type="file" id="skin-vrm-upload" accept=".vrm" style="display:inline-block; margin-left:0.6rem;" />
+            </div>
+            <div id="skins-grid" class="skins-grid">
+                <div class="meta">Loading skins...</div>
+            </div>
+            <div style="margin-top:1rem">
+                <button class="btn-ghost" id="clear-uploaded">Clear uploaded VRM (restore Rei)</button>
+            </div>
+        </article>
+    </div>
+    <script src="/js/skins.js"></script>
+</section>

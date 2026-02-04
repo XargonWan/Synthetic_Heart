@@ -1,150 +1,37 @@
-        <section class="tab-panel" id="tab-logs" data-tab="logs" role="tabpanel">
-            <header class="section-header">
-                <h2>System Logs</h2>
-                <div class="section-controls">
-                    <button id="logs-refresh" type="button" class="pill secondary">
-                        <span class="icon">🔄</span>
-                        Reconnect
-                    </button>
-                    <label class="control-label">
-                        <input type="checkbox" id="logs-autoscroll" checked />
-                        Auto-scroll
-                    </label>
-                    <input type="text" id="log-search" placeholder="Search logs..." class="search-input" />
-                    <select id="logging-level" class="level-select">
+<section class="tab-panel" id="tab-logs" data-tab="logs" role="tabpanel">
+    <div class="logs-wrapper">
+        <div class="log-header">
+            <h2>Live Log Stream</h2>
+            <div class="log-controls">
+                <button id="logs-refresh" type="button">Reconnect</button>
+                <label><input type="checkbox" id="logs-autoscroll" checked /> Auto-scroll</label>
+                <input type="text" id="log-search" placeholder="Search logs..." style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border); background: rgba(12, 12, 20, 0.58); color: inherit; margin-left: 1rem; min-width: 200px;" />
+                <label><input type="checkbox" class="log-filter" data-level="debug" checked /> Debug</label>
+                <label><input type="checkbox" class="log-filter" data-level="info" checked /> Info</label>
+                <label><input type="checkbox" class="log-filter" data-level="warning" checked /> Warning</label>
+                <label><input type="checkbox" class="log-filter" data-level="error" checked /> Error</label>
+                <label><input type="checkbox" class="log-filter" data-level="other" checked /> Other</label>
+                <label style="margin-left: 1rem;">
+                    System Log Level:
+                    <select id="logging-level" style="margin-left: 0.5rem; padding: 0.25rem 0.5rem;">
                         <option value="DEBUG">DEBUG</option>
-                        <option value="INFO" selected>INFO</option>
+                        <option value="INFO">INFO</option>
                         <option value="WARNING">WARNING</option>
-                        <option value="ERROR">ERROR</option>
+                        <option value="ERROR" selected>ERROR</option>
                     </select>
-                    <select id="logchat-level" class="level-select">
-                        <option value="DEBUG">Chat DEBUG</option>
-                        <option value="INFO" selected>Chat INFO</option>
-                        <option value="WARNING">Chat WARNING</option>
-                        <option value="ERROR">Chat ERROR</option>
+                </label>
+                <label style="margin-left: 1rem;">
+                    LogChat Notification Level:
+                    <select id="logchat-level" style="margin-left: 0.5rem; padding: 0.25rem 0.5rem;">
+                        <option value="DEBUG">DEBUG</option>
+                        <option value="INFO">INFO</option>
+                        <option value="WARNING">WARNING</option>
+                        <option value="ERROR" selected>ERROR</option>
+                        <option value="NONE">NONE</option>
                     </select>
-                </div>
-            </header>
-            <div id="log-output" class="log-container">
-                <div class="log-line level-info">Open the Logs tab to begin streaming…</div>
+                </label>
             </div>
-        </section>
-
-        <style>
-            .section-header {
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                padding: 1.5rem min(4vw, 2.4rem);
-                border-bottom: 1px solid var(--border);
-                background: var(--surface-alt);
-                flex-shrink: 0;
-            }
-            .section-header h2 {
-                margin: 0;
-                font-size: 1.5rem;
-                font-weight: 600;
-            }
-            .section-controls {
-                display: flex;
-                align-items: center;
-                gap: 1rem;
-                flex-wrap: wrap;
-            }
-            .control-label {
-                display: flex;
-                align-items: center;
-                gap: 0.5rem;
-                font-size: 0.9rem;
-                color: var(--text-soft);
-                cursor: pointer;
-            }
-            .control-label input[type="checkbox"] {
-                width: 16px;
-                height: 16px;
-                cursor: pointer;
-            }
-            .search-input {
-                padding: 0.4rem 0.8rem;
-                border-radius: 6px;
-                border: 1px solid var(--border);
-                background: rgba(12, 12, 20, 0.58);
-                color: inherit;
-                min-width: 200px;
-            }
-            .search-input:focus {
-                outline: 2px solid var(--accent);
-                outline-offset: 2px;
-            }
-            .level-select {
-                padding: 0.25rem 0.5rem;
-                border-radius: 4px;
-                border: 1px solid var(--border);
-                background: rgba(12, 12, 20, 0.58);
-                color: inherit;
-            }
-            .log-container {
-                flex: 1;
-                overflow-y: auto;
-                padding: 1rem min(4vw, 2.4rem);
-                font-family: 'JetBrains Mono', 'Fira Code', monospace;
-                font-size: 0.85rem;
-                line-height: 1.4;
-                background: var(--surface);
-                min-height: 0; /* allow the container to shrink inside flex parent so overflow works */
-            }
-            .log-line {
-                margin-bottom: 0.25rem;
-                padding: 0.25rem 0;
-                border-left: 3px solid transparent;
-                white-space: pre-wrap;
-                word-break: break-word;
-            }
-            .log-line.level-debug {
-                color: var(--log-debug);
-                border-left-color: var(--log-debug);
-            }
-            .log-line.level-info {
-                color: var(--log-info);
-                border-left-color: var(--log-info);
-            }
-            .log-line.level-warning {
-                color: var(--log-warn);
-                border-left-color: var(--log-warn);
-            }
-            .log-line.level-error {
-                color: var(--log-error);
-                border-left-color: var(--log-error);
-            }
-            .log-line.highlighted {
-                background: rgba(255, 107, 214, 0.1);
-                border-radius: 3px;
-            }
-            .pill {
-                display: inline-flex;
-                align-items: center;
-                gap: 0.5rem;
-                padding: 0.5rem 1rem;
-                border-radius: 999px;
-                border: 1px solid var(--border);
-                background: var(--surface-alt);
-                color: var(--text);
-                font-size: 0.9rem;
-                cursor: pointer;
-                transition: all 0.2s ease;
-            }
-            .pill:hover {
-                background: var(--surface);
-                transform: translateY(-1px);
-            }
-            .pill.secondary {
-                background: transparent;
-                border-color: var(--border-strong);
-            }
-            .pill.secondary:hover {
-                background: var(--surface-alt);
-            }
-            .pill .icon {
-                font-size: 1rem;
-            }
-        </style>
+        </div>
+        <div id="log-output"><div class="log-line level-info">Open the Logs tab to begin streaming…</div></div>
+    </div>
+</section>

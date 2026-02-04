@@ -86,6 +86,12 @@
             });
         });
 
+        // Load the initial active tab content on first render
+        try {
+            const initialTab = (document.querySelector && document.querySelector('.nav-btn.active') && document.querySelector('.nav-btn.active').getAttribute('data-tab')) || 'home';
+            loadSection(initialTab);
+        } catch (e) { /* ignore */ }
+
         // DIAGNOSTICS: capture top-level clicks and report overlay/pointer state to console.
         try {
             setTimeout(() => {
@@ -497,6 +503,7 @@ try {
                             const status = document.createElement('span');
                             status.className = 'component-status component-status-' + (item.status || 'unknown');
                             status.textContent = item.status || 'unknown';
+                            status.style.marginLeft = 'auto';
                             summary.appendChild(status);
                             details.appendChild(summary);
 
@@ -608,6 +615,8 @@ try {
                 const chatMinBtn = document.getElementById('chat-minimize');
                 const chatMaxBtn = document.getElementById('chat-maximize');
 
+                if (!chatPanel) return;
+
                 function showChat() {
                     if (!chatPanel) return;
                     chatPanel.classList.remove('minimized');
@@ -637,12 +646,15 @@ try {
             }
 
             function setupChatMessaging() {
+                if (window.__synth_chat_initialized) return;
                 const statusLabel = document.getElementById('status-label');
                 const statusIndicator = document.querySelector('.connection-status .indicator');
                 const messages = document.getElementById('messages');
                 const input = document.getElementById('input');
                 const form = document.getElementById('composer');
                 const sendBtn = document.getElementById('send');
+
+                if (!messages || !input || !form || !sendBtn) return;
 
                 let ws = null;
 
@@ -711,16 +723,120 @@ try {
                 }
 
                 connectWs();
+                window.__synth_chat_initialized = true;
             }
+
+            function initHomeTab() {
+                if (window.__synth_home_initialized) return;
+                const messagesEl = document.getElementById('messages');
+                const inputEl = document.getElementById('input');
+                if (!messagesEl || !inputEl) return;
+                setupChatControls();
+                setupChatMessaging();
+                window.__synth_home_initialized = true;
+                try {
+                    if (typeof window.restoreChatState === 'function') {
+                        window.restoreChatState();
+                    }
+                } catch (e) { /* ignore */ }
+            }
+
+            function initSettingsTab() {
+                refreshConfig();
+            }
+
+            function initComponentsTab() {
+                loadComponentsSummary();
+            }
+
+            function initLogsTab() {
+                if (window.__synth_logs_initialized) return;
+                const logOutput = document.getElementById('log-output');
+                if (!logOutput) return;
+                const logAutoscroll = document.getElementById('logs-autoscroll');
+                const logFilters = document.querySelectorAll('.log-filter');
+                const logSearchInput = document.getElementById('log-search');
+                const logsRefreshBtn = document.getElementById('logs-refresh');
+
+                function detectLevel(text) {
+                    const match = String(text || '').match(/\b(DEBUG|INFO|WARNING|ERROR)\b/i);
+                    if (!match) return 'other';
+                    return match[1].toLowerCase();
+                }
+
+                function isLevelEnabled(level) {
+                    const checkbox = document.querySelector(`.log-filter[data-level="${level}"]`);
+                    if (!checkbox) return true;
+                    return checkbox.checked;
+                }
+
+                function applyFilters() {
+                    const search = (logSearchInput && logSearchInput.value || '').trim().toLowerCase();
+                    const children = Array.from(logOutput.querySelectorAll('.log-line'));
+                    children.forEach((line) => {
+                        const level = line.dataset.level || 'other';
+                        const levelOk = isLevelEnabled(level);
+                        const textOk = !search || (line.textContent || '').toLowerCase().includes(search);
+                        line.style.display = (levelOk && textOk) ? '' : 'none';
+                    });
+                }
+
+                function appendLogLine(text) {
+                    const level = detectLevel(text);
+                    const line = document.createElement('div');
+                    line.className = `log-line level-${level}`;
+                    line.dataset.level = level;
+                    line.textContent = text;
+                    logOutput.appendChild(line);
+                    const auto = logAutoscroll ? logAutoscroll.checked : true;
+                    if (auto) {
+                        logOutput.scrollTop = logOutput.scrollHeight;
+                    }
+                    applyFilters();
+                }
+
+                function connectLogs() {
+                    if (window.__synth_logs_socket && (window.__synth_logs_socket.readyState === WebSocket.OPEN || window.__synth_logs_socket.readyState === WebSocket.CONNECTING)) {
+                        return;
+                    }
+                    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+                    const ws = new WebSocket(`${protocol}://${window.location.host}/logs`);
+                    window.__synth_logs_socket = ws;
+
+                    ws.onmessage = (event) => {
+                        appendLogLine(event.data);
+                    };
+                    ws.onclose = () => {
+                        setTimeout(connectLogs, 2000);
+                    };
+                }
+
+                logFilters.forEach((checkbox) => {
+                    checkbox.addEventListener('change', applyFilters);
+                });
+                if (logSearchInput) logSearchInput.addEventListener('input', applyFilters);
+                if (logsRefreshBtn) {
+                    logsRefreshBtn.addEventListener('click', () => {
+                        try {
+                            if (window.__synth_logs_socket) {
+                                window.__synth_logs_socket.close();
+                            }
+                        } catch (e) { /* ignore */ }
+                        connectLogs();
+                    });
+                }
+
+                connectLogs();
+                window.__synth_logs_initialized = true;
+            }
+
+            window.SynthWebUI = window.SynthWebUI || {};
+            window.SynthWebUI.initHomeTab = initHomeTab;
+            window.SynthWebUI.initSettingsTab = initSettingsTab;
+            window.SynthWebUI.initComponentsTab = initComponentsTab;
+            window.SynthWebUI.initLogsTab = initLogsTab;
 
             document.addEventListener('DOMContentLoaded', () => {
                 setupNavigation();
-                setupChatControls();
-                setupChatMessaging();
-            });
-            // Initial data loads
-            document.addEventListener('DOMContentLoaded', () => {
-                refreshConfig();
-                loadComponentsSummary();
             });
         })();

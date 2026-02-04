@@ -1,9 +1,592 @@
-<div class="tab-panel" id="tab-history" data-tab="history" role="tabpanel">
-  <div class="card">
-    <h2>History</h2>
-    <div class="card-content">History content placeholder. Use the existing code to render diary/grillo/chat history.</div>
-  </div>
-</div>
-<script>
-// history-specific init can be placed here or in /js/history.js
-</script>
+    <section class="tab-panel" id="tab-history" data-tab="history" role="tabpanel">
+      <div class="history-wrapper">
+        <header class="section-header">
+          <h2>History</h2>
+          <nav class="sub-nav" role="tablist">
+            <button class="sub-nav-btn active" data-subtab="diary" role="tab" aria-selected="true">
+              <span class="icon">📖</span>
+              <span>Diary</span>
+            </button>
+            <button class="sub-nav-btn" data-subtab="grillo" role="tab" aria-selected="false">
+              <span class="icon">🦗</span>
+              <span>Grillo</span>
+            </button>
+            <button class="sub-nav-btn" data-subtab="chat" role="tab" aria-selected="false">
+              <span class="icon">💬</span>
+              <span>Chat</span>
+            </button>
+          </nav>
+        </header>
+
+        <div class="sub-tabs-container">
+
+      <!-- Diary Sub-Tab -->
+      <div class="sub-tab-panel" id="subtab-diary" data-subtab="diary">
+        <div class="section-controls">
+          <input type="text" id="history-diary-search" placeholder="Search diary entries..." class="search-input" />
+          <select id="history-diary-sort" class="sort-select">
+            <option value="desc">Newest First</option>
+            <option value="asc">Oldest First</option>
+          </select>
+          <label class="control-label">
+            <input type="checkbox" id="history-diary-archived" />
+            Show Archived
+          </label>
+        </div>
+        <div id="history-diary-content" class="history-container">
+          <div class="loading-state">
+            <div class="loading-spinner"></div>
+            <p>Loading diary entries...</p>
+          </div>
+        </div>
+        <div id="history-diary-pagination" class="pagination-controls"></div>
+      </div>
+
+      <!-- Grillo Sub-Tab -->
+      <div class="sub-tab-panel" id="subtab-grillo" data-subtab="grillo">
+        <div class="section-controls">
+          <input type="text" id="history-grillo-search" placeholder="Search grillo activity..." class="search-input" />
+          <select id="history-grillo-beat-type" class="filter-select">
+            <option value="">All Beat Types</option>
+            <option value="tag_elaboration">Tag Elaboration</option>
+            <option value="memory_consolidation">Memory Consolidation</option>
+            <option value="self_reflection">Self Reflection</option>
+            <option value="curiosity">Curiosity</option>
+            <option value="relationship">Relationship</option>
+          </select>
+          <select id="history-grillo-sort" class="sort-select">
+            <option value="desc">Newest First</option>
+            <option value="asc">Oldest First</option>
+          </select>
+        </div>
+        <div id="history-grillo-content" class="history-container">
+          <div class="loading-state">
+            <div class="loading-spinner"></div>
+            <p>Loading grillo activity...</p>
+          </div>
+        </div>
+        <div id="history-grillo-pagination" class="pagination-controls"></div>
+      </div>
+
+      <!-- Chat Sub-Tab -->
+      <div class="sub-tab-panel" id="subtab-chat" data-subtab="chat">
+        <div class="section-controls">
+          <select id="history-chat-interface" class="filter-select">
+            <option value="">All Chats</option>
+          </select>
+          <input type="text" id="history-chat-search" placeholder="Search messages..." class="search-input" />
+          <select id="history-chat-sort" class="sort-select">
+            <option value="desc">Newest First</option>
+            <option value="asc">Oldest First</option>
+          </select>
+        </div>
+        <div id="history-chat-content" class="history-container">
+          <div class="loading-state">
+            <div class="loading-spinner"></div>
+            <p>Loading chat history...</p>
+          </div>
+        </div>
+        <div id="history-chat-pagination" class="pagination-controls"></div>
+      </div>
+        </div><!-- .sub-tabs-container -->
+      </div><!-- .history-wrapper -->
+      <style>
+      /* History tab wrapper */
+      .history-wrapper {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        width: 100%;
+      }
+
+      .section-header {
+        flex-shrink: 0;
+      }
+
+      /* Sub-navigation styles */
+      .sub-nav {
+        display: flex;
+        gap: 0.5rem;
+        margin-top: 1rem;
+        padding: 0.5rem;
+        background: rgba(12, 12, 20, 0.3);
+        border-radius: 8px;
+        border: 1px solid var(--border);
+      }
+
+      .sub-nav-btn {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.5rem 1rem;
+        border: none;
+        background: transparent;
+        color: var(--text-soft);
+        border-radius: 6px;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        font-size: 0.9rem;
+      }
+
+      .sub-nav-btn:hover {
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--text);
+      }
+
+      .sub-nav-btn.active {
+        background: var(--accent);
+        color: white;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+      }
+
+      .sub-nav-btn .icon {
+        font-size: 1.1rem;
+      }
+
+      /* Sub-tabs container */
+      .sub-tabs-container {
+        flex: 1;
+        position: relative;
+        overflow: hidden;
+      }
+
+      /* Sub-tab panel styles */
+      .sub-tab-panel {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        display: none !important; /* Forza hide */
+        flex-direction: column;
+        overflow: hidden;
+        background: var(--bg);
+      }
+
+      .sub-tab-panel.active {
+        display: flex !important; /* Forza show */
+      }
+
+      .section-controls {
+        display: flex;
+        gap: 0.75rem;
+        padding: 1rem;
+        background: rgba(12, 12, 20, 0.2);
+        border-bottom: 1px solid var(--border);
+        flex-wrap: wrap;
+      }
+
+      .search-input, .filter-select, .sort-select {
+        padding: 0.5rem 0.75rem;
+        border-radius: 6px;
+        border: 1px solid var(--border);
+        background: rgba(12, 12, 20, 0.58);
+        color: inherit;
+        font-size: 0.9rem;
+      }
+
+      .search-input {
+        flex: 1;
+        min-width: 200px;
+      }
+
+      .filter-select, .sort-select {
+        min-width: 150px;
+      }
+
+      .control-label {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-size: 0.9rem;
+        color: var(--text-soft);
+      }
+
+      /* History container styles */
+      .history-container {
+        flex: 1;
+        overflow-y: auto;
+        padding: 1rem;
+      }
+
+      .loading-state {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        height: 200px;
+        color: var(--text-soft);
+      }
+
+      .loading-spinner {
+        width: 40px;
+        height: 40px;
+        border: 3px solid var(--border);
+        border-top: 3px solid var(--accent);
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+        margin-bottom: 1rem;
+      }
+
+      @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+      }
+
+      /* Entry card styles */
+      .history-entry {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 1.5rem;
+        margin-bottom: 1rem;
+        transition: all 0.2s ease;
+      }
+
+      .history-entry:hover {
+        border-color: var(--border-strong);
+        box-shadow: 0 8px 25px -15px rgba(0, 0, 0, 0.5);
+      }
+
+      .history-entry.archived {
+        opacity: 0.6;
+      }
+
+      .history-entry-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        margin-bottom: 1rem;
+      }
+
+      .history-entry-meta {
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+      }
+
+      .history-entry-date {
+        font-size: 0.85rem;
+        color: var(--text-soft);
+        font-weight: 500;
+      }
+
+      .history-entry-type {
+        display: inline-block;
+        padding: 0.2rem 0.5rem;
+        border-radius: 4px;
+        background: var(--accent);
+        color: white;
+        font-size: 0.7rem;
+        font-weight: 600;
+        text-transform: uppercase;
+      }
+
+      .history-entry-content {
+        line-height: 1.6;
+        white-space: pre-wrap;
+        word-break: break-word;
+        margin-bottom: 1rem;
+      }
+
+      /* When diary content is very long, make it internally scrollable */
+      .history-entry-content--limited {
+        max-height: calc(1.5em * 6);
+        overflow-y: auto;
+        border-radius: 6px;
+        padding: 0.5rem;
+        background: rgba(255,255,255,0.02);
+        scrollbar-width: thin;
+      }
+
+      .history-entry-content--limited::-webkit-scrollbar {
+        width: 6px;
+      }
+
+      .history-entry-content--limited::-webkit-scrollbar-thumb {
+        background: rgba(255,255,255,0.25);
+        border-radius: 999px;
+      }
+
+      .history-entry-detail {
+        font-size: 0.85rem;
+        color: var(--text-soft);
+        margin-top: 0.5rem;
+      }
+
+      .history-entry-detail strong {
+        color: var(--text);
+      }
+
+      .grillo-prompt {
+        background: rgba(12, 12, 20, 0.4);
+        border-left: 3px solid var(--accent);
+        padding: 0.75rem;
+        margin-top: 0.5rem;
+        border-radius: 4px;
+        font-size: 0.85rem;
+        color: var(--text-soft);
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      .grillo-prompt--limited {
+        max-height: calc(1.5em * 5);
+        overflow-y: auto;
+        scrollbar-width: thin;
+        scrollbar-color: rgba(255, 255, 255, 0.25) transparent;
+      }
+
+      .grillo-response {
+        background: rgba(76, 175, 80, 0.1);
+        border-left: 3px solid #4CAF50;
+        padding: 0.75rem;
+        border-radius: 4px;
+        font-size: 0.9rem;
+        line-height: 1.5;
+        color: var(--text);
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      .grillo-response--limited {
+        max-height: calc(1.5em * 5);
+        overflow-y: auto;
+        scrollbar-width: thin;
+        scrollbar-color: rgba(255, 255, 255, 0.25) transparent;
+      }
+
+      .grillo-prompt--limited::-webkit-scrollbar,
+      .grillo-response--limited::-webkit-scrollbar {
+        width: 6px;
+      }
+
+      .grillo-prompt--limited::-webkit-scrollbar-track,
+      .grillo-response--limited::-webkit-scrollbar-track {
+        background: transparent;
+      }
+
+      .grillo-prompt--limited::-webkit-scrollbar-thumb,
+      .grillo-response--limited::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.35);
+        border-radius: 999px;
+      }
+
+      .grillo-actions {
+        margin-top: 0.85rem;
+        padding: 0.75rem;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: rgba(12, 12, 20, 0.25);
+      }
+
+      .grillo-actions-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.5rem;
+        font-size: 0.85rem;
+        color: var(--text-soft);
+        margin-bottom: 0.65rem;
+      }
+
+      .grillo-actions-counts {
+        display: flex;
+        gap: 0.4rem;
+        flex-wrap: wrap;
+      }
+
+      .grillo-actions-counts span {
+        padding: 0.15rem 0.5rem;
+        border-radius: 999px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        background: rgba(255, 255, 255, 0.08);
+        color: var(--text-soft);
+      }
+
+      .grillo-actions-list {
+        display: flex;
+        flex-direction: column;
+        gap: 0.6rem;
+      }
+
+      .grillo-action-item {
+        border-radius: 6px;
+        padding: 0.6rem 0.75rem;
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        display: flex;
+        flex-direction: column;
+        gap: 0.35rem;
+      }
+
+      .grillo-action-header {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+        font-size: 0.85rem;
+      }
+
+      .grillo-action-type {
+        font-weight: 600;
+        color: var(--text);
+      }
+
+      .grillo-action-status {
+        padding: 0.1rem 0.45rem;
+        border-radius: 999px;
+        font-size: 0.7rem;
+        font-weight: 700;
+        text-transform: uppercase;
+      }
+
+      .grillo-action-status.pending {
+        background: rgba(255, 193, 7, 0.2);
+        color: #ffc107;
+      }
+
+      .grillo-action-status.processed {
+        background: rgba(76, 175, 80, 0.2);
+        color: #4caf50;
+      }
+
+      .grillo-action-status.failed {
+        background: rgba(244, 67, 54, 0.2);
+        color: #f44336;
+      }
+
+      .grillo-action-detail {
+        font-size: 0.78rem;
+        color: var(--text-soft);
+        white-space: pre-wrap;
+        word-break: break-word;
+        background: rgba(12, 12, 20, 0.35);
+        border-radius: 6px;
+        padding: 0.45rem 0.6rem;
+      }
+
+      .chat-message {
+        display: flex;
+        gap: 0.5rem;
+        padding: 0.25rem 0.5rem;
+        border-bottom: 1px solid var(--border);
+        align-items: center;
+      }
+
+      .chat-message:last-child {
+        border-bottom: none;
+      }
+
+      .chat-sender {
+        font-weight: 600;
+        color: var(--accent);
+        min-width: 100px;
+        padding: 0 0.25rem;
+        align-self: center;
+      }
+
+      .chat-text {
+        flex: 1;
+        line-height: 1.5;
+        white-space: pre-wrap;
+        word-break: break-word;
+        /* No visual box for short messages - keep layout clean */
+        padding: 0;
+        border-radius: 0;
+        border: none;
+        background: transparent;
+        display: inline-block;
+        vertical-align: middle;
+      }
+
+      .chat-text--limited {
+        /* Limit visible height to ~5 lines and allow internal scrolling */
+        max-height: calc(1.5em * 5);
+        overflow-y: auto;
+        overflow-x: hidden;
+        padding: 0.45rem 0.5rem;
+        border-radius: 6px;
+        border: 1px solid transparent;
+        background: rgba(255, 255, 255, 0.03);
+        transition: border-color 0.2s ease;
+        scrollbar-width: thin;
+        scrollbar-color: rgba(255, 255, 255, 0.25) transparent;
+      }
+
+      .chat-text--limited:hover {
+        border-color: rgba(255, 255, 255, 0.28);
+      }
+
+      .chat-text--limited::-webkit-scrollbar {
+        width: 6px;
+      }
+
+      .chat-text--limited::-webkit-scrollbar-track {
+        background: transparent;
+      }
+
+      .chat-text--limited::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.35);
+        border-radius: 999px;
+      }
+
+      .chat-time {
+        font-size: 0.75rem;
+        color: var(--text-soft);
+        min-width: 80px;
+        text-align: right;
+      }
+
+      /* Pagination styles */
+      .pagination-controls {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 1rem;
+        border-top: 1px solid var(--border);
+      }
+
+      .pagination-btn {
+        padding: 0.5rem 1rem;
+        border-radius: 6px;
+        border: 1px solid var(--border);
+        background: rgba(12, 12, 20, 0.58);
+        color: var(--text);
+        cursor: pointer;
+        transition: all 0.2s ease;
+      }
+
+      .pagination-btn:hover:not(:disabled) {
+        background: var(--accent);
+        color: white;
+      }
+
+      .pagination-btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .pagination-info {
+        font-size: 0.9rem;
+        color: var(--text-soft);
+      }
+
+      .empty-state {
+        text-align: center;
+        padding: 3rem 1rem;
+        color: var(--text-soft);
+      }
+
+      .empty-state .icon {
+        font-size: 3rem;
+        margin-bottom: 1rem;
+        opacity: 0.5;
+      }
+      </style>
+
+      <script src="/js/utils.js"></script>
+      <script src="/js/history.js"></script>
+    </section>

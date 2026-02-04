@@ -1,190 +1,48 @@
-        <section class="tab-panel" id="tab-components" data-tab="components" role="tabpanel">
-            <header class="section-header">
-                <h2>System Components</h2>
-                <div class="section-controls">
-                    <button id="components-refresh" class="pill secondary">
-                        <span class="icon">🔄</span>
-                        Refresh
-                    </button>
-                    <label class="control-label">
-                        <input type="checkbox" id="dev-components-toggle" />
-                        Enable Dev Components
-                    </label>
-                </div>
-            </header>
-            <div class="components-content">
-                <div class="components-section">
-                    <h3>LLM Engine</h3>
-                    <div class="component-status" id="components-llm">
-                        <div class="meta" id="components-llm-summary">Loading…</div>
-                        <div class="components-list" id="components-llm-list">
-                            <!-- LLM options will be loaded here -->
-                        </div>
+<section class="tab-panel" id="tab-components" data-tab="components" role="tabpanel">
+    <div class="settings-grid" style="flex-direction: column;">
+        <article class="card">
+            <h2>LLM Engines</h2>
+            <div id="components-llm">
+                <div class="meta" id="components-llm-summary">Loading…</div>
+
+                <div class="meta" id="components-llm-controls" style="display:flex; gap:10px; align-items:center; margin-top:10px;">
+                    <select id="llm-engine-select" style="padding:10px 14px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; min-width:360px; font-size:1rem;">
+                    </select>
+                    <div id="llm-engine-info" class="meta" style="min-width:160px;">
+                        <span id="llm-engine-model">model: –</span>
+                        &nbsp;•&nbsp;
+                        <span id="llm-engine-login-state">state: –</span>
                     </div>
+                    <button id="llm-login-btn" class="pill">Login</button>
                 </div>
 
-                <div class="components-section">
-                    <h3>Interfaces</h3>
-                    <div class="components-list" id="components-interfaces-list">
-                        <!-- Interface components will be loaded here -->
-                    </div>
-                </div>
-
-                <div class="components-section">
-                    <h3>Plugins</h3>
-                    <div class="components-list" id="components-plugins-list">
-                        <!-- Plugin components will be loaded here -->
-                    </div>
-                </div>
+                <div class="components-list" id="components-llm-list"></div>
             </div>
-        </section>
+        </article>
+        <article class="card">
+            <h2>Interfaces</h2>
+            <div class="components-list" id="components-interfaces-list">
+                <div class="meta">Loading…</div>
+            </div>
+        </article>
+        <article class="card">
+            <h2>Plugins</h2>
+            <div class="components-list" id="components-plugins-list">
+                <div class="meta">Loading…</div>
+            </div>
+        </article>
 
-        <style>
-            .components-content {
-                flex: 1;
-                overflow-y: auto;
-                padding: 1rem min(4vw, 2.4rem);
-            }
-            .components-section {
-                background: var(--surface);
-                border: 1px solid var(--border);
-                border-radius: 12px;
-                padding: 1.5rem;
-                margin-bottom: 1.5rem;
-            }
-            .components-section h3 {
-                margin: 0 0 1rem 0;
-                font-size: 1.2rem;
-                font-weight: 600;
-                color: var(--accent);
-            }
-            .component-status {
-                margin-bottom: 1rem;
-            }
-            .component-status .meta {
-                font-size: 0.9rem;
-                color: var(--text-soft);
-                margin-bottom: 0.5rem;
-            }
-            .components-list {
-                display: flex;
-                flex-direction: column;
-                gap: 0.5rem;
-            }
-            .component-item {
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                padding: 1rem;
-                background: var(--surface-alt);
-                border: 1px solid var(--border);
-                border-radius: 8px;
-                transition: all 0.2s ease;
-            }
-            .component-item:hover {
-                border-color: var(--border-strong);
-                box-shadow: 0 4px 15px -10px rgba(0, 0, 0, 0.3);
-            }
-            .component-info {
-                display: flex;
-                align-items: center;
-                gap: 1rem;
-                flex: 1;
-                min-width: 0;
-            }
-            .component-icon {
-                width: 40px;
-                height: 40px;
-                border-radius: 8px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                font-size: 1.2rem;
-                background: var(--surface);
-                border: 1px solid var(--border);
-                flex-shrink: 0;
-            }
-            .component-details {
-                flex: 1;
-                min-width: 0;
-            }
-            .component-name {
-                font-weight: 600;
-                margin-bottom: 0.25rem;
-                word-break: break-word;
-            }
-            .component-description {
-                font-size: 0.85rem;
-                color: var(--text-soft);
-                line-height: 1.4;
-                word-break: break-word;
-            }
-            .component-status {
-                display: flex;
-                align-items: center;
-                gap: 0.5rem;
-                flex-shrink: 0;
-            }
-            .status-indicator {
-                width: 12px;
-                height: 12px;
-                border-radius: 50%;
-                flex-shrink: 0;
-            }
-            .status-indicator.success {
-                background: var(--success);
-                box-shadow: 0 0 8px rgba(24, 201, 140, 0.5);
-            }
-            .status-indicator.failed {
-                background: var(--error);
-                box-shadow: 0 0 8px rgba(255, 123, 147, 0.5);
-            }
-            .status-indicator.loading {
-                background: var(--warn);
-                animation: pulse 2s infinite;
-            }
-            .status-indicator.skipped {
-                background: var(--text-soft);
-            }
-            @keyframes pulse {
-                0%, 100% { opacity: 1; }
-                50% { opacity: 0.5; }
-            }
-            .status-text {
-                font-size: 0.8rem;
-                font-weight: 500;
-                text-transform: uppercase;
-                letter-spacing: 0.05em;
-            }
-            .status-text.success { color: var(--success); }
-            .status-text.failed { color: var(--error); }
-            .status-text.loading { color: var(--warn); }
-            .status-text.skipped { color: var(--text-soft); }
-            .component-actions {
-                display: flex;
-                gap: 0.5rem;
-                flex-shrink: 0;
-            }
-            .component-action {
-                padding: 0.25rem 0.5rem;
-                border-radius: 4px;
-                border: 1px solid var(--border);
-                background: transparent;
-                color: var(--text-soft);
-                font-size: 0.75rem;
-                cursor: pointer;
-                transition: all 0.2s ease;
-            }
-            .component-action:hover {
-                background: var(--surface);
-                color: var(--text);
-            }
-            .component-action.primary {
-                background: var(--accent);
-                color: #07070c;
-                border-color: var(--accent);
-            }
-            .component-action.primary:hover {
-                background: #e64bb8;
-            }
-        </style>
+        <article class="card" style="background: var(--background); border: 2px solid #ffc107; border-radius: 8px;">
+            <h2 style="color: #ffc107;">🔧 Development Components</h2>
+            <div style="display: flex; align-items: center; gap: 15px; margin-top: 10px;">
+                <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                    <input type="checkbox" id="dev-components-toggle" style="width: 20px; height: 20px; cursor: pointer;">
+                    <span style="font-weight: 500;">Enable development components (interface_dev, plugins_dev, llm_engines_dev)</span>
+                </label>
+            </div>
+            <div class="meta" style="margin-top: 10px;">
+                ⚠️ <strong>Warning:</strong> This setting is not persistent and will reset to OFF when SyntH restarts. SyntH will restart automatically after toggling.
+            </div>
+        </article>
+    </div>
+</section>

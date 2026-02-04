@@ -54,6 +54,7 @@ SECURE_CONNECTION / SYNTH_WEBUI_TLS
 
 - **SYNTH_WEBUI_TLS**: If not set, the application falls back to enabling TLS by default (value `1`) to provide a secure developer experience. You only need to set this to `0` when you explicitly want to disable HTTPS.
 - **SYNTH_WEBUI_CERT_DIR**: If no certificate/key are provided, the Web UI will look for certificates in `/config/ssl` and, if missing, will attempt to generate a self-signed certificate there at startup.
+- **Image seed**: The container image ships a default self-signed certificate and key in `/config/ssl` (copied from `/app/res/default_ssl`) so HTTPS works out-of-the-box unless a volume overwrites that path.
 
 DB_HOST
 ~~~~~~~

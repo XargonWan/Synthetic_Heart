@@ -1,6 +1,37 @@
-<div class="tab-panel" id="tab-settings" data-tab="settings" role="tabpanel">
-  <div class="card">
-    <h2>Settings</h2>
-    <div class="card-content">Settings placeholder — move controls from index into this partial as needed.</div>
+<section class="tab-panel" id="tab-settings" data-tab="settings" role="tabpanel">
+  <div class="settings-grid">
+    <article class="card">
+      <h2>Window Management</h2>
+      <p>Reset movable window positions and sizes to safe defaults for desktop and mobile.</p>
+      <div style="margin-top:0.6rem;">
+        <button id="reset-window-positions" class="btn-ghost">Reset window positions</button>
+      </div>
+    </article>
+    <article class="card">
+      <h2>Notifications</h2>
+      <p>Enable desktop notifications and audio cues whenever new messages arrive.</p>
+      <label class="toggle">
+        <input type="checkbox" id="notify-toggle" />
+        <span>Enable desktop notifications</span>
+      </label>
+      <div id="notify-status" class="meta">Disabled</div>
+      <div id="connection" class="status-chip" data-tone="info">Ready.</div>
+    </article>
+    <article class="card" id="config-general-card">
+      <h2>Configuration</h2>
+      <div class="config-list" id="config-general-list">
+        <div class="meta">Loading…</div>
+      </div>
+      <div class="config-disclaimer" id="config-env-disclaimer">
+        <span class="override-icon">⚠️</span> Variables with this icon are overridden by environment values. Remove the override to enable editing.
+      </div>
+    </article>
+    <article class="card warning-card" id="config-advanced-card">
+      <h2>Advanced Settings</h2>
+      <p class="warning-text" id="config-advanced-warning">Changing ports may render the service unavailable. Update Docker compose exposure before applying modifications.</p>
+      <div class="config-list" id="config-advanced-list">
+        <div class="meta">Loading…</div>
+      </div>
+    </article>
   </div>
-</div>
+</section>

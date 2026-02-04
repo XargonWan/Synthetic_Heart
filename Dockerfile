@@ -131,6 +131,12 @@ RUN mkdir -p /app/res/default_ssl && \
 # Copy project code last to leverage layer caching
 COPY . /app
 
+# Seed Selkies TLS certs into /config/ssl (used by HTTPS on port 3001)
+RUN mkdir -p /config/ssl && \
+    cp -n /app/res/default_ssl/synth_webui.crt /config/ssl/cert.pem && \
+    cp -n /app/res/default_ssl/synth_webui.key /config/ssl/cert.key && \
+    chown -R abc:abc /config/ssl
+
 # Note: res/ is included in the image. No runtime seeding or res_template is
 # created (we avoid keeping a mirrored /app/res_template). Static assets live
 # inside /app/res and will be present in the image.
