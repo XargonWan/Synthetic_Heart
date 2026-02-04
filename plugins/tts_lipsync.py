@@ -1,5 +1,4 @@
 import asyncio
-import os
 import re
 import time
 from pathlib import Path
@@ -29,7 +28,7 @@ register_exposed_var(
 register_exposed_var(
     "TTS_TIMEOUT_SECONDS",
     label="TTS Timeout (s)",
-    default=30,
+    default=60,
     value_type=int,
     ui_type="number",
     description="Timeout for TTS HTTP requests in seconds.",
@@ -128,38 +127,50 @@ class TTSLipSyncPlugin(AIPluginBase):
         result = await self.handle_custom_action(action.get("type"), payload)
 
         if result.get("status") != "success":
-            log_info(f"[tts_lipsync] TTS generation failed ({result.get('message')}); checking for fallback text message.")
-            
+            log_info(
+                f"[tts_lipsync] TTS generation failed ({result.get('message')}); checking for fallback text message."
+            )
+
             # If we have merged text from a message action, send it as text-only
             merged_text = payload.get("__merged_text")
             if merged_text:
-                log_info(f"[tts_lipsync] Sending text-only fallback (TTS failed): '{merged_text[:50]}...'")
-                
+                log_info(
+                    f"[tts_lipsync] Sending text-only fallback (TTS failed): '{merged_text[:50]}...'"
+                )
+
                 # Get interface_path from context or original_message
                 interface_path = context.get("interface_path")
                 if not interface_path and original_message:
                     interface_path = getattr(original_message, "interface_path", None)
-                
+
                 if interface_path:
                     try:
                         from core.interface_path_utils import parse_interface_path
-                        
+
                         iface_name, _ = parse_interface_path(interface_path)
                         target_iface = INTERFACE_REGISTRY.get(iface_name)
-                        
+
                         if target_iface and hasattr(target_iface, "send_message"):
-                            await target_iface.send_message({
-                                "interface_path": interface_path,
-                                "text": merged_text,
-                            })
-                            log_info(f"[tts_lipsync] ✅ Text-only fallback sent successfully")
+                            await target_iface.send_message(
+                                {
+                                    "interface_path": interface_path,
+                                    "text": merged_text,
+                                }
+                            )
+                            log_info(
+                                "[tts_lipsync] ✅ Text-only fallback sent successfully"
+                            )
                         else:
-                            log_warning(f"[tts_lipsync] Could not find interface {iface_name} for text fallback")
+                            log_warning(
+                                f"[tts_lipsync] Could not find interface {iface_name} for text fallback"
+                            )
                     except Exception as e:
                         log_error(f"[tts_lipsync] Failed to send text fallback: {e}")
                 else:
-                    log_warning(f"[tts_lipsync] No interface_path available for text fallback")
-            
+                    log_warning(
+                        "[tts_lipsync] No interface_path available for text fallback"
+                    )
+
             return result
 
         # 2. Extract info
@@ -172,31 +183,37 @@ class TTSLipSyncPlugin(AIPluginBase):
 
         if not local_path.exists():
             log_warning(f"[tts_lipsync] Generated audio file not found at {local_path}")
-            
+
             # Send text-only fallback if merged text is present
             merged_text = payload.get("__merged_text")
             if merged_text:
-                log_info(f"[tts_lipsync] Audio file not found, sending text-only fallback")
+                log_info(
+                    "[tts_lipsync] Audio file not found, sending text-only fallback"
+                )
                 interface_path = context.get("interface_path")
                 if not interface_path and original_message:
                     interface_path = getattr(original_message, "interface_path", None)
-                
+
                 if interface_path:
                     try:
                         from core.interface_path_utils import parse_interface_path
-                        
+
                         iface_name, _ = parse_interface_path(interface_path)
                         target_iface = INTERFACE_REGISTRY.get(iface_name)
-                        
+
                         if target_iface and hasattr(target_iface, "send_message"):
-                            await target_iface.send_message({
-                                "interface_path": interface_path,
-                                "text": merged_text,
-                            })
-                            log_info(f"[tts_lipsync] ✅ Text-only fallback sent (audio file missing)")
+                            await target_iface.send_message(
+                                {
+                                    "interface_path": interface_path,
+                                    "text": merged_text,
+                                }
+                            )
+                            log_info(
+                                "[tts_lipsync] ✅ Text-only fallback sent (audio file missing)"
+                            )
                     except Exception:
                         pass
-            
+
             return result
 
         # 3. Dispatch to Interface
@@ -236,11 +253,42 @@ class TTSLipSyncPlugin(AIPluginBase):
                         }
 
                         # Use merged text if available, fallback to original text
-                        text_caption = payload.get("__merged_text") or payload.get("text")
+                        text_caption = payload.get("__merged_text") or payload.get(
+                            "text"
+                        )
                         if text_caption:
                             msg_payload["text"] = text_caption
 
                         await target_iface.send_message(msg_payload)
+
+                    elif iface_name == "synth_webui" and hasattr(
+                        target_iface, "send_tts_audio"
+                    ):
+                        # WebUI: send text message + TTS audio for lip-sync playback
+                        _, levels = parse_interface_path(interface_path)
+                        session_id = levels[0] if levels else None
+
+                        if session_id:
+                            text_caption = payload.get("__merged_text") or payload.get(
+                                "text"
+                            )
+                            success = await target_iface.send_tts_audio(
+                                session_id=session_id,
+                                audio_path=str(local_path),
+                                text=text_caption,
+                            )
+                            if success:
+                                log_info(
+                                    f"[tts_lipsync] TTS audio dispatched to WebUI session {session_id}"
+                                )
+                            else:
+                                log_warning(
+                                    f"[tts_lipsync] Failed to dispatch TTS audio to WebUI session {session_id}"
+                                )
+                        else:
+                            log_warning(
+                                f"[tts_lipsync] Could not extract session_id from interface_path: {interface_path}"
+                            )
 
                     elif iface_name == "telegram_bot":
                         # Use audio_telegram_bot which maps to send_voice
@@ -251,7 +299,9 @@ class TTSLipSyncPlugin(AIPluginBase):
 
                             if chat_id:
                                 # Use text as caption
-                                text_caption = payload.get("__merged_text") or payload.get("text")
+                                text_caption = payload.get(
+                                    "__merged_text"
+                                ) or payload.get("text")
                                 await target_iface.execute_action(
                                     {
                                         "type": "audio_telegram_bot",
@@ -282,7 +332,7 @@ class TTSLipSyncPlugin(AIPluginBase):
             group="plugins",
             component="tts_lipsync",
         )
-        
+
         log_debug(f"[tts_lipsync] Loading endpoints. Raw config: '{raw}'")
 
         # Parse first
@@ -387,7 +437,9 @@ def _post_tts(endpoint: str, payload: dict, timeout_s: int) -> bytes | None:
     try:
         resp = requests.post(endpoint, json=payload, timeout=timeout_s)
         if resp.status_code != 200:
-            log_warning(f"[tts_lipsync] Request to {endpoint} failed (Status: {resp.status_code}). Response: {resp.text[:200]}")
+            log_warning(
+                f"[tts_lipsync] Request to {endpoint} failed (Status: {resp.status_code}). Response: {resp.text[:200]}"
+            )
             return None
         return resp.content or None
     except Exception as e:

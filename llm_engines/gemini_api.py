@@ -80,7 +80,7 @@ MODEL_CONFIGS = {
     },
     "gemini-3-pro-preview": {
         "description": "Gemini 3 Pro (Preview)",
-        "thinking": True, 
+        "thinking": True,
         "max_output_tokens": 8192,
         "max_prompt_chars": 1000000,
     },
@@ -99,6 +99,7 @@ MODEL_CONFIGS = {
 }
 
 DEFAULT_MODEL = "gemini-3-flash-preview"
+
 
 def _get_gemini_model() -> str:
     from core.config import get_current_model
@@ -123,6 +124,7 @@ def _set_gemini_model(value: str) -> None:
             active_plugin.set_current_model(model)
     except Exception:
         pass
+
 
 try:
     from core.variables_engine import register_exposed_var
@@ -167,9 +169,10 @@ MODEL_LIMITS_MAP = {
     "default": 500000,
 }
 
+
 class GeminiAPIPlugin(AIPluginBase):
     """Gemini API LLM Engine using REST API only.
-    
+
     This engine follows the standard Synthetic Heart LLM architecture:
     1. handle_incoming_message() receives the prompt and generates a response
     2. The response is RETURNED (not sent directly) so the message_chain can:
@@ -180,7 +183,7 @@ class GeminiAPIPlugin(AIPluginBase):
        - Execute any other plugin actions
     3. The message_chain then routes the response to the appropriate interface
     """
-    
+
     display_name = "Gemini API"
 
     def __init__(self, notify_fn=None):
@@ -191,19 +194,21 @@ class GeminiAPIPlugin(AIPluginBase):
             set_notifier(notify_fn)
             self._notify_fn = notify_fn
         else:
-            self._notify_fn = lambda chat_id, message: log_info(f"[NOTIFY fallback] {message}")
+            self._notify_fn = lambda chat_id, message: log_info(
+                f"[NOTIFY fallback] {message}"
+            )
             set_notifier(self._notify_fn)
 
         self._current_model = str(GEMINI_MODEL) or get_current_model() or DEFAULT_MODEL
         if self._current_model not in MODEL_CONFIGS:
             self._current_model = DEFAULT_MODEL
-        
+
         # Track current request metadata for error handling
         self._current_request_meta = None
-        
+
         # Model limits map for plugin_instance.py compatibility
         self.model_limits_map = MODEL_LIMITS_MAP
-        
+
         log_info(f"[gemini_api] Initialized with model: {self._current_model}")
 
     def get_health_status(self):
@@ -258,8 +263,13 @@ class GeminiAPIPlugin(AIPluginBase):
         Default implementation returns a not-supported dict so callers can fall back.
         Engines that can safely perform tool-calls should implement this.
         """
-        log_debug("[gemini_api] agent_execute called but not implemented for this engine")
-        return {"status": "unsupported", "reason": "engine does not implement agent_execute"}
+        log_debug(
+            "[gemini_api] agent_execute called but not implemented for this engine"
+        )
+        return {
+            "status": "unsupported",
+            "reason": "engine does not implement agent_execute",
+        }
         return self._current_model
 
     def set_current_model(self, name: str):
@@ -271,7 +281,7 @@ class GeminiAPIPlugin(AIPluginBase):
 
     def get_rate_limit(self):
         """Return rate limiting parameters.
-        
+
         Returns:
             tuple: (requests_per_window, window_seconds, burst_limit)
         """
@@ -281,18 +291,20 @@ class GeminiAPIPlugin(AIPluginBase):
 
     def get_interface_limits(self) -> dict:
         """Get the limits and capabilities for this LLM interface."""
-        model_config = MODEL_CONFIGS.get(self._current_model, MODEL_CONFIGS[DEFAULT_MODEL])
+        model_config = MODEL_CONFIGS.get(
+            self._current_model, MODEL_CONFIGS[DEFAULT_MODEL]
+        )
         return {
             "max_prompt_chars": model_config.get("max_prompt_chars", 1000000),
             "max_response_chars": model_config.get("max_output_tokens", 8192),
             "supports_images": True,
             "supports_functions": True,
-            "model_name": self._current_model
+            "model_name": self._current_model,
         }
 
     async def handle_incoming_message(self, bot, message, prompt):
         """Process a message using a pre-built prompt.
-        
+
         CRITICAL: This method RETURNS the response text, it does NOT send it directly.
         The response is then processed by the message_chain which:
         1. Parses JSON actions
@@ -300,32 +312,35 @@ class GeminiAPIPlugin(AIPluginBase):
         3. Creates diary entries
         4. Executes plugin actions
         5. Routes the response to the appropriate interface
-        
+
         This is the key difference from the previous implementation - we follow
         the standard LLM engine pattern that other engines use.
         """
         from core.notifier import notify_trainer
-        
+
         try:
             # Store request metadata for error handling
             self._current_request_meta = {
-                'bot': bot,
-                'message': message,
-                'interface': getattr(message, 'interface', None) or getattr(message, 'interface_path', None),
-                'chat_id': getattr(message, 'chat_id', None),
-                'interface_path': getattr(message, 'interface_path', None),
+                "bot": bot,
+                "message": message,
+                "interface": getattr(message, "interface", None)
+                or getattr(message, "interface_path", None),
+                "chat_id": getattr(message, "chat_id", None),
+                "interface_path": getattr(message, "interface_path", None),
             }
-            
-            log_debug(f"[gemini_api] Processing message from chat_id={getattr(message, 'chat_id', 'unknown')}")
-            
+
+            log_debug(
+                f"[gemini_api] Processing message from chat_id={getattr(message, 'chat_id', 'unknown')}"
+            )
+
             # Generate response using the Gemini API
             response = await self.generate_response(prompt)
-            
+
             # Log the response for debugging
             if response:
                 preview = response[:200] + "..." if len(response) > 200 else response
                 log_info(f"[gemini_api] 📤 Generated response: {preview}")
-            
+
             # IMPORTANT: Return the response, don't send it directly!
             # The message_chain/plugin_instance will handle:
             # - JSON parsing and action execution
@@ -345,10 +360,10 @@ class GeminiAPIPlugin(AIPluginBase):
 
     async def generate_response(self, prompt):
         """Send prompt to Gemini API and receive the response.
-        
+
         Args:
             prompt: Can be a dict (JSON prompt from prompt_engine) or string
-            
+
         Returns:
             str: The LLM response text
         """
@@ -358,9 +373,23 @@ class GeminiAPIPlugin(AIPluginBase):
         try:
             # Handle different prompt formats
             if isinstance(prompt, dict):
-                # Check for system_message (correction scenario)
+                # Check for system_message - but only trigger correction for ERROR types
+                # "output" type system_messages are just action results and should be processed normally
                 if "system_message" in prompt:
-                    return await self._handle_correction_prompt(prompt)
+                    sm = prompt.get("system_message", {})
+                    sm_type = sm.get("type", "") if isinstance(sm, dict) else ""
+                    # Only handle as correction if it's an actual error/correction request
+                    if sm_type in (
+                        "error",
+                        "correction",
+                        "invalid_json",
+                        "validation_error",
+                    ):
+                        return await self._handle_correction_prompt(prompt)
+                    # Otherwise, process normally (e.g., "output" type with action_outputs)
+                    log_debug(
+                        f"[gemini_api] Processing system_message type '{sm_type}' as normal prompt"
+                    )
 
                 # Standard JSON prompt from prompt_engine
                 prompt_text = json.dumps(prompt, indent=2, ensure_ascii=False)
@@ -369,19 +398,34 @@ class GeminiAPIPlugin(AIPluginBase):
                 try:
                     parsed = json.loads(prompt)
                     if isinstance(parsed, dict) and "system_message" in parsed:
-                        return await self._handle_correction_prompt(parsed)
+                        sm = parsed.get("system_message", {})
+                        sm_type = sm.get("type", "") if isinstance(sm, dict) else ""
+                        if sm_type in (
+                            "error",
+                            "correction",
+                            "invalid_json",
+                            "validation_error",
+                        ):
+                            return await self._handle_correction_prompt(parsed)
+                        log_debug(
+                            f"[gemini_api] Processing system_message type '{sm_type}' as normal prompt"
+                        )
                     prompt_text = prompt
                 except (json.JSONDecodeError, ValueError):
                     prompt_text = prompt
             else:
                 prompt_text = str(prompt)
-            
-            log_debug(f"[gemini_api] Sending prompt ({len(prompt_text)} chars) to {self._current_model}")
-            
+
+            log_debug(
+                f"[gemini_api] Sending prompt ({len(prompt_text)} chars) to {self._current_model}"
+            )
+
             # Build generation config
-            model_config = MODEL_CONFIGS.get(self._current_model, MODEL_CONFIGS[DEFAULT_MODEL])
-            thinking_enabled = model_config.get("thinking", False)
-            
+            model_config = MODEL_CONFIGS.get(
+                self._current_model, MODEL_CONFIGS[DEFAULT_MODEL]
+            )
+            # Note: thinking_enabled is configured via model config, not explicitly used here
+
             config_args = {
                 "max_output_tokens": model_config.get("max_output_tokens", 8192),
             }
@@ -396,25 +440,27 @@ class GeminiAPIPlugin(AIPluginBase):
                 system_instruction=system_instruction,
                 max_output_tokens=config_args.get("max_output_tokens", 8192),
             )
-            
+
             log_debug(f"[gemini_api] Received response ({len(response_text)} chars)")
-            
+
             return response_text
-            
+
         except Exception as e:
             log_error(f"[gemini_api] Generation failed: {e}")
             # Return a JSON error so the system can handle it
             error_response = {
-                "actions": [{
-                    "type": "system_message",
-                    "payload": {"text": f"⚠️ Gemini API error: {str(e)}"}
-                }]
+                "actions": [
+                    {
+                        "type": "system_message",
+                        "payload": {"text": f"⚠️ Gemini API error: {str(e)}"},
+                    }
+                ]
             }
             return json.dumps(error_response)
 
     def _build_system_instruction(self, prompt) -> str:
         """Build the system instruction for Gemini based on the prompt context.
-        
+
         NOTE: The prompt_engine already includes complete action schemas with descriptions,
         required fields, and examples. This system instruction just reinforces the JSON
         output format requirement. Don't duplicate action definitions here.
@@ -437,7 +483,9 @@ class GeminiAPIPlugin(AIPluginBase):
 
         if isinstance(prompt_dict, dict):
             # Check top-level first
-            interface = prompt_dict.get("interface") or prompt_dict.get("current_interface")
+            interface = prompt_dict.get("interface") or prompt_dict.get(
+                "current_interface"
+            )
             verbose_instructions = prompt_dict.get("instructions_verbose")
 
             # If not found, check input.source.interface (prompt_engine structure)
@@ -453,11 +501,11 @@ class GeminiAPIPlugin(AIPluginBase):
                 input_section = prompt_dict.get("input", {})
                 if isinstance(input_section, dict):
                     interface = input_section.get("interface") or interface
-        
+
         # Default fallback
         if not interface:
             interface = "unknown"
-        
+
         # Map interface to the correct message action type
         interface_to_action = {
             "synth_webui": "message_synth_webui",
@@ -466,7 +514,7 @@ class GeminiAPIPlugin(AIPluginBase):
             "ollama_serve": "message_ollama_serve",
         }
         message_action = interface_to_action.get(interface, f"message_{interface}")
-        
+
         # Minimal system instruction - the prompt itself contains full action schemas
         # We just need to remind the model to output valid JSON
         system_instruction = (
@@ -490,12 +538,17 @@ class GeminiAPIPlugin(AIPluginBase):
         # Include unminified chat instruction verbatim when provided
         if verbose_instructions:
             system_instruction = f"{verbose_instructions}\n\n{system_instruction}"
-        
+
         return system_instruction
 
-    async def _http_generate_content(self, prompt_text: str, system_instruction: str, max_output_tokens: int) -> str:
+    async def _http_generate_content(
+        self, prompt_text: str, system_instruction: str, max_output_tokens: int
+    ) -> str:
         """Generate content using the Gemini REST API."""
-        base_url = str(GEMINI_API_BASE_URL).strip() or "https://generativelanguage.googleapis.com"
+        base_url = (
+            str(GEMINI_API_BASE_URL).strip()
+            or "https://generativelanguage.googleapis.com"
+        )
         api_key = str(GEMINI_API_KEY).strip()
         if base_url.endswith("/v1") or base_url.endswith("/v1beta"):
             versioned_base = base_url
@@ -537,7 +590,7 @@ class GeminiAPIPlugin(AIPluginBase):
                 response = await loop.run_in_executor(None, _do_request)
             except Exception as e:
                 if attempt < max_attempts - 1:
-                    delay = min(8, 1 * (2 ** attempt))
+                    delay = min(8, 1 * (2**attempt))
                     log_warning(
                         f"[gemini_api] HTTP request failed (attempt {attempt + 1}/{max_attempts}): {e}. "
                         f"Retrying in {delay}s"
@@ -545,59 +598,94 @@ class GeminiAPIPlugin(AIPluginBase):
                     await asyncio.sleep(delay)
                     continue
                 log_error(f"[gemini_api] HTTP request failed: {e}")
-                return json.dumps({
-                    "actions": [{
-                        "type": "system_message",
-                        "payload": {"text": f"⚠️ Gemini HTTP request failed: {str(e)}"}
-                    }]
-                })
+                return json.dumps(
+                    {
+                        "actions": [
+                            {
+                                "type": "system_message",
+                                "payload": {
+                                    "text": f"⚠️ Gemini HTTP request failed: {str(e)}"
+                                },
+                            }
+                        ]
+                    }
+                )
 
             if response.status_code >= 400:
-                if response.status_code in retryable_statuses and attempt < max_attempts - 1:
-                    delay = min(8, 1 * (2 ** attempt))
+                if (
+                    response.status_code in retryable_statuses
+                    and attempt < max_attempts - 1
+                ):
+                    delay = min(8, 1 * (2**attempt))
                     log_warning(
                         f"[gemini_api] HTTP error {response.status_code} (attempt {attempt + 1}/{max_attempts}). "
                         f"Retrying in {delay}s"
                     )
                     await asyncio.sleep(delay)
                     continue
-                log_error(f"[gemini_api] HTTP error {response.status_code}: {response.text}")
-                return json.dumps({
-                    "actions": [{
-                        "type": "system_message",
-                        "payload": {"text": f"⚠️ Gemini HTTP error {response.status_code}: {response.text}"}
-                    }]
-                })
+                log_error(
+                    f"[gemini_api] HTTP error {response.status_code}: {response.text}"
+                )
+                return json.dumps(
+                    {
+                        "actions": [
+                            {
+                                "type": "system_message",
+                                "payload": {
+                                    "text": f"⚠️ Gemini HTTP error {response.status_code}: {response.text}"
+                                },
+                            }
+                        ]
+                    }
+                )
             break
 
         if response is None:
-            return json.dumps({
-                "actions": [{
-                    "type": "system_message",
-                    "payload": {"text": "⚠️ Gemini HTTP request failed: no response"}
-                }]
-            })
+            return json.dumps(
+                {
+                    "actions": [
+                        {
+                            "type": "system_message",
+                            "payload": {
+                                "text": "⚠️ Gemini HTTP request failed: no response"
+                            },
+                        }
+                    ]
+                }
+            )
 
         try:
             data = response.json()
         except Exception as e:
             log_error(f"[gemini_api] HTTP response JSON parse failed: {e}")
-            return json.dumps({
-                "actions": [{
-                    "type": "system_message",
-                    "payload": {"text": "⚠️ Gemini HTTP response was not valid JSON"}
-                }]
-            })
+            return json.dumps(
+                {
+                    "actions": [
+                        {
+                            "type": "system_message",
+                            "payload": {
+                                "text": "⚠️ Gemini HTTP response was not valid JSON"
+                            },
+                        }
+                    ]
+                }
+            )
 
         candidates = data.get("candidates") or []
         if not candidates:
             log_error(f"[gemini_api] HTTP response missing candidates: {data}")
-            return json.dumps({
-                "actions": [{
-                    "type": "system_message",
-                    "payload": {"text": "⚠️ Gemini HTTP response missing candidates"}
-                }]
-            })
+            return json.dumps(
+                {
+                    "actions": [
+                        {
+                            "type": "system_message",
+                            "payload": {
+                                "text": "⚠️ Gemini HTTP response missing candidates"
+                            },
+                        }
+                    ]
+                }
+            )
 
         content = candidates[0].get("content", {})
         parts = content.get("parts") or []
@@ -607,18 +695,24 @@ class GeminiAPIPlugin(AIPluginBase):
 
         if not response_text:
             log_error(f"[gemini_api] HTTP response contained no text: {data}")
-            return json.dumps({
-                "actions": [{
-                    "type": "system_message",
-                    "payload": {"text": "⚠️ Gemini HTTP response contained no text"}
-                }]
-            })
+            return json.dumps(
+                {
+                    "actions": [
+                        {
+                            "type": "system_message",
+                            "payload": {
+                                "text": "⚠️ Gemini HTTP response contained no text"
+                            },
+                        }
+                    ]
+                }
+            )
 
         return response_text
 
     async def _handle_correction_prompt(self, prompt: dict) -> str:
         """Handle a correction/system_message prompt.
-        
+
         When the system detects invalid JSON or failed actions, it sends a
         correction prompt. We need to understand what went wrong and fix it.
         """
@@ -628,13 +722,15 @@ class GeminiAPIPlugin(AIPluginBase):
         original_user_message = system_message.get("original_user_message", "")
         your_reply = system_message.get("your_reply", "")
         required_format = system_message.get("required_format", {})
-        action_full_schema = system_message.get("action_full_schema", {})
-        
+        # action_full_schema available via system_message.get("action_full_schema", {}) if needed
+
         # Extract interface from the prompt or system_message
-        interface = system_message.get("interface") or prompt.get("interface") or "synth_webui"
-        
+        interface = (
+            system_message.get("interface") or prompt.get("interface") or "synth_webui"
+        )
+
         log_warning(f"[gemini_api] Handling correction prompt: {error_type}")
-        
+
         # Map interface to the correct message action type
         interface_to_action = {
             "synth_webui": "message_synth_webui",
@@ -643,21 +739,18 @@ class GeminiAPIPlugin(AIPluginBase):
             "ollama_serve": "message_ollama_serve",
         }
         message_action = interface_to_action.get(interface, f"message_{interface}")
-        
+
         # Build a focused correction prompt
-        correction_prompt = (
-            f"CORRECTION REQUIRED\n"
-            f"\n"
-            f"Error: {error_message}\n"
-            f"\n"
-        )
-        
+        correction_prompt = f"CORRECTION REQUIRED\n\nError: {error_message}\n\n"
+
         if original_user_message:
-            correction_prompt += f"Original user message you should respond to:\n\"{original_user_message}\"\n\n"
-        
+            correction_prompt += f'Original user message you should respond to:\n"{original_user_message}"\n\n'
+
         if your_reply:
-            correction_prompt += f"Your previous (invalid) reply:\n{your_reply[:500]}...\n\n"
-        
+            correction_prompt += (
+                f"Your previous (invalid) reply:\n{your_reply[:500]}...\n\n"
+            )
+
         correction_prompt += (
             f"REQUIREMENTS:\n"
             f"1. Respond with ONLY valid JSON\n"
@@ -668,7 +761,7 @@ class GeminiAPIPlugin(AIPluginBase):
             f"\n"
             f"Respond NOW with valid JSON only."
         )
-        
+
         # Generate corrected response
         config_args = {
             "max_output_tokens": 8192,
@@ -678,9 +771,9 @@ class GeminiAPIPlugin(AIPluginBase):
                 f"CURRENT INTERFACE: {interface}. "
                 f"TO SEND A MESSAGE TO THE USER: Use action type '{message_action}'. "
                 "NO explanations. NO markdown. ONLY valid JSON starting with { and ending with }."
-            )
+            ),
         }
-        
+
         return await self._http_generate_content(
             prompt_text=correction_prompt,
             system_instruction=config_args["system_instruction"],
