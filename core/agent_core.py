@@ -53,6 +53,18 @@ class AgentLoopManager:
         self._running_tasks: Dict[int, asyncio.Task] = {}
 
     # --- DB helpers ---
+    async def _maybe_commit(self, conn) -> None:
+        """Safely call commit on connection (if available) and await if coroutine."""
+        try:
+            commit_fn = getattr(conn, 'commit', None)
+            if commit_fn and callable(commit_fn):
+                res = commit_fn()
+                if asyncio.iscoroutine(res):
+                    await res
+        except Exception:
+            # Best-effort; ignore commit failures
+            pass
+
     async def _create_agent_task(self, engine: str, input_payload: Dict[str, Any], metadata: Optional[Dict[str, Any]] = None) -> Optional[int]:
         try:
             from core.db import get_conn_ctx
@@ -73,7 +85,7 @@ class AgentLoopManager:
                             json.dumps(metadata) if metadata else None,
                         ),
                     )
-                    await conn.commit()
+                    await self._maybe_commit(conn)
                     return getattr(cur, "lastrowid", None)
         except Exception as e:
             log_error(f"[agent_core] _create_agent_task DB error: {e}")
@@ -88,7 +100,7 @@ class AgentLoopManager:
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute("UPDATE agent_tasks SET status=%s WHERE id=%s", (status, int(task_id)))
-                    await conn.commit()
+                    await self._maybe_commit(conn)
         except Exception as e:
             log_warning(f"[agent_core] _update_agent_task_status failed: {e}")
 
@@ -114,7 +126,7 @@ class AgentLoopManager:
                         arr = []
                     arr.append(iteration_meta)
                     await cur.execute("UPDATE agent_tasks SET iterations_meta=%s WHERE id=%s", (json.dumps(arr), int(task_id)))
-                    await conn.commit()
+                    await self._maybe_commit(conn)
         except Exception as e:
             log_warning(f"[agent_core] _append_iteration_meta failed: {e}")
 
@@ -126,7 +138,7 @@ class AgentLoopManager:
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute("UPDATE agent_tasks SET status=%s, output=%s WHERE id=%s", (status, json.dumps(output) if output else None, int(task_id)))
-                    await conn.commit()
+                    await self._maybe_commit(conn)
         except Exception as e:
             log_warning(f"[agent_core] _finalize_task failed: {e}")
 

@@ -378,6 +378,25 @@ class AgentPlugin(AIPluginBase):
                             pass
                 except Exception:
                     pass
+
+                # Also attempt to deliver the output back to the invoking interface (via LLM-mediated auto_response)
+                try:
+                    from core.auto_response import request_llm_delivery
+                    if context and isinstance(context, dict) and context.get('interface'):
+                        original_context = {
+                            'chat_id': getattr(original_message, 'chat_id', None) if hasattr(original_message, 'chat_id') else (original_message.get('chat_id') if isinstance(original_message, dict) else None),
+                            'message_id': getattr(original_message, 'message_id', None) if hasattr(original_message, 'message_id') else (original_message.get('message_id') if isinstance(original_message, dict) else None),
+                            'interface_name': context.get('interface'),
+                            'interface_path': getattr(original_message, 'interface_path', None) if hasattr(original_message, 'interface_path') else (original_message.get('interface_path') if isinstance(original_message, dict) else None)
+                        }
+                        action_outputs = [{'type': 'agent_execute', 'command': command, 'output': res}]
+                        try:
+                            await request_llm_delivery(action_outputs=action_outputs, original_context=original_context, action_type='agent_execute')
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
                 return res
 
             if mode == "always_approve":
