@@ -4887,6 +4887,25 @@ class SynthWebUIInterface:
             self.tls_keyfile = default_key
             return
 
+        # Check for image-seeded default certs (built into the image during Dockerfile build)
+        baked_cert = os.path.join(os.path.dirname(__file__), '..', 'res', 'default_ssl', 'synth_webui.crt')
+        baked_key = os.path.join(os.path.dirname(__file__), '..', 'res', 'default_ssl', 'synth_webui.key')
+        try:
+            baked_cert = os.path.abspath(baked_cert)
+            baked_key = os.path.abspath(baked_key)
+            if Path(baked_cert).exists() and Path(baked_key).exists():
+                # Copy baked certs into cert_dir so they can be replaced by runtime-generated certs if needed
+                import shutil
+                shutil.copyfile(baked_cert, default_cert)
+                shutil.copyfile(baked_key, default_key)
+                self.tls_certfile = default_cert
+                self.tls_keyfile = default_key
+                log_info(f"{LOG_PREFIX} Seeded TLS certs copied from image defaults to {cert_dir}")
+                return
+        except Exception:
+            # Non-fatal; proceed to generation below
+            pass
+
         # Attempt to generate a self-signed cert using openssl if available
         import shutil
         import subprocess
@@ -4944,36 +4963,76 @@ class SynthWebUIInterface:
             except Exception as exc:
                 raise RuntimeError(f'cryptography generation failed: {exc}')
 
-        # If openssl exists, use it to generate cert/key
+        # If openssl exists, use it to generate cert/key. Support SANs via
+        # SYNTH_WEBUI_CERT_SANS env var (comma-separated list of entries like
+        # 'IP:192.168.1.42,DNS:localhost'). If no SANs provided, fall back to
+        # sensible defaults (localhost + 127.0.0.1).
         subj = os.getenv('SYNTH_WEBUI_CERT_SUBJ', '/CN=localhost')
         days = os.getenv('SYNTH_WEBUI_CERT_DAYS', '3650')
-        cmd = [openssl_path, 'req', '-x509', '-nodes', '-days', str(days), '-newkey', 'rsa:2048', '-keyout', default_key, '-out', default_cert, '-subj', subj]
+
+        # Build SAN string
+        raw_sans = os.getenv('SYNTH_WEBUI_CERT_SANS', None)
+        if raw_sans and raw_sans.strip():
+            sans_string = raw_sans.strip()
+        else:
+            # Default SANs (DNS:localhost, IP:127.0.0.1)
+            sans_string = 'DNS:localhost,IP:127.0.0.1'
+            # If SYNTH_WEBUI_HOST looks like an IP, include it too
+            synth_host = os.getenv('SYNTH_WEBUI_HOST')
+            if synth_host:
+                import ipaddress
+                try:
+                    ipaddress.ip_address(synth_host)
+                    sans_string = sans_string + f',IP:{synth_host}'
+                except Exception:
+                    # not an IP, could be hostname - include as DNS
+                    sans_string = sans_string + f',DNS:{synth_host}'
+
+        cmd = [openssl_path, 'req', '-x509', '-nodes', '-days', str(days), '-newkey', 'rsa:2048', '-keyout', default_key, '-out', default_cert, '-subj', subj, '-addext', f'subjectAltName={sans_string}']
         try:
-            log_info(f"{LOG_PREFIX} Generating self-signed certificate using openssl at {default_cert}")
+            log_info(f"{LOG_PREFIX} Generating self-signed certificate using openssl at {default_cert} (SAN={sans_string})")
             subprocess.run(cmd, check=True)
             self.tls_certfile = default_cert
             self.tls_keyfile = default_key
             log_info(f"{LOG_PREFIX} Self-signed certificate generated: cert={self.tls_certfile} key={self.tls_keyfile}")
         except Exception as exc:
-            raise RuntimeError(f'Failed to generate self-signed certificate: {exc}')
+            # If openssl failed with addext (older openssl), try fallback via
+            # creating a tmp config file with v3 extensions
+            try:
+                import tempfile
+                with tempfile.NamedTemporaryFile('w', delete=False) as cfg:
+                    cfg.write('[req]\ndistinguished_name=req\n[ v3_ca ]\nsubjectAltName=' + sans_string + '\n')
+                    cfg_path = cfg.name
+                cmd2 = [openssl_path, 'req', '-x509', '-nodes', '-days', str(days), '-newkey', 'rsa:2048', '-keyout', default_key, '-out', default_cert, '-subj', subj, '-extensions', 'v3_ca', '-config', cfg_path]
+                subprocess.run(cmd2, check=True)
+                self.tls_certfile = default_cert
+                self.tls_keyfile = default_key
+                log_info(f"{LOG_PREFIX} Self-signed certificate generated using fallback config: cert={self.tls_certfile} key={self.tls_keyfile}")
+            except Exception as exc2:
+                raise RuntimeError(f'Failed to generate self-signed certificate: {exc} / {exc2}')
+
 
     async def start(self) -> None:
         """Start the web UI interface if autostart is enabled."""
         try:
             log_info(f"{LOG_PREFIX} start() called - initializing persona manager and starting server if enabled")
             # Initialize persona manager now that core initialization is complete
-            if self.persona_manager is None:
+            if not hasattr(self, 'persona_manager') or self.persona_manager is None:
                 from core.persona_manager import get_persona_manager
-                self.persona_manager = get_persona_manager()
-                if self.persona_manager:
-                    try:
-                        self.persona_manager.set_webui(self)
-                        self.persona_manager.set_animation_handler(self.animation_handler)
-                    except Exception as pm_exc:
-                        log_warning(f"{LOG_PREFIX} Persona manager set_* calls failed: {pm_exc}")
-                    log_info(f"{LOG_PREFIX} Persona manager initialized")
-                else:
-                    log_warning(f"{LOG_PREFIX} Failed to initialize persona manager")
+                try:
+                    self.persona_manager = get_persona_manager()
+                    if self.persona_manager:
+                        try:
+                            self.persona_manager.set_webui(self)
+                            self.persona_manager.set_animation_handler(self.animation_handler)
+                        except Exception as pm_exc:
+                            log_warning(f"{LOG_PREFIX} Persona manager set_* calls failed: {pm_exc}")
+                        log_info(f"{LOG_PREFIX} Persona manager initialized")
+                    else:
+                        log_warning(f"{LOG_PREFIX} Failed to initialize persona manager")
+                except Exception as pm_exc_outer:
+                    log_warning(f"{LOG_PREFIX} Exception while getting persona manager: {pm_exc_outer}")
+                    self.persona_manager = None
 
             if self.autostart:
                 log_info(f"{LOG_PREFIX} Autostart enabled, starting {BRAND_NAME} server")
@@ -5405,7 +5464,17 @@ def initialize_interface():
     
     log_info(f"{LOG_PREFIX} Creating {BRAND_NAME} interface instance...")
     synth_webui_interface = SynthWebUIInterface()
-    # Interface is already registered in __init__, no need to register again
+    # In some environments the automatic registration in __init__ may not run
+    # (e.g., hot reload or partial initialization). Ensure explicit registration
+    # here so the core initializer can start the interface and the server will
+    # be started on the expected port (e.g. SYNTH_WEBUI_HTTPS_PORT -> 9009).
+    try:
+        from core.core_initializer import register_interface
+        register_interface(INTERFACE_NAME, synth_webui_interface)
+        log_info(f"{LOG_PREFIX} Interface registered (initialize_interface)", log_file=WEBUI_LOG)
+    except Exception as exc:
+        log_warning(f"{LOG_PREFIX} Interface registration from initialize_interface failed: {exc}", log_file=WEBUI_LOG)
+
     log_info(f"{LOG_PREFIX} {BRAND_NAME} interface instance created")
     
     return synth_webui_interface

@@ -121,6 +121,13 @@ COPY automation_tools/cleanup_chrome.sh /usr/local/bin/cleanup_chrome.sh
 COPY automation_tools/container_synth.sh /app/synth.sh
 RUN chmod +x /usr/local/bin/cleanup_chrome.sh /app/synth.sh
 
+# Create a default self-signed cert to include in the image (used as a seed at runtime)
+RUN mkdir -p /app/res/default_ssl && \
+    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+      -keyout /app/res/default_ssl/synth_webui.key \
+      -out /app/res/default_ssl/synth_webui.crt \
+      -subj '/CN=localhost' -addext 'subjectAltName=IP:127.0.0.1,DNS:localhost' || true
+
 # Copy project code last to leverage layer caching
 COPY . /app
 
