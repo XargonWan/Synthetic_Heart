@@ -1,0 +1,55 @@
+name: E2E Playwright
+
+on:
+  pull_request:
+  push:
+    branches: [ 'develop', 'feat/agent', 'main' ]
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Install Python requirements
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Start the web application (background)
+        run: |
+          nohup python -u main.py > webui.log 2>&1 & echo $! > webui.pid
+
+      - name: Wait for WebUI to be available
+        run: npx wait-on http://127.0.0.1:8080 -t 60000
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install Node deps
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright tests
+        env:
+          WEBUI_BASE: 'http://127.0.0.1:8080'
+        run: npm run test:e2e
+
+      - name: Dump webui logs (on failure)
+        if: failure()
+        run: tail -n +1 webui.log | sed -n '1,200p'
+
+      - name: Stop the web application
+        if: always()
+        run: kill "$(cat webui.pid)" || true
