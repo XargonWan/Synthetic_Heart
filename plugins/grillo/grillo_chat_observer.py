@@ -179,9 +179,10 @@ class GrilloChatObserverPlugin:
                 from core.db import execute_query
                 # Ensure last_run_ts initialized
                 if not getattr(self, '_last_run_ts', 0.0):
+                    # Initialize to now but do not skip execution when invoked directly
+                    # (tests call _run_observer() directly and expect it to proceed).
                     self._last_run_ts = float(datetime.utcnow().timestamp())
-                    log_debug("[grillo_chat_observer] last_run_ts uninitialized – initializing and skipping first run")
-                    return
+                    log_debug(f"[grillo_chat_observer] last_run_ts uninitialized – initializing and continuing")
 
                 rows = await execute_query(
                     """
