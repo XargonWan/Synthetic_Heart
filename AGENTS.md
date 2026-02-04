@@ -432,6 +432,7 @@ The documentation must be written in English and in ReadTheDocs format.
 * Validation rules are auto-discovered from `get_supported_actions()` methods.
 * Every time you edit a python file use `python3 -m py_compile` against it. If you edited more than one please check them in a single command to save time and user interaction.
 * **Type hints & static checking:** All Python functions must include complete type annotations (parameters and return types). The project follows strict static typing and enforces type checking with `mypy` in **strict** mode. When adding or modifying Python code run `python -m mypy . --strict` (or `mypy --strict`) and resolve any reported errors before proposing the changes. Add or update `mypy.ini` / `pyproject.toml` configuration as needed and document relevant typing decisions in `./docs`.
+This might be used inside the pythin virtual environment.
 * **Cross-platform policy:** The project's default runtime is a Linux container. Do not write Windows- or macOS-specific code paths as the primary implementation. If platform-specific logic is unavoidable, implement it only as a secondary, well-documented case guarded by an OS check (e.g., `sys.platform` or `platform.system()`), include tests or CI guards where possible, and add explanatory notes in `./docs`. Prefer platform-agnostic or Linux-first implementations and show Linux-based examples in documentation.
 * Never use `git add` or `git commit` unless directly asked by the developer.
 * No POCs, only working and production ready code
