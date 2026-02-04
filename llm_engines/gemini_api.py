@@ -758,6 +758,20 @@ class GeminiAPIPlugin(AIPluginBase):
         "audio/mp4",
         "audio/x-m4a",
     }
+    SUPPORTED_VIDEO_TYPES = {
+        "video/mp4",
+        "video/mpeg",
+        "video/mov",
+        "video/quicktime",
+        "video/avi",
+        "video/x-msvideo",
+        "video/x-flv",
+        "video/mpg",
+        "video/webm",
+        "video/wmv",
+        "video/x-ms-wmv",
+        "video/3gpp",
+    }
     SUPPORTED_DOCUMENT_TYPES = {
         "application/pdf",
         "text/plain",
@@ -806,6 +820,17 @@ class GeminiAPIPlugin(AIPluginBase):
             ".json": "application/json",
             ".xml": "application/xml",
             ".csv": "text/csv",
+            # Video formats
+            ".mp4": "video/mp4",
+            ".mpeg": "video/mpeg",
+            ".mpg": "video/mpeg",
+            ".mov": "video/quicktime",
+            ".avi": "video/x-msvideo",
+            ".flv": "video/x-flv",
+            ".webm": "video/webm",
+            ".wmv": "video/x-ms-wmv",
+            ".3gp": "video/3gpp",
+            ".3gpp": "video/3gpp",
         }
 
         suffix = path.suffix.lower()
@@ -830,6 +855,7 @@ class GeminiAPIPlugin(AIPluginBase):
         return (
             mime_type in self.SUPPORTED_IMAGE_TYPES
             or mime_type in self.SUPPORTED_AUDIO_TYPES
+            or mime_type in self.SUPPORTED_VIDEO_TYPES
             or mime_type in self.SUPPORTED_DOCUMENT_TYPES
         )
 

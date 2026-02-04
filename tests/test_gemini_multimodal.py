@@ -40,10 +40,12 @@ class TestGeminiMultimodal:
         assert plugin._is_supported_multimodal_type("image/jpeg")
         assert plugin._is_supported_multimodal_type("audio/mpeg")
         assert plugin._is_supported_multimodal_type("application/pdf")
+        assert plugin._is_supported_multimodal_type("video/mp4")
+        assert plugin._is_supported_multimodal_type("video/webm")
 
         # Unsupported types
-        assert not plugin._is_supported_multimodal_type("video/mp4")
         assert not plugin._is_supported_multimodal_type("application/octet-stream")
+        assert not plugin._is_supported_multimodal_type("application/zip")
 
     def test_extract_multimodal_parts_from_dict(self):
         """Test extracting multimodal parts from a prompt dict."""
@@ -113,8 +115,8 @@ class TestGeminiMultimodal:
         assert len(parts) == 1
         assert parts[0]["inline_data"]["mime_type"] == "application/pdf"
 
-    def test_extract_multimodal_parts_skips_unsupported(self):
-        """Test that unsupported MIME types are skipped."""
+    def test_extract_multimodal_parts_video(self):
+        """Test extracting video attachments."""
         from llm_engines.gemini_api import GeminiAPIPlugin
 
         plugin = GeminiAPIPlugin()
@@ -126,6 +128,28 @@ class TestGeminiMultimodal:
                     "mime_type": "video/mp4",
                     "data": fake_base64,
                     "filename": "video.mp4",
+                }
+            ],
+        }
+
+        parts = plugin._extract_multimodal_parts(prompt)
+
+        assert len(parts) == 1
+        assert parts[0]["inline_data"]["mime_type"] == "video/mp4"
+
+    def test_extract_multimodal_parts_skips_unsupported(self):
+        """Test that unsupported MIME types are skipped."""
+        from llm_engines.gemini_api import GeminiAPIPlugin
+
+        plugin = GeminiAPIPlugin()
+
+        fake_base64 = base64.b64encode(b"fake_zip_data").decode("utf-8")
+        prompt = {
+            "attachments": [
+                {
+                    "mime_type": "application/zip",
+                    "data": fake_base64,
+                    "filename": "archive.zip",
                 }
             ],
         }

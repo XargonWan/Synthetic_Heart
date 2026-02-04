@@ -623,6 +623,12 @@ class DiscordInterface:
                 )
 
             # Prepare simplified message for core queue
+            # Detect wake/sleep commands early for flagging
+            text_lower_check = content.lower()
+            is_wake_sleep_cmd = (
+                "hey 2b" in text_lower_check or "bye 2b" in text_lower_check
+            )
+
             wrapped = SimpleNamespace(
                 message_id=getattr(message, "id", None),
                 chat_id=channel_id,  # In Discord, this is thread ID if in thread, channel ID otherwise
@@ -631,6 +637,7 @@ class DiscordInterface:
                 caption=None,
                 date=getattr(message, "created_at", None),
                 thread_id=thread_id,  # Thread ID if in thread, None if in regular channel
+                is_wake_sleep_command=is_wake_sleep_cmd,  # Flag for prompt engine
                 from_user=SimpleNamespace(
                     id=getattr(message.author, "id", None),
                     username=getattr(message.author, "name", None),

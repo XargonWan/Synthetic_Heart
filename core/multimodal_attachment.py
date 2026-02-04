@@ -35,6 +35,20 @@ SUPPORTED_AUDIO_TYPES = {
     "audio/x-m4a",
     "audio/x-wav",
 }
+SUPPORTED_VIDEO_TYPES = {
+    "video/mp4",
+    "video/mpeg",
+    "video/mov",
+    "video/quicktime",
+    "video/avi",
+    "video/x-msvideo",
+    "video/x-flv",
+    "video/mpg",
+    "video/webm",
+    "video/wmv",
+    "video/x-ms-wmv",
+    "video/3gpp",
+}
 SUPPORTED_DOCUMENT_TYPES = {
     "application/pdf",
     "text/plain",
@@ -91,6 +105,17 @@ def get_mime_type(file_path: str | Path | None, file_name: str | None = None) ->
         ".json": "application/json",
         ".xml": "application/xml",
         ".csv": "text/csv",
+        # Video formats
+        ".mp4": "video/mp4",
+        ".mpeg": "video/mpeg",
+        ".mpg": "video/mpeg",
+        ".mov": "video/quicktime",
+        ".avi": "video/x-msvideo",
+        ".flv": "video/x-flv",
+        ".webm": "video/webm",
+        ".wmv": "video/x-ms-wmv",
+        ".3gp": "video/3gpp",
+        ".3gpp": "video/3gpp",
     }
 
     # Get suffix from either path
@@ -115,6 +140,7 @@ def is_supported_type(mime_type: str) -> bool:
     return (
         mime_type in SUPPORTED_IMAGE_TYPES
         or mime_type in SUPPORTED_AUDIO_TYPES
+        or mime_type in SUPPORTED_VIDEO_TYPES
         or mime_type in SUPPORTED_DOCUMENT_TYPES
     )
 
@@ -252,10 +278,68 @@ async def extract_multimodal_from_telegram(
                 except Exception as e:
                     log_warning(f"[multimodal] Failed to download Telegram voice: {e}")
 
-        # Handle video notes (round videos)
+        # Handle video files
+        if message.video:
+            video = message.video
+            mime_type = video.mime_type or "video/mp4"  # Default to mp4
+
+            if is_supported_type(mime_type):
+                # Check file size - Telegram allows up to 20MB for bots to download
+                # Gemini inline supports up to 20MB total request size
+                file_size = getattr(video, "file_size", 0) or 0
+                if file_size > 20 * 1024 * 1024:  # 20MB limit
+                    log_warning(
+                        f"[multimodal] Video too large for inline upload: {file_size} bytes"
+                    )
+                else:
+                    try:
+                        file = await bot.get_file(video.file_id)
+                        file_bytes = await file.download_as_bytearray()
+
+                        attachments.append(
+                            {
+                                "mime_type": mime_type,
+                                "data": encode_bytes_to_base64(bytes(file_bytes)),
+                                "filename": video.file_name
+                                or f"video_{video.file_unique_id}.mp4",
+                            }
+                        )
+                        log_debug(
+                            f"[multimodal] Extracted Telegram video: {video.file_unique_id} ({mime_type})"
+                        )
+                    except Exception as e:
+                        log_warning(
+                            f"[multimodal] Failed to download Telegram video: {e}"
+                        )
+            else:
+                log_debug(f"[multimodal] Skipping unsupported video type: {mime_type}")
+
+        # Handle video notes (round videos) - these are small circular videos
         if message.video_note:
-            # Video notes are not directly supported, but we could extract a frame
-            log_debug("[multimodal] Video notes not supported for multimodal input")
+            video_note = message.video_note
+            # Video notes are always mp4, and typically small (up to 1 minute)
+            file_size = getattr(video_note, "file_size", 0) or 0
+            if file_size <= 20 * 1024 * 1024:  # 20MB limit
+                try:
+                    file = await bot.get_file(video_note.file_id)
+                    file_bytes = await file.download_as_bytearray()
+
+                    attachments.append(
+                        {
+                            "mime_type": "video/mp4",
+                            "data": encode_bytes_to_base64(bytes(file_bytes)),
+                            "filename": f"video_note_{video_note.file_unique_id}.mp4",
+                        }
+                    )
+                    log_debug(
+                        f"[multimodal] Extracted Telegram video note: {video_note.file_unique_id}"
+                    )
+                except Exception as e:
+                    log_warning(
+                        f"[multimodal] Failed to download Telegram video note: {e}"
+                    )
+            else:
+                log_debug(f"[multimodal] Video note too large: {file_size} bytes")
 
         # Handle stickers (as images if static)
         if (

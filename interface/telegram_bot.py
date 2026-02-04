@@ -145,6 +145,21 @@ def get_trainer_id() -> Optional[int]:
     return _interface_registry.get_trainer_id("telegram_bot")
 
 
+class MessageWrapper:
+    """Thin wrapper to add extra attributes to immutable Telegram message objects."""
+
+    def __init__(self, message, **extra_attrs):
+        self._message = message
+        self._extra = extra_attrs
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            return object.__getattribute__(self, name)
+        if name in self._extra:
+            return self._extra[name]
+        return getattr(self._message, name)
+
+
 say_sessions = {}
 context_memory = {}
 last_selected_chat = {}
@@ -731,6 +746,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     wake_triggers = ["hey 2b", "hey b", "2b", "yo 2b", "hi 2b"]
     is_wake_word = any(t in text_lower for t in wake_triggers)
 
+    # Flag for prompt engine to skip aggressive memory search on wake/sleep commands
+    is_wake_sleep_command = should_sleep or is_wake_word
+
     # Mentions also wake up
     is_mention = False
     if bot_username and f"@{bot_username.lower()}" in text_lower:
@@ -939,9 +957,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         log_debug("🔴 [PRIORITY 4] Calling message_queue.enqueue now...")
 
+        # Wrap message to add wake/sleep flag for prompt engine
+        wrapped_message = MessageWrapper(
+            message, is_wake_sleep_command=is_wake_sleep_command
+        )
+
         await message_queue.enqueue(
             context.bot,
-            message,
+            wrapped_message,
             interface_id="telegram_bot",
             original_message=message,
             skip_mention_check=directed,

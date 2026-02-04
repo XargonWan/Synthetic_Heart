@@ -56,10 +56,18 @@ class TestSupportedTypes:
         assert is_supported_type("text/plain")
         assert is_supported_type("application/json")
 
+    def test_supported_video_types(self):
+        """Test that common video types are supported."""
+        assert is_supported_type("video/mp4")
+        assert is_supported_type("video/mpeg")
+        assert is_supported_type("video/webm")
+        assert is_supported_type("video/quicktime")
+        assert is_supported_type("video/3gpp")
+
     def test_unsupported_types(self):
         """Test that unsupported types return False."""
-        assert not is_supported_type("video/mp4")
         assert not is_supported_type("application/octet-stream")
+        assert not is_supported_type("application/zip")
 
 
 class TestBase64Encoding:
@@ -96,6 +104,7 @@ class TestTelegramExtraction:
         mock_message.document = None
         mock_message.audio = None
         mock_message.voice = None
+        mock_message.video = None
         mock_message.video_note = None
         mock_message.sticker = None
         mock_message.chat = MagicMock(id=123, type="private")
@@ -107,6 +116,39 @@ class TestTelegramExtraction:
         assert attachments[0]["mime_type"] == "image/jpeg"
         assert attachments[0]["filename"].startswith("photo_")
         assert attachments[0]["data"] == encode_bytes_to_base64(b"fake_image_data")
+
+    @pytest.mark.asyncio
+    async def test_extract_video_from_telegram(self):
+        """Test extracting a video from a Telegram message."""
+        mock_bot = AsyncMock()
+        mock_file = AsyncMock()
+        mock_file.download_as_bytearray = AsyncMock(
+            return_value=bytearray(b"fake_video_data")
+        )
+        mock_bot.get_file = AsyncMock(return_value=mock_file)
+
+        mock_video = MagicMock()
+        mock_video.file_id = "test_video_id"
+        mock_video.file_unique_id = "test_unique_video_id"
+        mock_video.file_name = "video.mp4"
+        mock_video.mime_type = "video/mp4"
+        mock_video.file_size = 1024 * 1024  # 1MB - under limit
+
+        mock_message = MagicMock()
+        mock_message.photo = None
+        mock_message.document = None
+        mock_message.audio = None
+        mock_message.voice = None
+        mock_message.video = mock_video
+        mock_message.video_note = None
+        mock_message.sticker = None
+        mock_message.chat = MagicMock(id=123, type="private")
+
+        attachments = await extract_multimodal_from_telegram(mock_bot, mock_message)
+
+        assert len(attachments) == 1
+        assert attachments[0]["mime_type"] == "video/mp4"
+        assert attachments[0]["data"] == encode_bytes_to_base64(b"fake_video_data")
 
     @pytest.mark.asyncio
     async def test_extract_document_from_telegram(self):
@@ -129,6 +171,7 @@ class TestTelegramExtraction:
         mock_message.document = mock_doc
         mock_message.audio = None
         mock_message.voice = None
+        mock_message.video = None
         mock_message.video_note = None
         mock_message.sticker = None
         mock_message.chat = MagicMock(id=123, type="private")
@@ -152,6 +195,7 @@ class TestTelegramExtraction:
         mock_message.document = None
         mock_message.audio = None
         mock_message.voice = None
+        mock_message.video = None
         mock_message.video_note = None
         mock_message.sticker = None
         mock_message.chat = MagicMock(id=456, type="group")
@@ -191,11 +235,31 @@ class TestDiscordExtraction:
         assert attachments[0]["data"] == encode_bytes_to_base64(b"fake_png_data")
 
     @pytest.mark.asyncio
-    async def test_skip_unsupported_attachment(self):
-        """Test that unsupported attachments are skipped."""
+    async def test_extract_video_from_discord(self):
+        """Test extracting a video from a Discord message."""
         mock_attachment = AsyncMock()
         mock_attachment.content_type = "video/mp4"
         mock_attachment.filename = "video.mp4"
+        mock_attachment.read = AsyncMock(return_value=b"fake_video_data")
+
+        mock_message = MagicMock()
+        mock_message.attachments = [mock_attachment]
+        mock_message.embeds = []
+        mock_message.guild = None  # Private channel
+
+        attachments = await extract_multimodal_from_discord(mock_message)
+
+        assert len(attachments) == 1
+        assert attachments[0]["mime_type"] == "video/mp4"
+        assert attachments[0]["filename"] == "video.mp4"
+        assert attachments[0]["data"] == encode_bytes_to_base64(b"fake_video_data")
+
+    @pytest.mark.asyncio
+    async def test_skip_unsupported_attachment(self):
+        """Test that unsupported attachments are skipped."""
+        mock_attachment = AsyncMock()
+        mock_attachment.content_type = "application/zip"
+        mock_attachment.filename = "archive.zip"
 
         mock_message = MagicMock()
         mock_message.attachments = [mock_attachment]

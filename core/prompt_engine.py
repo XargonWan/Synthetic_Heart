@@ -979,9 +979,14 @@ async def build_json_prompt(
     # Memory-search “testflight”: ensure ALL runtime prompts (build_json_prompt) include
     # a strong instruction to call the `memory_search` action when uncertain.
     # (Previously this existed only in build_prompt(), which is not used by the main chain.)
+    # SKIP for wake/sleep commands - these are simple greetings, not memory queries.
+    is_wake_sleep = getattr(message, "is_wake_sleep_command", False)
     try:
-        if bool(
-            config_registry.get_value("ENABLE_MEMORY_SEARCH", True, value_type=bool)
+        if (
+            bool(
+                config_registry.get_value("ENABLE_MEMORY_SEARCH", True, value_type=bool)
+            )
+            and not is_wake_sleep
         ):
             memory_search_instr = (
                 "MANDATORY: If you do NOT have enough information to answer the user, or you are unsure, DO NOT ANSWER DIRECTLY. "
