@@ -362,6 +362,7 @@ class SynthWebUIInterface:
         # Run component actions on demand (e.g., Run Now button)
         self.app.post("/api/components/run")(self.run_component)
         self.app.get("/api/logchat/info")(self.get_logchat_info)
+        self.app.get("/api/about")(self.about_summary)
         self.app.get("/api/diary")(self.diary_summary)
         self.app.post("/api/diary/archive")(self.archive_diary_entries)
         self.app.post("/api/diary/unarchive")(self.unarchive_diary_entries)
@@ -438,6 +439,17 @@ class SynthWebUIInterface:
         # Template sections route for modular loading
         self.app.get("/templates/{section}.html")(self.serve_template_section)
 
+    def _is_missing_agent_table_error(self, exc: Exception) -> bool:
+        """Return True when agent tables are missing so endpoints can degrade gracefully."""
+        msg = str(exc).lower()
+        return (
+            "no such table" in msg
+            or "doesn't exist" in msg
+            or "does not exist" in msg
+            or "unknown table" in msg
+            or "undefinedtable" in msg
+        )
+
     # --- Agent endpoints ---
     async def list_agent_tasks(self, limit: int = 50):
         try:
@@ -451,6 +463,9 @@ class SynthWebUIInterface:
                         tasks.append({"id": r[0], "engine": r[1], "status": r[2], "created_at": r[3].isoformat() if r[3] else None, "updated_at": r[4].isoformat() if r[4] else None})
                     return JSONResponse({"tasks": tasks})
         except Exception as e:
+            if self._is_missing_agent_table_error(e):
+                log_warning(f"{LOG_PREFIX} list_agent_tasks: agent_tasks table missing, returning empty list")
+                return JSONResponse({"tasks": []})
             log_error(f"{LOG_PREFIX} list_agent_tasks failed: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -588,6 +603,9 @@ class SynthWebUIInterface:
                         })
                     return JSONResponse({"proposals": proposals})
         except Exception as e:
+            if self._is_missing_agent_table_error(e):
+                log_warning(f"{LOG_PREFIX} list_agent_proposals: agent_activity_log table missing, returning empty list")
+                return JSONResponse({"proposals": []})
             log_error(f"{LOG_PREFIX} list_agent_proposals failed: {e}")
             raise HTTPException(status_code=500, detail=str(e))
         # Register as an interface only when autostart is enabled.
@@ -970,6 +988,39 @@ class SynthWebUIInterface:
     async def stats(self):
         uptime = int((datetime.utcnow() - self.start_time).total_seconds())
         return JSONResponse({"uptime": uptime, "sessions": len(self.connections)})
+
+    async def about_summary(self) -> JSONResponse:
+        """Return lightweight About tab metadata (uptime, system, and component counts)."""
+        uptime = int((datetime.utcnow() - self.start_time).total_seconds())
+        sessions = len(self.connections)
+        python_version = platform.python_version()
+        platform_label = os.getenv("SYNTH_HOST_OS") or platform.platform()
+        database_label = os.getenv("SYNTH_DB_TYPE", os.getenv("DB_TYPE", "unknown"))
+        version = os.getenv("SYNTH_VERSION", self.app.version)
+        components_count = 0
+        try:
+            from core.core_initializer import PLUGIN_REGISTRY, INTERFACE_REGISTRY
+            from core.llm_registry import get_llm_registry
+
+            components_count += len(PLUGIN_REGISTRY)
+            components_count += len(INTERFACE_REGISTRY)
+            try:
+                components_count += len(get_llm_registry().get_available_engines())
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        return JSONResponse({
+            "uptime": uptime,
+            "sessions": sessions,
+            "components": components_count,
+            "messages_today": None,
+            "version": version,
+            "python": python_version,
+            "platform": platform_label,
+            "database": database_label,
+        })
 
     async def db_pool_debug(self, request: Request):
         """Return debug information about the DB connection pool.

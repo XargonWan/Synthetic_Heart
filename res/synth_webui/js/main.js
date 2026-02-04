@@ -31,20 +31,20 @@
                 children.forEach(n => panel.appendChild(n));
             }
 
-            // Execute scripts in the inserted content
-            const scripts = panel.querySelectorAll('script');
-            for (const old of Array.from(scripts)) {
+            // Execute scripts in the inserted content (preserve order)
+            const scripts = Array.from(panel.querySelectorAll('script'));
+            for (const old of scripts) {
                 const el = document.createElement('script');
+                if (old.type) el.type = old.type;
                 if (old.src) {
                     el.src = old.src;
-                    if (old.type) el.type = old.type;
-                    // Preserve module attribute
-                    document.body.appendChild(el);
+                    el.async = false;
+                    await new Promise((resolve) => {
+                        el.onload = () => resolve();
+                        el.onerror = () => resolve();
+                        document.body.appendChild(el);
+                    });
                 } else {
-                    // For inline module scripts, ensure type preserved
-                    if (old.type === 'module') {
-                        el.type = 'module';
-                    }
                     el.textContent = old.textContent;
                     document.body.appendChild(el);
                 }
@@ -72,26 +72,7 @@
     window.SynthWebUI = window.SynthWebUI || {};
     window.SynthWebUI.loadSection = loadSection;
 
-    // Attach to nav buttons: load section on first activation
     document.addEventListener('DOMContentLoaded', () => {
-        document.querySelectorAll('.nav-btn[data-tab]').forEach(btn => {
-            btn.addEventListener('click', async (ev) => {
-                const tab = btn.getAttribute('data-tab');
-                if (!tab) return;
-                try {
-                    // Persist and expose active tab globally for other modules
-                    try { window.activeTab = tab; if (localStorage && localStorage.setItem) localStorage.setItem(TAB_KEY, tab); } catch (e) { /* ignore */ }
-                    await loadSection(tab);
-                } catch (e) { /* ignore */ }
-            });
-        });
-
-        // Load the initial active tab content on first render
-        try {
-            const initialTab = (document.querySelector && document.querySelector('.nav-btn.active') && document.querySelector('.nav-btn.active').getAttribute('data-tab')) || 'home';
-            loadSection(initialTab);
-        } catch (e) { /* ignore */ }
-
         // DIAGNOSTICS: capture top-level clicks and report overlay/pointer state to console.
         try {
             setTimeout(() => {
@@ -365,17 +346,21 @@ try {
         // available.
         async function refreshConfig() {
             try {
-                if (!configGeneralList || !configAdvancedList) return;
+                const configGeneralListEl = document.getElementById('config-general-list');
+                const configAdvancedListEl = document.getElementById('config-advanced-list');
+                const configDisclaimerEl = document.getElementById('config-env-disclaimer');
+                const configAdvancedWarningEl = document.getElementById('config-advanced-warning');
+                if (!configGeneralListEl || !configAdvancedListEl) return;
                 const response = await fetch('/api/config');
                 if (!response.ok) throw new Error('HTTP ' + response.status);
                 const payload = await response.json();
                 const items = Array.isArray(payload.items) ? payload.items : [];
 
-                if (payload.messages && configDisclaimer) {
-                    if (payload.messages.env_override) configDisclaimer.textContent = payload.messages.env_override;
+                if (payload.messages && configDisclaimerEl) {
+                    if (payload.messages.env_override) configDisclaimerEl.textContent = payload.messages.env_override;
                 }
-                if (payload.messages && configAdvancedWarning) {
-                    if (payload.messages.advanced_warning) configAdvancedWarning.textContent = payload.messages.advanced_warning;
+                if (payload.messages && configAdvancedWarningEl) {
+                    if (payload.messages.advanced_warning) configAdvancedWarningEl.textContent = payload.messages.advanced_warning;
                 }
 
                 const renderList = (list, container) => {
@@ -457,12 +442,14 @@ try {
 
                 const general = items.filter((item) => !item.advanced);
                 const advanced = items.filter((item) => item.advanced);
-                renderList(general, configGeneralList);
-                renderList(advanced, configAdvancedList);
+                renderList(general, configGeneralListEl);
+                renderList(advanced, configAdvancedListEl);
             } catch (e) {
                 console.error('[synth_webui] Failed to load configuration', e);
-                if (configGeneralList) configGeneralList.innerHTML = '<div class="meta">Failed to load configuration.</div>';
-                if (configAdvancedList) configAdvancedList.innerHTML = '<div class="meta">Failed to load configuration.</div>';
+                const configGeneralListEl = document.getElementById('config-general-list');
+                const configAdvancedListEl = document.getElementById('config-advanced-list');
+                if (configGeneralListEl) configGeneralListEl.innerHTML = '<div class="meta">Failed to load configuration.</div>';
+                if (configAdvancedListEl) configAdvancedListEl.innerHTML = '<div class="meta">Failed to load configuration.</div>';
             }
         }
         window.refreshConfig = window.refreshConfig || refreshConfig;
@@ -475,13 +462,17 @@ try {
 
             async function loadComponentsSummary() {
                 try {
-                    if (!componentsLLMList || !componentsInterfacesList || !componentsPluginsList) return;
+                    const componentsLLMSummaryEl = document.getElementById('components-llm-summary');
+                    const componentsLLMListEl = document.getElementById('components-llm-list');
+                    const componentsInterfacesListEl = document.getElementById('components-interfaces-list');
+                    const componentsPluginsListEl = document.getElementById('components-plugins-list');
+                    if (!componentsLLMListEl || !componentsInterfacesListEl || !componentsPluginsListEl) return;
                     const res = await fetch('/api/components');
                     if (!res.ok) throw new Error('HTTP ' + res.status);
                     const data = await res.json();
 
-                    if (componentsLLMSummary && data.llm) {
-                        componentsLLMSummary.textContent = `Active engine: ${data.llm.active || '—'}`;
+                    if (componentsLLMSummaryEl && data.llm) {
+                        componentsLLMSummaryEl.textContent = `Active engine: ${data.llm.active || '—'}`;
                     }
 
                     const renderDetailsList = (items, container) => {
@@ -496,15 +487,23 @@ try {
                         items.forEach((item) => {
                             const details = document.createElement('details');
                             details.className = 'component-item';
+                            details.open = true;
                             const summary = document.createElement('summary');
+                            const summaryMain = document.createElement('span');
+                            summaryMain.className = 'component-summary-main';
                             const name = document.createElement('span');
+                            name.className = 'component-name';
                             name.textContent = item.display_name || item.name || 'Component';
-                            summary.appendChild(name);
+                            summaryMain.appendChild(name);
+                            summary.appendChild(summaryMain);
+
+                            const summaryActions = document.createElement('span');
+                            summaryActions.className = 'component-summary-actions';
                             const status = document.createElement('span');
                             status.className = 'component-status component-status-' + (item.status || 'unknown');
                             status.textContent = item.status || 'unknown';
-                            status.style.marginLeft = 'auto';
-                            summary.appendChild(status);
+                            summaryActions.appendChild(status);
+                            summary.appendChild(summaryActions);
                             details.appendChild(summary);
 
                             const desc = document.createElement('div');
@@ -515,14 +514,17 @@ try {
                         });
                     };
 
-                    renderDetailsList(data.llm && data.llm.engines ? data.llm.engines : [], componentsLLMList);
-                    renderDetailsList(data.interfaces || [], componentsInterfacesList);
-                    renderDetailsList(data.plugins || [], componentsPluginsList);
+                    renderDetailsList(data.llm && data.llm.engines ? data.llm.engines : [], componentsLLMListEl);
+                    renderDetailsList(data.interfaces || [], componentsInterfacesListEl);
+                    renderDetailsList(data.plugins || [], componentsPluginsListEl);
                 } catch (e) {
                     console.error('[synth_webui] Failed to load components', e);
-                    if (componentsLLMList) componentsLLMList.innerHTML = '<div class="meta">Failed to load components.</div>';
-                    if (componentsInterfacesList) componentsInterfacesList.innerHTML = '<div class="meta">Failed to load components.</div>';
-                    if (componentsPluginsList) componentsPluginsList.innerHTML = '<div class="meta">Failed to load components.</div>';
+                    const componentsLLMListEl = document.getElementById('components-llm-list');
+                    const componentsInterfacesListEl = document.getElementById('components-interfaces-list');
+                    const componentsPluginsListEl = document.getElementById('components-plugins-list');
+                    if (componentsLLMListEl) componentsLLMListEl.innerHTML = '<div class="meta">Failed to load components.</div>';
+                    if (componentsInterfacesListEl) componentsInterfacesListEl.innerHTML = '<div class="meta">Failed to load components.</div>';
+                    if (componentsPluginsListEl) componentsPluginsListEl.innerHTML = '<div class="meta">Failed to load components.</div>';
                 }
             }
 
@@ -587,12 +589,18 @@ try {
                     });
                 }
 
-                // Restore last active tab
+                // Restore last active tab and load its section once.
                 try {
                     const saved = (localStorage && localStorage.getItem && localStorage.getItem('synth-webui-active-tab')) || 'home';
                     setActiveTab(saved);
+                    if (window.SynthWebUI && typeof window.SynthWebUI.loadSection === 'function') {
+                        window.SynthWebUI.loadSection(saved);
+                    }
                 } catch (e) {
                     setActiveTab('home');
+                    if (window.SynthWebUI && typeof window.SynthWebUI.loadSection === 'function') {
+                        window.SynthWebUI.loadSection('home');
+                    }
                 }
             }
 
@@ -830,11 +838,67 @@ try {
                 window.__synth_logs_initialized = true;
             }
 
+            async function initAboutTab() {
+                if (window.__synth_about_initialized) return;
+                const uptimeEl = document.getElementById('stats-uptime');
+                const sessionsEl = document.getElementById('stats-sessions');
+                const componentsEl = document.getElementById('stats-components');
+                const messagesEl = document.getElementById('stats-messages');
+                const versionEl = document.getElementById('system-version');
+                const pythonEl = document.getElementById('system-python');
+                const platformEl = document.getElementById('system-platform');
+                const databaseEl = document.getElementById('system-database');
+                if (!uptimeEl && !sessionsEl && !versionEl) return;
+
+                try {
+                    const res = await fetch('/api/about');
+                    if (res.ok) {
+                        const data = await res.json();
+                        if (uptimeEl && data.uptime !== undefined) uptimeEl.textContent = formatUptime(data.uptime);
+                        if (sessionsEl && data.sessions !== undefined) sessionsEl.textContent = String(data.sessions);
+                        if (componentsEl && data.components !== undefined) componentsEl.textContent = String(data.components);
+                        if (messagesEl && data.messages_today !== undefined && data.messages_today !== null) messagesEl.textContent = String(data.messages_today);
+                        if (versionEl && data.version) versionEl.textContent = data.version;
+                        if (pythonEl && data.python) pythonEl.textContent = data.python;
+                        if (platformEl && data.platform) platformEl.textContent = data.platform;
+                        if (databaseEl && data.database) databaseEl.textContent = data.database;
+                    }
+                } catch (e) {
+                    console.warn('[synth_webui] about load failed', e);
+                }
+
+                try {
+                    if (componentsEl && (!componentsEl.textContent || componentsEl.textContent === '--')) {
+                        const res = await fetch('/api/components');
+                        if (res.ok) {
+                            const payload = await res.json();
+                            const total = (payload.llm && payload.llm.engines ? payload.llm.engines.length : 0)
+                                + (payload.interfaces ? payload.interfaces.length : 0)
+                                + (payload.plugins ? payload.plugins.length : 0);
+                            componentsEl.textContent = String(total);
+                        }
+                    }
+                } catch (e) { /* ignore */ }
+
+                window.__synth_about_initialized = true;
+            }
+
+            function formatUptime(seconds) {
+                const total = Number(seconds) || 0;
+                const days = Math.floor(total / 86400);
+                const hours = Math.floor((total % 86400) / 3600);
+                const minutes = Math.floor((total % 3600) / 60);
+                if (days > 0) return `${days}d ${hours}h ${minutes}m`;
+                if (hours > 0) return `${hours}h ${minutes}m`;
+                return `${minutes}m`;
+            }
+
             window.SynthWebUI = window.SynthWebUI || {};
             window.SynthWebUI.initHomeTab = initHomeTab;
             window.SynthWebUI.initSettingsTab = initSettingsTab;
             window.SynthWebUI.initComponentsTab = initComponentsTab;
             window.SynthWebUI.initLogsTab = initLogsTab;
+            window.SynthWebUI.initAboutTab = initAboutTab;
 
             document.addEventListener('DOMContentLoaded', () => {
                 setupNavigation();

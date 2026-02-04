@@ -6064,7 +6064,10 @@ import * as THREE from 'three';
                 } catch (e) { /* ignore */ }
             })();
 
-            // Diary functionality
+            // Diary functionality (legacy diary tab). Guard against missing elements
+            // since history is now loaded from section templates.
+            const diarySearchEl = document.getElementById('diary-search');
+            if (diarySearchEl) {
             let diaryEntries = [];
             let selectedEntries = new Set();
 
@@ -6261,7 +6264,7 @@ import * as THREE from 'three';
             // Event listeners for diary functionality
             // Search functionality - reload entries when search changes
             let searchTimeout;
-            document.getElementById('diary-search').addEventListener('input', function() {
+            diarySearchEl.addEventListener('input', function() {
                 clearTimeout(searchTimeout);
                 searchTimeout = setTimeout(() => {
                     currentPage = 1; // Reset to first page when searching
@@ -6364,9 +6367,12 @@ import * as THREE from 'three';
             });
 
             // Load diary entries when diary tab becomes active
-            document.querySelector('[data-tab="diary"]').addEventListener('click', function() {
-                setTimeout(loadDiaryEntries, 100); // Small delay to ensure tab is visible
-            });
+            const diaryTabBtn = document.querySelector('[data-tab="diary"]');
+            if (diaryTabBtn) {
+                diaryTabBtn.addEventListener('click', function() {
+                    setTimeout(loadDiaryEntries, 100); // Small delay to ensure tab is visible
+                });
+            }
             
             // Pagination controls
             document.getElementById('entries-per-page').addEventListener('change', function() {
@@ -6414,6 +6420,7 @@ import * as THREE from 'three';
                     }, 500);
                 }
             });
+            }
         }
 
         // Chat drag functionality (use pointer events for parity with debug window)

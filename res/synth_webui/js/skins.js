@@ -3,7 +3,18 @@
     'use strict';
     async function initSkinsTab() {
         try {
-            // placeholder for skins tab initialization
+            if (typeof window.fetchSkins === 'function') {
+                window.fetchSkins();
+            }
+            const clearBtn = document.getElementById('clear-uploaded');
+            if (clearBtn && !clearBtn.dataset.bound) {
+                clearBtn.addEventListener('click', () => {
+                    if (typeof window.clearUploadedSkins === 'function') {
+                        window.clearUploadedSkins();
+                    }
+                });
+                clearBtn.dataset.bound = '1';
+            }
             console.debug('[skins] init');
         } catch (e) { console.error('[skins] init failed', e); }
     }

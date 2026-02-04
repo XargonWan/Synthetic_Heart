@@ -195,7 +195,62 @@
             align-items: center;
             justify-content: center;
         }
-        .home-vrm { width: 100%; height: 100%; }
+        .home-vrm {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            border: none;
+        }
+        .chat-toggle-btn {
+            position: absolute;
+            top: clamp(1.2rem, 2vw, 1.6rem);
+            right: clamp(1.2rem, 2vw, 1.6rem);
+            z-index: 50;
+            width: 56px;
+            height: 56px;
+            border-radius: 50%;
+            border: 2px solid var(--border);
+            background: rgba(12, 12, 20, 0.95);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            color: var(--accent);
+            font-size: 1.5rem;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+            transition: all 0.25s ease;
+        }
+        .chat-toggle-btn:hover {
+            transform: scale(1.1);
+            background: rgba(255, 107, 214, 0.15);
+            border-color: var(--accent);
+            box-shadow: 0 12px 32px rgba(255, 107, 214, 0.4);
+        }
+        .chat-toggle-btn:active {
+            transform: scale(0.95);
+        }
+        .home-vrm canvas {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+        .home-vrm-overlay {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            pointer-events: none;
+            color: rgba(245, 245, 255, 0.6);
+            font-size: 0.95rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
         .settings-grid {
             display: flex;
             flex-wrap: wrap;
@@ -240,6 +295,209 @@
             grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
             gap: 1rem;
             margin-top: 1rem;
+        }
+        .skin-card {
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 1rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+        .skin-preview {
+            width: 100%;
+            height: 160px;
+            border-radius: 12px;
+            background: rgba(12, 12, 20, 0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+        }
+        .skin-preview img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        .skin-meta {
+            color: var(--text-soft);
+            font-size: 0.85rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+        }
+        .skin-actions {
+            display: flex;
+            gap: 0.5rem;
+        }
+        .btn-primary {
+            background: var(--accent);
+            border: none;
+            color: #07070c;
+            padding: 0.5rem 0.9rem;
+            border-radius: 10px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .btn-primary:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .components-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+        details.component-item {
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 0.75rem 1rem;
+            transition: background 0.2s ease, border 0.2s ease;
+        }
+        details.component-item[open] {
+            background: rgba(255, 255, 255, 0.06);
+        }
+        details.component-item summary {
+            list-style: none;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.8rem;
+            cursor: pointer;
+            font-weight: 600;
+        }
+        details.component-item summary::-webkit-details-marker {
+            display: none;
+        }
+        .component-summary-main {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            flex: 1 1 auto;
+            min-width: 0;
+        }
+        .component-summary-actions {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            flex: 0 0 auto;
+        }
+        .component-name {
+            flex: 1 1 auto;
+        }
+        .component-status {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.09em;
+            border: 1px solid rgba(255, 255, 255, 0.25);
+            border-radius: 999px;
+            padding: 0.15rem 0.55rem;
+        }
+        .component-status-success {
+            color: var(--success);
+            border-color: rgba(24, 201, 140, 0.4);
+        }
+        .component-status-failed {
+            color: var(--error);
+            border-color: rgba(255, 123, 147, 0.5);
+        }
+        .component-status-loading {
+            color: var(--warn);
+            border-color: rgba(243, 192, 77, 0.5);
+        }
+        .component-status-unknown {
+            color: var(--text-soft);
+            border-color: rgba(255, 255, 255, 0.2);
+        }
+        .component-description {
+            margin: 0.6rem 0;
+            color: var(--text-soft);
+        }
+        .component-details {
+            font-size: 0.85rem;
+            color: var(--text-soft);
+        }
+        .component-error {
+            font-size: 0.85rem;
+            color: var(--error);
+        }
+        .config-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.45rem;
+        }
+        .config-row {
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+            padding: 0.45rem 0.6rem;
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.03);
+        }
+        .config-label-line {
+            display: flex;
+            align-items: center;
+            gap: 0.45rem;
+            font-weight: 600;
+        }
+        .config-description {
+            color: var(--text-soft);
+            font-size: 0.85rem;
+        }
+        .config-input {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+        }
+        .config-input input,
+        .config-input select {
+            flex: 1;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            background: rgba(12, 12, 20, 0.58);
+            color: var(--text);
+            padding: 0.35rem 0.6rem;
+            font-size: 0.9rem;
+        }
+        .config-input input:disabled {
+            opacity: 0.55;
+            cursor: not-allowed;
+        }
+        .toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.6rem;
+            cursor: pointer;
+            font-size: 0.95rem;
+        }
+        .toggle input {
+            width: 1em;
+            height: 1em;
+            accent-color: var(--accent);
+        }
+        .status-chip {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.45rem 0.9rem;
+            border-radius: 999px;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            font-size: 0.85rem;
+            color: var(--text-soft);
+        }
+        .status-chip[data-tone="success"] {
+            color: var(--success);
+            border-color: rgba(24, 201, 140, 0.4);
+        }
+        .status-chip[data-tone="warn"] {
+            color: var(--warn);
+            border-color: rgba(243, 192, 77, 0.4);
+        }
+        .status-chip[data-tone="error"] {
+            color: var(--error);
+            border-color: rgba(255, 123, 147, 0.4);
         }
         .logs-wrapper {
             background: var(--surface);

@@ -133,6 +133,7 @@ Mate-Engine:
 - ``GET /api/animations/uploads`` – List temporary animation uploads
 - ``DELETE /api/animations/uploads/{upload_id}`` – Remove a temporary upload
 - ``POST /api/animations/promote`` – Promote a temporary upload into a skin
+- ``GET /api/about`` – About summary payload (uptime, sessions, system info)
 - ``GET /api/prompt_override`` – Interface prompt injection/override hints
 - ``POST /api/integrations/messages`` – Generic integration message endpoint. Body: ``{source, type, payload, metadata}``. ``type=chat`` is forwarded to the message chain; other types are stored for retrieval.
 - ``GET /api/integrations/outbox?source=<source>`` – Retrieve queued messages for a given integration source (clears the queue on read). Use ``source=mate`` for Mate Engine clients.
