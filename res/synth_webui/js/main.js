@@ -322,7 +322,16 @@ try {
                 // Restore typing indicator if server indicates processing
                 (async () => {
                     try {
-                        if (!sessionId) return;
+                        // If sessionId is not yet available, retry a few times to allow initialization ordering
+                        if (!sessionId) {
+                            try {
+                                restoreChatState._retry = (restoreChatState._retry || 0) + 1;
+                            } catch (e) { /* ignore */ }
+                            if ((restoreChatState._retry || 0) <= 10) {
+                                setTimeout(() => { try { restoreChatState(); } catch (e) {} }, 200);
+                            }
+                            return;
+                        }
                         const res = await fetch('/api/chat/session_meta?session_id=' + encodeURIComponent(sessionId));
                         if (!res.ok) return;
                         const out = await res.json();
@@ -873,6 +882,21 @@ try {
 
                 if (chatToggleBtn) chatToggleBtn.addEventListener('click', showChat);
                 if (chatMinBtn) chatMinBtn.addEventListener('click', hideChat);
+                // Some templates may replace DOM nodes after setup; add a delegated click handler
+                // to ensure maximize works even if the button is replaced dynamically.
+                if (!window.__synth_chat_controls_bound) {
+                    window.addEventListener('click', (ev) => {
+                        try {
+                            const t = ev.target || ev.srcElement;
+                            if (!t) return;
+                            if (t.id === 'chat-maximize' || (t.closest && t.closest && t.closest('#chat-maximize'))) {
+                                toggleMaximize();
+                            }
+                        } catch (e) { /* ignore */ }
+                    }, true);
+                    window.__synth_chat_controls_bound = true;
+                }
+                // Also bind directly to the button if present to ensure immediate responsiveness
                 if (chatMaxBtn) chatMaxBtn.addEventListener('click', toggleMaximize);
             }
 

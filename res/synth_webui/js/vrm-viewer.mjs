@@ -2228,18 +2228,34 @@ import * as THREE from 'three';
                         console.log(`[AnimationHandler] Fetching descriptor from ${descriptorPath}`);
                         const response = await fetch(descriptorPath);
                         if (!response.ok) {
-                            // Missing descriptor is valid: treat as simple looping animation until state changes.
-                            this.loadedDescriptors[descriptorPath] = null;
-                            return null;
+                            // Missing descriptor is valid: treat as a sensible implicit descriptor
+                            const implicit = { play_once: (String(actionName || '').toLowerCase() === 'idle') ? false : true };
+                            this.loadedDescriptors[descriptorPath] = implicit;
+                            return implicit;
                         }
 
-                        const descriptor = await response.json();
-                        this.loadedDescriptors[descriptorPath] = descriptor;
-                        console.log(`[AnimationHandler] Loaded descriptor for ${animationFile}:`, descriptor);
-                        return descriptor;
+                        try {
+                            const descriptor = await response.json();
+                            this.loadedDescriptors[descriptorPath] = descriptor;
+                            console.log(`[AnimationHandler] Loaded descriptor for ${animationFile}:`, descriptor);
+                            return descriptor;
+                        } catch (err) {
+                            // Malformed JSON: log, cache an implicit descriptor and continue
+                            console.warn(`[AnimationHandler] Descriptor JSON malformed for ${animationFile}:`, err);
+                            const implicit = { play_once: (String(actionName || '').toLowerCase() === 'idle') ? false : true };
+                            this.loadedDescriptors[descriptorPath] = implicit;
+                            return implicit;
+                        }
                     } catch (error) {
                         console.warn(`[AnimationHandler] Failed to load descriptor for ${animationFile}:`, error);
-                        return null;
+                        // On network or other failures fall back to implicit descriptor to avoid blocking playback.
+                        try {
+                            const implicit = { play_once: (String(actionName || '').toLowerCase() === 'idle') ? false : true };
+                            if (descriptorPath) this.loadedDescriptors[descriptorPath] = implicit;
+                            return implicit;
+                        } catch (e) {
+                            return null;
+                        }
                     }
                 }
 
@@ -2891,7 +2907,24 @@ import * as THREE from 'three';
                         if (animationFile) {
                             const clipReady = await this._awaitAnimationReady(actionName, animationFile, 5000);
                             if (!clipReady) {
-                                console.warn('[AnimationHandler] Cannot play (preload failed). Keeping previous animation:', actionName, animationFile);
+                                console.warn('[AnimationHandler] Cannot play (preload failed). Falling back to minimal animation state:', actionName, animationFile);
+                                // Apply a minimal animation state so UI can reflect the requested action even if the clip failed to preload.
+                                try {
+                                    this.currentActionName = actionName;
+                                    this.currentActionPhase = playOnce ? 'clip' : 'loop';
+                                    const minimalState = {
+                                        action: (actionName || '').toString().toLowerCase(),
+                                        phase: this.currentActionPhase,
+                                        animation: animationFile || null,
+                                        descriptor: null,
+                                        clip: { fps: 30 },
+                                        timing: { started_at: new Date().toISOString(), time_in_clip: 0.0, current_frame: 0 },
+                                        source: 'startAction_fallback'
+                                    };
+                                    if (typeof this.applyAnimationState === 'function') {
+                                        try { this.applyAnimationState(minimalState); } catch (e) { /* ignore */ }
+                                    }
+                                } catch (e) { /* ignore */ }
                                 return;
                             }
                         }

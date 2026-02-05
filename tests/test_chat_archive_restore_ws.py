@@ -218,14 +218,22 @@ async def test_archive_clears_processing_meta():
 
     # Patch DB and cache calls
     with patch('core.chat_history_cache.load_chat_history', AsyncMock(return_value=[])), \
-         patch('core.chat_archives_db.create_archive', AsyncMock(return_value={'id': 'arch-meta-id', 'path': '/tmp/arch'})), \
+         patch('core.chat_archives_db.create_archive', AsyncMock(return_value={'id': 'arch-meta-id', 'path': '/tmp/arch'})) as mock_create, \
          patch('core.chat_history_cache.clear_chat_history', AsyncMock()), \
          patch('core.chat_context_manager.clear_chat_context', AsyncMock()), \
          patch('core.session_meta.set_session_meta', AsyncMock()) as mock_set_meta:
         resp = await webui.archive_chat(req)
 
     assert resp.status_code == 200
-    # set_session_meta should be called with processing=False
+    # Since there are no messages, create_archive should NOT have been called
+    assert not mock_create.called
+    # set_session_meta should still be called with processing=False
     interface_path = f"synth_webui/{session_id}"
     mock_set_meta.assert_called_with(interface_path, {'processing': False})
+    # Response should indicate zero saved messages
+    body = resp.body.decode('utf-8') if hasattr(resp, 'body') else None
+    assert body is not None
+    import json as _json
+    o = _json.loads(body)
+    assert o.get('saved_count') == 0
 

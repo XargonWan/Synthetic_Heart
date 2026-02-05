@@ -12,11 +12,18 @@ const historyState = {
 
 function initializeHistoryTab() {
     if (historyState._initialized) return;
-    historyState._initialized = true;
     console.log('[History] === INITIALIZING HISTORY TAB ===');
 
     const allSubTabs = document.querySelectorAll('.sub-tab-panel');
     console.log(`[History] Found ${allSubTabs.length} sub-tab panels`);
+    if (!allSubTabs || allSubTabs.length === 0) {
+        // If the template isn't loaded yet, retry a few times (idempotent).
+        initializeHistoryTab._retry = (initializeHistoryTab._retry || 0) + 1;
+        if (initializeHistoryTab._retry <= 10) {
+            setTimeout(initializeHistoryTab, 200);
+        }
+        return;
+    }
     allSubTabs.forEach((tab, idx) => { tab.classList.remove('active'); });
 
     const diaryPanel = document.getElementById('subtab-diary');
@@ -26,22 +33,51 @@ function initializeHistoryTab() {
     }
 
     const subNavButtons = document.querySelectorAll('.sub-nav-btn[data-subtab]');
+    if (!subNavButtons || subNavButtons.length === 0) {
+        // Missing nav buttons: retry initialization (could be a script ordering race)
+        initializeHistoryTab._retry = (initializeHistoryTab._retry || 0) + 1;
+        if (initializeHistoryTab._retry <= 10) {
+            setTimeout(initializeHistoryTab, 200);
+        }
+        return;
+    }
+
     subNavButtons.forEach(button => {
         button.addEventListener('click', () => {
+            console.log('[History] sub-nav clicked:', button.dataset.subtab);
             const subtabName = button.dataset.subtab;
             subNavButtons.forEach(btn => { btn.classList.remove('active'); btn.setAttribute('aria-selected', 'false'); });
             button.classList.add('active');
             button.setAttribute('aria-selected', 'true');
             const subPanels = document.querySelectorAll('.sub-tab-panel');
-            subPanels.forEach(panel => panel.classList.remove('active'));
+            subPanels.forEach(panel => {
+                panel.classList.remove('active');
+                try {
+                    panel.style.display = 'none';
+                    panel.style.visibility = 'hidden';
+                    panel.style.opacity = '0';
+                } catch (e) { /* ignore */ }
+            });
             const targetPanel = document.querySelector(`#subtab-${subtabName}`);
             if (targetPanel) {
-                targetPanel.classList.add('active');
+                // Ensure immediate visual feedback
+                try {
+                    targetPanel.classList.add('active');
+                    targetPanel.style.display = 'flex';
+                    targetPanel.style.visibility = 'visible';
+                    targetPanel.style.opacity = '1';
+                } catch (e) { /* ignore */ }
+                try { targetPanel.style.zIndex = '46000'; setTimeout(() => { try { targetPanel.style.zIndex = ''; } catch (e) {} }, 800); } catch (e) {}
                 historyState.currentSubTab = subtabName;
                 loadHistoryData(subtabName);
             }
         });
     });
+
+    // Controls
+    historyState._initialized = true;
+    console.log('[History] initialization complete');
+
 
     // Controls
     document.getElementById('history-diary-search')?.addEventListener('input', SynthUtils.debounce(() => {
@@ -72,16 +108,25 @@ function loadHistoryData(subtab) {
 
 async function loadHistoryDiary() {
     const content = document.getElementById('history-diary-content'); if (!content) return;
+    console.log('[History] loadHistoryDiary called with state:', historyState.diary);
     content.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><p>Loading diary entries...</p></div>';
     const params = new URLSearchParams({ page: historyState.diary.page, per_page: historyState.diary.per_page, search: historyState.diary.search, include_archived: historyState.diary.include_archived, sort: historyState.diary.sort });
     try {
         const response = await fetch(`/api/history/diary?${params}`);
         const data = await response.json();
-        if (data.success && data.entries.length > 0) {
+        console.log('[History] diary response:', data);
+        if (data && data.success && Array.isArray(data.entries) && data.entries.length > 0) {
             content.innerHTML = data.entries.map(entry => renderDiaryEntry(entry)).join('');
+            content.classList.add('history-populated');
+            try { content.scrollTop = 0; content.tabIndex = -1; setTimeout(() => { try { content.focus(); } catch (e) {} }, 50); } catch (e) {}
             renderPagination('diary', data.page, data.total_pages, data.total_count);
-        } else {
+        } else if (data && data.success) {
+            content.classList.remove('history-populated');
             content.innerHTML = '<div class="empty-state"><div class="icon">📖</div><p>No diary entries found</p></div>';
+        } else {
+            console.warn('[History] diary response indicates failure or unexpected shape:', data);
+            content.classList.remove('history-populated');
+            content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load diary entries</p></div>';
         }
     } catch (error) {
         console.error('Failed to load diary history:', error);
@@ -91,36 +136,84 @@ async function loadHistoryDiary() {
 
 async function loadHistoryGrillo() {
     const content = document.getElementById('history-grillo-content'); if (!content) return;
+    console.log('[History] loadHistoryGrillo called with state:', historyState.grillo);
     content.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><p>Loading grillo activity...</p></div>';
     const params = new URLSearchParams({ page: historyState.grillo.page, per_page: historyState.grillo.per_page, search: historyState.grillo.search, beat_type: historyState.grillo.beat_type, sort: historyState.grillo.sort });
     try {
         const response = await fetch(`/api/history/grillo?${params}`);
         const data = await response.json();
-        if (data.success) {
+        console.log('[History] grillo response:', data);
+        if (data && data.success) {
             const beatSelect = document.getElementById('history-grillo-beat-type');
-            if (beatSelect && data.beat_types) {
-                const existing = new Set(Array.from(beatSelect.options).map(o => o.value));
-                data.beat_types.forEach(bt => { const trimmed = String(bt).trim(); if (!trimmed || existing.has(trimmed)) return; const option = document.createElement('option'); option.value = trimmed; option.textContent = trimmed.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()); beatSelect.appendChild(option); existing.add(trimmed); });
-                const opts = Array.from(beatSelect.options).slice(1); opts.sort((a,b) => a.textContent.localeCompare(b.textContent)); opts.forEach(o => beatSelect.appendChild(o));
+            if (beatSelect && Array.isArray(data.beat_types)) {
+                // Replace existing options (preserve the default first option)
+                const defaultOption = beatSelect.options && beatSelect.options[0] ? beatSelect.options[0] : null;
+                beatSelect.innerHTML = '';
+                if (defaultOption) beatSelect.appendChild(defaultOption);
+                const existing = new Set();
+                data.beat_types.forEach(bt => {
+                    const trimmed = String(bt).trim();
+                    if (!trimmed || existing.has(trimmed)) return;
+                    const option = document.createElement('option');
+                    option.value = trimmed;
+                    option.textContent = trimmed.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+                    beatSelect.appendChild(option);
+                    existing.add(trimmed);
+                });
             }
-            if (data.entries && data.entries.length > 0) { content.innerHTML = data.entries.map(entry => renderGrilloEntry(entry)).join(''); renderPagination('grillo', data.page, data.total_pages, data.total_count); } else { content.innerHTML = '<div class="empty-state"><div class="icon">🦗</div><p>No grillo activity found</p></div>'; }
+            if (Array.isArray(data.entries) && data.entries.length > 0) {
+                content.innerHTML = data.entries.map(entry => renderGrilloEntry(entry)).join('');
+                content.classList.add('history-populated');
+                try { content.scrollTop = 0; content.tabIndex = -1; setTimeout(() => { try { content.focus(); } catch (e) {} }, 50); } catch (e) {}
+                renderPagination('grillo', data.page, data.total_pages, data.total_count);
+            } else {
+                content.classList.remove('history-populated');
+                content.innerHTML = '<div class="empty-state"><div class="icon">🦗</div><p>No grillo activity found</p></div>';
+            }
         } else {
+            console.warn('[History] grillo response indicates failure or unexpected shape:', data);
             content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load grillo activity</p></div>';
         }
-    } catch (error) { console.error('Failed to load grillo history:', error); content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load grillo activity</p></div>'; }
+    } catch (error) {
+        console.error('Failed to load grillo history:', error);
+        content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load grillo activity</p></div>';
+    }
 }
 
 async function loadHistoryChat() {
     const content = document.getElementById('history-chat-content'); if (!content) return;
+    console.log('[History] loadHistoryChat called with state:', historyState.chat);
     content.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><p>Loading chat history...</p></div>';
     const params = new URLSearchParams({ page: historyState.chat.page, per_page: historyState.chat.per_page, search: historyState.chat.search, interface_path: historyState.chat.interface_path, sort: historyState.chat.sort });
     try {
         const response = await fetch(`/api/history/chat?${params}`);
         const data = await response.json();
+        console.log('[History] chat response:', data);
         const interfaceSelect = document.getElementById('history-chat-interface');
-        if (interfaceSelect && interfaceSelect.options.length === 1 && data.interface_paths) { data.interface_paths.forEach(path => { const option = document.createElement('option'); option.value = path; option.textContent = path; interfaceSelect.appendChild(option); }); }
-        if (data.success && data.messages.length > 0) { content.innerHTML = data.messages.map(msg => renderChatMessage(msg)).join(''); renderPagination('chat', data.page, data.total_pages, data.total_count); } else { content.innerHTML = '<div class="empty-state"><div class="icon">💬</div><p>No chat messages found</p></div>'; }
-    } catch (error) { console.error('Failed to load chat history:', error); content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load chat history</p></div>'; }
+        if (interfaceSelect && Array.isArray(data.interface_paths)) {
+            // Replace options with fresh list (preserve default first 'All Chats')
+            const defaultOpt = interfaceSelect.options && interfaceSelect.options[0] ? interfaceSelect.options[0] : null;
+            interfaceSelect.innerHTML = '';
+            if (defaultOpt) interfaceSelect.appendChild(defaultOpt);
+            data.interface_paths.forEach(path => { const option = document.createElement('option'); option.value = path; option.textContent = path; interfaceSelect.appendChild(option); });
+        }
+        if (data && data.success && Array.isArray(data.messages) && data.messages.length > 0) {
+            content.innerHTML = data.messages.map(msg => renderChatMessage(msg)).join('');
+            content.classList.add('history-populated');
+            try { content.scrollTop = 0; content.tabIndex = -1; setTimeout(() => { try { content.focus(); } catch (e) {} }, 50); } catch (e) {}
+            renderPagination('chat', data.page, data.total_pages, data.total_count);
+        } else if (data && data.success) {
+            content.classList.remove('history-populated');
+            content.innerHTML = '<div class="empty-state"><div class="icon">💬</div><p>No chat messages found</p></div>';
+        } else {
+            console.warn('[History] chat response indicates failure or unexpected shape:', data);
+            content.classList.remove('history-populated');
+            content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load chat history</p></div>';
+        }
+    } catch (error) {
+        console.error('Failed to load chat history:', error);
+        content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load chat history</p></div>';
+    }
 }
 
 function renderDiaryEntry(entry) {
@@ -290,6 +383,50 @@ document.addEventListener('DOMContentLoaded', () => {
             });
         });
         observer.observe(historyTab, { attributes: true });
+    }
+
+    // Delegated click handler for sub-nav buttons to guard against DOM replacements
+    if (!window.__synth_history_delegated) {
+        window.addEventListener('click', (ev) => {
+            try {
+                const target = ev.target || ev.srcElement;
+                if (!target) return;
+                const btn = target.closest ? target.closest('.sub-nav-btn') : null;
+                if (!btn) return;
+                // If this button is within the History tab area, handle it here
+                const parent = btn.closest('[data-tab="history"]');
+                if (!parent) return; // not inside history
+
+                console.debug('[History] delegated click for sub-nav:', btn.dataset && btn.dataset.subtab);
+                // emulate the button's click handler: set active and load data
+                const subNavButtons = Array.from(document.querySelectorAll('.sub-nav-btn[data-subtab]'));
+                subNavButtons.forEach(b => { b.classList.remove('active'); b.setAttribute('aria-selected', 'false'); });
+                btn.classList.add('active');
+                btn.setAttribute('aria-selected', 'true');
+                const subPanels = document.querySelectorAll('.sub-tab-panel');
+                subPanels.forEach(panel => {
+                    panel.classList.remove('active');
+                    try {
+                        panel.style.display = 'none';
+                        panel.style.visibility = 'hidden';
+                        panel.style.opacity = '0';
+                    } catch (e) { /* ignore */ }
+                });
+                const subtabName = btn.dataset && btn.dataset.subtab;
+                const targetPanel = document.querySelector(`#subtab-${subtabName}`);
+                if (targetPanel) {
+                    try {
+                        targetPanel.classList.add('active');
+                        targetPanel.style.display = 'flex';
+                        targetPanel.style.visibility = 'visible';
+                        targetPanel.style.opacity = '1';
+                    } catch (e) { /* ignore */ }
+                    historyState.currentSubTab = subtabName;
+                    loadHistoryData(subtabName);
+                }
+            } catch (e) { /* ignore */ }
+        }, true);
+        window.__synth_history_delegated = true;
     }
 });
 

@@ -1868,7 +1868,8 @@ class SynthWebUIInterface:
             active_sessions = list(self.connections.keys())
             log_warning(f"{LOG_PREFIX} no active websocket for session {chat_id}. Active sessions: {active_sessions}")
             log_debug(f"{LOG_PREFIX} send_message payload target: {chat_id}, text length: {len(text) if text else 0}")
-            return
+            # Do not return: persist the message so it will be visible on reconnect
+            websocket = None
 
         # Ensure any pending THINKING is cleared before delivery (fallback).
         await self._webui_clear_pending_thinking(session_id)
@@ -1901,7 +1902,14 @@ class SynthWebUIInterface:
                     except Exception as anim_exc:
                         log_debug(f"{LOG_PREFIX} Failed to set 'write' animation: {anim_exc}")
 
-        await websocket.send_json({"type": "message", "sender": "synth", "text": text})
+        # If websocket is present attempt to send; otherwise persist for later replay
+        if websocket:
+            try:
+                await websocket.send_json({"type": "message", "sender": "synth", "text": text})
+            except Exception as e:
+                log_warning(f"{LOG_PREFIX} Failed to send websocket message to {session_id}: {e}")
+
+        # Append to in-memory history so reconnect will replay it
         await self._append_history(session_id, "synth", text)
         
         # Save SyntH's response via core chat_context_manager
@@ -1911,9 +1919,11 @@ class SynthWebUIInterface:
             await save_response_message(msg_interface_path, text)
         except Exception as e:
             log_debug(f"{LOG_PREFIX} Failed to save response via context_manager: {e}")
-        
-        log_info(f"{LOG_PREFIX} Sent message to session {session_id}: {text[:80]}{'...' if len(text)>80 else ''}")
 
+        if websocket:
+            log_info(f"{LOG_PREFIX} Sent message to session {session_id}: {text[:80]}{'...' if len(text)>80 else ''}")
+        else:
+            log_info(f"{LOG_PREFIX} Saved message for session {session_id} (no active websocket): {text[:80]}{'...' if len(text)>80 else ''}")
         # Transition: WRITE -> IDLE (always, once message is sent)
         if writing_pushed and writing_action_id:
             try:
@@ -2525,13 +2535,17 @@ class SynthWebUIInterface:
             if desc_json_path.exists() and desc_json_path.is_file():
                 try:
                     content = desc_json_path.read_text(encoding='utf-8')
-                    return JSONResponse(json.loads(content))
+                    try:
+                        return JSONResponse(json.loads(content))
+                    except Exception as exc:  # pragma: no cover - defensive
+                        # JSON malformed: log and fall through to implicit descriptor
+                        log_warning(f"{LOG_PREFIX} Failed to parse descriptor JSON {desc_json_path}: {exc}")
                 except Exception as exc:  # pragma: no cover - defensive
-                    log_warning(f"{LOG_PREFIX} Failed to read/parse descriptor {desc_json_path}: {exc}")
-                    raise HTTPException(status_code=500, detail="Descriptor read error")
+                    # I/O error reading descriptor: log and fall through to implicit descriptor
+                    log_warning(f"{LOG_PREFIX} Failed to read descriptor {desc_json_path}: {exc}")
 
 
-            # No descriptor file found: return an implicit descriptor based
+            # No descriptor file found or descriptor unreadable: return an implicit descriptor based
             # on animation_type (idle -> loop by default; others play_once).
             play_once_default = False if animation_type.lower() == 'idle' else True
             implicit = {"play_once": play_once_default}
@@ -3669,6 +3683,16 @@ class SynthWebUIInterface:
                 metadata = await get_session_meta(interface_path)
             except Exception:
                 metadata = None
+            if not messages:
+                log_info(f"{LOG_PREFIX} Skipping archive for session {session_id}: no messages to archive")
+                # Clear session processing flag so clients don't keep typing indicator
+                try:
+                    from core.session_meta import set_session_meta as set_meta_fn
+                    await set_meta_fn(interface_path, {'processing': False})
+                except Exception as e:
+                    log_debug(f"{LOG_PREFIX} Failed to clear session processing meta after archive: {e}")
+                return JSONResponse({"success": True, "saved_count": 0})
+
             log_info(f"{LOG_PREFIX} Creating archive from {len(messages)} current messages for session {session_id}")
             archive = await create_archive(session_id, messages, name=payload.get('name'), metadata=metadata)
             # Clear DB cache and context
@@ -3682,7 +3706,7 @@ class SynthWebUIInterface:
                 await set_meta_fn(interface_path, {'processing': False})
             except Exception as e:
                 log_debug(f"{LOG_PREFIX} Failed to clear session processing meta after archive: {e}")
-            response = {"success": True, "archive_id": archive.get('id')}
+            response = {"success": True, "archive_id": archive.get('id'), "saved_count": len(messages)}
             if archive.get('path'):
                 response['path'] = archive.get('path')
             return JSONResponse(response)
