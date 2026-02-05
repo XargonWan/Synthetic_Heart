@@ -12,10 +12,13 @@
             if (!panel) return null;
             // If panel already contains substantial content, skip
             if (panel.dataset.loaded === '1') return panel;
+            if (panel.dataset.loading === '1') return panel;
             if (panel.children && panel.children.length > 0) {
                 panel.dataset.loaded = '1';
                 return panel;
             }
+
+            panel.dataset.loading = '1';
 
             const resp = await fetch(`/templates/${section}.html`);
             if (!resp.ok) throw new Error('HTTP ' + resp.status);
@@ -52,6 +55,7 @@
             }
 
             panel.dataset.loaded = '1';
+            panel.dataset.loading = '0';
             // Call an optional section-specific initializer, e.g. initSkinsTab, initHistoryTab
             try {
                 const initName = 'init' + section.charAt(0).toUpperCase() + section.slice(1) + 'Tab';
@@ -485,6 +489,15 @@ try {
                             return;
                         }
                         items.forEach((item) => {
+                            const statusRaw = (item.status || 'unknown');
+                            const statusValue = String(statusRaw).toLowerCase();
+                            const statusClass = (['ok', 'ready', 'success', 'running', 'active'].includes(statusValue))
+                                ? 'success'
+                                : (['fail', 'failed', 'error', 'broken', 'disabled'].includes(statusValue))
+                                    ? 'failed'
+                                    : (['loading', 'starting', 'pending'].includes(statusValue))
+                                        ? 'loading'
+                                        : 'unknown';
                             const details = document.createElement('details');
                             details.className = 'component-item';
                             details.open = true;
@@ -500,8 +513,8 @@ try {
                             const summaryActions = document.createElement('span');
                             summaryActions.className = 'component-summary-actions';
                             const status = document.createElement('span');
-                            status.className = 'component-status component-status-' + (item.status || 'unknown');
-                            status.textContent = item.status || 'unknown';
+                            status.className = 'component-status component-status-' + statusClass;
+                            status.textContent = statusValue;
                             summaryActions.appendChild(status);
                             summary.appendChild(summaryActions);
                             details.appendChild(summary);
@@ -510,6 +523,40 @@ try {
                             desc.className = 'component-description';
                             desc.textContent = item.details || item.description || '';
                             details.appendChild(desc);
+
+                            if (item.error) {
+                                const err = document.createElement('div');
+                                err.className = 'component-error';
+                                err.textContent = item.error;
+                                details.appendChild(err);
+                            }
+
+                            if (Array.isArray(item.actions) && item.actions.length) {
+                                const actionsWrap = document.createElement('div');
+                                actionsWrap.className = 'component-actions';
+                                const heading = document.createElement('div');
+                                heading.className = 'component-actions-heading';
+                                heading.textContent = `Actions (${item.actions.length})`;
+                                actionsWrap.appendChild(heading);
+                                const list = document.createElement('ul');
+                                list.className = 'component-action-list';
+                                item.actions.forEach((action) => {
+                                    const li = document.createElement('li');
+                                    const title = document.createElement('div');
+                                    title.className = 'component-action-title';
+                                    title.textContent = action.type || action.name || 'Action';
+                                    li.appendChild(title);
+                                    if (action.description) {
+                                        const d = document.createElement('div');
+                                        d.className = 'component-action-description';
+                                        d.textContent = action.description;
+                                        li.appendChild(d);
+                                    }
+                                    list.appendChild(li);
+                                });
+                                actionsWrap.appendChild(list);
+                                details.appendChild(actionsWrap);
+                            }
                             container.appendChild(details);
                         });
                     };
@@ -615,6 +662,10 @@ try {
                 wrapper.appendChild(bubble);
                 container.appendChild(wrapper);
                 container.scrollTop = container.scrollHeight;
+
+                if (sender === 'synth') {
+                    try { maybeNotify(text); } catch (e) { /* ignore */ }
+                }
             }
 
             function setupChatControls() {
@@ -750,6 +801,36 @@ try {
             }
 
             function initSettingsTab() {
+                if (!window.__synth_settings_initialized) {
+                    const resetBtn = document.getElementById('reset-window-positions');
+                    if (resetBtn) {
+                        resetBtn.addEventListener('click', () => {
+                            try {
+                                const keys = [];
+                                for (let i = 0; i < localStorage.length; i++) {
+                                    const k = localStorage.key(i);
+                                    if (!k) continue;
+                                    if (k.startsWith('synth-webui-window-state') || k.startsWith('synth-webui-chat-rect')) {
+                                        keys.push(k);
+                                    }
+                                }
+                                keys.forEach(k => localStorage.removeItem(k));
+                            } catch (e) { /* ignore */ }
+                            const chat = document.getElementById('chat');
+                            if (chat) {
+                                chat.classList.remove('minimized', 'maximized', 'expanded', 'hidden');
+                                chat.style.left = '';
+                                chat.style.top = '';
+                                chat.style.right = '';
+                                chat.style.bottom = '';
+                                chat.style.width = '';
+                                chat.style.height = '';
+                            }
+                        });
+                    }
+                    initNotifications();
+                    window.__synth_settings_initialized = true;
+                }
                 refreshConfig();
             }
 
@@ -891,6 +972,61 @@ try {
                 if (days > 0) return `${days}d ${hours}h ${minutes}m`;
                 if (hours > 0) return `${hours}h ${minutes}m`;
                 return `${minutes}m`;
+            }
+
+            function initNotifications() {
+                const toggle = document.getElementById('notify-toggle');
+                const statusEl = document.getElementById('notify-status');
+                if (!toggle || !statusEl) return;
+
+                let enabled = false;
+                try {
+                    enabled = (localStorage.getItem(NOTIFY_KEY) === '1');
+                } catch (e) { /* ignore */ }
+
+                const setStatus = (state, label) => {
+                    notificationsEnabled = state;
+                    toggle.checked = state;
+                    statusEl.textContent = label;
+                };
+
+                if (typeof Notification !== 'undefined' && Notification.permission === 'granted' && enabled) {
+                    setStatus(true, 'Enabled');
+                } else {
+                    setStatus(false, (typeof Notification !== 'undefined' && Notification.permission === 'denied') ? 'Blocked by browser' : 'Disabled');
+                }
+
+                toggle.addEventListener('change', async () => {
+                    if (!toggle.checked) {
+                        try { localStorage.setItem(NOTIFY_KEY, '0'); } catch (e) { /* ignore */ }
+                        setStatus(false, 'Disabled');
+                        return;
+                    }
+                    if (typeof Notification === 'undefined') {
+                        setStatus(false, 'Unsupported');
+                        return;
+                    }
+                    try {
+                        const permission = await Notification.requestPermission();
+                        if (permission === 'granted') {
+                            try { localStorage.setItem(NOTIFY_KEY, '1'); } catch (e) { /* ignore */ }
+                            setStatus(true, 'Enabled');
+                        } else {
+                            setStatus(false, permission === 'denied' ? 'Blocked by browser' : 'Disabled');
+                        }
+                    } catch (e) {
+                        setStatus(false, 'Disabled');
+                    }
+                });
+            }
+
+            function maybeNotify(text) {
+                if (!notificationsEnabled) return;
+                if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+                if (!document.hidden) return;
+                try {
+                    new Notification('SyntH', { body: text, silent: false });
+                } catch (e) { /* ignore */ }
             }
 
             window.SynthWebUI = window.SynthWebUI || {};

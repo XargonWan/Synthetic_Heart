@@ -6247,11 +6247,16 @@ import * as THREE from 'three';
 
             function updateActionButtons() {
                 const hasSelection = selectedEntries.size > 0;
-                const showArchived = document.getElementById('show-archived').checked;
-                
-                document.getElementById('archive-btn').style.display = hasSelection && !showArchived ? 'inline-block' : 'none';
-                document.getElementById('unarchive-btn').style.display = hasSelection && showArchived ? 'inline-block' : 'none';
-                document.getElementById('delete-btn').style.display = hasSelection && showArchived ? 'inline-block' : 'none';
+                const showArchivedEl = document.getElementById('show-archived');
+                const archiveBtn = document.getElementById('archive-btn');
+                const unarchiveBtn = document.getElementById('unarchive-btn');
+                const deleteBtn = document.getElementById('delete-btn');
+                if (!showArchivedEl || !archiveBtn || !unarchiveBtn || !deleteBtn) return;
+                const showArchived = showArchivedEl.checked;
+
+                archiveBtn.style.display = hasSelection && !showArchived ? 'inline-block' : 'none';
+                unarchiveBtn.style.display = hasSelection && showArchived ? 'inline-block' : 'none';
+                deleteBtn.style.display = hasSelection && showArchived ? 'inline-block' : 'none';
             }
 
             function escapeHtml(text) {
@@ -6271,10 +6276,13 @@ import * as THREE from 'three';
                     loadDiaryEntries(1, currentPerPage);
                 }, 300); // Debounce search
             });
-            document.getElementById('show-archived').addEventListener('change', loadDiaryEntries);
-            document.getElementById('group-by-date').addEventListener('change', renderDiaryEntries);
+            const showArchivedEl = document.getElementById('show-archived');
+            if (showArchivedEl) showArchivedEl.addEventListener('change', loadDiaryEntries);
+            const groupByDateEl = document.getElementById('group-by-date');
+            if (groupByDateEl) groupByDateEl.addEventListener('change', renderDiaryEntries);
             
-            document.getElementById('edit-mode-btn').addEventListener('click', function() {
+            const editModeBtn = document.getElementById('edit-mode-btn');
+            if (editModeBtn) editModeBtn.addEventListener('click', function() {
                 const isEditMode = this.textContent === 'Edit';
                 this.textContent = isEditMode ? 'Done' : 'Edit';
                 
@@ -6290,7 +6298,8 @@ import * as THREE from 'three';
                 updateActionButtons();
             });
 
-            document.getElementById('archive-btn').addEventListener('click', function() {
+            const archiveBtn = document.getElementById('archive-btn');
+            if (archiveBtn) archiveBtn.addEventListener('click', function() {
                 if (selectedEntries.size === 0) return;
                 
                 fetch('/api/diary/archive', {
@@ -6314,7 +6323,8 @@ import * as THREE from 'three';
                 });
             });
 
-            document.getElementById('unarchive-btn').addEventListener('click', function() {
+            const unarchiveBtn = document.getElementById('unarchive-btn');
+            if (unarchiveBtn) unarchiveBtn.addEventListener('click', function() {
                 if (selectedEntries.size === 0) return;
                 
                 fetch('/api/diary/unarchive', {
@@ -6338,7 +6348,8 @@ import * as THREE from 'three';
                 });
             });
 
-            document.getElementById('delete-btn').addEventListener('click', function() {
+            const deleteBtn = document.getElementById('delete-btn');
+            if (deleteBtn) deleteBtn.addEventListener('click', function() {
                 if (selectedEntries.size === 0) return;
                 
                 if (!confirm(`Are you sure you want to delete ${selectedEntries.size} archived entries? This action cannot be undone.`)) {
@@ -6375,26 +6386,30 @@ import * as THREE from 'three';
             }
             
             // Pagination controls
-            document.getElementById('entries-per-page').addEventListener('change', function() {
+            const entriesPerPageEl = document.getElementById('entries-per-page');
+            if (entriesPerPageEl) entriesPerPageEl.addEventListener('change', function() {
                 const newPerPage = this.value;
                 currentPerPage = newPerPage;
                 loadDiaryEntries(1, newPerPage); // Reset to page 1 when changing per-page
             });
             
-            document.getElementById('prev-page').addEventListener('click', function() {
+            const prevPageEl = document.getElementById('prev-page');
+            if (prevPageEl) prevPageEl.addEventListener('click', function() {
                 if (currentPage > 1) {
                     goToPage(currentPage - 1);
                 }
             });
             
-            document.getElementById('next-page').addEventListener('click', function() {
+            const nextPageEl = document.getElementById('next-page');
+            if (nextPageEl) nextPageEl.addEventListener('click', function() {
                 if (currentPage < totalPages) {
                     goToPage(currentPage + 1);
                 }
             });
             
             // Date filter
-            document.getElementById('date-filter').addEventListener('change', function() {
+            const dateFilterEl = document.getElementById('date-filter');
+            if (dateFilterEl) dateFilterEl.addEventListener('change', function() {
                 const selectedDate = this.value;
                 if (selectedDate) {
                     // Find the page that contains entries from the selected date
