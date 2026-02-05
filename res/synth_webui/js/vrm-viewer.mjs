@@ -7045,6 +7045,12 @@ import * as THREE from 'three';
 
         chatArchiveBtn?.addEventListener('click', async () => {
             try {
+                const messagesEl = document.getElementById('messages');
+                const hasMessages = (messagesEl && messagesEl.children && messagesEl.children.length > 0) || (Array.isArray(historyBuffer) && historyBuffer.length > 0);
+                if (!hasMessages) {
+                    showToast('Chat is empty. Nothing to archive.', true);
+                    return;
+                }
                 showToast('Archiving chat...', false);
                 const out = await apiPostJson('/api/chat/archive', {});
                 if (out && out.success) {

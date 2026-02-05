@@ -780,8 +780,10 @@ class SynthWebUIInterface:
             # Get replacement values
             from core.message_chain import RESPONSE_TIMEOUT, get_failed_message_text
             
+            synth_name = str(config_registry.get_value("SYNTH_NAME", "SyntH"))
             replacements = {
                 '%%BRAND_NAME%%': BRAND_NAME,
+                '%%SYNTH_NAME%%': synth_name,
                 '%%LOGO_URL%%': str(getattr(self, 'logo_url', '/static/synth_logo_bg.png')),
                 '%%RESPONSE_TIMEOUT%%': str(int(RESPONSE_TIMEOUT)),
                 '%%FAILED_MESSAGE_TEXT%%': str(get_failed_message_text()),

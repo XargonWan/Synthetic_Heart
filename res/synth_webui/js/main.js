@@ -798,6 +798,7 @@ try {
 
             function getSynthDisplayName() {
                 try {
+                    if (window.SynthConfig && window.SynthConfig.SYNTH_NAME) return window.SynthConfig.SYNTH_NAME;
                     if (window.SynthConfig && window.SynthConfig.BRAND_NAME) return window.SynthConfig.BRAND_NAME;
                     const headerName = document.querySelector('.brand-text h1');
                     if (headerName && headerName.textContent) return headerName.textContent.trim();
@@ -924,26 +925,21 @@ try {
                                     appendMessage(messages, data.sender === 'synth' ? 'synth' : 'user', data.text || '');
                                 } else if (data && data.type === 'action_state') {
                                     const phase = String(data.phase || '').toUpperCase();
-                                    if (phase === 'THINKING' || phase === 'WRITING' || phase === 'CORRECTING') {
-                                        try { addTypingIndicator(); } catch (e) { /* ignore */ }
-                                    } else if (phase === 'IDLE') {
-                                        try { removeTypingIndicator(); } catch (e) { /* ignore */ }
+                                    if (phase === 'THINKING' || phase === 'WRITING' || phase === 'TALKING') {
+                                        addTypingIndicator();
+                                    } else {
+                                        removeTypingIndicator();
                                     }
                                 } else if (data && data.type === 'animation') {
-                                    if (window.VRMAnimations && typeof window.VRMAnimations.play === 'function') {
-                                        window.VRMAnimations.play(data.state, {
-                                            animation: data.animation || null,
-                                            playOnce: data.loop === false,
-                                            playSection: data.play_section || null,
-                                            descriptor: data.descriptor || null
-                                        });
-                                    } else {
-                                        window.pendingAnimationCommands = window.pendingAnimationCommands || [];
-                                        window.pendingAnimationCommands.push(data);
-                                    }
-                                } else if (data && data.type === 'animation_state') {
                                     try {
-                                        window.__synth_last_rich_animation_state = data.animation_state || data;
+                                        if (window.VRMAnimations && typeof window.VRMAnimations.play === 'function') {
+                                            window.VRMAnimations.play(data.state, {
+                                                animation: data.animation,
+                                                playOnce: data.loop === false,
+                                                playSection: data.play_section,
+                                                descriptor: data.descriptor
+                                            });
+                                        }
                                     } catch (e) { /* ignore */ }
                                 }
                             } catch (e) {
