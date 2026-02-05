@@ -686,7 +686,21 @@ try {
                 function hideChat() {
                     if (!chatPanel) return;
                     chatPanel.classList.add('minimized');
-                    if (chatToggleBtn) chatToggleBtn.style.display = 'flex';
+                    chatPanel.classList.add('hidden');
+                    if (chatToggleBtn) {
+                        chatToggleBtn.style.display = 'flex';
+                        try {
+                            if (window.__synth_web_debug_enabled) {
+                                const dock = document.getElementById('synth-minimized-stack');
+                                if (dock && chatToggleBtn.parentElement !== dock) {
+                                    dock.appendChild(chatToggleBtn);
+                                    chatToggleBtn.style.position = 'static';
+                                    chatToggleBtn.style.right = '';
+                                    chatToggleBtn.style.bottom = '';
+                                }
+                            }
+                        } catch (e) { /* ignore */ }
+                    }
                 }
 
                 function toggleMaximize() {
@@ -695,6 +709,7 @@ try {
                     chatPanel.classList.toggle('maximized', !isMax);
                     if (!isMax) {
                         chatPanel.classList.remove('minimized');
+                        chatPanel.classList.remove('hidden');
                         if (chatToggleBtn) chatToggleBtn.style.display = 'none';
                     }
                 }

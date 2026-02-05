@@ -7,6 +7,7 @@ import * as THREE from 'three';
         import { mixamoVRMRigMap } from '/js/mixamoVRMRigMap.js';
 
         const canvas = document.getElementById('vrm-canvas');
+        const getSessionId = () => (window.sessionId || null);
         if (!canvas) {
             console.error('[synth_webui] VRM canvas not found in DOM');
         } else {
@@ -89,6 +90,7 @@ import * as THREE from 'three';
             // Camera change debounce logic: wait 10s after the last change to save camera state
             let cameraStateDebounce = null;
             controls.addEventListener('change', () => {
+                const sessionId = getSessionId();
                 if (!sessionId) return;
                 try {
                     const camState = {
@@ -4900,6 +4902,7 @@ import * as THREE from 'three';
                     };
 
                     const dock = ensureDock();
+                    const chatToggleBtn = document.getElementById('chat-toggle');
                     // If chat has a restore button, stack it with debug (WEB_DEBUG-only).
                     try {
                         if (chatToggleBtn && chatToggleBtn.parentElement !== dock) {
@@ -6903,6 +6906,7 @@ import * as THREE from 'three';
                     if (!selected) { showToast('Select an archive to restore', true); return; }
                     const aid = selected.dataset.id;
                     showToast('Restoring archive: ' + aid, false);
+                    const sessionId = getSessionId();
                     const out = await apiPostJson('/api/chat/restore', { archive_id: aid, session_id: sessionId });
                         if (out && out.success) {
                         showToast('Archive restored (' + out.restored + ' messages)', false);

@@ -131,9 +131,33 @@
             flex: 1;
             min-height: 0;
         }
-        #tab-home { padding: 0; }
-        .home-stage { height: 100%; }
-        .home-content { position: relative; height: 100%; }
+        #tab-home {
+            padding: 0;
+        }
+        #tab-home.active {
+            display: flex;
+        }
+        .home-stage {
+            flex: 1;
+            display: flex;
+            width: 100%;
+            height: 100%;
+            min-height: 0;
+            /* Ensure the 3D canvas always has viewport height even if parents collapse */
+            min-height: calc(100vh - 140px);
+        }
+        .home-content {
+            position: relative;
+            width: 100%;
+            min-height: 0;
+            height: 100%;
+        }
+        .home-vrm {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            min-height: calc(100vh - 140px);
+        }
         #chat {
             position: fixed;
             bottom: 1.5rem;
@@ -149,6 +173,10 @@
             box-shadow: 0 24px 45px -38px rgba(0, 0, 0, 0.9);
             overflow: hidden;
             z-index: 50;
+        }
+        #chat.minimized,
+        #chat.hidden {
+            display: none;
         }
         #messages {
             flex: 1;
@@ -203,9 +231,9 @@
             border: none;
         }
         .chat-toggle-btn {
-            position: absolute;
-            top: clamp(1.2rem, 2vw, 1.6rem);
-            right: clamp(1.2rem, 2vw, 1.6rem);
+            position: fixed;
+            right: 18px;
+            bottom: 18px;
             z-index: 50;
             width: 56px;
             height: 56px;
@@ -485,9 +513,37 @@
             font-size: 0.95rem;
         }
         .toggle input {
-            width: 1em;
-            height: 1em;
-            accent-color: var(--accent);
+            appearance: none;
+            -webkit-appearance: none;
+            width: 44px;
+            height: 24px;
+            border-radius: 999px;
+            border: 1px solid var(--border);
+            background: rgba(255, 255, 255, 0.12);
+            position: relative;
+            transition: background 0.2s ease, border-color 0.2s ease;
+            outline: none;
+            cursor: pointer;
+        }
+        .toggle input::after {
+            content: '';
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: #fff;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+            transition: transform 0.2s ease, background 0.2s ease;
+        }
+        .toggle input:checked {
+            background: var(--accent);
+            border-color: rgba(255, 255, 255, 0.3);
+        }
+        .toggle input:checked::after {
+            transform: translateX(20px);
+            background: #0b0b12;
         }
         .status-chip {
             display: inline-flex;
