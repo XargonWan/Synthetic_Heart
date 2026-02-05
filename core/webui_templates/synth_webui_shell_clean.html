@@ -194,14 +194,50 @@
             gap: 0.9rem;
         }
         .bubble {
-            max-width: 72ch;
+            max-width: 70%;
             padding: 1rem 1.2rem;
             border-radius: 18px;
             line-height: 1.45;
             white-space: pre-wrap;
         }
+        .message-container {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 0.35rem;
+        }
+        .message-container.user {
+            align-items: flex-end;
+        }
+        .bubble-sender {
+            font-weight: 700;
+            font-size: 0.85rem;
+            letter-spacing: 0.03em;
+            margin-bottom: 0.35rem;
+            opacity: 0.85;
+        }
         .bubble.user { align-self: flex-end; background: rgba(255, 255, 255, 0.08); }
         .bubble.synth { align-self: flex-start; background: linear-gradient(135deg, #ff6bd6, #7289da); color: #fff; }
+        .typing-indicator {
+            display: flex;
+            gap: 0.3rem;
+            align-items: center;
+            justify-content: center;
+            padding: 0.6rem 0.9rem;
+        }
+        .typing-indicator .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.9);
+            animation: typingDot 1.4s ease-in-out infinite;
+        }
+        .typing-indicator .dot:nth-child(2) { animation-delay: 0.2s; }
+        .typing-indicator .dot:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes typingDot {
+            0%, 60%, 100% { transform: translateY(0); opacity: 0.7; }
+            30% { transform: translateY(-8px); opacity: 1; }
+        }
         #composer {
             display: flex;
             gap: 0.8rem;
@@ -761,6 +797,7 @@
 window.__SYNTH_CONFIG = {
   RESPONSE_TIMEOUT: %%RESPONSE_TIMEOUT%%,
   FAILED_MESSAGE_TEXT: "%%FAILED_MESSAGE_TEXT%%",
+    BRAND_NAME: "%%BRAND_NAME%%",
   WEB_DEBUG: '%%WEB_DEBUG%%' === '1',
   CHAT_RESIZABLE: '%%CHAT_RESIZABLE%%' === 'true'
 };

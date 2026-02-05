@@ -40,6 +40,40 @@ window.SynthUtils.formatTimestamp = function(isoString) {
     }
 };
 
+window.formatTimestamp = window.formatTimestamp || window.SynthUtils.formatTimestamp;
+
+window.showToast = window.showToast || function(message, isError) {
+    try {
+        const existing = document.getElementById('synth-toast-container');
+        const container = existing || (() => {
+            const el = document.createElement('div');
+            el.id = 'synth-toast-container';
+            el.style.position = 'fixed';
+            el.style.right = '24px';
+            el.style.bottom = '24px';
+            el.style.zIndex = '99999';
+            el.style.display = 'flex';
+            el.style.flexDirection = 'column';
+            el.style.gap = '8px';
+            document.body.appendChild(el);
+            return el;
+        })();
+
+        const toast = document.createElement('div');
+        toast.textContent = String(message || '');
+        toast.style.padding = '10px 14px';
+        toast.style.borderRadius = '12px';
+        toast.style.background = isError ? 'rgba(255, 123, 147, 0.92)' : 'rgba(24, 201, 140, 0.92)';
+        toast.style.color = '#0b0b12';
+        toast.style.fontWeight = '600';
+        toast.style.boxShadow = '0 10px 24px rgba(0,0,0,0.35)';
+        container.appendChild(toast);
+        setTimeout(() => {
+            try { toast.remove(); } catch (e) { /* ignore */ }
+        }, 3200);
+    } catch (e) { /* ignore */ }
+};
+
 window.SynthUtils.formatJsonBlock = function(value) {
     if (value === undefined || value === null || value === '') return '';
     try {

@@ -782,8 +782,27 @@ try {
                     }
                 }
 
+                try {
+                    if (window.SynthWebUI && typeof window.SynthWebUI.loadSection === 'function') {
+                        window.SynthWebUI.loadSection('history').then(() => {
+                            if (window.SynthWebUI && typeof window.SynthWebUI.initHistoryTab === 'function') {
+                                window.SynthWebUI.initHistoryTab();
+                            }
+                        });
+                    }
+                } catch (e) { /* ignore */ }
+
                 updateTopbarHeight();
                 window.addEventListener('resize', updateTopbarHeight);
+            }
+
+            function getSynthDisplayName() {
+                try {
+                    if (window.SynthConfig && window.SynthConfig.BRAND_NAME) return window.SynthConfig.BRAND_NAME;
+                    const headerName = document.querySelector('.brand-text h1');
+                    if (headerName && headerName.textContent) return headerName.textContent.trim();
+                } catch (e) { /* ignore */ }
+                return 'SyntH';
             }
 
             function appendMessage(container, sender, text) {
@@ -793,13 +812,15 @@ try {
 
                 const bubble = document.createElement('div');
                 bubble.className = `bubble ${sender}`;
-                bubble.innerHTML = `<div class="bubble-sender">${sender === 'synth' ? 'SyntH' : 'You'}</div>${safeEscapeHtml(text)}`;
+                const senderLabel = sender === 'synth' ? getSynthDisplayName() : 'You';
+                bubble.innerHTML = `<div class="bubble-sender">${senderLabel}</div>${safeEscapeHtml(text)}`;
                 wrapper.appendChild(bubble);
                 container.appendChild(wrapper);
                 container.scrollTop = container.scrollHeight;
 
                 if (sender === 'synth') {
                     try { maybeNotify(text); } catch (e) { /* ignore */ }
+                    try { removeTypingIndicator(); } catch (e) { /* ignore */ }
                 }
             }
 
@@ -895,11 +916,35 @@ try {
                             if (statusIndicator) statusIndicator.classList.remove('online');
                             updateSendState();
                         };
+                        window.pendingAnimationCommands = window.pendingAnimationCommands || pendingAnimationCommands;
                         ws.onmessage = (event) => {
                             try {
                                 const data = JSON.parse(event.data);
                                 if (data && data.type === 'message') {
                                     appendMessage(messages, data.sender === 'synth' ? 'synth' : 'user', data.text || '');
+                                } else if (data && data.type === 'action_state') {
+                                    const phase = String(data.phase || '').toUpperCase();
+                                    if (phase === 'THINKING' || phase === 'WRITING' || phase === 'CORRECTING') {
+                                        try { addTypingIndicator(); } catch (e) { /* ignore */ }
+                                    } else if (phase === 'IDLE') {
+                                        try { removeTypingIndicator(); } catch (e) { /* ignore */ }
+                                    }
+                                } else if (data && data.type === 'animation') {
+                                    if (window.VRMAnimations && typeof window.VRMAnimations.play === 'function') {
+                                        window.VRMAnimations.play(data.state, {
+                                            animation: data.animation || null,
+                                            playOnce: data.loop === false,
+                                            playSection: data.play_section || null,
+                                            descriptor: data.descriptor || null
+                                        });
+                                    } else {
+                                        window.pendingAnimationCommands = window.pendingAnimationCommands || [];
+                                        window.pendingAnimationCommands.push(data);
+                                    }
+                                } else if (data && data.type === 'animation_state') {
+                                    try {
+                                        window.__synth_last_rich_animation_state = data.animation_state || data;
+                                    } catch (e) { /* ignore */ }
                                 }
                             } catch (e) {
                                 // ignore non-JSON
