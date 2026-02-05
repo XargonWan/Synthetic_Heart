@@ -407,12 +407,22 @@ try {
                         const isEditable = !!item.editable && !item.env_override;
 
                         let inputEl = null;
+                        let extraEl = null;
                         if (item.ui_type === 'bool' || item.value_type === 'bool') {
                             const checkbox = document.createElement('input');
+                            const key = item.key || item.label || `bool-${Math.random().toString(36).slice(2)}`;
                             checkbox.type = 'checkbox';
+                            checkbox.id = `config-${key}`;
                             checkbox.checked = value === true || value === 1 || value === '1' || value === 'true';
                             checkbox.disabled = !isEditable;
                             inputEl = checkbox;
+                            const toggleLabel = document.createElement('label');
+                            toggleLabel.className = 'toggle-switch';
+                            toggleLabel.setAttribute('for', checkbox.id);
+                            const slider = document.createElement('span');
+                            slider.className = 'toggle-slider';
+                            toggleLabel.appendChild(slider);
+                            extraEl = toggleLabel;
                         } else if (item.ui_type === 'select' && Array.isArray(item.options) && item.options.length) {
                             const select = document.createElement('select');
                             item.options.forEach((opt) => {
@@ -439,6 +449,7 @@ try {
                         }
 
                         if (inputEl) inputWrap.appendChild(inputEl);
+                        if (extraEl) inputWrap.appendChild(extraEl);
                         row.appendChild(inputWrap);
                         container.appendChild(row);
                     });
@@ -477,6 +488,105 @@ try {
 
                     if (componentsLLMSummaryEl && data.llm) {
                         componentsLLMSummaryEl.textContent = `Active engine: ${data.llm.active || '—'}`;
+                    }
+
+                    const llmSelect = document.getElementById('llm-engine-select');
+                    const llmModelLabel = document.getElementById('llm-engine-model');
+                    const llmLoginStateLabel = document.getElementById('llm-engine-login-state');
+                    const llmLoginBtn = document.getElementById('llm-login-btn');
+                    const devToggle = document.getElementById('dev-components-toggle');
+
+                    if (llmSelect && data.llm && Array.isArray(data.llm.engines)) {
+                        const engines = data.llm.engines.slice().sort((a, b) => {
+                            const an = (a.display_name || a.name || '').toLowerCase();
+                            const bn = (b.display_name || b.name || '').toLowerCase();
+                            return an.localeCompare(bn);
+                        });
+                        llmSelect.innerHTML = '';
+                        engines.forEach((engine) => {
+                            const opt = document.createElement('option');
+                            opt.value = engine.name;
+                            opt.textContent = engine.display_name || engine.name || 'LLM';
+                            if (engine.active) opt.selected = true;
+                            llmSelect.appendChild(opt);
+                        });
+
+                        const resolveActive = () => engines.find(e => e.active) || engines.find(e => e.name === data.llm.active) || engines[0] || null;
+                        const updateLlmInfo = (engine) => {
+                            if (llmModelLabel) llmModelLabel.textContent = `model: ${engine ? (engine.display_name || engine.name || '—') : '—'}`;
+                            const loginState = engine ? (engine.login_state || (engine.logged_in ? 'logged' : 'unlogged')) : '—';
+                            if (llmLoginStateLabel) llmLoginStateLabel.textContent = `state: ${loginState}`;
+                            if (llmLoginBtn) {
+                                llmLoginBtn.disabled = !engine || !engine.loaded;
+                                llmLoginBtn.textContent = engine && engine.logged_in ? 'Logged' : 'Login';
+                            }
+                        };
+                        updateLlmInfo(resolveActive());
+
+                        if (!llmSelect.dataset.bound) {
+                            llmSelect.addEventListener('change', async () => {
+                                const selected = llmSelect.value;
+                                if (!selected) return;
+                                try {
+                                    const res = await fetch('/api/components/llm', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ name: selected })
+                                    });
+                                    if (!res.ok) throw new Error('HTTP ' + res.status);
+                                    await loadComponentsSummary();
+                                } catch (e) {
+                                    console.error('[synth_webui] Failed to switch LLM', e);
+                                    alert('Failed to switch LLM engine.');
+                                }
+                            });
+                            llmSelect.dataset.bound = '1';
+                        }
+
+                        if (llmLoginBtn && !llmLoginBtn.dataset.bound) {
+                            llmLoginBtn.addEventListener('click', async () => {
+                                const selected = llmSelect.value;
+                                if (!selected) return;
+                                try {
+                                    const res = await fetch('/api/components/llm/login', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ name: selected })
+                                    });
+                                    if (!res.ok) throw new Error('HTTP ' + res.status);
+                                    await loadComponentsSummary();
+                                } catch (e) {
+                                    console.error('[synth_webui] Failed to start LLM login', e);
+                                    alert('LLM login flow failed to start.');
+                                }
+                            });
+                            llmLoginBtn.dataset.bound = '1';
+                        }
+                    }
+
+                    if (devToggle) {
+                        devToggle.checked = !!data.dev_components_enabled;
+                        if (!devToggle.dataset.bound) {
+                            devToggle.addEventListener('change', async () => {
+                                try {
+                                    const res = await fetch('/api/components/dev/toggle', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ enabled: devToggle.checked })
+                                    });
+                                    const resp = await res.json();
+                                    if (!res.ok) throw new Error(resp.detail || 'Request failed');
+                                    if (resp.message) {
+                                        alert(resp.message);
+                                    }
+                                } catch (e) {
+                                    console.error('[synth_webui] Failed to toggle dev components', e);
+                                    alert('Failed to toggle dev components.');
+                                    devToggle.checked = !devToggle.checked;
+                                }
+                            });
+                            devToggle.dataset.bound = '1';
+                        }
                     }
 
                     const renderDetailsList = (items, container) => {
@@ -604,6 +714,11 @@ try {
                         panel.setAttribute('aria-hidden', 'true');
                     }
                 });
+                if (tab === 'home' && typeof window.resizeVRMRenderer === 'function') {
+                    setTimeout(() => {
+                        try { window.resizeVRMRenderer(); } catch (e) { /* ignore */ }
+                    }, 150);
+                }
             }
 
             function setupNavigation() {

@@ -343,6 +343,7 @@
             display: flex;
             flex-direction: column;
             gap: 0.75rem;
+            min-height: 320px;
         }
         .skin-preview {
             width: 100%;
@@ -365,10 +366,15 @@
             display: flex;
             flex-direction: column;
             gap: 0.25rem;
+            flex: 1 1 auto;
+            min-height: 0;
+            overflow-y: auto;
+            max-height: 120px;
         }
         .skin-actions {
             display: flex;
             gap: 0.5rem;
+            margin-top: auto;
         }
         .btn-primary {
             background: var(--accent);
@@ -505,6 +511,57 @@
             opacity: 0.55;
             cursor: not-allowed;
         }
+        .config-input input[type="checkbox"] {
+            display: none;
+        }
+        .toggle-switch {
+            position: relative;
+            display: inline-block;
+            width: 50px;
+            height: 26px;
+            flex: 0 0 auto;
+        }
+        .toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(255, 255, 255, 0.15);
+            transition: 0.3s;
+            border-radius: 26px;
+            border: 1px solid var(--border);
+        }
+        .toggle-slider:before {
+            position: absolute;
+            content: '';
+            height: 18px;
+            width: 18px;
+            left: 3px;
+            bottom: 3px;
+            background-color: #fff;
+            transition: 0.3s;
+            border-radius: 50%;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+        }
+        input[type="checkbox"]:checked + .toggle-slider,
+        input[type="checkbox"]:checked + .toggle-switch .toggle-slider,
+        input[type="checkbox"]:checked + label .toggle-slider {
+            background: linear-gradient(135deg, #ff6bd6, #7289da);
+            border-color: #ff6bd6;
+        }
+        input[type="checkbox"]:checked + .toggle-slider:before,
+        input[type="checkbox"]:checked + .toggle-switch .toggle-slider:before,
+        input[type="checkbox"]:checked + label .toggle-slider:before {
+            transform: translateX(24px);
+        }
+        input[type="checkbox"]:disabled + .toggle-slider,
+        input[type="checkbox"]:disabled + .toggle-switch .toggle-slider,
+        input[type="checkbox"]:disabled + label .toggle-slider {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
         .toggle {
             display: inline-flex;
             align-items: center;
@@ -544,6 +601,29 @@
         .toggle input:checked::after {
             transform: translateX(20px);
             background: #0b0b12;
+        }
+        .config-disclaimer {
+            margin-top: 0.75rem;
+            font-size: 0.85rem;
+            color: var(--text-soft);
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
+        .override-icon {
+            color: var(--warn);
+            font-weight: 600;
+        }
+        .warning-card {
+            border: 1px solid rgba(243, 192, 77, 0.4);
+        }
+        .warning-card .warning-text {
+            margin-bottom: 0.8rem;
+            background: rgba(243, 192, 77, 0.15);
+            border-radius: 12px;
+            padding: 0.65rem 0.9rem;
+            color: var(--warn);
+            font-size: 0.9rem;
         }
         .status-chip {
             display: inline-flex;
@@ -711,6 +791,7 @@ window.__SYNTH_CONFIG = {
     <script src="/js/utils.js"></script>
     <script src="/js/ui-helpers.js"></script>
     <script src="/js/main.js"></script>
+    <script src="/js/history.js"></script>
     <script src="/js/skins-ui.js"></script>
     <script src="/js/skins-upload.js"></script>
 </body>

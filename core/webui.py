@@ -283,6 +283,14 @@ class SynthWebUIInterface:
         else:
             log_warning(f"{LOG_PREFIX} Skins directory not found: {skins_dir}")
         if self.vrm_dir.exists():
+            try:
+                self.app.mount("/avatars", StaticFiles(directory=str(self.vrm_dir)), name="synth-webui-avatars")
+                log_info(f"{LOG_PREFIX} Mounted /avatars to {self.vrm_dir}")
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to mount /avatars: {exc}")
+        else:
+            log_warning(f"{LOG_PREFIX} VRM directory does not exist, /avatars endpoint NOT mounted")
+        if self.vrm_dir.exists():
             log_debug(f"{LOG_PREFIX} VRM directory is_dir: {self.vrm_dir.is_dir()}")
             log_debug(f"{LOG_PREFIX} VRM directory is readable: {os.access(self.vrm_dir, os.R_OK)}")
             
@@ -295,9 +303,6 @@ class SynthWebUIInterface:
                     log_info(f"{LOG_PREFIX}   - {item.name} ({file_type}, {size} bytes)")
             except Exception as list_exc:
                 log_warning(f"{LOG_PREFIX} Unable to list VRM directory contents: {list_exc}")
-        else:
-            log_warning(f"{LOG_PREFIX} VRM directory does not exist, /avatars endpoint NOT mounted")
-        
         log_info(f"{LOG_PREFIX} ========== VRM DIRECTORY MOUNT END ==========")
 
         # Initialize AnimationHandler so tests and runtime can access it
