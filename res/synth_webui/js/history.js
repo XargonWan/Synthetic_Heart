@@ -274,6 +274,9 @@ window.SynthWebUI.initHistoryTab = function() { initializeHistoryTab(); };
 // Fallback: if the tab is active on DOMContentLoaded, initialize
 document.addEventListener('DOMContentLoaded', () => {
     const historyTab = document.querySelector('[data-tab="history"]');
+    if (historyTab && historyTab.children.length === 0 && window.SynthWebUI && typeof window.SynthWebUI.loadSection === 'function') {
+        window.SynthWebUI.loadSection('history');
+    }
     if (historyTab && historyTab.classList.contains('active')) {
         window.SynthWebUI.initHistoryTab();
     } else if (historyTab) {

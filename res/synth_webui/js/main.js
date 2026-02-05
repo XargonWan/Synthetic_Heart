@@ -56,6 +56,9 @@
 
             panel.dataset.loaded = '1';
             panel.dataset.loading = '0';
+            if (panel.children.length === 0 && text.trim().length > 0) {
+                panel.innerHTML = text;
+            }
             // Call an optional section-specific initializer, e.g. initSkinsTab, initHistoryTab
             try {
                 const initName = 'init' + section.charAt(0).toUpperCase() + section.slice(1) + 'Tab';
@@ -726,6 +729,17 @@ try {
                 const hamburger = document.querySelector('.hamburger');
                 const nav = document.querySelector('nav.main-nav');
 
+                function updateTopbarHeight() {
+                    const header = document.querySelector('header.top-bar');
+                    if (!header) return;
+                    try {
+                        const height = header.offsetHeight || header.getBoundingClientRect().height;
+                        if (height && document.documentElement) {
+                            document.documentElement.style.setProperty('--topbar-height', `${Math.round(height)}px`);
+                        }
+                    } catch (e) { /* ignore */ }
+                }
+
                 navButtons.forEach(btn => {
                     btn.addEventListener('click', async () => {
                         const tab = btn.getAttribute('data-tab');
@@ -735,6 +749,9 @@ try {
                             try { window.activeTab = tab; if (localStorage && localStorage.setItem) localStorage.setItem('synth-webui-active-tab', tab); } catch (e) { /* ignore */ }
                             if (window.SynthWebUI && typeof window.SynthWebUI.loadSection === 'function') {
                                 await window.SynthWebUI.loadSection(tab);
+                            }
+                            if (tab === 'history' && window.SynthWebUI && typeof window.SynthWebUI.initHistoryTab === 'function') {
+                                try { window.SynthWebUI.initHistoryTab(); } catch (e) { /* ignore */ }
                             }
                         } catch (e) {
                             console.warn('[synth_webui] tab switch failed', e);
@@ -764,6 +781,9 @@ try {
                         window.SynthWebUI.loadSection('home');
                     }
                 }
+
+                updateTopbarHeight();
+                window.addEventListener('resize', updateTopbarHeight);
             }
 
             function appendMessage(container, sender, text) {
@@ -989,6 +1009,14 @@ try {
                     return checkbox.checked;
                 }
 
+                function scrollLogsToBottom() {
+                    try {
+                        if (logOutput) {
+                            logOutput.scrollTop = logOutput.scrollHeight;
+                        }
+                    } catch (e) { /* ignore */ }
+                }
+
                 function applyFilters() {
                     const search = (logSearchInput && logSearchInput.value || '').trim().toLowerCase();
                     const children = Array.from(logOutput.querySelectorAll('.log-line'));
@@ -998,6 +1026,10 @@ try {
                         const textOk = !search || (line.textContent || '').toLowerCase().includes(search);
                         line.style.display = (levelOk && textOk) ? '' : 'none';
                     });
+                    const auto = logAutoscroll ? logAutoscroll.checked : true;
+                    if (auto) {
+                        scrollLogsToBottom();
+                    }
                 }
 
                 function appendLogLine(text) {
@@ -1009,7 +1041,7 @@ try {
                     logOutput.appendChild(line);
                     const auto = logAutoscroll ? logAutoscroll.checked : true;
                     if (auto) {
-                        logOutput.scrollTop = logOutput.scrollHeight;
+                        scrollLogsToBottom();
                     }
                     applyFilters();
                 }

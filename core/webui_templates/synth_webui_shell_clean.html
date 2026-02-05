@@ -4,6 +4,10 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>%%BRAND_NAME%%</title>
+    <link rel="icon" type="image/png" sizes="192x192" href="/static/synth_icon_192.png" />
+    <link rel="icon" type="image/png" sizes="512x512" href="/static/synth_icon_512.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/synth_icon_180.png" />
+    <link rel="manifest" href="/static/manifest.webmanifest" />
     <style>
         :root {
             color-scheme: dark;
@@ -52,6 +56,7 @@
             background: linear-gradient(135deg, rgba(12, 12, 20, 0.78), rgba(34, 30, 46, 0.78));
             border-bottom: 1px solid var(--border);
             backdrop-filter: blur(18px);
+            --topbar-height: 88px;
         }
         .brand {
             display: flex;
@@ -117,6 +122,7 @@
             display: flex;
             width: 100%;
             min-height: 0;
+            height: calc(100vh - var(--topbar-height, 120px));
         }
         .tab-panel {
             display: none;
@@ -144,7 +150,8 @@
             height: 100%;
             min-height: 0;
             /* Ensure the 3D canvas always has viewport height even if parents collapse */
-            min-height: calc(100vh - 140px);
+            min-height: calc(100vh - var(--topbar-height, 120px));
+            height: calc(100vh - var(--topbar-height, 120px));
         }
         .home-content {
             position: relative;
@@ -156,7 +163,7 @@
             position: relative;
             width: 100%;
             height: 100%;
-            min-height: calc(100vh - 140px);
+            min-height: calc(100vh - var(--topbar-height, 120px));
         }
         #chat {
             position: fixed;
@@ -456,6 +463,11 @@
             color: var(--text-soft);
             border-color: rgba(255, 255, 255, 0.2);
         }
+        #llm-engine-select {
+            background: rgba(0, 0, 0, 0.65) !important;
+            color: var(--text) !important;
+            border-color: var(--border-strong) !important;
+        }
         .component-description {
             margin: 0.6rem 0;
             color: var(--text-soft);
@@ -496,9 +508,11 @@
             display: flex;
             align-items: center;
             gap: 0.6rem;
+            width: 100%;
         }
         .config-input input,
-        .config-input select {
+        .config-input select,
+        .config-input textarea {
             flex: 1;
             border-radius: 8px;
             border: 1px solid var(--border);
@@ -506,6 +520,7 @@
             color: var(--text);
             padding: 0.35rem 0.6rem;
             font-size: 0.9rem;
+            width: 100%;
         }
         .config-input input:disabled {
             opacity: 0.55;
@@ -657,6 +672,7 @@
             flex-direction: column;
             gap: 1rem;
             overflow: hidden;
+            max-height: calc(100vh - var(--topbar-height, 120px) - 4rem);
         }
         #log-output {
             background: rgba(8, 8, 16, 0.82);
@@ -691,6 +707,18 @@
             border-radius: 999px;
             padding: 0.15rem 0.55rem;
             color: var(--text-soft);
+        }
+        .component-status-success {
+            color: var(--success);
+            border-color: rgba(24, 201, 140, 0.4);
+        }
+        .component-status-failed {
+            color: var(--error);
+            border-color: rgba(255, 123, 147, 0.5);
+        }
+        .component-status-loading {
+            color: var(--warn);
+            border-color: rgba(243, 192, 77, 0.5);
         }
         .hamburger {
             display: none;

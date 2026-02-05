@@ -401,6 +401,7 @@ class SynthWebUIInterface:
         self.app.get("/api/animations/{skin}/{animation_type}")(self.get_animations_for_type)
         self.app.get("/api/skins/{skin}/animations/{animation_type}/{animation_file}.json")(self.get_animation_descriptor)
         self.app.get("/service-worker.js")(self.service_worker)
+        self.app.get("/favicon.ico")(self.favicon)
         self.app.post("/api/animations/upload")(self.upload_animation)
         self.app.get("/api/animations/uploads")(self.list_animation_uploads)
         self.app.delete("/api/animations/uploads/{upload_id}")(self.delete_animation_upload)
@@ -2545,6 +2546,13 @@ class SynthWebUIInterface:
         if not sw_path.exists() or not sw_path.is_file():
             raise HTTPException(status_code=404, detail="Service worker not found")
         return FileResponse(sw_path, media_type="application/javascript")
+
+    async def favicon(self) -> FileResponse:
+        """Serve a bundled favicon to avoid 404s on /favicon.ico."""
+        icon_path = Path(__file__).parent.parent / "res" / "synth_webui" / "static" / "synth_icon_192.png"
+        if not icon_path.exists() or not icon_path.is_file():
+            raise HTTPException(status_code=404, detail="Favicon not found")
+        return FileResponse(icon_path, media_type="image/png")
 
     async def upload_animation(
         self,
