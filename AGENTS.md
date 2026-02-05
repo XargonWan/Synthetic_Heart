@@ -76,6 +76,60 @@ Notes for contributors:
 - Engines may optionally implement agent hooks (e.g., `supports_agent()`, `attach_agent()`, `agent_execute()`) — the Agent will attach to an engine if available but degrades gracefully when not.
 - See `tests/test_agent_loop.py` for unit tests that validate persistence, iteration flow and the `start_task` behavior.
 
+### Database & Event-loop guidelines for Agents (must-follow) 🔧
+
+Agents often perform background tasks and may need to access the database. Follow these rules to avoid exhausting DB connections or creating accidental pools/event loops:
+
+- Use the core DB context managers — do NOT open raw connections yourself:
+
+  - Use `async with get_conn_ctx() as conn:` or plugin helper `async with get_db() as conn:` to acquire a connection. These context managers guarantee the connection is released and tracked by the core pool monitoring.
+
+  - Never call `aiomysql.connect()` directly from an agent plugin or long-running task; this bypasses pool management and can create independent connections.
+
+- Acquire and release quickly:
+
+  - Fetch any required rows, close the connection, then perform long-running operations (e.g., LLM calls, external IO).
+
+  - Wrong:
+
+    async with get_conn_ctx() as conn:
+        user = await fetch_user(conn)
+        response = await llm.generate(prompt)  # holds the connection while waiting
+
+  - Right:
+
+    async with get_conn_ctx() as conn:
+        user = await fetch_user(conn)
+    # connection released here
+    response = await llm.generate(prompt)
+
+- Avoid creating additional event loops in threads:
+
+  - Do not use `ThreadPoolExecutor` + `asyncio.run()` to execute coroutines; this pattern creates new event loops (and thus new pools) that lead to uncontrollable DB connection growth.
+
+  - If you must run an async coro from sync context and there is a running loop, use `asyncio.run_coroutine_threadsafe(coro, loop).result()`.
+
+- For background linking/auxiliary DB work prefer `asyncio.create_task()` so the Agent loop is not blocked.
+
+- Configuration & monitoring:
+
+  - The system supports `DB_MAX_POOLS` (default 3) and pool sizing via `DB_POOL_MINSIZE`/`DB_POOL_MAXSIZE`. Tune them per deployment and ensure `max_connections` on MariaDB is sufficient.
+
+  - Watch for symptoms: `TIMEOUT acquiring connection`, `(1040, 'Too many connections')`, or disproportionate `Connection acquired` vs `Connection released` log counts.
+
+- Deprecated patterns to remove or refactor (search & remove if unused):
+
+  - `aiomysql.connect(...)` called in plugin code (replace with `get_conn_ctx()`)
+  - direct use of `get_conn()` without `get_conn_ctx()`
+  - helpers that run coroutines with `ThreadPoolExecutor` + `asyncio.run()` (replace with `run_coroutine_threadsafe`)
+
+- Checklist for reviewers when merging Agent-related changes:
+  1. Verify DB calls use `get_conn_ctx()`/`get_db()` and are short-lived. ✅
+  2. Ensure no new `asyncio.run()` in thread contexts or raw `aiomysql.connect()` calls. ✅
+  3. Add tests that simulate concurrent Agent tasks and assert pool/connection invariants. ✅
+
+- If you find a legacy helper that would require a large refactor (used widely), leave the change for a dedicated cleanup PR and add a TODO referencing the ticket.
+
 ---
 
 ## LLM Engines
