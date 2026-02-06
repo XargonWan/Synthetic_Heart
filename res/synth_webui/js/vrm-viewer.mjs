@@ -6,151 +6,208 @@ import * as THREE from 'three';
         import { loadMixamoAnimation } from '/js/loadMixamoAnimation.js';
         import { mixamoVRMRigMap } from '/js/mixamoVRMRigMap.js';
 
-        const canvas = document.getElementById('vrm-canvas');
-        const getSessionId = () => (window.sessionId || null);
-        if (!canvas) {
-            console.error('[synth_webui] VRM canvas not found in DOM');
-        } else {
-            console.log('[synth_webui] VRM canvas found, initializing viewer...');
-            const setStatus = window.SynthWebUISetStatus || ((message) => console.log('[synth_webui]', message));
-            const listEl = document.getElementById('vrm-list');
-            // The upload control was moved into the Skins tab. Use its element here.
-            const uploadInput = document.getElementById('skin-vrm-upload');
-            let currentModel = null;
+            // Module-scoped variables (initialized when the canvas is available)
+            let canvas = null;
+            let renderer = null;
+            let scene = null;
+            let camera = null;
+            let controls = null;
+            let __synthLookAtTarget = null;
+            let __synthDefaultLookAtTarget = null;
+            let __synthTmpAvatarPos = null;
+            let __synthTmpCamPos = null;
+            let __synthTmpForward = null;
+            let __synthTmpQuat = null;
+            let __synthTmpDesired = null;
+            let __synthTmpDesired2 = null;
+            let __synthTmpHeadPos = null;
+            let __synthTmpDir = null;
+            let __synthTmpUp = null;
+
             let currentVRM = null;
             let currentMixer = null;
-            let currentAnimation = null;
-            let isProcessing = false;
-            let isSpeaking = false;
-            // Flat list of mesh targets for raycasting (avoid recursive traversal per click)
-            let __synthRaycastTargets = [];
-
-            // Screen knock interaction (empty canvas tap)
-            // - Plays a glass knock SFX
-            // - Briefly and subtly glances towards the camera (head/eyes only)
-            // Use WebAudio pre-decoding to avoid click-time MP3 decode stutter.
             let __synthKnockAudio = null; // legacy fallback
             let __synthKnockSfx = { buffer: null, loading: null };
             let __synthLastKnockAt = 0;
             let __synthKnockLook = { activeUntil: 0, startedAt: 0, durationMs: 520, maxStrength: 0.32 };
 
-            const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
-            renderer.outputEncoding = THREE.sRGBEncoding;
-            renderer.setPixelRatio(window.devicePixelRatio);
-            const scene = new THREE.Scene();
-            const camera = new THREE.PerspectiveCamera(30, canvas.clientWidth / Math.max(1, canvas.clientHeight), 0.1, 20);
-            camera.position.set(0, 1.4, 2.2);
-
-            // LookAt targets (we use an explicit Object3D target instead of the camera object)
-            // so we can blend the target position for a subtle “glance”.
-            const __synthLookAtTarget = new THREE.Object3D();
-            const __synthDefaultLookAtTarget = new THREE.Object3D();
-            scene.add(__synthLookAtTarget);
-            scene.add(__synthDefaultLookAtTarget);
-            __synthLookAtTarget.position.set(0, 1.45, 1);
-            __synthDefaultLookAtTarget.position.set(0, 1.45, 1);
-
-            // Cached temps for render-loop math
-            const __synthTmpAvatarPos = new THREE.Vector3();
-            const __synthTmpCamPos = new THREE.Vector3();
-            const __synthTmpForward = new THREE.Vector3();
-            const __synthTmpQuat = new THREE.Quaternion();
-            const __synthTmpDesired = new THREE.Vector3();
-            const __synthTmpDesired2 = new THREE.Vector3();
-            const __synthTmpHeadPos = new THREE.Vector3();
-            const __synthTmpDir = new THREE.Vector3();
-            const __synthTmpUp = new THREE.Vector3(0, 1, 0);
-
-            // Neutral gaze is avatar-forward (does not track the camera).
-            // Knock temporarily blends gaze towards the camera.
             const __synthNeutralGaze = { yawOffsetRad: 0.0, distance: 2.2 };
 
-            const controls = new OrbitControls(camera, canvas);
-            controls.enableDamping = true;
-            controls.dampingFactor = 0.05;
-            
-            // Enable pan (Middle Mouse Button or Shift + Left Click)
-            controls.enablePan = true;
-            controls.panSpeed = 0.8;
-            controls.screenSpacePanning = true; // Pan in screen space (more intuitive)
-            
-            // Mouse button configuration (inverted middle/right)
-            controls.mouseButtons = {
-                LEFT: THREE.MOUSE.ROTATE,      // Left click: rotate
-                RIGHT: THREE.MOUSE.PAN,        // Right click: pan
-                MIDDLE: THREE.MOUSE.DOLLY      // Middle click: zoom
-            };
-            
-            // Enable zoom with mouse wheel
-            controls.enableZoom = true;
-            controls.zoomSpeed = 1.0;
-            controls.minDistance = 0.5;  // Minimum zoom distance
-            controls.maxDistance = 10;   // Maximum zoom distance
-
-            // Camera change debounce logic: wait 10s after the last change to save camera state
-            let cameraStateDebounce = null;
-            controls.addEventListener('change', () => {
-                const sessionId = getSessionId();
-                if (!sessionId) return;
+            function showVrmFallback(err) {
                 try {
-                    const camState = {
-                        position: camera.position ? [camera.position.x, camera.position.y, camera.position.z] : null,
-                        rotation: camera.rotation ? [camera.rotation.x, camera.rotation.y, camera.rotation.z] : null,
-                        fov: camera.fov || null,
-                        zoom: camera.zoom || null
-                    };
-                    if (cameraStateDebounce) clearTimeout(cameraStateDebounce);
-                    cameraStateDebounce = setTimeout(async () => {
-                        try {
-                            await apiPostJson('/api/chat/session_meta', { session_id: sessionId, meta: { camera: camState } });
-                        } catch (err) {
-                            console.debug('[synth_webui] Failed to save camera state:', err);
-                        }
-                    }, 10000);
-                } catch (err) { console.debug('[synth_webui] Camera change handler error:', err); }
-            });
+                    const parent = (canvas && canvas.parentElement) || document.querySelector('.home-vrm') || document.body;
+                    if (!parent) return;
+                    let banner = document.getElementById('vrm-fallback');
+                    if (!banner) {
+                        banner = document.createElement('div');
+                        banner.id = 'vrm-fallback';
+                        banner.style.position = 'absolute';
+                        banner.style.inset = '0';
+                        banner.style.display = 'flex';
+                        banner.style.alignItems = 'center';
+                        banner.style.justifyContent = 'center';
+                        banner.style.textAlign = 'center';
+                        banner.style.padding = '1.5rem';
+                        banner.style.background = 'rgba(10, 10, 16, 0.6)';
+                        banner.style.color = 'var(--text)';
+                        banner.style.zIndex = '5';
+                        parent.style.position = parent.style.position || 'relative';
+                        parent.appendChild(banner);
+                    }
+                    const detail = err && err.message ? err.message : 'WebGL unavailable';
+                    banner.textContent = `3D view unavailable. ${detail}`;
+                } catch (e) { /* ignore */ }
+            }
+
+            function initVRMViewer() {
+                canvas = document.getElementById('vrm-canvas');
+                if (!canvas) {
+                    console.warn('[synth_webui] VRM canvas not found; waiting for DOMContentLoaded...');
+                    document.addEventListener('DOMContentLoaded', initVRMViewer, { once: true });
+                    return;
+                }
+
+                try {
+                    renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+                    renderer.outputEncoding = THREE.sRGBEncoding;
+                    renderer.setPixelRatio(window.devicePixelRatio);
+                    scene = new THREE.Scene();
+                    camera = new THREE.PerspectiveCamera(30, canvas.clientWidth / Math.max(1, canvas.clientHeight), 0.1, 20);
+                    camera.position.set(0, 1.4, 2.2);
+                } catch (err) {
+                    console.error('[synth_webui] VRM renderer init failed:', err);
+                    try { window.__synth_vrm_init_failed = true; } catch (e) { /* ignore */ }
+                    showVrmFallback(err);
+                    return;
+                }
+
+                // LookAt targets (we use an explicit Object3D target instead of the camera object)
+                // so we can blend the target position for a subtle “glance”.
+                __synthLookAtTarget = new THREE.Object3D();
+                __synthDefaultLookAtTarget = new THREE.Object3D();
+                scene.add(__synthLookAtTarget);
+                scene.add(__synthDefaultLookAtTarget);
+                __synthLookAtTarget.position.set(0, 1.45, 1);
+                __synthDefaultLookAtTarget.position.set(0, 1.45, 1);
+
+                // Cached temps for render-loop math
+                __synthTmpAvatarPos = new THREE.Vector3();
+                __synthTmpCamPos = new THREE.Vector3();
+                __synthTmpForward = new THREE.Vector3();
+                __synthTmpQuat = new THREE.Quaternion();
+                __synthTmpDesired = new THREE.Vector3();
+                __synthTmpDesired2 = new THREE.Vector3();
+                __synthTmpHeadPos = new THREE.Vector3();
+                __synthTmpDir = new THREE.Vector3();
+                __synthTmpUp = new THREE.Vector3(0, 1, 0);
+
+                // Neutral gaze is avatar-forward (does not track the camera).
+                // Knock temporarily blends gaze towards the camera.
+                // (value already declared above as const __synthNeutralGaze)
+
+                controls = new OrbitControls(camera, canvas);
+                controls.enableDamping = true;
+                controls.dampingFactor = 0.05;
+                // Notify any deferred init logic that VRM viewer is ready
+                document.dispatchEvent(new Event('synth_vrm_initialized'));
+            }
+
+            // Initialize VRM viewer (will wait for DOM if canvas isn't present yet)
+            initVRMViewer();
             
-            controls.target.set(0, 1.2, 0);
-            controls.update();
+            // Only run the following initialization once the VRM viewer has been initialized
+            const runWhenInitialized = (fn) => {
+                if (canvas && renderer && scene && camera && controls) {
+                    fn();
+                } else {
+                    document.addEventListener('synth_vrm_initialized', () => fn(), { once: true });
+                }
+            };
 
-            scene.add(new THREE.AmbientLight(0xffffff, 0.6));
-            const keyLight = new THREE.DirectionalLight(0xffffff, 1.2);
-            keyLight.position.set(1, 1.2, 1);
-            scene.add(keyLight);
-            const fillLight = new THREE.DirectionalLight(0xffffff, 0.4);
-            fillLight.position.set(-1, 1.2, -1);
-            scene.add(fillLight);
+            runWhenInitialized(() => {
+                // Enable pan (Middle Mouse Button or Shift + Left Click)
+                controls.enablePan = true;
+                controls.panSpeed = 0.8;
+                controls.screenSpacePanning = true; // Pan in screen space (more intuitive)
+                
+                // Mouse button configuration (inverted middle/right)
+                controls.mouseButtons = {
+                    LEFT: THREE.MOUSE.ROTATE,      // Left click: rotate
+                    RIGHT: THREE.MOUSE.PAN,        // Right click: pan
+                    MIDDLE: THREE.MOUSE.DOLLY      // Middle click: zoom
+                };
+                
+                // Enable zoom with mouse wheel
+                controls.enableZoom = true;
+                controls.zoomSpeed = 1.0;
+                controls.minDistance = 0.5;  // Minimum zoom distance
+                controls.maxDistance = 10;   // Maximum zoom distance
 
-            // Add floor/ground plane to always show 3D room
-            const floorGeometry = new THREE.PlaneGeometry(10, 10);
-            const floorMaterial = new THREE.MeshStandardMaterial({ 
-                color: 0x2a2a2a, 
-                roughness: 0.8,
-                metalness: 0.2
+                // Camera change debounce logic: wait 10s after the last change to save camera state
+                let cameraStateDebounce = null;
+                controls.addEventListener('change', () => {
+                    const sessionId = getSessionId();
+                    if (!sessionId) return;
+                    try {
+                        const camState = {
+                            position: camera.position ? [camera.position.x, camera.position.y, camera.position.z] : null,
+                            rotation: camera.rotation ? [camera.rotation.x, camera.rotation.y, camera.rotation.z] : null,
+                            fov: camera.fov || null,
+                            zoom: camera.zoom || null
+                        };
+                        if (cameraStateDebounce) clearTimeout(cameraStateDebounce);
+                        cameraStateDebounce = setTimeout(async () => {
+                            try {
+                                await apiPostJson('/api/chat/session_meta', { session_id: sessionId, meta: { camera: camState } });
+                            } catch (err) {
+                                console.debug('[synth_webui] Failed to save camera state:', err);
+                            }
+                        }, 10000);
+                    } catch (err) { console.debug('[synth_webui] Camera change handler error:', err); }
+                });
+                
+                controls.target.set(0, 1.2, 0);
+                controls.update();
+
+                scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+                const keyLight = new THREE.DirectionalLight(0xffffff, 1.2);
+                keyLight.position.set(1, 1.2, 1);
+                scene.add(keyLight);
+                const fillLight = new THREE.DirectionalLight(0xffffff, 0.4);
+                fillLight.position.set(-1, 1.2, -1);
+                scene.add(fillLight);
+
+                // Add floor/ground plane to always show 3D room
+                const floorGeometry = new THREE.PlaneGeometry(10, 10);
+                const floorMaterial = new THREE.MeshStandardMaterial({ 
+                    color: 0x2a2a2a, 
+                    roughness: 0.8,
+                    metalness: 0.2
+                });
+                const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+                floor.rotation.x = -Math.PI / 2;
+                floor.position.y = 0;
+                floor.receiveShadow = true;
+                scene.add(floor);
+                console.log('[synth_webui] Floor plane added to scene');
+
+                // Add grid helper for better depth perception
+                const gridHelper = new THREE.GridHelper(10, 20, 0x444444, 0x333333);
+                gridHelper.position.y = 0.001; // Slightly above floor to avoid z-fighting
+                scene.add(gridHelper);
+                console.log('[synth_webui] Grid helper added to scene');
+
+                const loader = new GLTFLoader();
+                loader.setCrossOrigin('anonymous');
+                loader.setResourcePath('/skins/temp/');
+                loader.register((parser) => new VRMLoaderPlugin(parser));
+                console.log('[synth_webui] VRM loader configured with resource path: /avatars/');
+
+                const blobLoader = new GLTFLoader();
+                blobLoader.setCrossOrigin('anonymous');
+                blobLoader.register((parser) => new VRMLoaderPlugin(parser));
+                console.log('[synth_webui] Blob loader configured');
             });
-            const floor = new THREE.Mesh(floorGeometry, floorMaterial);
-            floor.rotation.x = -Math.PI / 2;
-            floor.position.y = 0;
-            floor.receiveShadow = true;
-            scene.add(floor);
-            console.log('[synth_webui] Floor plane added to scene');
-
-            // Add grid helper for better depth perception
-            const gridHelper = new THREE.GridHelper(10, 20, 0x444444, 0x333333);
-            gridHelper.position.y = 0.001; // Slightly above floor to avoid z-fighting
-            scene.add(gridHelper);
-            console.log('[synth_webui] Grid helper added to scene');
-
-            const loader = new GLTFLoader();
-            loader.setCrossOrigin('anonymous');
-            loader.setResourcePath('/skins/temp/');
-            loader.register((parser) => new VRMLoaderPlugin(parser));
-            console.log('[synth_webui] VRM loader configured with resource path: /avatars/');
-
-            const blobLoader = new GLTFLoader();
-            blobLoader.setCrossOrigin('anonymous');
-            blobLoader.register((parser) => new VRMLoaderPlugin(parser));
-            console.log('[synth_webui] Blob loader configured');
 
             // Animation mappings registry (GLOBAL, plugin/interface-extensible).
             // Plugins/interfaces can populate this at runtime, including new states
@@ -4951,13 +5008,15 @@ import * as THREE from 'three';
                         panel.style.width = '100%';
                         panel.style.height = '100%';
                         panel.innerHTML = `
-                        <div id="synth-debug-title-bar" style="display:flex;align-items:center;justify-content:flex-end;gap:6px;padding:10px 12px;border-bottom:1px solid var(--border);cursor:move;user-select:none;">
-                            <button id="synth-debug-pause" class="pill secondary" type="button" title="Pause">⏸️</button>
-                            <button id="synth-debug-resync" class="pill secondary" type="button" title="Sync">🛜</button>
-                            <button id="synth-debug-reset" class="pill" type="button" title="Reset">🔁</button>
-                            <button id="synth-debug-minimize" class="pill secondary" type="button" title="Minimize">➖</button>
-                        </div>
-                        <div id="synth-debug-body" style="padding:12px;display:flex;flex-direction:column;gap:12px;overflow:auto;height:calc(100% - 52px);">
+                        <div id="synth-debug-title-bar" style="display:flex;align-items:center;justify-content:flex-end;gap:6px;padding:10px 12px;border-bottom:1px solid var(--border);cursor:move;user-select:none;"></div>
+                        <div id="synth-debug-body" style="padding:12px;display:flex;flex-direction:column;gap:12px;overflow:auto;flex:1;min-height:0;">
+                            <div class="card" style="margin:0;">
+                                <div style="display:flex;gap:8px;align-items:center;justify-content:flex-end;">
+                                    <button id="synth-debug-pause" class="pill secondary" type="button" title="Pause">⏸️</button>
+                                    <button id="synth-debug-resync" class="pill secondary" type="button" title="Sync">🛜</button>
+                                    <button id="synth-debug-reset" class="pill" type="button" title="Reset">🔁</button>
+                                </div>
+                            </div>
 
                             <div class="card" style="margin:0;">
                                 <h2 style="margin:0 0 8px 0;">Status</h2>
@@ -5028,36 +5087,14 @@ import * as THREE from 'three';
                             iconText: '💻',
                             dockLabel: 'Restore Debug',
                             dockClass: 'chat-toggle-btn',
-                            className: 'synth-winbox no-full'
+                            className: 'synth-winbox no-full no-close no-min debug-window'
                         });
                         try {
                             if (window.SynthWindowManager && typeof window.SynthWindowManager.attachHeaderTools === 'function') {
                                 const pauseBtn = panel.querySelector('#synth-debug-pause');
                                 const resyncBtn = panel.querySelector('#synth-debug-resync');
                                 const resetBtn = panel.querySelector('#synth-debug-reset');
-                                window.SynthWindowManager.attachHeaderTools('debug', winbox, [
-                                    {
-                                        label: '⏸️',
-                                        title: 'Pause',
-                                        className: 'synth-wb-tool-pause',
-                                        onClick: () => { if (pauseBtn) pauseBtn.click(); }
-                                    },
-                                    {
-                                        label: '🛜',
-                                        title: 'Sync',
-                                        onClick: () => { if (resyncBtn) resyncBtn.click(); }
-                                    },
-                                    {
-                                        label: '🔁',
-                                        title: 'Reset',
-                                        onClick: () => { if (resetBtn) resetBtn.click(); }
-                                    },
-                                    {
-                                        label: '➖',
-                                        title: 'Minimize',
-                                        onClick: () => { try { window.SynthWindowManager.minimize('debug'); } catch (e) { /* ignore */ } }
-                                    }
-                                ]);
+                                window.SynthWindowManager.attachHeaderTools('debug', winbox, []);
                             }
                         } catch (e) { /* ignore */ }
                         return winbox;
@@ -5134,8 +5171,19 @@ import * as THREE from 'three';
                             window.addEventListener('pointermove', (ev) => {
                                 if (!dragging) return;
                                 try {
-                                    el.style.left = (ev.clientX - offsetX) + 'px';
-                                    el.style.top = (ev.clientY - offsetY) + 'px';
+                                    const topbar = (document.querySelector('header.top-bar') && document.querySelector('header.top-bar').getBoundingClientRect().height) ? Math.ceil(document.querySelector('header.top-bar').getBoundingClientRect().height) : 0;
+                                    const w = el.offsetWidth || 320;
+                                    const h = el.offsetHeight || 240;
+                                    const viewportW = Math.max(window.innerWidth || 0, document.documentElement.clientWidth || 0);
+                                    const viewportH = Math.max(window.innerHeight || 0, document.documentElement.clientHeight || 0);
+                                    const maxX = Math.max(0, viewportW - w);
+                                    const maxY = Math.max(topbar, viewportH - h);
+                                    let tx = Math.round(ev.clientX - offsetX);
+                                    let ty = Math.round(ev.clientY - offsetY);
+                                    tx = Math.min(maxX, Math.max(0, tx));
+                                    ty = Math.min(maxY, Math.max(topbar, ty));
+                                    el.style.left = tx + 'px';
+                                    el.style.top = ty + 'px';
                                     el.style.right = 'auto';
                                     el.style.bottom = 'auto';
                                 } catch (e) { /* ignore */ }
@@ -5182,14 +5230,16 @@ import * as THREE from 'three';
                         }
                     }
 
-                    const minimizeBtn = win.querySelector('#synth-debug-minimize');
-                    if (minimizeBtn) {
-                        minimizeBtn.addEventListener('click', () => {
-                            if (winbox && window.SynthWindowManager && typeof window.SynthWindowManager.minimize === 'function') {
-                                try { window.SynthWindowManager.minimize('debug'); } catch (e) { /* ignore */ }
-                                return;
-                            }
-                        });
+                    if (!winbox) {
+                        const minimizeBtn = win.querySelector('#synth-debug-minimize');
+                        if (minimizeBtn) {
+                            minimizeBtn.addEventListener('click', () => {
+                                if (winbox && window.SynthWindowManager && typeof window.SynthWindowManager.minimize === 'function') {
+                                    try { window.SynthWindowManager.minimize('debug'); } catch (e) { /* ignore */ }
+                                    return;
+                                }
+                            });
+                        }
                     }
 
                     async function resyncFromBackend() {
@@ -5260,15 +5310,6 @@ import * as THREE from 'three';
                                 pauseBtn.textContent = paused ? '▶️' : '⏸️';
                                 pauseBtn.title = paused ? 'Play' : 'Pause';
                                 pauseBtn.setAttribute('aria-label', paused ? 'Play' : 'Pause');
-                            }
-                            if (winbox) {
-                                const winEl = winbox.window || winbox.dom || winbox.g || null;
-                                const toolBtn = winEl ? winEl.querySelector('.synth-wb-tool-pause') : null;
-                                if (toolBtn) {
-                                    toolBtn.textContent = paused ? '▶️' : '⏸️';
-                                    toolBtn.title = paused ? 'Play' : 'Pause';
-                                    toolBtn.setAttribute('aria-label', paused ? 'Play' : 'Pause');
-                                }
                             }
                         } catch (e) { /* ignore */ }
                         if (!paused) {
@@ -6560,7 +6601,6 @@ import * as THREE from 'three';
                     }, 500);
                 }
             });
-            }
         }
 
         // Chat drag functionality (use pointer events for parity with debug window)
@@ -6607,8 +6647,19 @@ import * as THREE from 'three';
                 // Only respond to the pointer that started the drag
                 if (chatPointerId !== ((e.pointerId !== undefined) ? e.pointerId : 'mouse')) return;
                 try {
-                    chat.style.left = (e.clientX - dragOffsetX) + 'px';
-                    chat.style.top = (e.clientY - dragOffsetY) + 'px';
+                    const topbar = (document.querySelector('header.top-bar') && document.querySelector('header.top-bar').getBoundingClientRect().height) ? Math.ceil(document.querySelector('header.top-bar').getBoundingClientRect().height) : 0;
+                    const w = chat.offsetWidth || 320;
+                    const h = chat.offsetHeight || 240;
+                    const viewportW = Math.max(window.innerWidth || 0, document.documentElement.clientWidth || 0);
+                    const viewportH = Math.max(window.innerHeight || 0, document.documentElement.clientHeight || 0);
+                    const maxX = Math.max(0, viewportW - w);
+                    const maxY = Math.max(topbar, viewportH - h);
+                    let tx = Math.round(e.clientX - dragOffsetX);
+                    let ty = Math.round(e.clientY - dragOffsetY);
+                    tx = Math.min(maxX, Math.max(0, tx));
+                    ty = Math.min(maxY, Math.max(topbar, ty));
+                    chat.style.left = tx + 'px';
+                    chat.style.top = ty + 'px';
                     chat.style.bottom = 'auto';
                     chat.style.right = 'auto';
                 } catch (e) { /* ignore */ }
@@ -6991,7 +7042,7 @@ import * as THREE from 'three';
                     background: var(--panel-bg);
                     color: var(--text);
                     border: 1px solid var(--border);
-                    border-radius: 14px;
+                    border-radius: 18px;
                     box-shadow: 0 40px 80px -40px rgba(0,0,0,0.95);
                     display: none; flex-direction: column; overflow: hidden;
                 `;
@@ -7001,13 +7052,13 @@ import * as THREE from 'three';
                     <div class="archive-title">Archives</div>
                     <div class="archive-controls">
                         <button id="archive-minimize" class="pill secondary" type="button">—</button>
-                        <button id="archive-edit" class="pill secondary" type="button">Edit</button>
-                        <button id="archive-refresh" class="pill">Refresh</button>
                         <button id="archive-close" class="pill">Close</button>
                     </div>
                 </div>
                 <div id="archive-list" class="archive-list"></div>
                 <div class="archive-footer">
+                    <button id="archive-edit" class="pill secondary" type="button">Edit</button>
+                    <button id="archive-refresh" class="pill" type="button">Refresh</button>
                     <button id="archive-restore-btn" class="pill" disabled>Restore Selected</button>
                 </div>
             `;
@@ -7027,18 +7078,7 @@ import * as THREE from 'three';
                 });
                 try {
                     if (window.SynthWindowManager && typeof window.SynthWindowManager.attachHeaderTools === 'function') {
-                        window.SynthWindowManager.attachHeaderTools('archives', archiveWinbox, [
-                            {
-                                label: '🔄',
-                                title: 'Refresh archives',
-                                onClick: () => { try { refreshArchiveList(); } catch (e) { /* ignore */ } }
-                            },
-                            {
-                                label: '✏️',
-                                title: 'Edit selection',
-                                onClick: () => { try { toggleArchiveEditMode(); } catch (e) { /* ignore */ } }
-                            }
-                        ]);
+                        window.SynthWindowManager.attachHeaderTools('archives', archiveWinbox, []);
                     }
                 } catch (e) { /* ignore */ }
             } else {

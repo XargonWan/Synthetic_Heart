@@ -1,7 +1,7 @@
     <section class="tab-panel" id="tab-history" data-tab="history" role="tabpanel">
       <div class="history-wrapper">
         <header class="section-header">
-          <h2>History</h2>
+          <h2>Activity</h2>
           <nav class="sub-nav" role="tablist">
             <button class="sub-nav-btn active" data-subtab="diary" role="tab" aria-selected="true">
               <span class="icon">📖</span>
@@ -14,6 +14,10 @@
             <button class="sub-nav-btn" data-subtab="chat" role="tab" aria-selected="false">
               <span class="icon">💬</span>
               <span>Chat</span>
+            </button>
+            <button class="sub-nav-btn" data-subtab="agent" role="tab" aria-selected="false">
+              <span class="icon">🤖</span>
+              <span>Agent</span>
             </button>
           </nav>
         </header>
@@ -87,6 +91,16 @@
           </div>
         </div>
         <div id="history-chat-pagination" class="pagination-controls"></div>
+      </div>
+
+      <!-- Agent Sub-Tab -->
+      <div class="sub-tab-panel" id="subtab-agent" data-subtab="agent">
+        <div class="section-controls">
+          <div style="color: var(--text-soft); font-size: 0.9rem;">Agent tasks and proposals</div>
+        </div>
+        <div id="agent-tasks-list">Loading tasks...</div>
+        <div id="agent-proposals-list" style="margin-top: 1rem;">Loading proposals...</div>
+        <div id="agent-task-detail" style="margin-top: 1rem;"></div>
       </div>
         </div><!-- .sub-tabs-container -->
       </div><!-- .history-wrapper -->
@@ -603,4 +617,5 @@
 
       <script src="/js/utils.js"></script>
       <script src="/js/history.js"></script>
+      <script src="/js/agent.js"></script>
     </section>

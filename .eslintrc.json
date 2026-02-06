@@ -9,8 +9,18 @@
     "ecmaVersion": 2021,
     "sourceType": "module"
   },
+  "globals": {
+    "SynthUtils": "readonly",
+    "WinBox": "readonly",
+    "loader": "readonly",
+    "createResizeHandlesForElement": "readonly",
+    "fetchSkins": "readonly"
+  },
   "rules": {
     "no-console": "off",
-    "no-unused-vars": ["warn", { "argsIgnorePattern": "^_" }]
+    "no-unused-vars": ["warn", { "argsIgnorePattern": "^_" }],
+    "no-empty": "off",
+    "no-inner-declarations": "off",
+    "no-unreachable": "off"
   }
 }

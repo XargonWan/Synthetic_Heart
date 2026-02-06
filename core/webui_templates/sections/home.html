@@ -6,16 +6,17 @@
                 <div id="chat-title-bar">
                     <div class="chat-title">💬 Chat</div>
                     <div class="chat-controls">
-                        <button id="chat-minimize" title="Minimize chat" type="button" class="pill" style="margin-left:6px;">➖</button>
-                        <button id="chat-maximize" title="Maximize chat" type="button" class="pill" style="margin-left:6px;">⤢</button>
-                        <button id="chat-archive" title="Archive current chat" type="button" class="pill" style="margin-left:8px;">📦</button>
-                        <button id="chat-restore" title="Open archives" type="button" class="pill" style="margin-left:6px;">🗂️</button>
+                        <!-- WinBox header provides maximize control; no duplicate button here -->
                     </div>
                 </div>
                 <div id="messages" aria-live="polite"></div>
+                <div class="chat-toolbar">
+                    <button id="chat-archive" title="Archive current chat" type="button" class="pill">📦 Archive</button>
+                    <button id="chat-restore" title="Open archives" type="button" class="pill">🗂️ Open Archive</button>
+                </div>
                 <form id="composer" autocomplete="off">
                     <textarea id="input" placeholder="Type a message…" rows="2"></textarea>
-                    <button id="send" type="submit" disabled>➤</button>
+                    <button id="send" type="submit" disabled="disabled">➤</button>
                 </form>
             </section>
             <div class="home-vrm">

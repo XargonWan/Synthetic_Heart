@@ -3,13 +3,46 @@
 // Reset window positions to sensible defaults (no-op if not needed)
 function resetWindowPositions(forceConfirm) {
     try {
-        // Best-effort: if applyDefaultWindowPositions is available, call it
-        if (typeof window.applyDefaultWindowPositions === 'function') {
-            try { window.applyDefaultWindowPositions(); } catch (e) { /* ignore */ }
+        // Prefer a simple DOM-level fallback that moves a handful of known windows
+        const topbar = (document.querySelector('header.top-bar') && document.querySelector('header.top-bar').getBoundingClientRect()) ? Math.ceil(document.querySelector('header.top-bar').getBoundingClientRect().height) : 0;
+        // If a manager is present, try to reposition primary windows below the topbar
+        if (typeof window.SynthWindowManager !== 'undefined' && window.SynthWindowManager) {
+            const mgr = window.SynthWindowManager;
+            const ids = ['chat', 'debug', 'archive'];
+            let offsetX = 24;
+            const viewportH = window.innerHeight || document.documentElement.clientHeight || 0;
+            const margin = 24;
+            ids.forEach((id) => {
+                try {
+                    const wb = mgr.get(id);
+                    if (wb && typeof wb.move === 'function') {
+                        let y = Math.max(topbar, 80);
+                        if (id === 'chat') {
+                            let height = 320;
+                            try {
+                                const winEl = wb.window || wb.dom || wb.g || null;
+                                if (winEl && winEl.getBoundingClientRect) {
+                                    const rect = winEl.getBoundingClientRect();
+                                    height = rect.height || height;
+                                } else if (typeof wb.height === 'number') {
+                                    height = wb.height;
+                                }
+                            } catch (e) { /* ignore */ }
+                            if (viewportH) {
+                                y = Math.max(topbar, Math.round(viewportH - height - margin));
+                            }
+                        }
+                        try { wb.move(offsetX, y); } catch (e) { /* ignore */ }
+                        offsetX += 48;
+                    }
+                } catch (e) { /* ignore per-window errors */ }
+            });
             return;
         }
-        // Otherwise provide a safe no-op fallback
-        return;
+        // Otherwise call generic applyDefaultWindowPositions if available
+        if (typeof window.applyDefaultWindowPositions === 'function') {
+            try { window.applyDefaultWindowPositions(); } catch (e) { /* ignore */ }
+        }
     } catch (e) { /* ignore */ }
 }
 

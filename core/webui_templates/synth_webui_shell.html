@@ -140,7 +140,9 @@
             position: fixed;
             bottom: 1.5rem;
             left: 1.5rem;
-            width: 420px;
+            width: min(420px, calc(100vw - 3rem));
+            max-width: calc(100vw - 3rem);
+            min-width: 280px;
             height: 70vh;
             max-height: 75vh;
             display: flex;
@@ -162,6 +164,7 @@
             border-radius: 16px;
             box-shadow: none;
             background: rgba(12, 12, 20, 0.9);
+            overflow: hidden;
         }
         #chat.synth-window-managed #chat-title-bar {
             display: flex;
@@ -173,7 +176,7 @@
             border-bottom: 1px solid rgba(255, 255, 255, 0.08);
         }
         #chat.synth-window-managed #chat-title-bar {
-            display: none;
+            display: none !important;
         }
         #chat-title-bar .chat-title {
             display: inline-flex;
@@ -208,16 +211,22 @@
             color: var(--accent);
         }
         .winbox.synth-winbox .wb-body {
-            background: rgba(12, 12, 20, 0.9);
+            background: rgba(12, 12, 20, 0.88);
         }
-        .winbox.synth-winbox .wb-header {
-            background: var(--accent);
+                color: var(--text);
+                font-weight: 700;
+            background: linear-gradient(135deg, rgba(255, 107, 214, 0.92), rgba(114, 137, 218, 0.85));
+        }
+        .winbox.synth-winbox {
+            background: rgba(12, 12, 20, 0.6);
+            backdrop-filter: blur(8px);
         }
         .winbox.synth-winbox .wb-drag {
             display: flex;
             align-items: center;
             gap: 8px;
-            padding-right: 120px;
+                background: rgba(12, 12, 20, 0.6);
+                border-radius: 18px;
         }
         .winbox.synth-winbox .synth-wb-tools {
             display: flex;
@@ -226,8 +235,8 @@
             margin-left: auto;
         }
         .winbox.synth-winbox .synth-wb-tool-btn {
-            border: 1px solid rgba(255, 255, 255, 0.12);
-            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.22);
+            background: rgba(255, 107, 214, 0.22);
             color: var(--text);
             border-radius: 8px;
             height: 22px;
@@ -244,18 +253,19 @@
             color: var(--accent);
         }
         #synth-advanced-debug.synth-window-managed #synth-debug-title-bar {
-            display: none;
+            display: none !important;
         }
         #synth-advanced-debug {
             background: var(--panel-bg);
             color: var(--text);
         }
         #archive-panel.synth-window-managed .archive-header {
-            display: none;
+            display: none !important;
         }
         #archive-panel {
             background: var(--panel-bg);
         }
+                    min-height: 0;
         #archive-panel {
             color: var(--text);
         }
@@ -263,7 +273,18 @@
             padding: 10px 14px;
             display: flex;
             align-items: center;
+                    flex-shrink: 0;
             justify-content: space-between;
+                .chat-toolbar {
+                    display: flex;
+                    gap: 8px;
+                    align-items: center;
+                    justify-content: flex-end;
+                    padding: 0.6rem 1rem;
+                    background: rgba(12, 12, 20, 0.72);
+                    border-top: 1px solid rgba(255, 255, 255, 0.06);
+                    flex-shrink: 0;
+                }
             background: var(--surface-alt);
             border-bottom: 1px solid var(--border);
         }
@@ -518,10 +539,7 @@
 +                <span class="icon" aria-hidden="true">🏠</span><span>Home</span>
 +            </button>
 +            <button class="nav-btn" data-tab="history" aria-controls="tab-history" aria-pressed="false">
-+                <span class="icon" aria-hidden="true">📚</span><span>History</span>
-+            </button>
-+            <button class="nav-btn" data-tab="agent" aria-controls="tab-agent" aria-pressed="false">
-+                <span class="icon" aria-hidden="true">🤖</span><span>Agent</span>
++                <span class="icon" aria-hidden="true">📚</span><span>Activity</span>
 +            </button>
 +            <button class="nav-btn" data-tab="skins" aria-controls="tab-skins" aria-pressed="false">
 +                <span class="icon" aria-hidden="true">🧥</span><span>Skins</span>
@@ -547,7 +565,6 @@
 +    <main>
 +        <section class="tab-panel active" id="tab-home" data-tab="home" role="tabpanel"></section>
 +        <section class="tab-panel" id="tab-history" data-tab="history" role="tabpanel"></section>
-+        <section class="tab-panel" id="tab-agent" data-tab="agent" role="tabpanel"></section>
 +        <section class="tab-panel" id="tab-skins" data-tab="skins" role="tabpanel"></section>
 +        <section class="tab-panel" id="tab-logs" data-tab="logs" role="tabpanel"></section>
 +        <section class="tab-panel" id="tab-settings" data-tab="settings" role="tabpanel"></section>

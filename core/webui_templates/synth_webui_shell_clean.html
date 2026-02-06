@@ -29,10 +29,16 @@
             --log-info: #d5d8ff;
             --log-warn: #ffde85;
             --log-error: #ff9fae;
+                --topbar-height: 88px;
             font-family: "Segoe UI", system-ui, sans-serif;
         }
         * {
             box-sizing: border-box;
+        }
+        html, body {
+            height: 100%;
+            width: 100%;
+            overflow: hidden;
         }
         body {
             margin: 0;
@@ -57,7 +63,6 @@
             background: linear-gradient(135deg, rgba(12, 12, 20, 0.78), rgba(34, 30, 46, 0.78));
             border-bottom: 1px solid var(--border);
             backdrop-filter: blur(18px);
-            --topbar-height: 88px;
         }
         .brand {
             display: flex;
@@ -166,13 +171,21 @@
             height: 100%;
             min-height: calc(100vh - var(--topbar-height, 120px));
         }
+        #vrm-canvas,
+        .home-vrm canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
         #chat {
             position: fixed;
             bottom: 1.5rem;
             left: 1.5rem;
-            width: 420px;
-            height: 70vh;
-            max-height: 75vh;
+            width: min(360px, calc(100vw - 3rem));
+            max-width: calc(100vw - 3rem);
+            min-width: 280px;
+                height: 52vh;
+                max-height: 60vh;
             display: flex;
             flex-direction: column;
             background: rgba(12, 12, 20, 0.9);
@@ -192,6 +205,7 @@
             border-radius: 16px;
             box-shadow: none;
             background: rgba(12, 12, 20, 0.9);
+            overflow: hidden;
         }
         #chat.synth-window-managed #chat-title-bar {
             display: flex;
@@ -203,7 +217,7 @@
             border-bottom: 1px solid rgba(255, 255, 255, 0.08);
         }
         #chat.synth-window-managed #chat-title-bar {
-            display: none;
+            display: none !important;
         }
         #chat-title-bar .chat-title {
             display: inline-flex;
@@ -219,29 +233,64 @@
         .synth-minimized-stack {
             position: fixed;
             bottom: 1.2rem;
-            right: auto;
-            left: 1.2rem;
+            left: auto;
+            right: 1.2rem;
             display: flex;
             flex-direction: column;
             gap: 0.6rem;
-            align-items: flex-start;
+            align-items: flex-end;
             z-index: 10650;
+        }
+        /* Circular minimized window badges */
+        .synth-dock-btn, .chat-toggle-btn {
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02));
+            color: var(--text);
+            border: 1px solid rgba(255,255,255,0.06);
+            box-shadow: 0 6px 14px rgba(0,0,0,0.35);
+            cursor: pointer;
+            font-size: 1.05rem;
+            transition: transform .12s ease, box-shadow .12s ease;
+        }
+        .synth-dock-btn:hover, .chat-toggle-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(0,0,0,0.42);
+        }
+        .synth-dock-btn:focus, .chat-toggle-btn:focus {
+            outline: 3px solid rgba(255,255,255,0.08);
+            outline-offset: 3px;
         }
         .winbox.synth-winbox .wb-title {
             color: var(--text);
+            font-weight: 700;
+            font-size: 1.05rem;
         }
         .winbox.synth-winbox .wb-control {
             color: var(--text-soft);
         }
         .winbox.synth-winbox .wb-control:hover,
         .winbox.synth-winbox .wb-control:focus {
-            color: var(--accent);
+                color: var(--text);
+                font-weight: 700;
+        }
+        .winbox.synth-winbox.debug-window .wb-min {
+            display: none !important;
         }
         .winbox.synth-winbox .wb-body {
-            background: rgba(12, 12, 20, 0.9);
+            background: rgba(12, 12, 20, 0.88);
         }
         .winbox.synth-winbox .wb-header {
-            background: var(--accent);
+            background: linear-gradient(135deg, rgba(255, 107, 214, 0.92), rgba(114, 137, 218, 0.85));
+        }
+        .winbox.synth-winbox {
+            background: rgba(12, 12, 20, 0.6);
+            backdrop-filter: blur(8px);
+                border-radius: 18px;
         }
         .winbox.synth-winbox .wb-drag {
             display: flex;
@@ -250,14 +299,15 @@
             padding-right: 120px;
         }
         .winbox.synth-winbox .synth-wb-tools {
+                min-height: 320px;
             display: flex;
             align-items: center;
             gap: 6px;
             margin-left: auto;
         }
         .winbox.synth-winbox .synth-wb-tool-btn {
-            border: 1px solid rgba(255, 255, 255, 0.12);
-            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.22);
+            background: rgba(255, 107, 214, 0.22);
             color: var(--text);
             border-radius: 8px;
             height: 22px;
@@ -268,20 +318,32 @@
             align-items: center;
             justify-content: center;
             cursor: pointer;
+                min-height: 0;
         }
         .winbox.synth-winbox .synth-wb-tool-btn:hover {
             border-color: var(--accent);
             color: var(--accent);
         }
         #synth-advanced-debug.synth-window-managed #synth-debug-title-bar {
-            display: none;
+            flex-shrink: 0;
+            display: none !important;
+        }
+        .chat-toolbar {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            justify-content: flex-end;
+            padding: 0.6rem 1rem;
+            background: rgba(12, 12, 20, 0.72);
+            border-top: 1px solid rgba(255, 255, 255, 0.06);
+            flex-shrink: 0;
         }
         #synth-advanced-debug {
             background: var(--panel-bg);
             color: var(--text);
         }
         #archive-panel.synth-window-managed .archive-header {
-            display: none;
+            display: none !important;
         }
         #archive-panel {
             background: var(--panel-bg);
@@ -387,12 +449,13 @@
         .synth-minimized-stack {
             position: fixed;
             bottom: 1.2rem;
-            left: 1.2rem;
+            left: auto;
+            right: 1.2rem;
             display: flex;
             gap: 0.6rem;
             z-index: 10650;
             flex-direction: column;
-            align-items: flex-start;
+            align-items: flex-end;
         }
         #chat.minimized,
         #chat.hidden {
@@ -405,6 +468,7 @@
             display: flex;
             flex-direction: column;
             gap: 0.9rem;
+            min-height: 0;
         }
         .bubble {
             max-width: 70%;
@@ -456,6 +520,7 @@
             gap: 0.8rem;
             padding: 1.1rem 1.4rem 1.4rem;
             align-items: flex-end;
+            flex-shrink: 0;
         }
         #input {
             flex: 1;
@@ -1052,10 +1117,7 @@ window.__SYNTH_CONFIG = {
                 <span class="icon" aria-hidden="true">🏠</span><span>Home</span>
             </button>
             <button class="nav-btn" data-tab="history" aria-controls="tab-history" aria-pressed="false">
-                <span class="icon" aria-hidden="true">📚</span><span>History</span>
-            </button>
-            <button class="nav-btn" data-tab="agent" aria-controls="tab-agent" aria-pressed="false">
-                <span class="icon" aria-hidden="true">🤖</span><span>Agent</span>
+                <span class="icon" aria-hidden="true">📚</span><span>Activity</span>
             </button>
             <button class="nav-btn" data-tab="skins" aria-controls="tab-skins" aria-pressed="false">
                 <span class="icon" aria-hidden="true">🧥</span><span>Skins</span>
@@ -1081,7 +1143,6 @@ window.__SYNTH_CONFIG = {
     <main>
         <section class="tab-panel active" id="tab-home" data-tab="home" role="tabpanel"></section>
         <section class="tab-panel" id="tab-history" data-tab="history" role="tabpanel"></section>
-        <section class="tab-panel" id="tab-agent" data-tab="agent" role="tabpanel"></section>
         <section class="tab-panel" id="tab-skins" data-tab="skins" role="tabpanel"></section>
         <section class="tab-panel" id="tab-logs" data-tab="logs" role="tabpanel"></section>
         <section class="tab-panel" id="tab-settings" data-tab="settings" role="tabpanel"></section>

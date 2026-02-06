@@ -4,20 +4,20 @@
             <h2>Live Log Stream</h2>
             <div class="log-controls">
                 <button id="logs-refresh" type="button">Reconnect</button>
-                <label><input type="checkbox" id="logs-autoscroll" checked /> Auto-scroll</label>
+                <label><input type="checkbox" id="logs-autoscroll" checked="checked" /> Auto-scroll</label>
                 <input type="text" id="log-search" placeholder="Search logs..." style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border); background: rgba(12, 12, 20, 0.58); color: inherit; margin-left: 1rem; min-width: 200px;" />
-                <label><input type="checkbox" class="log-filter" data-level="debug" checked /> Debug</label>
-                <label><input type="checkbox" class="log-filter" data-level="info" checked /> Info</label>
-                <label><input type="checkbox" class="log-filter" data-level="warning" checked /> Warning</label>
-                <label><input type="checkbox" class="log-filter" data-level="error" checked /> Error</label>
-                <label><input type="checkbox" class="log-filter" data-level="other" checked /> Other</label>
+                <label><input type="checkbox" class="log-filter" data-level="debug" checked="checked" /> Debug</label>
+                <label><input type="checkbox" class="log-filter" data-level="info" checked="checked" /> Info</label>
+                <label><input type="checkbox" class="log-filter" data-level="warning" checked="checked" /> Warning</label>
+                <label><input type="checkbox" class="log-filter" data-level="error" checked="checked" /> Error</label>
+                <label><input type="checkbox" class="log-filter" data-level="other" checked="checked" /> Other</label>
                 <label style="margin-left: 1rem;">
                     System Log Level:
                     <select id="logging-level" style="margin-left: 0.5rem; padding: 0.25rem 0.5rem;">
                         <option value="DEBUG">DEBUG</option>
                         <option value="INFO">INFO</option>
                         <option value="WARNING">WARNING</option>
-                        <option value="ERROR" selected>ERROR</option>
+                        <option value="ERROR" selected="selected">ERROR</option>
                     </select>
                 </label>
                 <label style="margin-left: 1rem;">
@@ -26,7 +26,7 @@
                         <option value="DEBUG">DEBUG</option>
                         <option value="INFO">INFO</option>
                         <option value="WARNING">WARNING</option>
-                        <option value="ERROR" selected>ERROR</option>
+                        <option value="ERROR" selected="selected">ERROR</option>
                         <option value="NONE">NONE</option>
                     </select>
                 </label>

@@ -203,6 +203,10 @@ try {
         let ws = null;
         // Expose sessionId as a true global var so other scripts can reference it
         var sessionId = window.sessionId = window.sessionId || null;
+        // Legacy helper for modules that call getSessionId()
+        window.getSessionId = window.getSessionId || function getSessionId() {
+            try { return window.sessionId || sessionId || null; } catch (e) { return null; }
+        };
         let notificationsEnabled = false;
         let audioContext = null;
         let historyBuffer = [];
@@ -250,8 +254,8 @@ try {
                             const script = document.createElement('script');
                             script.id = scriptId;
                             script.src = '/js/vendor/winbox.min.js';
-                            script.onload = () => { try { console.debug('[SynthWindowManager] winbox loaded:', typeof window.WinBox !== 'undefined'); } catch (e) {} ; resolve(typeof window.WinBox !== 'undefined'); };
-                            script.onerror = () => { try { console.debug('[SynthWindowManager] winbox failed to load'); } catch (e) {} ; resolve(false); };
+                            script.onload = () => { try { console.debug('[SynthWindowManager] winbox loaded:', typeof window.WinBox !== 'undefined'); } catch (e) {} resolve(typeof window.WinBox !== 'undefined'); };
+                            script.onerror = () => { try { console.debug('[SynthWindowManager] winbox failed to load'); } catch (e) {} resolve(false); };
                             document.body.appendChild(script);
                         } else {
                             try { console.debug('[SynthWindowManager] winbox script tag already present'); } catch (e) {}
@@ -284,15 +288,25 @@ try {
                 }
                 try {
                     dock.style.position = 'fixed';
-                    dock.style.right = 'auto';
-                    dock.style.left = '18px';
+                    dock.style.left = 'auto';
+                    dock.style.right = '18px';
                     dock.style.bottom = '18px';
                     dock.style.top = 'auto';
                     dock.style.display = 'flex';
                     dock.style.flexDirection = 'column';
                     dock.style.gap = '8px';
-                    dock.style.alignItems = 'flex-start';
+                    dock.style.alignItems = 'flex-end';
                     dock.style.zIndex = '10650';
+                    // Ensure an announcer for screen readers
+                    let announcer = dock.querySelector('.synth-dock-announcer');
+                    if (!announcer) {
+                        announcer = document.createElement('div');
+                        announcer.className = 'synth-dock-announcer';
+                        announcer.setAttribute('aria-live', 'polite');
+                        announcer.style.position = 'absolute';
+                        announcer.style.left = '-9999px';
+                        dock.appendChild(announcer);
+                    }
                 } catch (e) { /* ignore */ }
                 return dock;
             }
@@ -305,26 +319,71 @@ try {
                 return 0;
             }
 
+            function getViewportSize() {
+                const w = Math.max(window.innerWidth || 0, document.documentElement?.clientWidth || 0);
+                const h = Math.max(window.innerHeight || 0, document.documentElement?.clientHeight || 0);
+                return { width: w, height: h };
+            }
+
+            function applyViewportInsets(entry) {
+                if (!entry || !entry.winbox) return;
+                try {
+                    const deltaW = Math.max(0, (window.innerWidth || 0) - (document.documentElement?.clientWidth || 0));
+                    const deltaH = Math.max(0, (window.innerHeight || 0) - (document.documentElement?.clientHeight || 0));
+                    if (deltaW) entry.winbox.right = -deltaW;
+                    if (deltaH) entry.winbox.bottom = -deltaH;
+                } catch (e) { /* ignore */ }
+            }
+
             function applyMaximizeConstraints(entry) {
                 if (!entry || !entry.winbox) return;
-                if (!entry.winbox.max) return;
+                const isMax = !!(entry.winbox.max || entry.winbox.maximized);
+                if (!isMax) return;
                 const top = getTopbarHeight();
-                const width = window.innerWidth || entry.winbox.width || 0;
-                const height = Math.max(120, (window.innerHeight || entry.winbox.height || 0) - top);
+                const viewport = getViewportSize();
+                const width = viewport.width || entry.winbox.width || 0;
+                const height = Math.max(120, (viewport.height || entry.winbox.height || 0) - top);
                 try { entry.winbox.move(0, top); } catch (e) { /* ignore */ }
                 try { entry.winbox.resize(width, height); } catch (e) { /* ignore */ }
+            }
+
+            function clampToTopbar(entry) {
+                if (!entry || !entry.winbox) return;
+                const top = getTopbarHeight();
+                if (!top) return;
+                const winEl = entry.winbox.window || entry.winbox.dom || entry.winbox.g || null;
+                if (!winEl) return;
+                const rect = winEl.getBoundingClientRect();
+                if (!rect || rect.top >= top) return;
+                const x = Number.isFinite(entry.winbox.x) ? entry.winbox.x : rect.left;
+                try { entry.winbox.move(x, top); } catch (e) { /* ignore */ }
             }
 
             function ensureDockButton(entry) {
                 if (entry.dockButton && entry.dockButton.isConnected) return entry.dockButton;
                 const btn = entry.dockButton || document.createElement('button');
                 btn.type = 'button';
-                btn.className = entry.dockClass || 'chat-toggle-btn';
+                // Ensure consistent class for styling and a11y
+                const baseClass = entry.dockClass || 'chat-toggle-btn';
+                btn.className = `${baseClass} synth-dock-btn`;
                 btn.textContent = entry.iconText || '🗔';
                 btn.setAttribute('aria-label', entry.dockLabel || 'Restore window');
                 btn.title = entry.dockLabel || 'Restore window';
+                btn.setAttribute('role', 'button');
+                btn.setAttribute('tabindex', '0');
+                btn.setAttribute('aria-pressed', 'false');
                 btn.style.display = 'none';
+                // Click restores the window
                 btn.addEventListener('click', () => restore(entry.id));
+                // Keyboard: Enter / Space to activate
+                btn.addEventListener('keydown', (ev) => {
+                    try {
+                        if (ev.key === 'Enter' || ev.key === ' ' || ev.code === 'Space') {
+                            ev.preventDefault();
+                            restore(entry.id);
+                        }
+                    } catch (e) { /* ignore */ }
+                });
                 entry.dockButton = btn;
                 return btn;
             }
@@ -343,7 +402,22 @@ try {
                     if (!dragging) return;
                     const dx = ev.clientX - startX;
                     const dy = ev.clientY - startY;
-                    try { winbox.move(winX + dx, winY + dy); } catch (e) { /* ignore */ }
+                    try {
+                        // Clamp to viewport (respect topbar)
+                        const winEl = winbox.window || winbox.dom || winbox.g || null;
+                        let w = 320, h = 240;
+                        if (winEl) {
+                            const r = winEl.getBoundingClientRect();
+                            w = r.width || w; h = r.height || h;
+                        }
+                        const topbar = getTopbarHeight() || 0;
+                        const viewport = getViewportSize();
+                        const maxX = Math.max(0, viewport.width - w);
+                        const maxY = Math.max(topbar, viewport.height - h);
+                        const targetX = Math.min(maxX, Math.max(0, Math.round((winX || 0) + dx)));
+                        const targetY = Math.min(maxY, Math.max(topbar, Math.round((winY || 0) + dy)));
+                        winbox.move(targetX, targetY);
+                    } catch (e) { /* ignore */ }
                 };
 
                 const onUp = () => {
@@ -374,13 +448,29 @@ try {
             function minimize(id) {
                 const entry = windows.get(id);
                 if (!entry || !entry.winbox) return;
+                // Prevent double-minimize behavior
+                if (entry.minimized) return;
                 entry.minimized = true;
                 try { entry.winbox.hide(); } catch (e) { /* ignore */ }
+                try { entry.winbox.min = false; } catch (e) { /* ignore */ }
+                try {
+                    const winEl = entry.winbox.window || entry.winbox.dom || entry.winbox.g || null;
+                    if (winEl && winEl.classList) winEl.classList.remove('min');
+                } catch (e) { /* ignore */ }
                 const dock = ensureDock();
                 const btn = ensureDockButton(entry);
                 btn.style.display = 'flex';
                 dock.appendChild(btn);
                 try { entry.winbox.blur(); } catch (e) { /* ignore */ }
+                // Announce minimize for screen reader
+                try {
+                    const dock = ensureDock();
+                    const announcer = dock && dock.querySelector && dock.querySelector('.synth-dock-announcer');
+                    if (announcer) {
+                        announcer.textContent = (entry.dockLabel || 'Window') + ' minimized';
+                        setTimeout(() => { try { announcer.textContent = ''; } catch (e) {} }, 2000);
+                    }
+                } catch (e) { /* ignore */ }
                 try { saveState(id); } catch (e) { /* ignore */ }
             }
 
@@ -391,18 +481,33 @@ try {
                 try { entry.winbox.show(); } catch (e) { /* ignore */ }
                 try { entry.winbox.restore(); } catch (e) { /* ignore */ }
                 try { entry.winbox.focus(); } catch (e) { /* ignore */ }
-                if (entry.dockButton) entry.dockButton.style.display = 'none';
+                if (entry.dockButton) {
+                    try {
+                        const dock = ensureDock();
+                        const announcer = dock && dock.querySelector && dock.querySelector('.synth-dock-announcer');
+                        entry.dockButton.style.display = 'none';
+                        if (entry.dockButton.parentElement) entry.dockButton.parentElement.removeChild(entry.dockButton);
+                        if (announcer) {
+                            announcer.textContent = (entry.dockLabel || 'Window') + ' restored';
+                            setTimeout(() => { try { announcer.textContent = ''; } catch (e) {} }, 1500);
+                        }
+                    } catch (e) { /* ignore DOM removal errors */ }
+                }
                 try { saveState(id); } catch (e) { /* ignore */ }
             }
 
             function toggleMaximize(id) {
                 const entry = windows.get(id);
                 if (!entry || !entry.winbox) return;
-                const isMax = !!entry.winbox.max;
-                try { entry.winbox.maximize(!isMax); } catch (e) { /* ignore */ }
-                if (!isMax) {
-                    try { applyMaximizeConstraints(entry); } catch (e) { /* ignore */ }
-                }
+                try {
+                    // If currently maximized, restore; otherwise maximize and apply constraints
+                    if (entry.winbox.max || entry.winbox.maximized) {
+                        try { entry.winbox.restore(); } catch (e) { /* ignore */ }
+                    } else {
+                        try { entry.winbox.maximize(); } catch (e) { /* ignore */ }
+                        try { applyMaximizeConstraints(entry); } catch (e) { /* ignore */ }
+                    }
+                } catch (e) { /* ignore */ }
                 try { saveState(id); } catch (e) { /* ignore */ }
             }
 
@@ -449,7 +554,11 @@ try {
                             entry.winbox.resize(entry.winbox.width, rect.height);
                         }
                         if (typeof rect.left === 'number' || typeof rect.top === 'number') {
-                            entry.winbox.move(typeof rect.left === 'number' ? rect.left : entry.winbox.x, typeof rect.top === 'number' ? rect.top : entry.winbox.y);
+                            const topbar = getTopbarHeight() || 0;
+                            const left = typeof rect.left === 'number' ? rect.left : entry.winbox.x;
+                            let top = typeof rect.top === 'number' ? rect.top : entry.winbox.y;
+                            if (top < topbar) top = topbar;
+                            entry.winbox.move(left, top);
                         }
                     }
 
@@ -460,7 +569,8 @@ try {
                     } else if (localState === 'maximized') {
                         entry.minimized = false;
                         entry.winbox.show();
-                        entry.winbox.maximize(true);
+                        try { entry.winbox.maximize(); } catch (e) { /* ignore */ }
+                        try { applyMaximizeConstraints(entry); } catch (e) { /* ignore */ }
                     } else {
                         entry.minimized = false;
                         entry.winbox.show();
@@ -486,7 +596,7 @@ try {
                     }
                     return null;
                 }
-                if (isMobileViewport()) { try { console.debug('[SynthWindowManager] mobile viewport, skipping WinBox creation for', opts.id); } catch (e) {} ; return null; }
+                if (isMobileViewport()) { try { console.debug('[SynthWindowManager] mobile viewport, skipping WinBox creation for', opts.id); } catch (e) {} return null; }
                 if (windows.has(opts.id)) return windows.get(opts.id).winbox;
 
                 const mountEl = opts.mount;
@@ -508,21 +618,32 @@ try {
                     y: opts.y !== undefined ? opts.y : 'bottom',
                     width: opts.width || 420,
                     height: opts.height || '70%',
-                    class: opts.className || 'synth-winbox no-min no-max no-full no-close',
-                    onmove: () => { try { saveState(opts.id); } catch (e) { /* ignore */ } },
+                    class: opts.className || 'synth-winbox no-full no-close',
+                    onmove: () => {
+                        try { clampToTopbar(entry); } catch (e) { /* ignore */ }
+                        try { saveState(opts.id); } catch (e) { /* ignore */ }
+                    },
                     onresize: () => {
                         try { applyMaximizeConstraints(entry); } catch (e) { /* ignore */ }
+                        try { clampToTopbar(entry); } catch (e) { /* ignore */ }
                         try { saveState(opts.id); } catch (e) { /* ignore */ }
                     },
                     onrestore: () => {
-                        try { applyMaximizeConstraints(entry); } catch (e) { /* ignore */ }
+                        try { clampToTopbar(entry); } catch (e) { /* ignore */ }
                         try { saveState(opts.id); } catch (e) { /* ignore */ }
+                    },
+                    onminimize: () => {
+                        try { minimize(opts.id); } catch (e) { /* ignore */ }
+                    },
+                    onmaximize: () => {
+                        try { applyMaximizeConstraints(entry); } catch (e) { /* ignore */ }
                     }
                 });
                 try { console.debug('[SynthWindowManager] created winbox for', opts.id, 'instance=', winbox); } catch (e) { /* ignore */ }
                 entry.winbox = winbox;
                 windows.set(opts.id, entry);
                 ensureDockButton(entry);
+                try { applyViewportInsets(entry); } catch (e) { /* ignore */ }
                 try { applyMaximizeConstraints(entry); } catch (e) { /* ignore */ }
                 return winbox;
             }
@@ -601,36 +722,13 @@ try {
                     const dragHandle = document.getElementById('chat-title-bar');
                     attachDragHandle(entry, dragHandle);
                 } catch (e) { /* ignore */ }
-                try {
-                    attachHeaderTools('chat', winbox, [
-                        {
-                            label: '➖',
-                            title: 'Minimize chat',
-                            onClick: () => { const btn = document.getElementById('chat-minimize'); if (btn) btn.click(); }
-                        },
-                        {
-                            label: '⤢',
-                            title: 'Maximize chat',
-                            onClick: () => { const btn = document.getElementById('chat-maximize'); if (btn) btn.click(); }
-                        },
-                        {
-                            label: '📦',
-                            title: 'Archive current chat',
-                            onClick: () => { const btn = document.getElementById('chat-archive'); if (btn) btn.click(); }
-                        },
-                        {
-                            label: '🗂️',
-                            title: 'Open archives',
-                            onClick: () => { const btn = document.getElementById('chat-restore'); if (btn) btn.click(); }
-                        }
-                    ]);
-                } catch (e) { /* ignore */ }
+                // No extra header tools: rely on native WinBox controls
                 return winbox;
             }
 
             try {
                 window.addEventListener('resize', () => {
-                    try { windows.forEach((entry) => applyMaximizeConstraints(entry)); } catch (e) { /* ignore */ }
+                    try { windows.forEach((entry) => { applyViewportInsets(entry); applyMaximizeConstraints(entry); }); } catch (e) { /* ignore */ }
                 });
             } catch (e) { /* ignore */ }
 

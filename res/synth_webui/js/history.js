@@ -69,7 +69,11 @@ function initializeHistoryTab() {
                 } catch (e) { /* ignore */ }
                 try { targetPanel.style.zIndex = '46000'; setTimeout(() => { try { targetPanel.style.zIndex = ''; } catch (e) {} }, 800); } catch (e) {}
                 historyState.currentSubTab = subtabName;
-                loadHistoryData(subtabName);
+                if (subtabName === 'agent') {
+                    try { if (window.SynthWebUI && typeof window.SynthWebUI.initAgentTab === 'function') window.SynthWebUI.initAgentTab(); } catch (e) { /* ignore */ }
+                } else {
+                    loadHistoryData(subtabName);
+                }
             }
         });
     });
@@ -104,6 +108,10 @@ function loadHistoryData(subtab) {
     if (subtab === 'diary') return loadHistoryDiary();
     if (subtab === 'grillo') return loadHistoryGrillo();
     if (subtab === 'chat') return loadHistoryChat();
+    if (subtab === 'agent') {
+        try { if (window.SynthWebUI && typeof window.SynthWebUI.initAgentTab === 'function') window.SynthWebUI.initAgentTab(); } catch (e) { /* ignore */ }
+        return;
+    }
 }
 
 async function loadHistoryDiary() {
@@ -422,7 +430,11 @@ document.addEventListener('DOMContentLoaded', () => {
                         targetPanel.style.opacity = '1';
                     } catch (e) { /* ignore */ }
                     historyState.currentSubTab = subtabName;
-                    loadHistoryData(subtabName);
+                    if (subtabName === 'agent') {
+                        try { if (window.SynthWebUI && typeof window.SynthWebUI.initAgentTab === 'function') window.SynthWebUI.initAgentTab(); } catch (e) { /* ignore */ }
+                    } else {
+                        loadHistoryData(subtabName);
+                    }
                 }
             } catch (e) { /* ignore */ }
         }, true);
