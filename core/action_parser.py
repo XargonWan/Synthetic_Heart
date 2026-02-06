@@ -1003,19 +1003,27 @@ IMPORTANT: Do not include the {successful_count} actions that were already execu
         correction_message.from_llm = True
         correction_message.original_text = correction_context["instruction"]
         correction_message.text = correction_context["instruction"]
-        
-        # Use existing corrector middleware but with selective context
+
+        # Ensure the original message carries correction_context for the transport-layer corrector
+        try:
+            if hasattr(original_message, '__dict__'):
+                original_message.correction_context = correction_context
+        except Exception:
+            pass
+
+        # Use existing corrector middleware but include original_message in context so
+        # run_corrector_middleware can detect selective correction context correctly
+        corrected_context = {**(context or {}), "selective_correction": True, "correction_context": correction_context, "message": original_message}
+
         await run_corrector_middleware(
             text=correction_context["instruction"],
             bot=bot,
-            context={**context, "selective_correction": True, "correction_context": correction_context},
+            context=corrected_context,
             chat_id=getattr(original_message, 'chat_id', None),
             thread_id=getattr(original_message, 'thread_id', None)
         )
     except Exception as e:
         log_error(f"[action_parser] Failed to request selective correction: {e}")
-
-
 async def run_actions(actions: Any, context: Dict[str, Any], bot, original_message):
     """Execute multiple actions in sequence.
 

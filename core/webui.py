@@ -330,6 +330,50 @@ class SynthWebUIInterface:
 
             self.animation_handler = _AnimStub()
 
+        # Register as an interface only when autostart is enabled.
+        # Tests/dev harnesses may instantiate the WebUI with autostart disabled
+        # and without a fully initialized core initializer.
+        if self.autostart:
+            try:
+                register_interface(INTERFACE_NAME, self)
+                log_info(f"{LOG_PREFIX} Interface registered", log_file=WEBUI_LOG)
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Interface registration failed (non-fatal): {exc}", log_file=WEBUI_LOG)
+
+        # Initialize global action state manager
+        self.action_state_manager = get_action_state_manager()
+        # Register callback to broadcast state changes to all WebSocket clients
+        self.action_state_manager.register_state_changed_callback(self._broadcast_action_state)
+        log_info(f"{LOG_PREFIX} Action state manager initialized with WebSocket broadcast", log_file=WEBUI_LOG)
+
+        # Persona manager will be initialized in start() method after core initialization
+        self.persona_manager = None
+
+        if self.autostart:
+            log_info(f"{LOG_PREFIX} Autostart enabled - will start server when event loop is available", log_file=WEBUI_LOG)
+            # Don't start server here - it will be started by the main application
+        else:
+            log_info(f"{LOG_PREFIX} Autostart disabled - {BRAND_NAME} will not start automatically", log_file=WEBUI_LOG)
+
+        # Attempt to initialize the chat_archives DB table in background (best-effort)
+        try:
+            import asyncio
+            from core.chat_archives_db import init_chat_archives_table
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(init_chat_archives_table())
+                else:
+                    loop.run_until_complete(init_chat_archives_table())
+            except Exception:
+                # Fallback: ignore - the endpoints will try initializing on demand
+                pass
+        except Exception:
+            pass
+
+        if self.autostart:
+            self._schedule_uploads_cleanup()
+
 
 
         self.app.get("/")(self.index)
@@ -614,59 +658,6 @@ class SynthWebUIInterface:
                 return JSONResponse({"proposals": []})
             log_error(f"{LOG_PREFIX} list_agent_proposals failed: {e}")
             raise HTTPException(status_code=500, detail=str(e))
-        # Register as an interface only when autostart is enabled.
-        # Tests/dev harnesses may instantiate the WebUI with autostart disabled
-        # and without a fully initialized core initializer.
-        if self.autostart:
-            try:
-                register_interface(INTERFACE_NAME, self)
-                log_info(f"{LOG_PREFIX} Interface registered", log_file=WEBUI_LOG)
-            except Exception as exc:
-                log_warning(f"{LOG_PREFIX} Interface registration failed (non-fatal): {exc}", log_file=WEBUI_LOG)
-        
-        # Initialize animation handler
-        from core.animation_handler import get_animation_handler
-        self.animation_handler = get_animation_handler()
-        self.animation_handler.set_webui(self)
-        # Register a broadcast summary endpoint to help clients sync state
-        log_info(f"{LOG_PREFIX} Animation handler initialized (single websocket sender)", log_file=WEBUI_LOG)
-        # AnimationHandler already sends websocket animation commands via set_webui(); avoid
-        # double-sending by not also broadcasting from a callback.
-        log_info(f"{LOG_PREFIX} Animation handler initialized (single websocket sender)", log_file=WEBUI_LOG)
-
-        # Initialize global action state manager
-        self.action_state_manager = get_action_state_manager()
-        # Register callback to broadcast state changes to all WebSocket clients
-        self.action_state_manager.register_state_changed_callback(self._broadcast_action_state)
-        log_info(f"{LOG_PREFIX} Action state manager initialized with WebSocket broadcast", log_file=WEBUI_LOG)
-
-        # Persona manager will be initialized in start() method after core initialization
-        self.persona_manager = None
-
-        if self.autostart:
-            log_info(f"{LOG_PREFIX} Autostart enabled - will start server when event loop is available", log_file=WEBUI_LOG)
-            # Don't start server here - it will be started by the main application
-        else:
-            log_info(f"{LOG_PREFIX} Autostart disabled - {BRAND_NAME} will not start automatically", log_file=WEBUI_LOG)
-
-        # Attempt to initialize the chat_archives DB table in background (best-effort)
-        try:
-            import asyncio
-            from core.chat_archives_db import init_chat_archives_table
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    loop.create_task(init_chat_archives_table())
-                else:
-                    loop.run_until_complete(init_chat_archives_table())
-            except Exception:
-                # Fallback: ignore - the endpoints will try initializing on demand
-                pass
-        except Exception:
-            pass
-
-        if self.autostart:
-            self._schedule_uploads_cleanup()
 
     async def set_animation_state(self, request: Request):
         """Set the centralized animation state. Expected JSON:

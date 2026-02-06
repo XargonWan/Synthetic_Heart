@@ -126,36 +126,28 @@ class EventPlugin(AIPluginBase):
             f"[event_plugin] Ensuring table scheduled_events in {user}@{host}:{port}/{db_name}"
         )
 
-        conn = await aiomysql.connect(
-            host=host,
-            port=port,
-            user=user,
-            password=password,
-            db=db_name,
-            autocommit=True,
-        )
         try:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS scheduled_events (
-                        id INT AUTO_INCREMENT PRIMARY KEY,
-                        `date` DATE NOT NULL,
-                        `time` TIME DEFAULT '00:00',
-                        recurrence_type VARCHAR(20) DEFAULT 'none',
-                        next_run DATETIME NOT NULL,
-                        description TEXT NOT NULL,
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        delivered BOOLEAN DEFAULT 0,
-                        created_by VARCHAR(100) DEFAULT 'synth'
+            from core.db import get_conn_ctx
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS scheduled_events (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            `date` DATE NOT NULL,
+                            `time` TIME DEFAULT '00:00',
+                            recurrence_type VARCHAR(20) DEFAULT 'none',
+                            next_run DATETIME NOT NULL,
+                            description TEXT NOT NULL,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            delivered BOOLEAN DEFAULT 0,
+                            created_by VARCHAR(100) DEFAULT 'synth'
+                        )
+                        """
                     )
-                    """
-                )
             log_info("[event_plugin] ensured scheduled_events table exists")
         except Exception as e:
             log_error(f"[event_plugin] Failed to ensure table exists: {repr(e)}")
-        finally:
-            conn.close()
 
     async def start(self):
         """Start the event scheduler."""

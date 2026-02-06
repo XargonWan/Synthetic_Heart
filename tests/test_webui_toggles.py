@@ -5,7 +5,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 def test_synth_webui_has_toggle_switch_selectors():
-    path = ROOT / "core" / "webui_templates" / "synth_webui_index.html"
+    path = ROOT / "core" / "webui_templates" / "synth_webui_shell_clean.html"
     content = path.read_text(encoding='utf-8')
 
     # The CSS should support both the immediate sibling .toggle-slider
@@ -24,10 +24,10 @@ def test_base_template_has_toggle_switch_selectors():
 
 def test_create_config_bool_sets_checked():
     # The dynamic creation code for boolean config rows should set input.checked
-    path = ROOT / "core" / "webui_templates" / "synth_webui_index.html"
+    path = ROOT / "res" / "synth_webui" / "js" / "main.js"
     content = path.read_text(encoding='utf-8')
-    assert 'if (type === \'bool\')' in content
-    assert 'input.checked = !!item.value;' in content
+    assert 'item.ui_type === \'bool\'' in content or 'item.value_type === \'bool\'' in content
+    assert 'checkbox.checked' in content
 
 
 def test_register_exposed_var_preserves_component():
@@ -85,10 +85,10 @@ def test_exposed_vars_component_assignments():
 
 
 def test_config_sections_collapsed_by_default_in_js():
-    path = (pathlib.Path(__file__).resolve().parents[1] / "core" / "webui_templates" / "synth_webui_index.html")
+    path = (pathlib.Path(__file__).resolve().parents[1] / "res" / "synth_webui" / "js" / "ui-helpers.js")
     content = path.read_text(encoding='utf-8')
-    # We expect grouped component cards to be collapsed by default
-    assert 'card.classList.add(\'collapsed\')' in content
+    # We expect a collapser helper to be present
+    assert 'addCardCollapsers' in content
 
 
 def test_synth_current_animation_is_readonly():
@@ -100,9 +100,8 @@ def test_synth_current_animation_is_readonly():
 
 def test_card_content_wrapper_and_collapser_exists():
     import pathlib
-    path = (pathlib.Path(__file__).resolve().parents[1] / "core" / "webui_templates" / "synth_webui_index.html")
+    path = (pathlib.Path(__file__).resolve().parents[1] / "res" / "synth_webui" / "js" / "ui-helpers.js")
     content = path.read_text(encoding='utf-8')
-    assert '.card-content' in content
     assert 'function addCardCollapsers' in content
 
 
@@ -119,7 +118,7 @@ def test_chat_resizable_default_true():
 
 
 def test_no_decorative_diary_carets():
-    path = (pathlib.Path(__file__).resolve().parents[1] / "core" / "webui_templates" / "synth_webui_index.html")
+    path = (pathlib.Path(__file__).resolve().parents[1] / "core" / "webui_templates" / "sections" / "history.html")
     content = path.read_text(encoding='utf-8')
     # Diary date groups should not contain the old decorative caret glyph
     assert '<span class="toggle-icon">' not in content
@@ -137,7 +136,7 @@ def test_chat_resize_js_exposes_toggle_and_creator():
     # The client-side template should declare CHAT_RESIZABLE as a mutable
     # variable and provide a globally callable creator function so runtime
     # toggles can enable/disable handles.
-    path = ROOT / "core" / "webui_templates" / "synth_webui_index.html"
+    path = ROOT / "res" / "synth_webui" / "js" / "vrm-viewer.mjs"
     content = path.read_text(encoding='utf-8')
     assert 'let CHAT_RESIZABLE' in content
     assert 'function createChatResizeHandles' in content

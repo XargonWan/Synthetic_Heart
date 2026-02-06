@@ -4917,65 +4917,45 @@ import * as THREE from 'three';
                     // The render/WS freeze gates elsewhere still additionally check __synth_web_debug_enabled.
                     const isPaused = () => !!window.__synth_debug_pause_all;
 
-                    const ensureDock = () => {
+                    const ensureFallbackDock = () => {
                         let dock = document.getElementById('synth-minimized-stack');
                         if (dock) return dock;
                         dock = document.createElement('div');
                         dock.id = 'synth-minimized-stack';
                         dock.style.position = 'fixed';
-                        dock.style.right = '18px';
+                        dock.style.right = 'auto';
+                        dock.style.left = '18px';
                         dock.style.bottom = '18px';
                         dock.style.display = 'flex';
                         dock.style.flexDirection = 'column';
                         dock.style.gap = '8px';
                         dock.style.zIndex = 99999;
-                        dock.style.alignItems = 'flex-end';
+                        dock.style.alignItems = 'flex-start';
                         document.body.appendChild(dock);
                         return dock;
                     };
 
-                    const dock = ensureDock();
-                    const chatToggleBtn = document.getElementById('chat-toggle');
-                    // If chat has a restore button, stack it with debug (WEB_DEBUG-only).
-                    try {
-                        if (chatToggleBtn && chatToggleBtn.parentElement !== dock) {
-                            dock.appendChild(chatToggleBtn);
-                            try { chatToggleBtn.style.position = 'static'; chatToggleBtn.style.right = ''; chatToggleBtn.style.bottom = ''; } catch (e) { /* ignore */ }
+                    const getDock = () => {
+                        if (window.SynthWindowManager && typeof window.SynthWindowManager.ensureDock === 'function') {
+                            return window.SynthWindowManager.ensureDock();
                         }
-                    } catch (e) { /* ignore */ }
+                        return ensureFallbackDock();
+                    };
 
-                    // Build floating debug window
-                    const win = document.createElement('div');
-                    win.id = 'synth-advanced-debug';
-                    win.style.position = 'fixed';
-                    win.style.right = '18px';
-                    win.style.bottom = '86px';
-                    win.style.width = '420px';
-                    win.style.maxWidth = 'calc(100% - 40px)';
-                    win.style.minWidth = '320px';
-                    win.style.height = '520px';
-                    win.style.maxHeight = 'calc(100vh - 140px)';
-                    win.style.minHeight = '240px';
-                    win.style.zIndex = 99998;
-                    win.style.background = 'var(--surface)';
-                    win.style.color = 'var(--text)';
-                    win.style.border = '1px solid var(--border)';
-                    win.style.borderRadius = '12px';
-                    win.style.overflow = 'hidden';
-                    win.style.resize = 'both';
-
-                    win.innerHTML = `
-                        <div id="synth-debug-title-bar" style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 12px;border-bottom:1px solid var(--border);cursor:move;user-select:none;">
-                            <div style="display:flex;flex-direction:column;gap:2px;min-width:0;">
-                                <div style="font-weight:700;">Debug</div>
-                                <div style="font-size:11px;color:var(--text-soft);">Session only · WEB_DEBUG</div>
-                            </div>
-                            <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
-                                <button id="synth-debug-pause" class="pill secondary" type="button">Pause</button>
-                                <button id="synth-debug-resync" class="pill secondary" type="button">Resync</button>
-                                <button id="synth-debug-reset" class="pill" type="button">Reset</button>
-                                <button id="synth-debug-minimize" class="pill secondary" type="button">—</button>
-                            </div>
+                    const buildDebugPanel = () => {
+                        const panel = document.createElement('div');
+                        panel.id = 'synth-advanced-debug';
+                        panel.className = 'synth-window-panel';
+                        panel.style.display = 'flex';
+                        panel.style.flexDirection = 'column';
+                        panel.style.width = '100%';
+                        panel.style.height = '100%';
+                        panel.innerHTML = `
+                        <div id="synth-debug-title-bar" style="display:flex;align-items:center;justify-content:flex-end;gap:6px;padding:10px 12px;border-bottom:1px solid var(--border);cursor:move;user-select:none;">
+                            <button id="synth-debug-pause" class="pill secondary" type="button" title="Pause">⏸️</button>
+                            <button id="synth-debug-resync" class="pill secondary" type="button" title="Sync">🛜</button>
+                            <button id="synth-debug-reset" class="pill" type="button" title="Reset">🔁</button>
+                            <button id="synth-debug-minimize" class="pill secondary" type="button" title="Minimize">➖</button>
                         </div>
                         <div id="synth-debug-body" style="padding:12px;display:flex;flex-direction:column;gap:12px;overflow:auto;height:calc(100% - 52px);">
 
@@ -4992,16 +4972,16 @@ import * as THREE from 'three';
 
                             <div class="card" style="margin:0;">
                                 <h2 style="margin:0 0 8px 0;">Loop Override</h2>
-                                <div style="display:flex;gap:8px;align-items:center;">
-                                    <select id="synth-debug-loop-type" style="flex:1;min-width:0;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);"></select>
-                                    <select id="synth-debug-loop-file" style="flex:2;min-width:0;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);"></select>
+                                <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
+                                    <select id="synth-debug-loop-type" style="flex:1 1 140px;min-width:120px;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);"></select>
+                                    <select id="synth-debug-loop-file" style="flex:2 1 220px;min-width:160px;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);"></select>
                                 </div>
-                                <div style="display:flex;gap:8px;margin-top:8px;">
-                                    <input id="synth-debug-loop-start" type="number" placeholder="start" style="flex:1;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);" />
-                                    <input id="synth-debug-loop-end" type="number" placeholder="end" style="flex:1;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);" />
-                                    <input id="synth-debug-loop-fps" type="number" placeholder="fps" style="width:86px;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);" />
+                                <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;">
+                                    <input id="synth-debug-loop-start" type="number" placeholder="start" style="flex:1 1 120px;min-width:100px;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);" />
+                                    <input id="synth-debug-loop-end" type="number" placeholder="end" style="flex:1 1 120px;min-width:100px;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);" />
+                                    <input id="synth-debug-loop-fps" type="number" placeholder="fps" style="flex:0 0 86px;min-width:86px;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);" />
                                 </div>
-                                <div style="display:flex;gap:8px;margin-top:8px;">
+                                <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;">
                                     <button id="synth-debug-loop-start-btn" class="pill" type="button" style="flex:1;">Start</button>
                                     <button id="synth-debug-loop-clear-btn" class="pill secondary" type="button" style="flex:1;">Clear</button>
                                     <button id="synth-debug-loop-refresh" class="pill secondary" type="button">Refresh</button>
@@ -5027,92 +5007,188 @@ import * as THREE from 'three';
                             </div>
                         </div>
                     `;
+                        return panel;
+                    };
 
-                    document.body.appendChild(win);
+                    let win = null;
+                    let winbox = null;
+                    const tryCreateWinBox = () => {
+                        if (!window.SynthWindowManager || typeof window.SynthWindowManager.create !== 'function') return null;
+                        if (typeof window.WinBox === 'undefined') return null;
+                        const panel = buildDebugPanel();
+                        win = panel;
+                        winbox = window.SynthWindowManager.create({
+                            id: 'debug',
+                            title: 'Debug',
+                            mount: panel,
+                            width: 420,
+                            height: 520,
+                            x: 24,
+                            y: 'bottom',
+                            iconText: '💻',
+                            dockLabel: 'Restore Debug',
+                            dockClass: 'chat-toggle-btn',
+                            className: 'synth-winbox no-full'
+                        });
+                        try {
+                            if (window.SynthWindowManager && typeof window.SynthWindowManager.attachHeaderTools === 'function') {
+                                const pauseBtn = panel.querySelector('#synth-debug-pause');
+                                const resyncBtn = panel.querySelector('#synth-debug-resync');
+                                const resetBtn = panel.querySelector('#synth-debug-reset');
+                                window.SynthWindowManager.attachHeaderTools('debug', winbox, [
+                                    {
+                                        label: '⏸️',
+                                        title: 'Pause',
+                                        className: 'synth-wb-tool-pause',
+                                        onClick: () => { if (pauseBtn) pauseBtn.click(); }
+                                    },
+                                    {
+                                        label: '🛜',
+                                        title: 'Sync',
+                                        onClick: () => { if (resyncBtn) resyncBtn.click(); }
+                                    },
+                                    {
+                                        label: '🔁',
+                                        title: 'Reset',
+                                        onClick: () => { if (resetBtn) resetBtn.click(); }
+                                    },
+                                    {
+                                        label: '➖',
+                                        title: 'Minimize',
+                                        onClick: () => { try { window.SynthWindowManager.minimize('debug'); } catch (e) { /* ignore */ } }
+                                    }
+                                ]);
+                            }
+                        } catch (e) { /* ignore */ }
+                        return winbox;
+                    };
 
-                    // Dragging (simple, chat-like)
-                    (function makeDraggable(el) {
-                        const header = el.querySelector('#synth-debug-title-bar');
-                        if (!header) return;
-                        let dragging = false;
-                        let startX = 0, startY = 0;
-                        let offsetX = 0, offsetY = 0;
-                        header.addEventListener('pointerdown', (ev) => {
-                            try {
-                                // Prevent resize handles beneath the title bar from stealing pointer events
-                                try { ev.stopPropagation(); } catch (e) {}
-                                // Respect global active interactions (avoid interfering with chat drag/other resizes)
-                                try { if (window.__synth_active_interaction) return; } catch (e) {}
-                                // Don't start dragging when the user is clicking controls in the title bar.
-                                const t = ev && ev.target ? ev.target : null;
-                                if (t && typeof t.closest === 'function') {
-                                    if (t.closest('button, input, select, textarea, a')) return;
-                                }
-                                dragging = true;
-                                const dragPointerId = (ev.pointerId !== undefined) ? ev.pointerId : 'mouse';
-                                try { window.__synth_active_interaction = { type: 'debug_drag', id: dragPointerId }; } catch (e) {}
-                                // Normalize to left/top positioning so drag+resize behave consistently.
-                                const r = el.getBoundingClientRect();
+                    if (!tryCreateWinBox()) {
+                        win = buildDebugPanel();
+                        win.style.position = 'fixed';
+                        win.style.right = '18px';
+                        win.style.bottom = '86px';
+                        win.style.width = '420px';
+                        win.style.maxWidth = 'calc(100% - 40px)';
+                        win.style.minWidth = '320px';
+                        win.style.height = '520px';
+                        win.style.maxHeight = 'calc(100vh - 140px)';
+                        win.style.minHeight = '240px';
+                        win.style.zIndex = 99998;
+                        win.style.background = 'var(--surface)';
+                        win.style.color = 'var(--text)';
+                        win.style.border = '1px solid var(--border)';
+                        win.style.borderRadius = '12px';
+                        win.style.overflow = 'hidden';
+                        win.style.resize = 'both';
+                        document.body.appendChild(win);
+
+                        const dock = getDock();
+                        const chatToggleBtn = document.getElementById('chat-toggle');
+                        // If chat has a restore button, stack it with debug (WEB_DEBUG-only).
+                        try {
+                            if (chatToggleBtn && chatToggleBtn.parentElement !== dock) {
+                                dock.appendChild(chatToggleBtn);
+                                try { chatToggleBtn.style.position = 'static'; chatToggleBtn.style.right = ''; chatToggleBtn.style.bottom = ''; } catch (e) { /* ignore */ }
+                            }
+                        } catch (e) { /* ignore */ }
+                    }
+
+                    if (!winbox) {
+                        // Dragging (simple, chat-like)
+                        (function makeDraggable(el) {
+                            const header = el.querySelector('#synth-debug-title-bar');
+                            if (!header) return;
+                            let dragging = false;
+                            let startX = 0, startY = 0;
+                            let offsetX = 0, offsetY = 0;
+                            header.addEventListener('pointerdown', (ev) => {
                                 try {
-                                    el.style.left = r.left + 'px';
-                                    el.style.top = r.top + 'px';
+                                    // Prevent resize handles beneath the title bar from stealing pointer events
+                                    try { ev.stopPropagation(); } catch (e) {}
+                                    // Respect global active interactions (avoid interfering with chat drag/other resizes)
+                                    try { if (window.__synth_active_interaction) return; } catch (e) {}
+                                    // Don't start dragging when the user is clicking controls in the title bar.
+                                    const t = ev && ev.target ? ev.target : null;
+                                    if (t && typeof t.closest === 'function') {
+                                        if (t.closest('button, input, select, textarea, a')) return;
+                                    }
+                                    dragging = true;
+                                    const dragPointerId = (ev.pointerId !== undefined) ? ev.pointerId : 'mouse';
+                                    try { window.__synth_active_interaction = { type: 'debug_drag', id: dragPointerId }; } catch (e) {}
+                                    // Normalize to left/top positioning so drag+resize behave consistently.
+                                    const r = el.getBoundingClientRect();
+                                    try {
+                                        el.style.left = r.left + 'px';
+                                        el.style.top = r.top + 'px';
+                                        el.style.right = 'auto';
+                                        el.style.bottom = 'auto';
+                                    } catch (e) { /* ignore */ }
+                                    startX = ev.clientX;
+                                    startY = ev.clientY;
+                                    offsetX = startX - r.left;
+                                    offsetY = startY - r.top;
+                                    try { header.setPointerCapture && header.setPointerCapture(ev.pointerId); } catch (e) {}
+                                } catch (e) { /* ignore */ }
+                            });
+                            window.addEventListener('pointermove', (ev) => {
+                                if (!dragging) return;
+                                try {
+                                    el.style.left = (ev.clientX - offsetX) + 'px';
+                                    el.style.top = (ev.clientY - offsetY) + 'px';
                                     el.style.right = 'auto';
                                     el.style.bottom = 'auto';
                                 } catch (e) { /* ignore */ }
-                                startX = ev.clientX;
-                                startY = ev.clientY;
-                                offsetX = startX - r.left;
-                                offsetY = startY - r.top;
-                                try { header.setPointerCapture && header.setPointerCapture(ev.pointerId); } catch (e) {}
-                            } catch (e) { /* ignore */ }
-                        });
-                        window.addEventListener('pointermove', (ev) => {
-                            if (!dragging) return;
+                            });
+                            window.addEventListener('pointerup', (ev) => { try { dragging = false; if (window.__synth_active_interaction && window.__synth_active_interaction.type === 'debug_drag') window.__synth_active_interaction = null; } catch (e) {} });
+                        })(win);
+
+                        // Add chat-like resize handles for the debug window so resizing anchors work
+                        try { createResizeHandlesForElement(win); } catch (e) { /* ignore */ }
+
+                        // Dock button for minimized state
+                        let debugDockBtn = null;
+                        const ensureDebugDockBtn = () => {
+                            if (debugDockBtn && debugDockBtn.isConnected) return debugDockBtn;
+                            debugDockBtn = document.createElement('button');
+                            debugDockBtn.type = 'button';
+                            // Match chat bubble styling when minimized.
+                            debugDockBtn.className = 'chat-toggle-btn';
+                            debugDockBtn.textContent = '💻';
+                            debugDockBtn.setAttribute('aria-label', 'Restore debug');
+                            debugDockBtn.title = 'Restore Debug';
                             try {
-                                el.style.left = (ev.clientX - offsetX) + 'px';
-                                el.style.top = (ev.clientY - offsetY) + 'px';
-                                el.style.right = 'auto';
-                                el.style.bottom = 'auto';
+                                // When in the minimized stack, behave as a normal element.
+                                debugDockBtn.style.position = 'static';
+                                debugDockBtn.style.top = '';
+                                debugDockBtn.style.right = '';
+                                debugDockBtn.style.bottom = '';
+                                debugDockBtn.style.left = '';
+                                debugDockBtn.style.zIndex = '';
                             } catch (e) { /* ignore */ }
-                        });
-                        window.addEventListener('pointerup', (ev) => { try { dragging = false; if (window.__synth_active_interaction && window.__synth_active_interaction.type === 'debug_drag') window.__synth_active_interaction = null; } catch (e) {} });
-                    })(win);
+                            debugDockBtn.addEventListener('click', () => {
+                                try { win.style.display = ''; } catch (e) { /* ignore */ }
+                                try { if (debugDockBtn && debugDockBtn.parentElement) debugDockBtn.parentElement.removeChild(debugDockBtn); } catch (e) { /* ignore */ }
+                            });
+                            return debugDockBtn;
+                        };
 
-                    // Add chat-like resize handles for the debug window so resizing anchors work
-                    try { createResizeHandlesForElement(win); } catch (e) { /* ignore */ }
-
-                    // Dock button for minimized state
-                    let debugDockBtn = null;
-                    const ensureDebugDockBtn = () => {
-                        if (debugDockBtn && debugDockBtn.isConnected) return debugDockBtn;
-                        debugDockBtn = document.createElement('button');
-                        debugDockBtn.type = 'button';
-                        // Match chat bubble styling when minimized.
-                        debugDockBtn.className = 'chat-toggle-btn';
-                        debugDockBtn.textContent = '💻';
-                        debugDockBtn.setAttribute('aria-label', 'Restore debug');
-                        debugDockBtn.title = 'Restore Debug';
-                        try {
-                            // When in the minimized stack, behave as a normal element.
-                            debugDockBtn.style.position = 'static';
-                            debugDockBtn.style.top = '';
-                            debugDockBtn.style.right = '';
-                            debugDockBtn.style.bottom = '';
-                            debugDockBtn.style.left = '';
-                            debugDockBtn.style.zIndex = '';
-                        } catch (e) { /* ignore */ }
-                        debugDockBtn.addEventListener('click', () => {
-                            try { win.style.display = ''; } catch (e) { /* ignore */ }
-                            try { if (debugDockBtn && debugDockBtn.parentElement) debugDockBtn.parentElement.removeChild(debugDockBtn); } catch (e) { /* ignore */ }
-                        });
-                        return debugDockBtn;
-                    };
+                        const minimizeBtnLegacy = win.querySelector('#synth-debug-minimize');
+                        if (minimizeBtnLegacy) {
+                            minimizeBtnLegacy.addEventListener('click', () => {
+                                try { win.style.display = 'none'; } catch (e) { /* ignore */ }
+                                try { getDock().appendChild(ensureDebugDockBtn()); } catch (e) { /* ignore */ }
+                            });
+                        }
+                    }
 
                     const minimizeBtn = win.querySelector('#synth-debug-minimize');
                     if (minimizeBtn) {
                         minimizeBtn.addEventListener('click', () => {
-                            try { win.style.display = 'none'; } catch (e) { /* ignore */ }
-                            try { dock.appendChild(ensureDebugDockBtn()); } catch (e) { /* ignore */ }
+                            if (winbox && window.SynthWindowManager && typeof window.SynthWindowManager.minimize === 'function') {
+                                try { window.SynthWindowManager.minimize('debug'); } catch (e) { /* ignore */ }
+                                return;
+                            }
                         });
                     }
 
@@ -5180,7 +5256,20 @@ import * as THREE from 'three';
                         } catch (e) { /* ignore */ }
 
                         try {
-                            if (pauseBtn) pauseBtn.textContent = paused ? 'Resume' : 'Pause';
+                            if (pauseBtn) {
+                                pauseBtn.textContent = paused ? '▶️' : '⏸️';
+                                pauseBtn.title = paused ? 'Play' : 'Pause';
+                                pauseBtn.setAttribute('aria-label', paused ? 'Play' : 'Pause');
+                            }
+                            if (winbox) {
+                                const winEl = winbox.window || winbox.dom || winbox.g || null;
+                                const toolBtn = winEl ? winEl.querySelector('.synth-wb-tool-pause') : null;
+                                if (toolBtn) {
+                                    toolBtn.textContent = paused ? '▶️' : '⏸️';
+                                    toolBtn.title = paused ? 'Play' : 'Pause';
+                                    toolBtn.setAttribute('aria-label', paused ? 'Play' : 'Pause');
+                                }
+                            }
                         } catch (e) { /* ignore */ }
                         if (!paused) {
                             await resyncFromBackend();
@@ -6859,12 +6948,21 @@ import * as THREE from 'three';
 
         // Modal archive manager
         let archiveModal = null;
+        let archiveWinbox = null;
+        let archiveMultiSelect = false;
+        let archiveSelectedIds = new Set();
         function createArchiveModal() {
             if (archiveModal) return archiveModal;
             const panel = document.createElement('div');
             panel.id = 'archive-panel';
+            panel.className = 'synth-window-panel archive-panel';
+            panel.style.display = 'flex';
+            panel.style.flexDirection = 'column';
+            panel.style.width = '100%';
+            panel.style.height = '100%';
             // Determine mobile view to adjust modal behavior
             const isMobileArchive = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768);
+            const canUseWinBox = !isMobileArchive && window.SynthWindowManager && typeof window.SynthWindowManager.create === 'function' && typeof window.WinBox !== 'undefined';
             if (isMobileArchive) {
                 panel.style.cssText = `
                     position: fixed;
@@ -6875,13 +6973,14 @@ import * as THREE from 'three';
                     bottom: 0;
                     width: 100%;
                     height: 100%;
-                    background: rgba(14, 14, 20, 0.98);
+                    background: var(--panel-bg);
+                    color: var(--text);
                     border: none;
                     border-radius: 0;
                     box-shadow: none;
                     display: none; flex-direction: column; overflow: auto;
                 `;
-            } else {
+            } else if (!canUseWinBox) {
                 panel.style.cssText = `
                     position: fixed;
                     z-index: 10080;
@@ -6889,7 +6988,8 @@ import * as THREE from 'three';
                     bottom: 4rem;
                     width: 720px;
                     height: 520px;
-                    background: rgba(14, 14, 20, 0.96);
+                    background: var(--panel-bg);
+                    color: var(--text);
                     border: 1px solid var(--border);
                     border-radius: 14px;
                     box-shadow: 0 40px 80px -40px rgba(0,0,0,0.95);
@@ -6897,29 +6997,68 @@ import * as THREE from 'three';
                 `;
             }
             panel.innerHTML = `
-                <div id="archive-header" style="padding:10px 14px; display:flex; align-items:center; justify-content:space-between; cursor:grab;">
-                    <div style="font-weight:600">Archives</div>
-                    <div style="display:flex; gap:6px; align-items:center">
+                <div id="archive-header" class="archive-header">
+                    <div class="archive-title">Archives</div>
+                    <div class="archive-controls">
+                        <button id="archive-minimize" class="pill secondary" type="button">—</button>
+                        <button id="archive-edit" class="pill secondary" type="button">Edit</button>
                         <button id="archive-refresh" class="pill">Refresh</button>
                         <button id="archive-close" class="pill">Close</button>
                     </div>
                 </div>
-                <div id="archive-list" style="flex:1; overflow:auto; padding:12px; display:flex; flex-direction:column; gap:8px"></div>
-                <div style="padding:10px 12px; border-top:1px solid rgba(255,255,255,0.04); display:flex; gap:8px; justify-content:flex-end">
+                <div id="archive-list" class="archive-list"></div>
+                <div class="archive-footer">
                     <button id="archive-restore-btn" class="pill" disabled>Restore Selected</button>
                 </div>
             `;
-            document.body.appendChild(panel);
-            // Dragging header (disabled on mobile where modal is fullscreen)
-            const header = panel.querySelector('#archive-header');
-            if (!isMobileArchive) {
-                let dragging = false, startX = 0, startY = 0, startRight = 18, startBottom = 60;
-                header.addEventListener('pointerdown', (ev) => { dragging = true; startX = ev.clientX; startY = ev.clientY; startRight = parseFloat(getComputedStyle(panel).right); startBottom = parseFloat(getComputedStyle(panel).bottom); document.body.style.userSelect = 'none'; });
-                window.addEventListener('pointermove', (ev) => { if(!dragging) return; const dx = ev.clientX - startX; const dy = ev.clientY - startY; panel.style.right = (startRight - dx) + 'px'; panel.style.bottom = (startBottom - dy) + 'px'; });
-                window.addEventListener('pointerup', () => { dragging = false; document.body.style.userSelect = ''; });
+            if (canUseWinBox) {
+                archiveWinbox = window.SynthWindowManager.create({
+                    id: 'archives',
+                    title: 'Archives',
+                    mount: panel,
+                    width: 720,
+                    height: 520,
+                    x: 64,
+                    y: 'bottom',
+                    iconText: '🗂️',
+                    dockLabel: 'Restore Archives',
+                    dockClass: 'chat-toggle-btn',
+                    className: 'synth-winbox no-full'
+                });
+                try {
+                    if (window.SynthWindowManager && typeof window.SynthWindowManager.attachHeaderTools === 'function') {
+                        window.SynthWindowManager.attachHeaderTools('archives', archiveWinbox, [
+                            {
+                                label: '🔄',
+                                title: 'Refresh archives',
+                                onClick: () => { try { refreshArchiveList(); } catch (e) { /* ignore */ } }
+                            },
+                            {
+                                label: '✏️',
+                                title: 'Edit selection',
+                                onClick: () => { try { toggleArchiveEditMode(); } catch (e) { /* ignore */ } }
+                            }
+                        ]);
+                    }
+                } catch (e) { /* ignore */ }
             } else {
-                // On mobile, ensure header isn't draggable and shows close/controls clearly
-                header.style.cursor = 'default';
+                document.body.appendChild(panel);
+                // Dragging header (disabled on mobile where modal is fullscreen)
+                const header = panel.querySelector('#archive-header');
+                if (!isMobileArchive) {
+                    header.style.cursor = 'grab';
+                    let dragging = false, startX = 0, startY = 0, startRight = 18, startBottom = 60;
+                    header.addEventListener('pointerdown', (ev) => { dragging = true; startX = ev.clientX; startY = ev.clientY; startRight = parseFloat(getComputedStyle(panel).right); startBottom = parseFloat(getComputedStyle(panel).bottom); document.body.style.userSelect = 'none'; });
+                    window.addEventListener('pointermove', (ev) => { if(!dragging) return; const dx = ev.clientX - startX; const dy = ev.clientY - startY; panel.style.right = (startRight - dx) + 'px'; panel.style.bottom = (startBottom - dy) + 'px'; });
+                    window.addEventListener('pointerup', () => { dragging = false; document.body.style.userSelect = ''; });
+                } else {
+                    // On mobile, ensure header isn't draggable and shows close/controls clearly
+                    header.style.cursor = 'default';
+                }
+            }
+            if (canUseWinBox) {
+                const header = panel.querySelector('#archive-header');
+                if (header) header.style.cursor = 'default';
             }
             archiveModal = panel;
             return panel;
@@ -6931,41 +7070,82 @@ import * as THREE from 'three';
             const btnClose = modal.querySelector('#archive-close');
             const btnRefresh = modal.querySelector('#archive-refresh');
             const btnRestore = modal.querySelector('#archive-restore-btn');
+            const btnMinimize = modal.querySelector('#archive-minimize');
+            const btnEdit = modal.querySelector('#archive-edit');
             btnClose.addEventListener('click', () => { modal.style.display = 'none'; });
+            if (btnMinimize) {
+                btnMinimize.addEventListener('click', () => {
+                    if (archiveWinbox && window.SynthWindowManager && typeof window.SynthWindowManager.minimize === 'function') {
+                        try { window.SynthWindowManager.minimize('archives'); } catch (e) { /* ignore */ }
+                        return;
+                    }
+                    try { modal.style.display = 'none'; } catch (e) { /* ignore */ }
+                });
+            }
+            if (btnEdit) {
+                btnEdit.addEventListener('click', () => { toggleArchiveEditMode(); });
+            }
             btnRefresh.addEventListener('click', async () => { await refreshArchiveList(); });
             btnRestore.addEventListener('click', async () => {
                 try {
-                    const selected = modal.querySelector('.archive-row.selected');
-                    if (!selected) { showToast('Select an archive to restore', true); return; }
-                    const aid = selected.dataset.id;
-                    showToast('Restoring archive: ' + aid, false);
-                    const sessionId = getSessionId();
-                    const out = await apiPostJson('/api/chat/restore', { archive_id: aid, session_id: sessionId });
-                        if (out && out.success) {
-                        showToast('Archive restored (' + out.restored + ' messages)', false);
-                        // We rely on WebSocket replay to render restored messages via _replay_history;
-                        // do not render `out.messages` here to avoid duplicates.
-                        modal.style.display = 'none';
-                        // Refresh archive list after successful restore
-                        try { await refreshArchiveList(); } catch (err) { console.debug('[synth_webui] Failed to refresh archive list after restore:', err); }
-                        // If server returned deleted_archive_id, remove the row immediately
-                        if (out && out.deleted_archive_id) {
-                            try {
-                                const deletedId = out.deleted_archive_id;
-                                const row = document.querySelector(`#archive-list .archive-row[data-id='${deletedId}']`);
-                                if (row) row.remove();
-                            } catch (err) { console.debug('[synth_webui] Failed to remove deleted archive row', err); }
-                        } else if (out && out.saved_count === 0) {
-                            showToast('No messages were restored (archive may be corrupt)', true);
-                        }
-                    } else {
-                        showToast('Restore failed', true);
+                    const ids = archiveMultiSelect ? Array.from(archiveSelectedIds) : [];
+                    if (!archiveMultiSelect) {
+                        const selected = modal.querySelector('.archive-row.selected');
+                        if (selected) ids.push(selected.dataset.id);
                     }
+                    if (!ids.length) { showToast('Select an archive to restore', true); return; }
+                    const sessionId = getSessionId();
+                    showToast(`Restoring ${ids.length} archive(s)...`, false);
+                    for (const aid of ids) {
+                        const out = await apiPostJson('/api/chat/restore', { archive_id: aid, session_id: sessionId });
+                        if (out && out.success) {
+                            // We rely on WebSocket replay to render restored messages via _replay_history;
+                            // do not render `out.messages` here to avoid duplicates.
+                            if (out && out.deleted_archive_id) {
+                                try {
+                                    const deletedId = out.deleted_archive_id;
+                                    const row = document.querySelector(`#archive-list .archive-row[data-id='${deletedId}']`);
+                                    if (row) row.remove();
+                                } catch (err) { console.debug('[synth_webui] Failed to remove deleted archive row', err); }
+                            }
+                        } else {
+                            showToast(`Restore failed for ${aid}`, true);
+                        }
+                    }
+                    showToast('Restore completed', false);
+                    archiveSelectedIds.clear();
+                    updateArchiveRestoreState(modal);
+                    // Refresh archive list after successful restore
+                    try { await refreshArchiveList(); } catch (err) { console.debug('[synth_webui] Failed to refresh archive list after restore:', err); }
                 } catch (err) {
                     console.error('[synth_webui] Restore failed', err);
                     showToast('Restore error: ' + err.message, true);
                 }
             });
+        }
+
+        function updateArchiveRestoreState(panel) {
+            const btnRestore = panel.querySelector('#archive-restore-btn');
+            const selectedRow = panel.querySelector('.archive-row.selected');
+            const count = archiveMultiSelect ? archiveSelectedIds.size : (selectedRow ? 1 : 0);
+            if (!btnRestore) return;
+            btnRestore.disabled = count === 0;
+            btnRestore.textContent = count > 1 ? `Restore Selected (${count})` : 'Restore Selected';
+        }
+
+        function toggleArchiveEditMode() {
+            const panel = archiveModal || createArchiveModal();
+            archiveMultiSelect = !archiveMultiSelect;
+            if (!archiveMultiSelect) {
+                archiveSelectedIds.clear();
+            }
+            try { panel.classList.toggle('archive-edit-mode', archiveMultiSelect); } catch (e) { /* ignore */ }
+            try {
+                const btnEdit = panel.querySelector('#archive-edit');
+                if (btnEdit) btnEdit.textContent = archiveMultiSelect ? 'Done' : 'Edit';
+            } catch (e) { /* ignore */ }
+            updateArchiveRestoreState(panel);
+            renderArchiveList(Array.isArray(window.__synth_archive_cache) ? window.__synth_archive_cache : []);
         }
 
         async function refreshArchiveList() {
@@ -6974,6 +7154,7 @@ import * as THREE from 'three';
                 if (!res.ok) throw new Error('HTTP ' + res.status);
                 const payload = await res.json();
                 const list = payload.archives || [];
+                window.__synth_archive_cache = list;
                 renderArchiveList(list);
             } catch (err) {
                 console.error('[synth_webui] Failed to refresh archives:', err);
@@ -6985,20 +7166,30 @@ import * as THREE from 'three';
             const panel = archiveModal || createArchiveModal();
             const container = panel.querySelector('#archive-list');
             container.innerHTML = '';
+            try { panel.classList.toggle('archive-edit-mode', archiveMultiSelect); } catch (e) { /* ignore */ }
+            const validIds = new Set(Array.isArray(list) ? list.map((a) => String(a.id)) : []);
+            for (const sid of Array.from(archiveSelectedIds)) {
+                if (!validIds.has(String(sid))) archiveSelectedIds.delete(sid);
+            }
             if (!Array.isArray(list) || !list.length) {
                 const empty = document.createElement('div');
                 empty.className = 'empty-state';
                 empty.style.padding = '1rem';
                 empty.textContent = 'No archives found.';
                 container.appendChild(empty);
-                panel.querySelector('#archive-restore-btn').disabled = true;
+                updateArchiveRestoreState(panel);
                 return;
             }
             for (const arch of list) {
                 const row = document.createElement('div');
                 row.className = 'archive-row';
-                row.dataset.id = arch.id;
+                const archId = String(arch.id);
+                row.dataset.id = archId;
                 row.style.display = 'flex'; row.style.gap = '8px'; row.style.alignItems = 'center'; row.style.justifyContent = 'space-between'; row.style.padding = '8px'; row.style.borderRadius='8px';
+                const check = document.createElement('input');
+                check.type = 'checkbox';
+                check.className = 'archive-check';
+                check.checked = archiveSelectedIds.has(archId);
                 // Left section: date/time + name
                 const left = document.createElement('div'); left.style.display='flex'; left.style.flexDirection='column';
                 const dt = document.createElement('div');
@@ -7018,16 +7209,29 @@ import * as THREE from 'three';
                 const deleteBtn = document.createElement('button'); deleteBtn.className = 'pill danger'; deleteBtn.type='button'; deleteBtn.textContent = '🗑️';
                 right.appendChild(renameBtn); right.appendChild(deleteBtn);
 
-                row.appendChild(left); row.appendChild(center); row.appendChild(right);
+                row.appendChild(check); row.appendChild(left); row.appendChild(center); row.appendChild(right);
                 container.appendChild(row);
 
                 // Selection handling
                 row.addEventListener('click', (ev) => {
                     // ignore clicks on action buttons
-                    if (ev.target === deleteBtn || ev.target === renameBtn) return;
+                    if (ev.target === deleteBtn || ev.target === renameBtn || ev.target === check) return;
+                    if (archiveMultiSelect) {
+                        check.checked = !check.checked;
+                        if (check.checked) archiveSelectedIds.add(archId); else archiveSelectedIds.delete(archId);
+                        row.classList.toggle('selected', check.checked);
+                        updateArchiveRestoreState(panel);
+                        return;
+                    }
                     container.querySelectorAll('.archive-row').forEach(r => r.classList.remove('selected'));
                     row.classList.add('selected');
-                    panel.querySelector('#archive-restore-btn').disabled = false;
+                    updateArchiveRestoreState(panel);
+                });
+
+                check.addEventListener('change', () => {
+                    if (check.checked) archiveSelectedIds.add(archId); else archiveSelectedIds.delete(archId);
+                    row.classList.toggle('selected', check.checked);
+                    updateArchiveRestoreState(panel);
                 });
 
                 // Delete
@@ -7074,6 +7278,7 @@ import * as THREE from 'three';
                     input.addEventListener('blur', finishRename);
                 });
             }
+            updateArchiveRestoreState(panel);
         }
 
         chatArchiveBtn?.addEventListener('click', async () => {
@@ -7108,7 +7313,11 @@ import * as THREE from 'three';
             try {
                 const modal = createArchiveModal();
                 bindArchiveModalButtons();
-                modal.style.display = 'flex';
+                if (archiveWinbox && window.SynthWindowManager && typeof window.SynthWindowManager.restore === 'function') {
+                    window.SynthWindowManager.restore('archives');
+                } else {
+                    modal.style.display = 'flex';
+                }
                 await refreshArchiveList();
             } catch (err) {
                 console.error('[synth_webui] Open archives failed', err);

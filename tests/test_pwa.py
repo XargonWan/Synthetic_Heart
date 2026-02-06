@@ -8,7 +8,7 @@ def test_manifest_display_fullscreen():
 
 def test_service_worker_exists_and_registered():
     from pathlib import Path
-    tpl = Path('core/webui_templates/synth_webui_index.html').read_text(encoding='utf-8')
+    tpl = Path('core/webui_templates/synth_webui_shell_clean.html').read_text(encoding='utf-8')
     # service worker registration moved into res/synth_webui/js/init.js — check it instead of template
     js = Path('res/synth_webui/js/init.js').read_text(encoding='utf-8')
     assert 'serviceWorker' in js and 'service-worker.js' in js

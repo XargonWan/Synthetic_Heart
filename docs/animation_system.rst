@@ -27,7 +27,7 @@ Located in ``core/animation_handler.py``, this component:
 Frontend Animation Handler
 ---------------------------
 
-Located in the WebUI templates (``core/webui_templates/synth_webui_index.html``), this component:
+Located in ``res/synth_webui/js/vrm-viewer.mjs``, this component:
 
 - Receives animation commands from the backend
 - Loads and manages FBX animation files

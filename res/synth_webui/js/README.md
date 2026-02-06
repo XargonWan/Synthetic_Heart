@@ -59,14 +59,18 @@ action.play();
 
 ## Integration with WebUI
 
-These modules are imported in `core/webui_templates/synth_webui_index.html`:
+These modules are imported via `core/webui_templates/synth_webui_shell_clean.html` and the section templates:
 
 ```javascript
 import { loadMixamoAnimation } from '/static/js/loadMixamoAnimation.js';
 import { mixamoVRMRigMap } from '/static/js/mixamoVRMRigMap.js';
 ```
 
-The import map in the HTML ensures Three.js and addons are resolved correctly:
+The import map in the HTML ensures Three.js and addons are resolved correctly (see `core/webui_templates/synth_webui_shell_clean.html`):
+
+## Bootstrap helper
+
+`webui-bootstrap.js` provides a lightweight runtime stub for the animation handler and VRM loader path configuration until `vrm-viewer.mjs` has finished loading.
 
 ```html
 <script type="importmap">

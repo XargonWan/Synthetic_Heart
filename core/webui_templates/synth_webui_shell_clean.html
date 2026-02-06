@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>%%BRAND_NAME%%</title>
+    <link rel="stylesheet" href="/js/vendor/winbox.min.css" />
     <link rel="icon" type="image/png" sizes="192x192" href="/static/synth_icon_192.png" />
     <link rel="icon" type="image/png" sizes="512x512" href="/static/synth_icon_512.png" />
     <link rel="apple-touch-icon" sizes="180x180" href="/static/synth_icon_180.png" />
@@ -174,12 +175,224 @@
             max-height: 75vh;
             display: flex;
             flex-direction: column;
-            background: rgba(12, 12, 20, 0.95);
+            background: rgba(12, 12, 20, 0.9);
             border: 1px solid var(--border);
             border-radius: 22px;
             box-shadow: 0 24px 45px -38px rgba(0, 0, 0, 0.9);
             overflow: hidden;
             z-index: 50;
+        }
+        #chat.synth-window-managed {
+            position: static;
+            inset: auto;
+            width: 100%;
+            height: 100%;
+            max-height: none;
+            border: none;
+            border-radius: 16px;
+            box-shadow: none;
+            background: rgba(12, 12, 20, 0.9);
+        }
+        #chat.synth-window-managed #chat-title-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.8rem;
+            padding: 0.85rem 1rem;
+            background: rgba(12, 12, 20, 0.82);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        #chat.synth-window-managed #chat-title-bar {
+            display: none;
+        }
+        #chat-title-bar .chat-title {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-weight: 600;
+            letter-spacing: 0.03em;
+        }
+        #chat-title-bar .chat-controls .pill {
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            background: rgba(255, 255, 255, 0.04);
+        }
+        .synth-minimized-stack {
+            position: fixed;
+            bottom: 1.2rem;
+            right: auto;
+            left: 1.2rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.6rem;
+            align-items: flex-start;
+            z-index: 10650;
+        }
+        .winbox.synth-winbox .wb-title {
+            color: var(--text);
+        }
+        .winbox.synth-winbox .wb-control {
+            color: var(--text-soft);
+        }
+        .winbox.synth-winbox .wb-control:hover,
+        .winbox.synth-winbox .wb-control:focus {
+            color: var(--accent);
+        }
+        .winbox.synth-winbox .wb-body {
+            background: rgba(12, 12, 20, 0.9);
+        }
+        .winbox.synth-winbox .wb-header {
+            background: var(--accent);
+        }
+        .winbox.synth-winbox .wb-drag {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding-right: 120px;
+        }
+        .winbox.synth-winbox .synth-wb-tools {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-left: auto;
+        }
+        .winbox.synth-winbox .synth-wb-tool-btn {
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            background: rgba(255, 255, 255, 0.04);
+            color: var(--text);
+            border-radius: 8px;
+            height: 22px;
+            min-width: 24px;
+            padding: 0 6px;
+            font-size: 0.85rem;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+        }
+        .winbox.synth-winbox .synth-wb-tool-btn:hover {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+        #synth-advanced-debug.synth-window-managed #synth-debug-title-bar {
+            display: none;
+        }
+        #synth-advanced-debug {
+            background: var(--panel-bg);
+            color: var(--text);
+        }
+        #archive-panel.synth-window-managed .archive-header {
+            display: none;
+        }
+        #archive-panel {
+            background: var(--panel-bg);
+        }
+        #archive-panel {
+            color: var(--text);
+        }
+        #archive-panel .archive-header {
+            padding: 10px 14px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: var(--surface-alt);
+            border-bottom: 1px solid var(--border);
+        }
+        #archive-panel .archive-title {
+            font-weight: 600;
+            letter-spacing: 0.02em;
+        }
+        #archive-panel .archive-controls {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+        }
+        #archive-panel .archive-list {
+            flex: 1;
+            overflow: auto;
+            padding: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        #archive-panel .archive-footer {
+            padding: 10px 12px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            gap: 8px;
+            justify-content: flex-end;
+            background: rgba(255, 255, 255, 0.02);
+        }
+        #archive-panel .archive-row {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border);
+        }
+        #archive-panel .archive-check {
+            display: none;
+            margin-right: 6px;
+            accent-color: var(--accent);
+        }
+        #archive-panel.archive-edit-mode .archive-check {
+            display: inline-block;
+        }
+        #archive-panel.archive-edit-mode .archive-row {
+            cursor: pointer;
+        }
+        #archive-panel .archive-row:hover {
+            border-color: var(--border-strong);
+        }
+        #archive-panel .archive-row.selected {
+            border-color: var(--accent);
+            background: var(--accent-soft);
+        }
+        #archive-panel .archive-row input {
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid var(--border);
+            color: var(--text);
+            border-radius: 8px;
+            padding: 6px 8px;
+        }
+        #archive-panel .archive-row input:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px rgba(255, 107, 214, 0.2);
+        }
+        #archive-panel .empty-state {
+            color: var(--text-soft);
+        }
+        #chat.synth-window-managed {
+            position: static;
+            inset: auto;
+            width: 100%;
+            height: 100%;
+            max-height: none;
+            border: none;
+            border-radius: 16px;
+            box-shadow: none;
+            background: rgba(12, 12, 20, 0.9);
+        }
+        #chat.synth-window-managed #chat-title-bar {
+            display: none;
+        }
+        #chat-title-bar .chat-title {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-weight: 600;
+            letter-spacing: 0.03em;
+        }
+        #chat-title-bar .chat-controls .pill {
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            background: rgba(255, 255, 255, 0.04);
+        }
+        .synth-minimized-stack {
+            position: fixed;
+            bottom: 1.2rem;
+            left: 1.2rem;
+            display: flex;
+            gap: 0.6rem;
+            z-index: 10650;
+            flex-direction: column;
+            align-items: flex-start;
         }
         #chat.minimized,
         #chat.hidden {
@@ -302,6 +515,27 @@
         }
         .chat-toggle-btn:active {
             transform: scale(0.95);
+        }
+        #synth-install-btn {
+            position: fixed;
+            right: 18px;
+            bottom: 90px;
+            z-index: 50;
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            border: 2px solid var(--border);
+            background: rgba(12, 12, 20, 0.9);
+            color: var(--accent);
+            font-size: 1.1rem;
+            cursor: pointer;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 8px 18px rgba(0, 0, 0, 0.55);
+        }
+        #synth-install-btn.visible {
+            display: flex;
         }
         .home-vrm canvas {
             position: absolute;
@@ -854,8 +1088,12 @@ window.__SYNTH_CONFIG = {
         <section class="tab-panel" id="tab-components" data-tab="components" role="tabpanel"></section>
         <section class="tab-panel" id="tab-about" data-tab="about" role="tabpanel"></section>
     </main>
+    <div id="synth-minimized-stack" class="synth-minimized-stack" aria-live="polite"></div>
+    <button id="synth-install-btn" title="Install Synthetic Heart" aria-label="Install Synthetic Heart">⬇️</button>
     <script src="/js/utils.js"></script>
     <script src="/js/ui-helpers.js"></script>
+    <script src="/js/vendor/winbox.min.js"></script>
+    <script src="/js/webui-bootstrap.js"></script>
     <script src="/js/main.js"></script>
     <script src="/js/history.js"></script>
     <script src="/js/skins-ui.js"></script>

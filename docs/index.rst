@@ -45,6 +45,7 @@ getting started.
    vrm_animations
    animation_system
    webui_debug
+   window_manager
    interfaces
    compose_env_vars
    interface_path

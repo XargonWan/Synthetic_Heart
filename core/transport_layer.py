@@ -19,6 +19,55 @@ LAST_JSON_ERROR_INFO: Optional[str] = None
 # Format: {chat_id: timestamp} to allow timeout cleanup
 _EXPECTING_SYSTEM_REPLY: dict = {}
 
+
+# Helpers for sanitizing and extracting JSON from noisy LLM outputs
+def _remove_control_chars(s: str) -> str:
+    """Remove non-printable control characters that commonly break JSON parsing.
+    Keep common whitespace (\n, \r, \t)."""
+    # Remove C0 control chars except tab/newline/carriage return (0x09,0x0a,0x0d)
+    return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", s)
+
+
+def _strip_stacktraces_and_addresses(s: str) -> str:
+    """Remove obvious stacktrace blocks and lines containing raw addresses to reduce noise.
+    This is conservative: we remove blocks starting with 'Traceback' or 'Stacktrace' and
+    isolated lines containing '0x' hex addresses which commonly appear in native traces.
+    """
+    # Remove common Python Traceback blocks
+    s2 = re.sub(r'(?is)traceback.*?(?=\n\s*\n|$)', '', s)
+
+    # Remove generic 'Stacktrace:' blocks
+    s2 = re.sub(r'(?is)stacktrace:.*?(?=\n\s*\n|$)', '', s2)
+
+    # Remove long blocks that look like hex-address stacks (lines with 0x..)
+    s2 = re.sub(r'(?m)^.*0x[0-9a-fA-F]+.*\n?', '', s2)
+
+    return s2
+
+
+def _find_json_substrings(s: str, max_window: int = 20000):
+    """Find candidate JSON substrings by scanning for balanced braces/brackets.
+    Returns generator of (start, end, substring).
+    The scan is bounded to avoid pathological worst-cases."""
+    n = len(s)
+    for i, ch in enumerate(s):
+        if ch not in '{[':
+            continue
+        depth = 0
+        start = i
+        # Limit scan window
+        end_limit = min(n, i + max_window)
+        for j in range(i, end_limit):
+            cj = s[j]
+            if cj == ch:
+                depth += 1
+            elif (ch == '{' and cj == '}') or (ch == '[' and cj == ']'):
+                depth -= 1
+                if depth == 0:
+                    yield (start, j + 1, s[start:j + 1])
+                    break
+
+
 def _get_system_reply_timeout():
     """Get the system reply timeout from config, default to 10 minutes."""
     try:
@@ -130,7 +179,9 @@ def extract_json_from_text(text: str, return_metadata: bool = False) -> Optional
         cleaned_text = cleaned_text.strip()
     
     # Also try original text in case cleaning broke something
-    texts_to_try = [cleaned_text, text.strip()]
+    sanitized = _remove_control_chars(text)
+    stripped_noise = _strip_stacktraces_and_addresses(text)
+    texts_to_try = [cleaned_text, stripped_noise.strip(), sanitized.strip(), text.strip()]
     
     decoder = json.JSONDecoder()
     found_json = None
@@ -206,10 +257,37 @@ def extract_json_from_text(text: str, return_metadata: bool = False) -> Optional
             break
     
     if not found_json:
-        log_debug("[extract_json_from_text] No valid JSON found in text")
-        log_debug(f"[extract_json_from_text] Text content (first 500 chars): {text[:500]}")
-        log_debug(f"[extract_json_from_text] Text content (last 500 chars): {text[-500:]}")
-        return (None, metadata) if return_metadata else None
+        # As a last resort, try to find balanced JSON substrings in noise-reduced variants.
+        tried_substrings = 0
+        for candidate_source in (stripped_noise, sanitized, text):
+            if not candidate_source:
+                continue
+            for start, end, substr in _find_json_substrings(candidate_source):
+                tried_substrings += 1
+                try:
+                    obj = json.loads(substr)
+                    # We found a valid JSON substring — accept it
+                    found_json = obj
+                    metadata['had_extra_text'] = True
+                    metadata['prefix'] = candidate_source[:start].strip()
+                    metadata['suffix'] = candidate_source[end:].strip()
+                    metadata['prefix_length'] = len(metadata['prefix'])
+                    metadata['suffix_length'] = len(metadata['suffix'])
+                    metadata['noise_removed'] = tried_substrings > 0
+                    log_info(f"[extract_json_from_text] ✅ Extracted JSON from substring of sanitized text (start={start}, len={len(substr)})")
+                    break
+                except Exception as e:  # JSON still invalid — continue
+                    metadata['had_errors'] = True
+                    metadata['error_count'] += 1
+                    continue
+            if found_json:
+                break
+
+        if not found_json:
+            log_debug("[extract_json_from_text] No valid JSON found in text")
+            log_debug(f"[extract_json_from_text] Text content (first 500 chars): {text[:500]}")
+            log_debug(f"[extract_json_from_text] Text content (last 500 chars): {text[-500:]}")
+            return (None, metadata) if return_metadata else None
 
     # Log results based on what we found
     if metadata.get('had_extra_text', False):
@@ -941,8 +1019,11 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
     # If already valid JSON WITHOUT errors, nothing to do
     try:
         json_obj, metadata = extract_json_from_text(text, return_metadata=True)
-        if json_obj and not metadata.get('had_errors', False) and not correction_context:
-            log_debug("[corrector_middleware] Input contains clean JSON; skipping correction")
+        # If we have a JSON object, prefer it even if there was extra surrounding
+        # noise (e.g., stacktraces) as long as we recovered or there were no parsing
+        # errors that leave us without a valid JSON structure.
+        if json_obj and not correction_context and (not metadata.get('had_errors', False) or metadata.get('recovered', False) or metadata.get('had_extra_text', False)):
+            log_debug("[corrector_middleware] Input contains valid JSON (possibly with extra noise); skipping correction")
             return text
         elif json_obj and metadata.get('had_errors', False):
             log_debug(f"[corrector_middleware] JSON recovered with {metadata.get('error_count', 0)} errors; proceeding with correction")

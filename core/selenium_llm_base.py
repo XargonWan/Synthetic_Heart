@@ -2636,13 +2636,15 @@ class SeleniumLLMBase(AIPluginBase):
 
                         # Schedule llm_to_interface asynchronously on the main loop
                         try:
-                            loop = asyncio.get_event_loop()
-                            if loop.is_running():
-                                loop.create_task(llm_to_interface(bot, chat_id, text=failed_text, interface=interface, interface_path=meta.get('interface_path')))
-                                log_debug("[selenium][send_failure] Scheduled fallback message via llm_to_interface (create_task)")
-                            else:
-                                asyncio.run_coroutine_threadsafe(llm_to_interface(bot, chat_id, text=failed_text, interface=interface, interface_path=meta.get('interface_path')), loop)
-                                log_debug("[selenium][send_failure] Scheduled fallback message via run_coroutine_threadsafe")
+                            # Use notifier helper to schedule safely on the main loop to avoid
+                            # "There is no current event loop in thread" issues.
+                            from core.notifier import _safe_schedule_async
+
+                            async def _send_fallback():
+                                await llm_to_interface(bot, chat_id, text=failed_text, interface=interface, interface_path=meta.get('interface_path'))
+
+                            _safe_schedule_async(_send_fallback())
+                            log_debug("[selenium][send_failure] Scheduled fallback message via notifier._safe_schedule_async")
                         except Exception as e_schedule:
                             log_debug(f"[selenium][send_failure] Could not schedule llm_to_interface: {e_schedule}")
                             # Fallback to trainer notification if scheduling fails

@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import json
 from datetime import datetime, timedelta
-from typing import Any, List, Dict, Optional
+from typing import Any, List, Dict, Optional, Coroutine
 import asyncio
 import aiomysql
 import threading
@@ -378,24 +378,29 @@ async def recreate_diary_table():
         log_info("[ai_diary] ai_diary table recreated with new personal diary structure")
 
 
-def _run(coro):
-    """Run a coroutine safely even if an event loop is already running."""
+def _run(coro: Coroutine[Any, Any, Any]) -> Optional[Any]:
+    """Run a coroutine from sync context without deadlocking the running loop.
+
+    If we are already executing inside the running event loop thread, schedule
+    the coroutine and return immediately to avoid blocking the loop (and thus
+    the startup sequence). If no loop is running in this thread, run the
+    coroutine with asyncio.run().
+    """
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # We're in async context, use executor to avoid creating new loop
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(asyncio.run, coro)
-                return future.result(timeout=10.0)
-        else:
-            # Event loop exists but not running, use run_until_complete
-            return loop.run_until_complete(coro)
+        loop = asyncio.get_running_loop()
     except RuntimeError:
-        # No event loop at all - this is the only safe place to use asyncio.run()
-        return asyncio.run(coro)
+        try:
+            return asyncio.run(coro)
+        except Exception as e:
+            log_debug(f"[ai_diary] Error in asyncio.run: {e}")
+            return None
+
+    try:
+        # We are in the loop thread; schedule and return to avoid deadlock.
+        loop.create_task(coro)
+        return None
     except Exception as e:
-        log_debug(f"[ai_diary] Error in _run: {e}")
+        log_debug(f"[ai_diary] Error scheduling coroutine on running loop: {e}")
         return None
 
 
@@ -614,44 +619,48 @@ async def add_diary_entry_async(
             continue
     
     try:
-        conn = await get_conn()
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                INSERT INTO ai_diary (content, personal_thought, emotions, 
-                                    interaction_summary, user_message, context_tags, involved_users, interface, chat_id, thread_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    content,
-                    personal_thought,
-                    json.dumps(emotions),
-                    interaction_summary,
-                    user_message,
-                    json.dumps(context_tags),
-                    json.dumps(involved_users),
-                    interface,
-                    chat_id,
-                    thread_id
+        # Use the project's DB context manager to ensure connections are released
+        async with get_db() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    INSERT INTO ai_diary (content, personal_thought, emotions, 
+                                        interaction_summary, user_message, context_tags, involved_users, interface, chat_id, thread_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        content,
+                        personal_thought,
+                        json.dumps(emotions),
+                        interaction_summary,
+                        user_message,
+                        json.dumps(context_tags),
+                        json.dumps(involved_users),
+                        interface,
+                        chat_id,
+                        thread_id
+                    )
                 )
-            )
-            diary_entry_id = cur.lastrowid
-        conn.close()
-        
+                diary_entry_id = getattr(cur, 'lastrowid', None)
+
         log_debug(f"[ai_diary] Added personal diary entry: {content[:50]}...")
         if personal_thought:
             log_debug(f"[ai_diary] Personal thought: {personal_thought[:50]}...")
-        
+
         # Link to grillo activity log if this entry was created from a grillo beat
         if grillo_activity_log_id and diary_entry_id:
             try:
+                import asyncio
                 from plugins.grillo_plugin import GrilloPlugin
-                await GrilloPlugin.link_diary_entry_to_activity(
-                    grillo_activity_log_id,
-                    diary_entry_id,
-                    response_text=content,
+                # Link asynchronously to avoid blocking callers or holding DB
+                asyncio.create_task(
+                    GrilloPlugin.link_diary_entry_to_activity(
+                        grillo_activity_log_id,
+                        diary_entry_id,
+                        response_text=content,
+                    )
                 )
-                log_debug(f"[ai_diary] Linked grillo activity: activity_log={grillo_activity_log_id}, diary={diary_entry_id}")
+                log_debug(f"[ai_diary] Scheduled grillo activity link: activity_log={grillo_activity_log_id}, diary={diary_entry_id}")
             except Exception as link_error:
                 log_warning(f"[ai_diary] Failed to link grillo activity: {link_error}")
     except Exception as e:

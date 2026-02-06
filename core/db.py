@@ -155,6 +155,20 @@ async def get_pool():
             # Double-check under lock
             pool = _pools_by_loop.get(loop_id)
             if pool is None:
+                # Prevent unbounded creation of pools across many event loops
+                try:
+                    DB_MAX_POOLS = int(os.getenv('DB_MAX_POOLS', config_registry.get_value('DB_MAX_POOLS', 3, label='DB Max Pools', group='database', component='core', advanced=True)))
+                except Exception:
+                    DB_MAX_POOLS = 3
+                if len(_pools_by_loop) >= DB_MAX_POOLS:
+                    # Reuse an existing pool to avoid exhausting DB connections
+                    existing_pool = next(iter(_pools_by_loop.values()))
+                    log_warning(f"[db] Reached DB_MAX_POOLS={DB_MAX_POOLS}, reusing existing pool instead of creating a new one")
+                    # Map this loop id to the existing pool to avoid creating more pools
+                    _pools_by_loop[loop_id] = existing_pool
+                    pool = existing_pool
+                    return pool
+
                 log_info("[db] Creating connection pool for loop id=%s" % loop_id)
                 # Allow pool size to be configured via config_registry or environment
                 try:
@@ -189,10 +203,12 @@ async def get_pool():
                             return []
 
                     class _FakeConn:
-                        def cursor(self):
+                        def cursor(self, *args, **kwargs):
                             return _FakeCursor()
                         def close(self):
                             pass
+                        async def commit(self):
+                            return None
 
                     class _FakePool:
                         async def acquire(self):
