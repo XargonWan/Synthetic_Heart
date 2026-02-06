@@ -11,6 +11,9 @@ backups/
 tests/
 run_tests.sh
 .venv/
+venv/
+ENV/
+.env.*
 GitVersion.yml
 skins/Rekku
 skins/temp

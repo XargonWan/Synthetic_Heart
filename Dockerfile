@@ -131,6 +131,11 @@ RUN mkdir -p /app/res/default_ssl && \
 # Copy project code last to leverage layer caching
 COPY . /app
 
+# Verify venv integrity after copying project files: ensure the container's venv
+# was not overwritten by a host 'venv' directory. This check will fail the build
+# when a host virtualenv is accidentally copied, catching the root cause early.
+RUN /app/venv/bin/python3 -c "import sys, importlib; importlib.import_module('uvicorn'); print('uvicorn present after copy:', importlib.import_module('uvicorn').__version__)"
+
 # Seed Selkies TLS certs into /config/ssl (used by HTTPS on port 3001)
 RUN mkdir -p /config/ssl && \
     cp -n /app/res/default_ssl/synth_webui.crt /config/ssl/cert.pem && \
