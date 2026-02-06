@@ -1,11 +1,14 @@
 <!DOCTYPE html>
-<!-- Deprecated: use synth_webui_shell_clean.html (rendered by core/webui.py). -->
 <html lang="en">
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>%%BRAND_NAME%%</title>
     <link rel="stylesheet" href="/js/vendor/winbox.min.css" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/static/synth_icon_192.png" />
+    <link rel="icon" type="image/png" sizes="512x512" href="/static/synth_icon_512.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/synth_icon_180.png" />
+    <link rel="manifest" href="/static/manifest.webmanifest" />
     <style>
         :root {
             color-scheme: dark;
@@ -26,10 +29,16 @@
             --log-info: #d5d8ff;
             --log-warn: #ffde85;
             --log-error: #ff9fae;
+                --topbar-height: 88px;
             font-family: "Segoe UI", system-ui, sans-serif;
         }
         * {
             box-sizing: border-box;
+        }
+        html, body {
+            height: 100%;
+            width: 100%;
+            overflow: hidden;
         }
         body {
             margin: 0;
@@ -119,6 +128,7 @@
             display: flex;
             width: 100%;
             min-height: 0;
+            height: calc(100vh - var(--topbar-height, 120px));
         }
         .tab-panel {
             display: none;
@@ -133,18 +143,49 @@
             flex: 1;
             min-height: 0;
         }
-        #tab-home { padding: 0; }
-        .home-stage { height: 100%; }
-        .home-content { position: relative; height: 100%; }
+        #tab-home {
+            padding: 0;
+        }
+        #tab-home.active {
+            display: flex;
+        }
+        .home-stage {
+            flex: 1;
+            display: flex;
+            width: 100%;
+            height: 100%;
+            min-height: 0;
+            /* Ensure the 3D canvas always has viewport height even if parents collapse */
+            min-height: calc(100vh - var(--topbar-height, 120px));
+            height: calc(100vh - var(--topbar-height, 120px));
+        }
+        .home-content {
+            position: relative;
+            width: 100%;
+            min-height: 0;
+            height: 100%;
+        }
+        .home-vrm {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            min-height: calc(100vh - var(--topbar-height, 120px));
+        }
+        #vrm-canvas,
+        .home-vrm canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
         #chat {
             position: fixed;
             bottom: 1.5rem;
             left: 1.5rem;
-            width: min(420px, calc(100vw - 3rem));
+            width: min(360px, calc(100vw - 3rem));
             max-width: calc(100vw - 3rem);
             min-width: 280px;
-            height: 70vh;
-            max-height: 75vh;
+                height: 52vh;
+                max-height: 60vh;
             display: flex;
             flex-direction: column;
             background: rgba(12, 12, 20, 0.9);
@@ -192,43 +233,73 @@
         .synth-minimized-stack {
             position: fixed;
             bottom: 1.2rem;
-            right: auto;
-            left: 1.2rem;
+            left: auto;
+            right: 1.2rem;
             display: flex;
             flex-direction: column;
             gap: 0.6rem;
-            align-items: flex-start;
+            align-items: flex-end;
             z-index: 10650;
+        }
+        /* Circular minimized window badges */
+        .synth-dock-btn, .chat-toggle-btn {
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02));
+            color: var(--text);
+            border: 1px solid rgba(255,255,255,0.06);
+            box-shadow: 0 6px 14px rgba(0,0,0,0.35);
+            cursor: pointer;
+            font-size: 1.05rem;
+            transition: transform .12s ease, box-shadow .12s ease;
+        }
+        .synth-dock-btn:hover, .chat-toggle-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(0,0,0,0.42);
+        }
+        .synth-dock-btn:focus, .chat-toggle-btn:focus {
+            outline: 3px solid rgba(255,255,255,0.08);
+            outline-offset: 3px;
         }
         .winbox.synth-winbox .wb-title {
             color: var(--text);
+            font-weight: 700;
+            font-size: 1.05rem;
         }
         .winbox.synth-winbox .wb-control {
             color: var(--text-soft);
         }
         .winbox.synth-winbox .wb-control:hover,
         .winbox.synth-winbox .wb-control:focus {
-            color: var(--accent);
+                color: var(--text);
+                font-weight: 700;
+        }
+        .winbox.synth-winbox.debug-window .wb-min {
+            display: none !important;
         }
         .winbox.synth-winbox .wb-body {
             background: rgba(12, 12, 20, 0.88);
         }
-                color: var(--text);
-                font-weight: 700;
+        .winbox.synth-winbox .wb-header {
             background: linear-gradient(135deg, rgba(255, 107, 214, 0.92), rgba(114, 137, 218, 0.85));
         }
         .winbox.synth-winbox {
             background: rgba(12, 12, 20, 0.6);
             backdrop-filter: blur(8px);
+                border-radius: 18px;
         }
         .winbox.synth-winbox .wb-drag {
             display: flex;
             align-items: center;
             gap: 8px;
-                background: rgba(12, 12, 20, 0.6);
-                border-radius: 18px;
+            padding-right: 120px;
         }
         .winbox.synth-winbox .synth-wb-tools {
+                min-height: 320px;
             display: flex;
             align-items: center;
             gap: 6px;
@@ -247,13 +318,25 @@
             align-items: center;
             justify-content: center;
             cursor: pointer;
+                min-height: 0;
         }
         .winbox.synth-winbox .synth-wb-tool-btn:hover {
             border-color: var(--accent);
             color: var(--accent);
         }
         #synth-advanced-debug.synth-window-managed #synth-debug-title-bar {
+            flex-shrink: 0;
             display: none !important;
+        }
+        .chat-toolbar {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            justify-content: flex-end;
+            padding: 0.6rem 1rem;
+            background: rgba(12, 12, 20, 0.72);
+            border-top: 1px solid rgba(255, 255, 255, 0.06);
+            flex-shrink: 0;
         }
         #synth-advanced-debug {
             background: var(--panel-bg);
@@ -265,7 +348,6 @@
         #archive-panel {
             background: var(--panel-bg);
         }
-                    min-height: 0;
         #archive-panel {
             color: var(--text);
         }
@@ -273,18 +355,7 @@
             padding: 10px 14px;
             display: flex;
             align-items: center;
-                    flex-shrink: 0;
             justify-content: space-between;
-                .chat-toolbar {
-                    display: flex;
-                    gap: 8px;
-                    align-items: center;
-                    justify-content: flex-end;
-                    padding: 0.6rem 1rem;
-                    background: rgba(12, 12, 20, 0.72);
-                    border-top: 1px solid rgba(255, 255, 255, 0.06);
-                    flex-shrink: 0;
-                }
             background: var(--surface-alt);
             border-bottom: 1px solid var(--border);
         }
@@ -350,6 +421,46 @@
         #archive-panel .empty-state {
             color: var(--text-soft);
         }
+        #chat.synth-window-managed {
+            position: static;
+            inset: auto;
+            width: 100%;
+            height: 100%;
+            max-height: none;
+            border: none;
+            border-radius: 16px;
+            box-shadow: none;
+            background: rgba(12, 12, 20, 0.9);
+        }
+        #chat.synth-window-managed #chat-title-bar {
+            display: none;
+        }
+        #chat-title-bar .chat-title {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-weight: 600;
+            letter-spacing: 0.03em;
+        }
+        #chat-title-bar .chat-controls .pill {
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            background: rgba(255, 255, 255, 0.04);
+        }
+        .synth-minimized-stack {
+            position: fixed;
+            bottom: 1.2rem;
+            left: auto;
+            right: 1.2rem;
+            display: flex;
+            gap: 0.6rem;
+            z-index: 10650;
+            flex-direction: column;
+            align-items: flex-end;
+        }
+        #chat.minimized,
+        #chat.hidden {
+            display: none;
+        }
         #messages {
             flex: 1;
             overflow-y: auto;
@@ -357,21 +468,59 @@
             display: flex;
             flex-direction: column;
             gap: 0.9rem;
+            min-height: 0;
         }
         .bubble {
-            max-width: 72ch;
+            max-width: 70%;
             padding: 1rem 1.2rem;
             border-radius: 18px;
             line-height: 1.45;
             white-space: pre-wrap;
         }
+        .message-container {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 0.35rem;
+        }
+        .message-container.user {
+            align-items: flex-end;
+        }
+        .bubble-sender {
+            font-weight: 700;
+            font-size: 0.85rem;
+            letter-spacing: 0.03em;
+            margin-bottom: 0.35rem;
+            opacity: 0.85;
+        }
         .bubble.user { align-self: flex-end; background: rgba(255, 255, 255, 0.08); }
         .bubble.synth { align-self: flex-start; background: linear-gradient(135deg, #ff6bd6, #7289da); color: #fff; }
+        .typing-indicator {
+            display: flex;
+            gap: 0.3rem;
+            align-items: center;
+            justify-content: center;
+            padding: 0.6rem 0.9rem;
+        }
+        .typing-indicator .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.9);
+            animation: typingDot 1.4s ease-in-out infinite;
+        }
+        .typing-indicator .dot:nth-child(2) { animation-delay: 0.2s; }
+        .typing-indicator .dot:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes typingDot {
+            0%, 60%, 100% { transform: translateY(0); opacity: 0.7; }
+            30% { transform: translateY(-8px); opacity: 1; }
+        }
         #composer {
             display: flex;
             gap: 0.8rem;
             padding: 1.1rem 1.4rem 1.4rem;
             align-items: flex-end;
+            flex-shrink: 0;
         }
         #input {
             flex: 1;
@@ -395,7 +544,83 @@
             align-items: center;
             justify-content: center;
         }
-        .home-vrm { width: 100%; height: 100%; }
+        .home-vrm {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            border: none;
+        }
+        .chat-toggle-btn {
+            position: fixed;
+            right: 18px;
+            bottom: 18px;
+            z-index: 50;
+            width: 56px;
+            height: 56px;
+            border-radius: 50%;
+            border: 2px solid var(--border);
+            background: rgba(12, 12, 20, 0.95);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            color: var(--accent);
+            font-size: 1.5rem;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+            transition: all 0.25s ease;
+        }
+        .chat-toggle-btn:hover {
+            transform: scale(1.1);
+            background: rgba(255, 107, 214, 0.15);
+            border-color: var(--accent);
+            box-shadow: 0 12px 32px rgba(255, 107, 214, 0.4);
+        }
+        .chat-toggle-btn:active {
+            transform: scale(0.95);
+        }
+        #synth-install-btn {
+            position: fixed;
+            right: 18px;
+            bottom: 90px;
+            z-index: 50;
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            border: 2px solid var(--border);
+            background: rgba(12, 12, 20, 0.9);
+            color: var(--accent);
+            font-size: 1.1rem;
+            cursor: pointer;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 8px 18px rgba(0, 0, 0, 0.55);
+        }
+        #synth-install-btn.visible {
+            display: flex;
+        }
+        .home-vrm canvas {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+        .home-vrm-overlay {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            pointer-events: none;
+            color: rgba(245, 245, 255, 0.6);
+            font-size: 0.95rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
         .settings-grid {
             display: flex;
             flex-wrap: wrap;
@@ -403,6 +628,17 @@
             align-items: stretch;
             width: 100%;
             overflow-y: auto;
+        }
+        .settings-grid > .card {
+            flex: 1 1 auto;
+            min-width: 280px;
+        }
+        #tab-settings .settings-grid {
+            flex-direction: column;
+        }
+        #tab-settings .settings-grid > .card {
+            max-width: none;
+            width: 100%;
         }
         .card {
             background: var(--surface);
@@ -441,6 +677,325 @@
             gap: 1rem;
             margin-top: 1rem;
         }
+        .skin-card {
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 1rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+            min-height: 320px;
+        }
+        .skin-preview {
+            width: 100%;
+            height: 160px;
+            border-radius: 12px;
+            background: rgba(12, 12, 20, 0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+        }
+        .skin-preview img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        .skin-meta {
+            color: var(--text-soft);
+            font-size: 0.85rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+            flex: 1 1 auto;
+            min-height: 0;
+            overflow-y: auto;
+            max-height: 120px;
+        }
+        .skin-actions {
+            display: flex;
+            gap: 0.5rem;
+            margin-top: auto;
+        }
+        .btn-primary {
+            background: var(--accent);
+            border: none;
+            color: #07070c;
+            padding: 0.5rem 0.9rem;
+            border-radius: 10px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .btn-primary:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .components-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+        details.component-item {
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 0.75rem 1rem;
+            transition: background 0.2s ease, border 0.2s ease;
+        }
+        details.component-item[open] {
+            background: rgba(255, 255, 255, 0.06);
+        }
+        details.component-item summary {
+            list-style: none;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.8rem;
+            cursor: pointer;
+            font-weight: 600;
+        }
+        details.component-item summary::-webkit-details-marker {
+            display: none;
+        }
+        .component-summary-main {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            flex: 1 1 auto;
+            min-width: 0;
+        }
+        .component-summary-actions {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            flex: 0 0 auto;
+        }
+        .component-name {
+            flex: 1 1 auto;
+        }
+        .component-status {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.09em;
+            border: 1px solid rgba(255, 255, 255, 0.25);
+            border-radius: 999px;
+            padding: 0.15rem 0.55rem;
+        }
+        .component-status-success {
+            color: var(--success);
+            border-color: rgba(24, 201, 140, 0.4);
+        }
+        .component-status-failed {
+            color: var(--error);
+            border-color: rgba(255, 123, 147, 0.5);
+        }
+        .component-status-loading {
+            color: var(--warn);
+            border-color: rgba(243, 192, 77, 0.5);
+        }
+        .component-status-unknown {
+            color: var(--text-soft);
+            border-color: rgba(255, 255, 255, 0.2);
+        }
+        #llm-engine-select {
+            background: rgba(0, 0, 0, 0.65) !important;
+            color: var(--text) !important;
+            border-color: var(--border-strong) !important;
+        }
+        .component-description {
+            margin: 0.6rem 0;
+            color: var(--text-soft);
+        }
+        .component-details {
+            font-size: 0.85rem;
+            color: var(--text-soft);
+        }
+        .component-error {
+            font-size: 0.85rem;
+            color: var(--error);
+        }
+        .config-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.45rem;
+        }
+        .config-row {
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+            padding: 0.45rem 0.6rem;
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.03);
+        }
+        .config-label-line {
+            display: flex;
+            align-items: center;
+            gap: 0.45rem;
+            font-weight: 600;
+        }
+        .config-description {
+            color: var(--text-soft);
+            font-size: 0.85rem;
+        }
+        .config-input {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            width: 100%;
+        }
+        .config-input input,
+        .config-input select,
+        .config-input textarea {
+            flex: 1;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            background: rgba(12, 12, 20, 0.58);
+            color: var(--text);
+            padding: 0.35rem 0.6rem;
+            font-size: 0.9rem;
+            width: 100%;
+        }
+        .config-input input:disabled {
+            opacity: 0.55;
+            cursor: not-allowed;
+        }
+        .config-input input[type="checkbox"] {
+            display: none;
+        }
+        .toggle-switch {
+            position: relative;
+            display: inline-block;
+            width: 50px;
+            height: 26px;
+            flex: 0 0 auto;
+        }
+        .toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(255, 255, 255, 0.15);
+            transition: 0.3s;
+            border-radius: 26px;
+            border: 1px solid var(--border);
+        }
+        .toggle-slider:before {
+            position: absolute;
+            content: '';
+            height: 18px;
+            width: 18px;
+            left: 3px;
+            bottom: 3px;
+            background-color: #fff;
+            transition: 0.3s;
+            border-radius: 50%;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+        }
+        input[type="checkbox"]:checked + .toggle-slider,
+        input[type="checkbox"]:checked + .toggle-switch .toggle-slider,
+        input[type="checkbox"]:checked + label .toggle-slider {
+            background: linear-gradient(135deg, #ff6bd6, #7289da);
+            border-color: #ff6bd6;
+        }
+        input[type="checkbox"]:checked + .toggle-slider:before,
+        input[type="checkbox"]:checked + .toggle-switch .toggle-slider:before,
+        input[type="checkbox"]:checked + label .toggle-slider:before {
+            transform: translateX(24px);
+        }
+        input[type="checkbox"]:disabled + .toggle-slider,
+        input[type="checkbox"]:disabled + .toggle-switch .toggle-slider,
+        input[type="checkbox"]:disabled + label .toggle-slider {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.6rem;
+            cursor: pointer;
+            font-size: 0.95rem;
+        }
+        .toggle input {
+            appearance: none;
+            -webkit-appearance: none;
+            width: 44px;
+            height: 24px;
+            border-radius: 999px;
+            border: 1px solid var(--border);
+            background: rgba(255, 255, 255, 0.12);
+            position: relative;
+            transition: background 0.2s ease, border-color 0.2s ease;
+            outline: none;
+            cursor: pointer;
+        }
+        .toggle input::after {
+            content: '';
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: #fff;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+            transition: transform 0.2s ease, background 0.2s ease;
+        }
+        .toggle input:checked {
+            background: var(--accent);
+            border-color: rgba(255, 255, 255, 0.3);
+        }
+        .toggle input:checked::after {
+            transform: translateX(20px);
+            background: #0b0b12;
+        }
+        .config-disclaimer {
+            margin-top: 0.75rem;
+            font-size: 0.85rem;
+            color: var(--text-soft);
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
+        .override-icon {
+            color: var(--warn);
+            font-weight: 600;
+        }
+        .warning-card {
+            border: 1px solid rgba(243, 192, 77, 0.4);
+        }
+        .warning-card .warning-text {
+            margin-bottom: 0.8rem;
+            background: rgba(243, 192, 77, 0.15);
+            border-radius: 12px;
+            padding: 0.65rem 0.9rem;
+            color: var(--warn);
+            font-size: 0.9rem;
+        }
+        .status-chip {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.45rem 0.9rem;
+            border-radius: 999px;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            font-size: 0.85rem;
+            color: var(--text-soft);
+        }
+        .status-chip[data-tone="success"] {
+            color: var(--success);
+            border-color: rgba(24, 201, 140, 0.4);
+        }
+        .status-chip[data-tone="warn"] {
+            color: var(--warn);
+            border-color: rgba(243, 192, 77, 0.4);
+        }
+        .status-chip[data-tone="error"] {
+            color: var(--error);
+            border-color: rgba(255, 123, 147, 0.4);
+        }
         .logs-wrapper {
             background: var(--surface);
             border: 1px solid var(--border);
@@ -452,6 +1007,7 @@
             flex-direction: column;
             gap: 1rem;
             overflow: hidden;
+            max-height: calc(100vh - var(--topbar-height, 120px) - 4rem);
         }
         #log-output {
             background: rgba(8, 8, 16, 0.82);
@@ -487,6 +1043,18 @@
             padding: 0.15rem 0.55rem;
             color: var(--text-soft);
         }
+        .component-status-success {
+            color: var(--success);
+            border-color: rgba(24, 201, 140, 0.4);
+        }
+        .component-status-failed {
+            color: var(--error);
+            border-color: rgba(255, 123, 147, 0.5);
+        }
+        .component-status-loading {
+            color: var(--warn);
+            border-color: rgba(243, 192, 77, 0.5);
+        }
         .hamburger {
             display: none;
             background: none;
@@ -514,76 +1082,82 @@
             #chat { width: calc(100% - 2rem); height: 50vh; }
         }
     </style>
-+</head>
-+<body>
-+<script>
-+window.__SYNTH_CONFIG = {
-+  RESPONSE_TIMEOUT: %%RESPONSE_TIMEOUT%%,
-+  FAILED_MESSAGE_TEXT: "%%FAILED_MESSAGE_TEXT%%",
-+  WEB_DEBUG: '%%WEB_DEBUG%%' === '1',
-+  CHAT_RESIZABLE: '%%CHAT_RESIZABLE%%' === 'true'
-+};
-+</script>
-+
-+    <div id="synth-debug" data-debug-enabled="%%WEB_DEBUG%%" style="display:none"></div>
-+    <header class="top-bar">
-+        <div class="brand">
-+            <img src="%%LOGO_URL%%" alt="SyntH logo" />
-+            <div class="brand-text">
-+                <h1>%%BRAND_NAME%%</h1>
-+            </div>
-+        </div>
-+        <button class="hamburger" aria-label="Toggle menu">☰</button>
-+        <nav class="main-nav" aria-label="Primary navigation">
-+            <button class="nav-btn active" data-tab="home" aria-controls="tab-home" aria-pressed="true">
-+                <span class="icon" aria-hidden="true">🏠</span><span>Home</span>
-+            </button>
-+            <button class="nav-btn" data-tab="history" aria-controls="tab-history" aria-pressed="false">
-+                <span class="icon" aria-hidden="true">📚</span><span>Activity</span>
-+            </button>
-+            <button class="nav-btn" data-tab="skins" aria-controls="tab-skins" aria-pressed="false">
-+                <span class="icon" aria-hidden="true">🧥</span><span>Skins</span>
-+            </button>
-+            <button class="nav-btn" data-tab="logs" aria-controls="tab-logs" aria-pressed="false">
-+                <span class="icon" aria-hidden="true">📜</span><span>Logs</span>
-+            </button>
-+            <button class="nav-btn" data-tab="settings" aria-controls="tab-settings" aria-pressed="false">
-+                <span class="icon" aria-hidden="true">⚙️</span><span>Settings</span>
-+            </button>
-+            <button class="nav-btn" data-tab="components" aria-controls="tab-components" aria-pressed="false">
-+                <span class="icon" aria-hidden="true">🧩</span><span>Components</span>
-+            </button>
-+            <button class="nav-btn" data-tab="about" aria-controls="tab-about" aria-pressed="false">
-+                <span class="icon" aria-hidden="true">ℹ️</span><span>About</span>
-+            </button>
-+        </nav>
-+        <div class="connection-status">
-+            <span class="indicator offline" aria-hidden="true"></span>
-+            <span id="status-label">Connecting…</span>
-+        </div>
-+    </header>
-+    <main>
-+        <section class="tab-panel active" id="tab-home" data-tab="home" role="tabpanel"></section>
-+        <section class="tab-panel" id="tab-history" data-tab="history" role="tabpanel"></section>
-+        <section class="tab-panel" id="tab-skins" data-tab="skins" role="tabpanel"></section>
-+        <section class="tab-panel" id="tab-logs" data-tab="logs" role="tabpanel"></section>
-+        <section class="tab-panel" id="tab-settings" data-tab="settings" role="tabpanel"></section>
-+        <section class="tab-panel" id="tab-components" data-tab="components" role="tabpanel"></section>
-+        <section class="tab-panel" id="tab-about" data-tab="about" role="tabpanel"></section>
-+    </main>
-+    <div id="synth-minimized-stack" class="synth-minimized-stack" aria-live="polite"></div>
-+    <script src="/js/vendor/winbox.min.js"></script>
-+    <script src="/js/main.js"></script>
-+    <script src="/js/skins-ui.js"></script>
-+    <script src="/js/skins-upload.js"></script>
-+    <script type="importmap">
-+        {
-+            "imports": {
-+                "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
-+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
-+            }
-+        }
-+    </script>
-+    <script type="module" src="/js/vrm-viewer.mjs"></script>
-+</body>
-+</html>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+<body>
+<script>
+window.__SYNTH_CONFIG = {
+  RESPONSE_TIMEOUT: %%RESPONSE_TIMEOUT%%,
+  FAILED_MESSAGE_TEXT: "%%FAILED_MESSAGE_TEXT%%",
+    BRAND_NAME: "%%BRAND_NAME%%",
+    SYNTH_NAME: "%%SYNTH_NAME%%",
+  WEB_DEBUG: '%%WEB_DEBUG%%' === '1',
+  CHAT_RESIZABLE: '%%CHAT_RESIZABLE%%' === 'true'
+};
+</script>
+
+    <div id="synth-debug" data-debug-enabled="%%WEB_DEBUG%%" style="display:none"></div>
+    <header class="top-bar">
+        <div class="brand">
+            <img src="%%LOGO_URL%%" alt="SyntH logo" />
+            <div class="brand-text">
+                <h1>%%BRAND_NAME%%</h1>
+            </div>
+        </div>
+        <button class="hamburger" aria-label="Toggle menu">☰</button>
+        <nav class="main-nav" aria-label="Primary navigation">
+            <button class="nav-btn active" data-tab="home" aria-controls="tab-home" aria-pressed="true">
+                <span class="icon" aria-hidden="true">🏠</span><span>Home</span>
+            </button>
+            <button class="nav-btn" data-tab="history" aria-controls="tab-history" aria-pressed="false">
+                <span class="icon" aria-hidden="true">📚</span><span>Activity</span>
+            </button>
+            <button class="nav-btn" data-tab="skins" aria-controls="tab-skins" aria-pressed="false">
+                <span class="icon" aria-hidden="true">🧥</span><span>Skins</span>
+            </button>
+            <button class="nav-btn" data-tab="logs" aria-controls="tab-logs" aria-pressed="false">
+                <span class="icon" aria-hidden="true">📜</span><span>Logs</span>
+            </button>
+            <button class="nav-btn" data-tab="settings" aria-controls="tab-settings" aria-pressed="false">
+                <span class="icon" aria-hidden="true">⚙️</span><span>Settings</span>
+            </button>
+            <button class="nav-btn" data-tab="components" aria-controls="tab-components" aria-pressed="false">
+                <span class="icon" aria-hidden="true">🧩</span><span>Components</span>
+            </button>
+            <button class="nav-btn" data-tab="about" aria-controls="tab-about" aria-pressed="false">
+                <span class="icon" aria-hidden="true">ℹ️</span><span>About</span>
+            </button>
+        </nav>
+        <div class="connection-status">
+            <span class="indicator offline" aria-hidden="true"></span>
+            <span id="status-label">Connecting…</span>
+        </div>
+    </header>
+    <main>
+        <section class="tab-panel active" id="tab-home" data-tab="home" role="tabpanel"></section>
+        <section class="tab-panel" id="tab-history" data-tab="history" role="tabpanel"></section>
+        <section class="tab-panel" id="tab-skins" data-tab="skins" role="tabpanel"></section>
+        <section class="tab-panel" id="tab-logs" data-tab="logs" role="tabpanel"></section>
+        <section class="tab-panel" id="tab-settings" data-tab="settings" role="tabpanel"></section>
+        <section class="tab-panel" id="tab-components" data-tab="components" role="tabpanel"></section>
+        <section class="tab-panel" id="tab-about" data-tab="about" role="tabpanel"></section>
+    </main>
+    <div id="synth-minimized-stack" class="synth-minimized-stack" aria-live="polite"></div>
+    <button id="synth-install-btn" title="Install Synthetic Heart" aria-label="Install Synthetic Heart">⬇️</button>
+    <script src="/js/utils.js"></script>
+    <script src="/js/ui-helpers.js"></script>
+    <script src="/js/vendor/winbox.min.js"></script>
+    <script src="/js/webui-bootstrap.js"></script>
+    <script src="/js/main.js"></script>
+    <script src="/js/history.js"></script>
+    <script src="/js/skins-ui.js"></script>
+    <script src="/js/skins-upload.js"></script>
+</body>
+</html>
