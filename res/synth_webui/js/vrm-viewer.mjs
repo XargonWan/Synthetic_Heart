@@ -26,6 +26,9 @@ import * as THREE from 'three';
 
             let currentVRM = null;
             let currentMixer = null;
+            let currentModel = null;
+            let loader = null;
+            let blobLoader = null;
             let __synthKnockAudio = null; // legacy fallback
             let __synthKnockSfx = { buffer: null, loading: null };
             let __synthLastKnockAt = 0;
@@ -197,15 +200,17 @@ import * as THREE from 'three';
                 scene.add(gridHelper);
                 console.log('[synth_webui] Grid helper added to scene');
 
-                const loader = new GLTFLoader();
+                loader = new GLTFLoader();
                 loader.setCrossOrigin('anonymous');
                 loader.setResourcePath('/skins/temp/');
                 loader.register((parser) => new VRMLoaderPlugin(parser));
-                console.log('[synth_webui] VRM loader configured with resource path: /avatars/');
+                try { window.loader = loader; } catch (e) { /* ignore */ }
+                console.log('[synth_webui] VRM loader configured with resource path: /skins/temp/');
 
-                const blobLoader = new GLTFLoader();
+                blobLoader = new GLTFLoader();
                 blobLoader.setCrossOrigin('anonymous');
                 blobLoader.register((parser) => new VRMLoaderPlugin(parser));
+                try { window.blobLoader = blobLoader; } catch (e) { /* ignore */ }
                 console.log('[synth_webui] Blob loader configured');
             });
 
@@ -219,6 +224,14 @@ import * as THREE from 'three';
             const animationMappings = window.VRMAnimationMappings;
             const animationMappingsLoaded = window.__VRMAnimationMappingsLoaded || new Map(); // per-session cache
             window.__VRMAnimationMappingsLoaded = animationMappingsLoaded;
+
+            function setStatus(message, level) {
+                try {
+                    if (typeof window.SynthWebUISetStatus === 'function') {
+                        window.SynthWebUISetStatus(message, level);
+                    }
+                } catch (e) { /* ignore */ }
+            }
 
             // Animation handler
             class AnimationHandler {
@@ -4265,7 +4278,7 @@ import * as THREE from 'three';
 
                     // Build raycast target list once for this model (meshes only)
                     try {
-                        __synthRaycastTargets = [];
+                        window.__synthRaycastTargets = [];
                         if (vrm && vrm.scene) {
                             vrm.scene.traverse((obj) => {
                                 try {
@@ -4273,14 +4286,14 @@ import * as THREE from 'three';
                                     const isMesh = !!(obj.isMesh || obj.isSkinnedMesh);
                                     if (!isMesh) return;
                                     if (!obj.geometry) return;
-                                    __synthRaycastTargets.push(obj);
+                                    window.__synthRaycastTargets.push(obj);
                                 } catch (_e) { /* ignore */ }
                             });
                         }
-                        console.log('[synth_webui] Raycast targets:', __synthRaycastTargets.length);
+                        try { console.log('[synth_webui] Raycast targets:', window.__synthRaycastTargets.length); } catch (e) {}
                     } catch (e) {
                         console.warn('[synth_webui] Failed to build raycast targets:', e);
-                        __synthRaycastTargets = [];
+                        window.__synthRaycastTargets = [];
                     }
 
                     // Detect face/expression capabilities (VRM0 vs VRM1) for case-by-case debugging.
@@ -5087,14 +5100,36 @@ import * as THREE from 'three';
                             iconText: '💻',
                             dockLabel: 'Restore Debug',
                             dockClass: 'chat-toggle-btn',
-                            className: 'synth-winbox no-full no-close no-min debug-window'
+                            className: 'synth-winbox no-full no-close debug-window'
                         });
                         try {
                             if (window.SynthWindowManager && typeof window.SynthWindowManager.attachHeaderTools === 'function') {
                                 const pauseBtn = panel.querySelector('#synth-debug-pause');
                                 const resyncBtn = panel.querySelector('#synth-debug-resync');
                                 const resetBtn = panel.querySelector('#synth-debug-reset');
-                                window.SynthWindowManager.attachHeaderTools('debug', winbox, []);
+                                window.SynthWindowManager.attachHeaderTools('debug', winbox, [
+                                    {
+                                        label: '⏸️',
+                                        title: 'Pause',
+                                        className: 'synth-wb-tool-pause',
+                                        onClick: () => { if (pauseBtn) pauseBtn.click(); }
+                                    },
+                                    {
+                                        label: '🛜',
+                                        title: 'Sync',
+                                        onClick: () => { if (resyncBtn) resyncBtn.click(); }
+                                    },
+                                    {
+                                        label: '🔁',
+                                        title: 'Reset',
+                                        onClick: () => { if (resetBtn) resetBtn.click(); }
+                                    },
+                                    {
+                                        label: '➖',
+                                        title: 'Minimize',
+                                        onClick: () => { try { window.SynthWindowManager.minimize('debug'); } catch (e) { /* ignore */ } }
+                                    }
+                                ]);
                             }
                         } catch (e) { /* ignore */ }
                         return winbox;
@@ -6071,7 +6106,7 @@ import * as THREE from 'three';
                             // geometry or other non-avatar objects which would incorrectly
                             // trigger touch animations when clicking empty space.
                             if (!currentVRM || !currentVRM.scene) return;
-                            const targets = (__synthRaycastTargets && __synthRaycastTargets.length) ? __synthRaycastTargets : [currentVRM.scene];
+                            const targets = (window.__synthRaycastTargets && window.__synthRaycastTargets.length) ? window.__synthRaycastTargets : [currentVRM.scene];
                             const intersects = raycaster.intersectObjects(targets, false);
                             if (!intersects || intersects.length === 0) {
                                 // Empty space tap: play knock SFX and turn towards the camera.
@@ -6607,7 +6642,7 @@ import * as THREE from 'three';
         const chat = document.getElementById('chat');
         const chatTitleBar = document.getElementById('chat-title-bar');
 
-        if (chatTitleBar && chat) {
+        if (chatTitleBar && chat && false) {
             let isDragging = false;
             let dragOffsetX = 0;
             let dragOffsetY = 0;
@@ -6686,10 +6721,10 @@ import * as THREE from 'three';
             console.log('[chat-control] Chat drag enabled via title-bar (pointer events)');
         }
         
-        // Drag is implemented via JavaScript on the title-bar
+        // Drag/resize is handled by WinBox when available.
         const chatElement = document.getElementById('chat');
         if (chatElement) {
-            console.log('[chat-control] Chat initialized with drag + resize handles');
+            console.log('[chat-control] Chat initialized');
         }
 
         // Create resize handles to allow resizing from any edge (desktop only)
@@ -6699,20 +6734,13 @@ import * as THREE from 'three';
         let CHAT_RESIZABLE = (typeof window !== 'undefined' && window.__SYNTH_CONFIG && window.__SYNTH_CONFIG.CHAT_RESIZABLE !== undefined) ? !!window.__SYNTH_CONFIG.CHAT_RESIZABLE : true; // server-controlled at render time, default true
 
         function createChatResizeHandles() {
-            if (!CHAT_RESIZABLE) {
-                console.debug('[chat-control] CHAT_RESIZABLE disabled on this session - enabling native corner resize for convenience');
-                // Even when custom handles are disabled, allow the user to resize via
-                // the native corner by enabling `resize: both` inline (desktop only).
-                try {
-                    if (!chatElement || /Mobi|Android/i.test(navigator.userAgent)) return;
-                    try { chatElement.style.resize = 'both'; } catch (e) { /* ignore */ }
-                } catch (e) { /* ignore */ }
-                return; // Disabled custom handles, but native resizing left available
-            }
-            if (!chatElement || /Mobi|Android/i.test(navigator.userAgent)) {
-                console.debug('[chat-control] Chat resize disabled for mobile or missing element');
-                return; // disable on mobile
-            }
+            // Chat is always managed by WinBox; disable custom handles unconditionally.
+            try {
+                if (!chatElement) return;
+                chatElement.style.resize = 'none';
+                chatElement.querySelectorAll('.chat-resize-handle').forEach(h => h.remove());
+            } catch (e) { /* ignore */ }
+            return;
             // Avoid recreating handles if they already exist
             // IMPORTANT: scope to chat only. Debug window also uses `.chat-resize-handle`.
             if (chatElement.querySelector('.chat-resize-handle')) {
@@ -7003,6 +7031,9 @@ import * as THREE from 'three';
         let archiveMultiSelect = false;
         let archiveSelectedIds = new Set();
         function createArchiveModal() {
+            if (window.ArchiveWindow && typeof window.ArchiveWindow.createArchiveModal === 'function') {
+                try { return window.ArchiveWindow.createArchiveModal(); } catch (e) { console.warn('[archive] delegate failed', e); }
+            }
             if (archiveModal) return archiveModal;
             const panel = document.createElement('div');
             panel.id = 'archive-panel';

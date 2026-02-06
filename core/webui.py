@@ -764,7 +764,7 @@ class SynthWebUIInterface:
         """Render the main web UI page from template."""
         try:
             # Read the template file - use the shell template that loads modular sections
-            template_path = Path(__file__).parent / "webui_templates" / "synth_webui_shell_clean.html"
+            template_path = Path(__file__).parent / "webui_templates" / "synth_webui_shell.html"
             with open(template_path, 'r', encoding='utf-8') as f:
                 template = f.read()
             

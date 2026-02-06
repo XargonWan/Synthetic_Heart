@@ -59,14 +59,14 @@ action.play();
 
 ## Integration with WebUI
 
-These modules are imported via `core/webui_templates/synth_webui_shell_clean.html` and the section templates:
+These modules are imported via `core/webui_templates/synth_webui_shell.html` and the section templates:
 
 ```javascript
 import { loadMixamoAnimation } from '/static/js/loadMixamoAnimation.js';
 import { mixamoVRMRigMap } from '/static/js/mixamoVRMRigMap.js';
 ```
 
-The import map in the HTML ensures Three.js and addons are resolved correctly (see `core/webui_templates/synth_webui_shell_clean.html`):
+The import map in the HTML ensures Three.js and addons are resolved correctly (see `core/webui_templates/synth_webui_shell.html`):
 
 ## Bootstrap helper
 

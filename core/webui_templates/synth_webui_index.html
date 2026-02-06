@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- Legacy template: runtime uses synth_webui_shell_clean.html + modular JS in res/synth_webui/js. -->
+<!-- Legacy template: runtime uses synth_webui_shell.html + modular JS in res/synth_webui/js. -->
 <html lang="en">
 <head>
     <meta charset="utf-8" />
@@ -3433,7 +3433,7 @@
 
                     // Build raycast target list once for this model (meshes only)
                     try {
-                        __synthRaycastTargets = [];
+                        window.__synthRaycastTargets = [];
                         if (vrm && vrm.scene) {
                             vrm.scene.traverse((obj) => {
                                 try {
@@ -3441,14 +3441,14 @@
                                     const isMesh = !!(obj.isMesh || obj.isSkinnedMesh);
                                     if (!isMesh) return;
                                     if (!obj.geometry) return;
-                                    __synthRaycastTargets.push(obj);
+                                    window.__synthRaycastTargets.push(obj);
                                 } catch (_e) { /* ignore */ }
                             });
                         }
-                        console.log('[synth_webui] Raycast targets:', __synthRaycastTargets.length);
+                        try { console.log('[synth_webui] Raycast targets:', window.__synthRaycastTargets.length); } catch (e) {}
                     } catch (e) {
                         console.warn('[synth_webui] Failed to build raycast targets:', e);
-                        __synthRaycastTargets = [];
+                        window.__synthRaycastTargets = [];
                     }
 
                     // Detect face/expression capabilities (VRM0 vs VRM1) for case-by-case debugging.
@@ -3933,196 +3933,19 @@
                 try { window.__synth_web_debug_enabled = !!debugEnabled; } catch (e) { /* ignore */ }
                 if (debugEnabled) {
                     console.log('[synth_webui] WEB_DEBUG enabled — initializing advanced debug window');
-
-                    const clamp01 = (x) => {
-                        const v = Number(x);
-                        if (!Number.isFinite(v)) return 0;
-                        return Math.max(0, Math.min(1, v));
-                    };
-
-                    // UI pause flag is tracked locally.
-                    // The render/WS freeze gates elsewhere still additionally check __synth_web_debug_enabled.
-                    const isPaused = () => !!window.__synth_debug_pause_all;
-
-                    const ensureFallbackDock = () => {
-                        let dock = document.getElementById('synth-minimized-stack');
-                        if (dock) return dock;
-                        dock = document.createElement('div');
-                        dock.id = 'synth-minimized-stack';
-                        dock.style.position = 'fixed';
-                        dock.style.right = 'auto';
-                        dock.style.left = '18px';
-                        dock.style.bottom = '18px';
-                        dock.style.display = 'flex';
-                        dock.style.flexDirection = 'column';
-                        dock.style.gap = '8px';
-                        dock.style.zIndex = 99999;
-                        dock.style.alignItems = 'flex-start';
-                        document.body.appendChild(dock);
-                        return dock;
-                    };
-
-                    const getDock = () => {
-                        if (window.SynthWindowManager && typeof window.SynthWindowManager.ensureDock === 'function') {
-                            return window.SynthWindowManager.ensureDock();
-                        }
-                        return ensureFallbackDock();
-                    };
-
-                    const buildDebugPanel = () => {
-                        const panel = document.createElement('div');
-                        panel.id = 'synth-advanced-debug';
-                        panel.className = 'synth-window-panel';
-                        panel.style.display = 'flex';
-                        panel.style.flexDirection = 'column';
-                        panel.style.width = '100%';
-                        panel.style.height = '100%';
-                        panel.innerHTML = `
-                        <div id="synth-debug-title-bar" style="display:flex;align-items:center;justify-content:flex-end;gap:6px;padding:10px 12px;border-bottom:1px solid var(--border);cursor:move;user-select:none;">
-                            <button id="synth-debug-pause" class="pill secondary" type="button" title="Pause">⏸️</button>
-                            <button id="synth-debug-resync" class="pill secondary" type="button" title="Sync">🛜</button>
-                            <button id="synth-debug-reset" class="pill" type="button" title="Reset">🔁</button>
-                            <button id="synth-debug-minimize" class="pill secondary" type="button" title="Minimize">➖</button>
-                        </div>
-                        <div id="synth-debug-body" style="padding:12px;display:flex;flex-direction:column;gap:12px;overflow:auto;height:calc(100% - 52px);">
-
-                            <div class="card" style="margin:0;">
-                                <h2 style="margin:0 0 8px 0;">Status</h2>
-                                <div style="font-size:12px;color:var(--text-soft);line-height:1.4;">
-                                    <div>Paused: <span id="synth-debug-status-paused">—</span></div>
-                                    <div>Current: <span id="synth-debug-status-current">—</span></div>
-                                    <div>Phase: <span id="synth-debug-status-phase">—</span></div>
-                                    <div>Frame: <span id="synth-debug-status-frame">—</span></div>
-                                    <div>Remote: <span id="synth-debug-status-remote">—</span></div>
-                                </div>
-                            </div>
-
-                            <div class="card" style="margin:0;">
-                                <h2 style="margin:0 0 8px 0;">Loop Override</h2>
-                                <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
-                                    <select id="synth-debug-loop-type" style="flex:1 1 140px;min-width:120px;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);"></select>
-                                    <select id="synth-debug-loop-file" style="flex:2 1 220px;min-width:160px;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);"></select>
-                                </div>
-                                <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;">
-                                    <input id="synth-debug-loop-start" type="number" placeholder="start" style="flex:1 1 120px;min-width:100px;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);" />
-                                    <input id="synth-debug-loop-end" type="number" placeholder="end" style="flex:1 1 120px;min-width:100px;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);" />
-                                    <input id="synth-debug-loop-fps" type="number" placeholder="fps" style="flex:0 0 86px;min-width:86px;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);" />
-                                </div>
-                                <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;">
-                                    <button id="synth-debug-loop-start-btn" class="pill" type="button" style="flex:1;">Start</button>
-                                    <button id="synth-debug-loop-clear-btn" class="pill secondary" type="button" style="flex:1;">Clear</button>
-                                    <button id="synth-debug-loop-refresh" class="pill secondary" type="button">Refresh</button>
-                                </div>
-                                <div style="margin-top:8px;font-size:11px;color:var(--text-soft);">Loaded: <span id="synth-debug-loop-loaded">0</span></div>
-                            </div>
-
-                            <div class="card" style="margin:0;">
-                                <h2 style="margin:0 0 8px 0;">Feelings</h2>
-                                <div id="synth-debug-feelings" style="display:flex;flex-direction:column;gap:8px;"></div>
-                                <div style="display:flex;gap:8px;margin-top:8px;">
-                                    <button id="synth-debug-feelings-clear" class="pill secondary" type="button">Clear Overrides</button>
-                                </div>
-                            </div>
-
-                            <div class="card" style="margin:0;">
-                                <h2 style="margin:0 0 8px 0;">Facial Morphs</h2>
-                                <input id="synth-debug-face-filter" placeholder="filter…" style="width:100%;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);" />
-                                <div id="synth-debug-face-list" style="margin-top:8px;max-height:240px;overflow:auto;display:flex;flex-direction:column;gap:8px;"></div>
-                                <div style="display:flex;gap:8px;margin-top:8px;">
-                                    <button id="synth-debug-face-clear" class="pill secondary" type="button">Clear Overrides</button>
-                                </div>
-                            </div>
-                        </div>
-                    `;
-                        return panel;
-                    };
-
-                    let win = null;
-                    let winbox = null;
-                    const tryCreateWinBox = () => {
-                        if (!window.SynthWindowManager || typeof window.SynthWindowManager.create !== 'function') return null;
-                        if (typeof window.WinBox === 'undefined') return null;
-                        const panel = buildDebugPanel();
-                        win = panel;
-                        winbox = window.SynthWindowManager.create({
-                            id: 'debug',
-                            title: 'Debug',
-                            mount: panel,
-                            width: 420,
-                            height: 520,
-                            x: 24,
-                            y: 'bottom',
-                            iconText: '💻',
-                            dockLabel: 'Restore Debug',
-                            dockClass: 'chat-toggle-btn',
-                            className: 'synth-winbox no-full'
+                    try {
+                        // Load debug module as an ES module and create the debug window when ready
+                        const s = document.createElement('script');
+                        s.type = 'module';
+                        s.src = '/res/synth_webui/js/debug-window.mjs';
+                        document.head.appendChild(s);
+                        s.addEventListener('load', () => {
+                            try { if (window.DebugWindow && typeof window.DebugWindow.createDebugWindow === 'function') window.DebugWindow.createDebugWindow(); } catch (e) { /* ignore */ }
                         });
-                        try {
-                            if (window.SynthWindowManager && typeof window.SynthWindowManager.attachHeaderTools === 'function') {
-                                const pauseBtn = panel.querySelector('#synth-debug-pause');
-                                const resyncBtn = panel.querySelector('#synth-debug-resync');
-                                const resetBtn = panel.querySelector('#synth-debug-reset');
-                                window.SynthWindowManager.attachHeaderTools('debug', winbox, [
-                                    {
-                                        label: '⏸️',
-                                        title: 'Pause',
-                                        className: 'synth-wb-tool-pause',
-                                        onClick: () => { if (pauseBtn) pauseBtn.click(); }
-                                    },
-                                    {
-                                        label: '🛜',
-                                        title: 'Sync',
-                                        onClick: () => { if (resyncBtn) resyncBtn.click(); }
-                                    },
-                                    {
-                                        label: '🔁',
-                                        title: 'Reset',
-                                        onClick: () => { if (resetBtn) resetBtn.click(); }
-                                    },
-                                    {
-                                        label: '➖',
-                                        title: 'Minimize',
-                                        onClick: () => { try { window.SynthWindowManager.minimize('debug'); } catch (e) { /* ignore */ } }
-                                    }
-                                ]);
-                            }
-                        } catch (e) { /* ignore */ }
-                        return winbox;
-                    };
-
-                    if (!tryCreateWinBox()) {
-                        win = buildDebugPanel();
-                        win.style.position = 'fixed';
-                        win.style.right = '18px';
-                        win.style.bottom = '86px';
-                        win.style.width = '420px';
-                        win.style.maxWidth = 'calc(100% - 40px)';
-                        win.style.minWidth = '320px';
-                        win.style.height = '520px';
-                        win.style.maxHeight = 'calc(100vh - 140px)';
-                        win.style.minHeight = '240px';
-                        win.style.zIndex = 99998;
-                        win.style.background = 'var(--surface)';
-                        win.style.color = 'var(--text)';
-                        win.style.border = '1px solid var(--border)';
-                        win.style.borderRadius = '12px';
-                        win.style.overflow = 'hidden';
-                        win.style.resize = 'both';
-                        document.body.appendChild(win);
-
-                        const dock = getDock();
-                        // If chat has a restore button, stack it with debug (WEB_DEBUG-only).
-                        try {
-                            if (chatToggleBtn && chatToggleBtn.parentElement !== dock) {
-                                dock.appendChild(chatToggleBtn);
-                                try { chatToggleBtn.style.position = 'static'; chatToggleBtn.style.right = ''; chatToggleBtn.style.bottom = ''; } catch (e) { /* ignore */ }
-                            }
-                        } catch (e) { /* ignore */ }
+                    } catch (e) {
+                        console.warn('[synth_webui] Failed to load debug-window module', e);
                     }
-
-
-                    if (!winbox) {
-                        // Dragging (simple, chat-like)
+                }                        // Dragging (simple, chat-like)
                         (function makeDraggable(el) {
                             const header = el.querySelector('#synth-debug-title-bar');
                             if (!header) return;
@@ -5057,7 +4880,7 @@
                             // geometry or other non-avatar objects which would incorrectly
                             // trigger touch animations when clicking empty space.
                             if (!currentVRM || !currentVRM.scene) return;
-                            const targets = (__synthRaycastTargets && __synthRaycastTargets.length) ? __synthRaycastTargets : [currentVRM.scene];
+                            const targets = (window.__synthRaycastTargets && window.__synthRaycastTargets.length) ? window.__synthRaycastTargets : [currentVRM.scene];
                             const intersects = raycaster.intersectObjects(targets, false);
                             if (!intersects || intersects.length === 0) {
                                 // Empty space tap: play knock SFX and turn towards the camera.
