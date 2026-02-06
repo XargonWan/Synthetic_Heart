@@ -605,22 +605,48 @@
         }
         .settings-grid {
             display: flex;
-            flex-wrap: wrap;
+            /* Vertical stacking by default */
+            flex-direction: column;
             gap: clamp(1rem, 2vw, 1.6rem);
             align-items: stretch;
             width: 100%;
-            overflow-y: auto;
         }
         .settings-grid > .card {
-            flex: 1 1 auto;
-            min-width: 280px;
+            width: 100%;
+            min-width: 0;
         }
         #tab-settings .settings-grid {
-            flex-direction: column;
+            /* intentionally left empty (already columnar) */
         }
         #tab-settings .settings-grid > .card {
             max-width: none;
             width: 100%;
+        }
+
+        /* Use browser scroll for About / Settings / Components */
+        .tab-panel[data-tab="settings"],
+        .tab-panel[data-tab="components"],
+        .tab-panel[data-tab="about"] {
+            /* Keep panels honor .active; only adjust sizing/overflow */
+            height: auto;
+            min-height: 0;
+            overflow: visible;
+        }
+        /* Active variants use document flow so browser scroll is used */
+        .tab-panel[data-tab="settings"].active,
+        .tab-panel[data-tab="components"].active,
+        .tab-panel[data-tab="about"].active {
+            display: block;
+            height: auto;
+            min-height: 0;
+            overflow: visible;
+        }
+        .tab-panel[data-tab="settings"] .home-stage,
+        .tab-panel[data-tab="components"] .home-stage,
+        .tab-panel[data-tab="about"] .home-stage {
+            height: auto;
+            min-height: 0;
+            overflow: visible;
         }
         .card {
             background: var(--surface);

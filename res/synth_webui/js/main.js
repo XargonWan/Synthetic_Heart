@@ -115,10 +115,47 @@
                 } catch (e) {}
             }, 300);
 
-            // Initialize Chat window module (separate file)
+            // Initialize Chat window module (separate file) and attach header tools
             try {
-                import('./chat-window.mjs').then((mod) => {
-                    try { if (mod && typeof mod.createChatWindow === 'function') mod.createChatWindow(); } catch (e) { /* ignore */ }
+                import('./chat-window.mjs').then(async (mod) => {
+                    try {
+                        if (mod && typeof mod.createChatWindow === 'function') {
+                            // Ensure the Home section (and #chat mount) is available before creating the window
+                            try { if (window.SynthWebUI && typeof window.SynthWebUI.loadSection === 'function') await window.SynthWebUI.loadSection('home'); } catch (e) { /* ignore */ }
+                            // createChatWindow returns a Promise resolving to the WinBox instance (or null)
+                            const winbox = await mod.createChatWindow().catch(() => null);
+                            try {
+                                attachHeaderTools('chat', winbox, [
+                                    {
+                                        label: '🗕',
+                                        title: 'Minimize',
+                                        onClick: () => {
+                                            try {
+                                                if (window.SynthWindowManager && typeof window.SynthWindowManager.minimize === 'function') {
+                                                    window.SynthWindowManager.minimize('chat');
+                                                } else if (winbox && typeof winbox.minimize === 'function') {
+                                                    winbox.minimize();
+                                                }
+                                            } catch (e) { /* ignore */ }
+                                        }
+                                    },
+                                    {
+                                        label: '↻',
+                                        title: 'Reset position',
+                                        onClick: () => {
+                                            try {
+                                                if (window.SynthWindowManager && typeof window.SynthWindowManager.restore === 'function') {
+                                                    window.SynthWindowManager.restore('chat');
+                                                } else if (typeof window.resetWindowPositions === 'function') {
+                                                    window.resetWindowPositions();
+                                                }
+                                            } catch (e) { /* ignore */ }
+                                        }
+                                    }
+                                ]);
+                            } catch (e) { /* ignore */ }
+                        }
+                    } catch (e) { /* ignore */ }
                 }).catch((e) => { try { console.debug('[synth_webui] chat-window import failed', e); } catch (e) {} });
             } catch (e) { /* ignore */ }
 
@@ -777,27 +814,16 @@ try {
 
         window.SynthWindowManager = window.SynthWindowManager || synthWindowManager;
 
-        function addTypingIndicator() {
-            try { if (window.SynthChat && typeof window.SynthChat.addTypingIndicator === 'function') return window.SynthChat.addTypingIndicator(); } catch (e) { /* ignore */ }
+        // Backwards-compatible helper to allow top-level calls like attachHeaderTools('chat', winbox, ...)
+        function attachHeaderTools(id, winbox, tools) {
+            try {
+                if (window.SynthWindowManager && typeof window.SynthWindowManager.attachHeaderTools === 'function') {
+                    return window.SynthWindowManager.attachHeaderTools(id, winbox, tools);
+                }
+            } catch (e) { /* ignore */ }
+            return null;
         }
 
-        function removeTypingIndicator() {
-            try { if (window.SynthChat && typeof window.SynthChat.removeTypingIndicator === 'function') return window.SynthChat.removeTypingIndicator(); } catch (e) { /* ignore */ }
-        }
-
-        function saveChatState() {
-            try { if (window.SynthChat && typeof window.SynthChat.saveChatState === 'function') return window.SynthChat.saveChatState(); } catch (e) { /* ignore */ }
-        }
-
-        function restoreChatState() {
-            try { if (window.SynthChat && typeof window.SynthChat.restoreChatState === 'function') return window.SynthChat.restoreChatState(); } catch (e) { /* ignore */ }
-        }
-
-        // Backwards-compatible globals delegating to the chat module
-        window.addTypingIndicator = window.addTypingIndicator || function() { try { if (window.SynthChat && typeof window.SynthChat.addTypingIndicator === 'function') return window.SynthChat.addTypingIndicator(); } catch (e) { /* ignore */ } };
-        window.removeTypingIndicator = window.removeTypingIndicator || function() { try { if (window.SynthChat && typeof window.SynthChat.removeTypingIndicator === 'function') return window.SynthChat.removeTypingIndicator(); } catch (e) { /* ignore */ } };
-        window.saveChatState = window.saveChatState || function() { try { if (window.SynthChat && typeof window.SynthChat.saveChatState === 'function') return window.SynthChat.saveChatState(); } catch (e) { /* ignore */ } };
-        window.restoreChatState = window.restoreChatState || function() { try { if (window.SynthChat && typeof window.SynthChat.restoreChatState === 'function') return window.SynthChat.restoreChatState(); } catch (e) { /* ignore */ } };
         // Phase priorities mirrored from server-side ActionStateManager
         const PHASE_PRIORITIES = {
             'IDLE': 0,
@@ -1298,8 +1324,8 @@ try {
                 } catch (e) { /* ignore */ }
                 window.__synth_home_initialized = true;
                 try {
-                    if (typeof window.restoreChatState === 'function') {
-                        window.restoreChatState();
+                    if (window.SynthChat && typeof window.SynthChat.restoreChatState === 'function') {
+                        window.SynthChat.restoreChatState();
                     }
                 } catch (e) { /* ignore */ }
             }
@@ -1581,7 +1607,7 @@ try {
                 try {
                     const s = document.createElement('script');
                     s.type = 'module';
-                    s.src = '/res/synth_webui/js/archive-window.mjs';
+                    s.src = '/js/archive-window.mjs';
                     document.head.appendChild(s);
                 } catch (e) { /* ignore */ }
             });

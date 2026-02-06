@@ -88,8 +88,10 @@
             </div>
         <style>
             .about-content {
-                flex: 1;
-                overflow-y: auto;
+                /* Use browser scroll for About page */
+                flex: none;
+                height: auto;
+                overflow: visible;
                 padding: 2rem min(4vw, 2.4rem);
                 max-width: 1200px;
                 margin: 0 auto;

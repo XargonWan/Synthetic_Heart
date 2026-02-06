@@ -185,7 +185,9 @@ class SynthWebUIInterface:
         self._server_thread = None
         self._server_task = None
         # Persistent session id file (single session per deploy)
-        self.session_id_file = Path('backups') / 'webui_session_id.txt'
+        # Allow override of backups directory in tests or custom deploys via env var
+        backups_dir = os.environ.get('SYNTH_BACKUPS_DIR', 'backups')
+        self.session_id_file = Path(backups_dir) / 'webui_session_id.txt'
         self.session_id = None
         try:
             self._ensure_persistent_session_id()

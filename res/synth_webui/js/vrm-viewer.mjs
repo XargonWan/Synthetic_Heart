@@ -4971,202 +4971,49 @@ import * as THREE from 'three';
 
             // Initialize debug UI when WEB_DEBUG is enabled in the base template
             try {
+                // Consolidation: delegate debug UI to the centralized module and disable legacy inline debug code below.
+                try {
+                    const _synthDbgElem = document.getElementById('synth-debug');
+                    const _dbgEnabled = _synthDbgElem && (_synthDbgElem.dataset.debugEnabled === '1' || _synthDbgElem.dataset.debugEnabled === 'true');
+                    if (_dbgEnabled) {
+                        // Load consolidated debug window module and create window (async)
+                        (async () => {
+                            try {
+                                const mod = await import('/js/debug-window.mjs');
+                                try { if (mod && typeof mod.createDebugWindow === 'function') mod.createDebugWindow(); } catch (e) { /* ignore */ }
+                            } catch (e) { console.warn('[synth_webui] Failed to import debug-window module', e); }
+                        })();
+                        // Prevent legacy inline debug block from running by clearing the attribute.
+                        try { _synthDbgElem.dataset.debugEnabled = '0'; } catch (e) { /* ignore */ }
+                    }
+                } catch (e) { /* ignore */ }
+
                 const synthDebug = document.getElementById('synth-debug');
                 const debugEnabled = synthDebug && (synthDebug.dataset.debugEnabled === '1' || synthDebug.dataset.debugEnabled === 'true');
                 try { window.__synth_web_debug_enabled = !!debugEnabled; } catch (e) { /* ignore */ }
-                if (debugEnabled) {
+                if (debugEnabled) { console.log('[synth_webui] WEB_DEBUG delegated — legacy block removed'); }
                     console.log('[synth_webui] WEB_DEBUG enabled — initializing advanced debug window');
 
-                    const clamp01 = (x) => {
-                        const v = Number(x);
-                        if (!Number.isFinite(v)) return 0;
-                        return Math.max(0, Math.min(1, v));
-                    };
+
 
                     // UI pause flag is tracked locally.
                     // The render/WS freeze gates elsewhere still additionally check __synth_web_debug_enabled.
                     const isPaused = () => !!window.__synth_debug_pause_all;
 
-                    const ensureFallbackDock = () => {
-                        let dock = document.getElementById('synth-minimized-stack');
-                        if (dock) return dock;
-                        dock = document.createElement('div');
-                        dock.id = 'synth-minimized-stack';
-                        dock.style.position = 'fixed';
-                        dock.style.right = 'auto';
-                        dock.style.left = '18px';
-                        dock.style.bottom = '18px';
-                        dock.style.display = 'flex';
-                        dock.style.flexDirection = 'column';
-                        dock.style.gap = '8px';
-                        dock.style.zIndex = 99999;
-                        dock.style.alignItems = 'flex-start';
-                        document.body.appendChild(dock);
-                        return dock;
-                    };
 
-                    const getDock = () => {
-                        if (window.SynthWindowManager && typeof window.SynthWindowManager.ensureDock === 'function') {
-                            return window.SynthWindowManager.ensureDock();
-                        }
-                        return ensureFallbackDock();
-                    };
 
-                    const buildDebugPanel = () => {
-                        const panel = document.createElement('div');
-                        panel.id = 'synth-advanced-debug';
-                        panel.className = 'synth-window-panel';
-                        panel.style.display = 'flex';
-                        panel.style.flexDirection = 'column';
-                        panel.style.width = '100%';
-                        panel.style.height = '100%';
-                        panel.innerHTML = `
-                        <div id="synth-debug-title-bar" style="display:flex;align-items:center;justify-content:flex-end;gap:6px;padding:10px 12px;border-bottom:1px solid var(--border);cursor:move;user-select:none;"></div>
-                        <div id="synth-debug-body" style="padding:12px;display:flex;flex-direction:column;gap:12px;overflow:auto;flex:1;min-height:0;">
-                            <div class="card" style="margin:0;">
-                                <div style="display:flex;gap:8px;align-items:center;justify-content:flex-end;">
-                                    <button id="synth-debug-pause" class="pill secondary" type="button" title="Pause">⏸️</button>
-                                    <button id="synth-debug-resync" class="pill secondary" type="button" title="Sync">🛜</button>
-                                    <button id="synth-debug-reset" class="pill" type="button" title="Reset">🔁</button>
-                                </div>
-                            </div>
 
-                            <div class="card" style="margin:0;">
-                                <h2 style="margin:0 0 8px 0;">Status</h2>
-                                <div style="font-size:12px;color:var(--text-soft);line-height:1.4;">
-                                    <div>Paused: <span id="synth-debug-status-paused">—</span></div>
-                                    <div>Current: <span id="synth-debug-status-current">—</span></div>
-                                    <div>Phase: <span id="synth-debug-status-phase">—</span></div>
-                                    <div>Frame: <span id="synth-debug-status-frame">—</span></div>
-                                    <div>Remote: <span id="synth-debug-status-remote">—</span></div>
-                                </div>
-                            </div>
 
-                            <div class="card" style="margin:0;">
-                                <h2 style="margin:0 0 8px 0;">Loop Override</h2>
-                                <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
-                                    <select id="synth-debug-loop-type" style="flex:1 1 140px;min-width:120px;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);"></select>
-                                    <select id="synth-debug-loop-file" style="flex:2 1 220px;min-width:160px;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);"></select>
-                                </div>
-                                <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;">
-                                    <input id="synth-debug-loop-start" type="number" placeholder="start" style="flex:1 1 120px;min-width:100px;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);" />
-                                    <input id="synth-debug-loop-end" type="number" placeholder="end" style="flex:1 1 120px;min-width:100px;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);" />
-                                    <input id="synth-debug-loop-fps" type="number" placeholder="fps" style="flex:0 0 86px;min-width:86px;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);" />
-                                </div>
-                                <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;">
-                                    <button id="synth-debug-loop-start-btn" class="pill" type="button" style="flex:1;">Start</button>
-                                    <button id="synth-debug-loop-clear-btn" class="pill secondary" type="button" style="flex:1;">Clear</button>
-                                    <button id="synth-debug-loop-refresh" class="pill secondary" type="button">Refresh</button>
-                                </div>
-                                <div style="margin-top:8px;font-size:11px;color:var(--text-soft);">Loaded: <span id="synth-debug-loop-loaded">0</span></div>
-                            </div>
-
-                            <div class="card" style="margin:0;">
-                                <h2 style="margin:0 0 8px 0;">Feelings</h2>
-                                <div id="synth-debug-feelings" style="display:flex;flex-direction:column;gap:8px;"></div>
-                                <div style="display:flex;gap:8px;margin-top:8px;">
-                                    <button id="synth-debug-feelings-clear" class="pill secondary" type="button">Clear Overrides</button>
-                                </div>
-                            </div>
-
-                            <div class="card" style="margin:0;">
-                                <h2 style="margin:0 0 8px 0;">Facial Morphs</h2>
-                                <input id="synth-debug-face-filter" placeholder="filter…" style="width:100%;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);" />
-                                <div id="synth-debug-face-list" style="margin-top:8px;max-height:240px;overflow:auto;display:flex;flex-direction:column;gap:8px;"></div>
-                                <div style="display:flex;gap:8px;margin-top:8px;">
-                                    <button id="synth-debug-face-clear" class="pill secondary" type="button">Clear Overrides</button>
-                                </div>
-                            </div>
-                        </div>
-                    `;
-                        return panel;
-                    };
+                    const buildDebugPanel = () => { return null; };
 
                     let win = null;
                     let winbox = null;
-                    const tryCreateWinBox = () => {
-                        if (!window.SynthWindowManager || typeof window.SynthWindowManager.create !== 'function') return null;
-                        if (typeof window.WinBox === 'undefined') return null;
-                        const panel = buildDebugPanel();
-                        win = panel;
-                        winbox = window.SynthWindowManager.create({
-                            id: 'debug',
-                            title: 'Debug',
-                            mount: panel,
-                            width: 420,
-                            height: 520,
-                            x: 24,
-                            y: 'bottom',
-                            iconText: '💻',
-                            dockLabel: 'Restore Debug',
-                            dockClass: 'chat-toggle-btn',
-                            className: 'synth-winbox no-full no-close debug-window'
-                        });
-                        try {
-                            if (window.SynthWindowManager && typeof window.SynthWindowManager.attachHeaderTools === 'function') {
-                                const pauseBtn = panel.querySelector('#synth-debug-pause');
-                                const resyncBtn = panel.querySelector('#synth-debug-resync');
-                                const resetBtn = panel.querySelector('#synth-debug-reset');
-                                window.SynthWindowManager.attachHeaderTools('debug', winbox, [
-                                    {
-                                        label: '⏸️',
-                                        title: 'Pause',
-                                        className: 'synth-wb-tool-pause',
-                                        onClick: () => { if (pauseBtn) pauseBtn.click(); }
-                                    },
-                                    {
-                                        label: '🛜',
-                                        title: 'Sync',
-                                        onClick: () => { if (resyncBtn) resyncBtn.click(); }
-                                    },
-                                    {
-                                        label: '🔁',
-                                        title: 'Reset',
-                                        onClick: () => { if (resetBtn) resetBtn.click(); }
-                                    },
-                                    {
-                                        label: '➖',
-                                        title: 'Minimize',
-                                        onClick: () => { try { window.SynthWindowManager.minimize('debug'); } catch (e) { /* ignore */ } }
-                                    }
-                                ]);
-                            }
-                        } catch (e) { /* ignore */ }
-                        return winbox;
-                    };
+                    const tryCreateWinBox = () => null;
 
-                    if (!tryCreateWinBox()) {
-                        win = buildDebugPanel();
-                        win.style.position = 'fixed';
-                        win.style.right = '18px';
-                        win.style.bottom = '86px';
-                        win.style.width = '420px';
-                        win.style.maxWidth = 'calc(100% - 40px)';
-                        win.style.minWidth = '320px';
-                        win.style.height = '520px';
-                        win.style.maxHeight = 'calc(100vh - 140px)';
-                        win.style.minHeight = '240px';
-                        win.style.zIndex = 99998;
-                        win.style.background = 'var(--surface)';
-                        win.style.color = 'var(--text)';
-                        win.style.border = '1px solid var(--border)';
-                        win.style.borderRadius = '12px';
-                        win.style.overflow = 'hidden';
-                        win.style.resize = 'both';
-                        document.body.appendChild(win);
 
-                        const dock = getDock();
-                        const chatToggleBtn = document.getElementById('chat-toggle');
-                        // If chat has a restore button, stack it with debug (WEB_DEBUG-only).
-                        try {
-                            if (chatToggleBtn && chatToggleBtn.parentElement !== dock) {
-                                dock.appendChild(chatToggleBtn);
-                                try { chatToggleBtn.style.position = 'static'; chatToggleBtn.style.right = ''; chatToggleBtn.style.bottom = ''; } catch (e) { /* ignore */ }
-                            }
-                        } catch (e) { /* ignore */ }
-                    }
 
                     if (!winbox) {
+                        try {
                         // Dragging (simple, chat-like)
                         (function makeDraggable(el) {
                             const header = el.querySelector('#synth-debug-title-bar');
@@ -5263,23 +5110,10 @@ import * as THREE from 'three';
                                 try { getDock().appendChild(ensureDebugDockBtn()); } catch (e) { /* ignore */ }
                             });
                         }
-                    }
-
-                    if (!winbox) {
-                        const minimizeBtn = win.querySelector('#synth-debug-minimize');
-                        if (minimizeBtn) {
-                            minimizeBtn.addEventListener('click', () => {
-                                if (winbox && window.SynthWindowManager && typeof window.SynthWindowManager.minimize === 'function') {
-                                    try { window.SynthWindowManager.minimize('debug'); } catch (e) { /* ignore */ }
-                                    return;
-                                }
-                            });
-                        }
-                    }
+                        } catch (e) { /* ignore */ }
 
                     async function resyncFromBackend() {
                         try {
-                            if (!animationHandler) return;
                             if (isPaused()) return;
 
                             // Apply rich state first if we have it (blink/eye/expressions)
@@ -5318,9 +5152,7 @@ import * as THREE from 'three';
                         } catch (e) { /* ignore */ }
                     }
 
-                    const pauseBtn = win.querySelector('#synth-debug-pause');
-                    const resyncBtn = win.querySelector('#synth-debug-resync');
-                    const resetBtn = win.querySelector('#synth-debug-reset');
+                    const pauseBtn = null; const resyncBtn = null; const resetBtn = null;
 
                     const setPaused = async (paused) => {
                         try {
@@ -5371,12 +5203,7 @@ import * as THREE from 'three';
 
                     // Loop override controls
                     const types = ['idle','think','talk','write','touch'];
-                    const selType = win.querySelector('#synth-debug-loop-type');
-                    const selFile = win.querySelector('#synth-debug-loop-file');
-                    const startInput = win.querySelector('#synth-debug-loop-start');
-                    const endInput = win.querySelector('#synth-debug-loop-end');
-                    const fpsInput = win.querySelector('#synth-debug-loop-fps');
-                    const loadedSpan = win.querySelector('#synth-debug-loop-loaded');
+                    const selType = null; const selFile = null; const startInput = null; const endInput = null; const fpsInput = null; const loadedSpan = null;
 
                     if (fpsInput) fpsInput.value = '30';
                     if (selType) {
@@ -5506,431 +5333,13 @@ import * as THREE from 'three';
                             await autofillLoopInputs();
                         })();
                     }
-                    const refreshBtn = win.querySelector('#synth-debug-loop-refresh');
-                    if (refreshBtn && selType) refreshBtn.addEventListener('click', async () => {
-                        await refreshFilesForType(selType.value);
-                        try { if (selFile) selFile.selectedIndex = 0; } catch (e) { /* ignore */ }
-                        await autofillLoopInputs();
-                    });
+                    // Loop override UI removed (consolidated into debug-window.mjs).
 
-                    if (selFile) {
-                        selFile.addEventListener('change', async () => { await autofillLoopInputs(); });
-                    }
+                    // Feelings UI removed; consolidated in debug-window.mjs
 
-                    const loopStartBtn = win.querySelector('#synth-debug-loop-start-btn');
-                    const loopClearBtn = win.querySelector('#synth-debug-loop-clear-btn');
-                    if (loopStartBtn) {
-                        loopStartBtn.addEventListener('click', async () => {
-                            try {
-                                if (!animationHandler) return console.warn('[synth_webui] No animationHandler');
-                                const aType = selType ? selType.value : 'think';
-                                const aFile = (selFile && selFile.value) ? selFile.value : null;
-                                const s = parseInt((startInput && startInput.value) ? startInput.value : '0', 10);
-                                const e = parseInt((endInput && endInput.value) ? endInput.value : '0', 10);
-                                const fps = parseFloat((fpsInput && fpsInput.value) ? fpsInput.value : '30');
-                                if (!aFile) return alert('Please select an animation file first');
-                                if (!Number.isFinite(s) || !Number.isFinite(e)) return alert('Please enter numeric frame values');
-                                if (e <= s) return alert('end must be > start');
-                                await animationHandler.startTemporaryLoop(aType, aFile, s, e, Number.isFinite(fps) ? fps : 30);
-                            } catch (err) { console.warn('[synth_webui] start temp loop error:', err); }
-                        });
-                    }
-                    if (loopClearBtn) {
-                        loopClearBtn.addEventListener('click', () => {
-                            try { if (!animationHandler) return; animationHandler.clearTemporaryOverride(); } catch (err) { console.warn('[synth_webui] clear temp loop failed:', err); }
-                        });
-                    }
+                    // Facial morph UI removed; consolidated in debug-window.mjs
 
-                    // Feelings UI
-                    const feelingsHost = win.querySelector('#synth-debug-feelings');
-                    const feelingsClearBtn = win.querySelector('#synth-debug-feelings-clear');
-
-                    const extractEmotionValues = () => {
-                        try {
-                            const out = {};
-                            const mergeObj = (obj) => {
-                                if (!obj || typeof obj !== 'object') return;
-                                const values = (obj.values && typeof obj.values === 'object') ? obj.values : obj;
-                                if (!values || typeof values !== 'object') return;
-                                if (Array.isArray(values)) {
-                                    values.forEach((it) => {
-                                        try {
-                                            const name = it && (it.type || it.name) ? String(it.type || it.name) : '';
-                                            if (!name) return;
-                                            if (/^\d+$/.test(String(name))) return;
-                                            const raw = Number(it.intensity !== undefined ? it.intensity : it.value);
-                                            if (!Number.isFinite(raw)) return;
-                                            const v01 = (raw > 1) ? (raw / 10.0) : raw;
-                                            const vv = Math.max(0, Math.min(1, v01));
-                                            out[String(name)] = Math.max(out[String(name)] || 0, vv);
-                                        } catch (e) { /* ignore */ }
-                                    });
-                                    return;
-                                }
-                                Object.keys(values).forEach((k) => {
-                                    if (!k) return;
-                                    if (/^\d+$/.test(String(k))) return;
-                                    const v = Number(values[k]);
-                                    if (!Number.isFinite(v)) return;
-                                    const v01 = (v > 1) ? (v / 10.0) : v;
-                                    const vv = Math.max(0, Math.min(1, v01));
-                                    out[String(k)] = Math.max(out[String(k)] || 0, vv);
-                                });
-                            };
-                            mergeObj(animationHandler ? (animationHandler._lastEmotions || null) : null);
-                            mergeObj(animationHandler ? (animationHandler._lastFeelings || null) : null);
-                            return out;
-                        } catch (e) {
-                            return {};
-                        }
-                    };
-
-                    // Feelings UI: avoid rebuilding DOM every tick.
-                    let __dbgFeelingsSig = '';
-                    let __dbgFeelingsRows = new Map();
-
-                    const ensureFeelingsRows = (keys) => {
-                        try {
-                            if (!feelingsHost) return;
-                            const sig = keys.join('|');
-                            if (__dbgFeelingsSig === sig && __dbgFeelingsRows.size) return;
-
-                            __dbgFeelingsSig = sig;
-                            __dbgFeelingsRows = new Map();
-                            feelingsHost.innerHTML = '';
-
-                            if (keys.length === 0) {
-                                const empty = document.createElement('div');
-                                empty.style.fontSize = '12px';
-                                empty.style.color = 'var(--text-soft)';
-                                empty.textContent = '—';
-                                feelingsHost.appendChild(empty);
-                                return;
-                            }
-
-                            keys.forEach((name) => {
-                                const row = document.createElement('div');
-                                row.style.display = 'grid';
-                                row.style.gridTemplateColumns = '1fr 140px 56px';
-                                row.style.alignItems = 'center';
-                                row.style.gap = '8px';
-
-                                const label = document.createElement('div');
-                                label.style.fontSize = '12px';
-                                label.style.color = 'var(--text)';
-                                label.textContent = name;
-
-                                const slider = document.createElement('input');
-                                slider.type = 'range';
-                                slider.min = '0';
-                                slider.max = '1';
-                                slider.step = '0.01';
-                                slider.value = '0';
-
-                                const num = document.createElement('input');
-                                num.type = 'number';
-                                num.min = '0';
-                                num.max = '1';
-                                num.step = '0.01';
-                                num.value = '0';
-                                num.style.padding = '6px';
-                                num.style.borderRadius = '8px';
-                                num.style.background = 'rgba(255,255,255,0.02)';
-                                num.style.border = '1px solid var(--border)';
-                                num.style.color = 'var(--text)';
-
-                                const apply = (v) => {
-                                    const vv = clamp01(v);
-                                    slider.value = String(vv);
-                                    num.value = String(vv);
-                                    try { animationHandler && animationHandler.setDebugEmotionOverride && animationHandler.setDebugEmotionOverride(name, vv); } catch (e) { /* ignore */ }
-                                };
-                                slider.addEventListener('input', () => apply(slider.value));
-                                num.addEventListener('change', () => apply(num.value));
-
-                                row.appendChild(label);
-                                row.appendChild(slider);
-                                row.appendChild(num);
-                                feelingsHost.appendChild(row);
-
-                                __dbgFeelingsRows.set(name, { slider, num });
-                            });
-                        } catch (e) { /* ignore */ }
-                    };
-
-                    const renderFeelings = () => {
-                        try {
-                            if (!feelingsHost) return;
-                            const base = extractEmotionValues();
-                            const overrides = (animationHandler && typeof animationHandler.getDebugEmotionOverrides === 'function') ? animationHandler.getDebugEmotionOverrides() : {};
-                            // Use persona-provided emotion list as primary debug keys (no legacy fallback)
-                            const personaKeys = (window.__synth_persona_emotions_list && Array.isArray(window.__synth_persona_emotions_list)) ? window.__synth_persona_emotions_list : [];
-                            // Prefer persona-declared emotion keys. If persona defines an emotion list,
-                            // only show those keys (augmented by any overrides present for them).
-                            // If no persona list is available, fall back to showing keys from
-                            // the animation-derived base and any overrides.
-                            const keysSet = new Set();
-                            if (personaKeys && Array.isArray(personaKeys) && personaKeys.length) {
-                                personaKeys.forEach(k => keysSet.add(k));
-                                Object.keys(base).forEach(k => { if (personaKeys.includes(k)) keysSet.add(k); });
-                                Object.keys(overrides).forEach(k => { if (personaKeys.includes(k)) keysSet.add(k); });
-                            } else {
-                                Object.keys(base).forEach(k => keysSet.add(k));
-                                Object.keys(overrides).forEach(k => keysSet.add(k));
-                            }
-                            const keys = Array.from(keysSet).filter(k => k && !/^\d+$/.test(String(k))).sort();
-                            ensureFeelingsRows(keys);
-                            if (!keys.length) return;
-                            keys.forEach((name) => {
-                                const row = __dbgFeelingsRows.get(name);
-                                if (!row) return;
-                                const override = (overrides && overrides[name] !== undefined) ? clamp01(overrides[name]) : null;
-                                const current = (override !== null) ? override : clamp01(base[name] || 0);
-
-                                // Don't clobber active user edits unless it's an override.
-                                const active = document.activeElement;
-                                const isActive = (active === row.slider || active === row.num);
-                                if (!isActive || override !== null) {
-                                    row.slider.value = String(current);
-                                    row.num.value = String(current);
-                                }
-                            });
-                        } catch (e) { /* ignore */ }
-                    };
-
-                    if (feelingsClearBtn) {
-                        feelingsClearBtn.addEventListener('click', () => {
-                            try { animationHandler && animationHandler.clearDebugEmotionOverrides && animationHandler.clearDebugEmotionOverrides(); } catch (e) { /* ignore */ }
-                            __dbgFeelingsSig = '';
-                            renderFeelings();
-                        });
-                    }
-
-                    // Facial morph UI
-                    const faceFilter = win.querySelector('#synth-debug-face-filter');
-                    const faceList = win.querySelector('#synth-debug-face-list');
-                    const faceClearBtn = win.querySelector('#synth-debug-face-clear');
-
-                    const getFaceKeys = () => {
-                        try {
-                            const caps = window.__synth_vrm_capabilities || null;
-                            const keys = (caps && Array.isArray(caps.expressionKeys)) ? caps.expressionKeys : [];
-                            // Include a few common aliases and expressive morphs so debug UI exposes
-                            // the typical facial targets used by skins and persona.emotions.
-                            const extra = [
-                                'blink','blinkLeft','blinkRight','eye_blink_left','eye_blink_right',
-                                'eyes_closed','eyesClosed',
-                                // expressive morphs
-                                'eyes_wide','mouth_open','mouth_frown','brow_down','brow_up',
-                                'mouth_smile','eyes_smile','mouth_O',
-                                // explicit emotion morphs (some models expose these directly)
-                                // basic viseme aliases
-                                'aa','ih','ou','ee','oh',
-                                // look targets
-                                'eye_look_left','eye_look_right','eye_look_up','eye_look_down'
-                            ];
-                            const rawKeys = Array.from(new Set([...(keys || []), ...extra].map(String)));
-                            // Exclude composite feeling metrics and emotion names from the granular face morph list.
-                            const compositeMetrics = new Set(['valence','arousal','stress','calm','relaxed','neutral']);
-                            const personaEmotionKeys = (window.__synth_persona_emotions_list && Array.isArray(window.__synth_persona_emotions_list)) ? window.__synth_persona_emotions_list : [];
-                            const personaEmotionKeysLower = personaEmotionKeys.map(k => String(k).toLowerCase());
-                            const compositeEmotions = new Set([
-                                'sad','happy','angry','surprised','relaxed','neutral','scared','fear','disgust','joy','love','smile',
-                                'sorrow','fun','joy','anger','fear','disgust','surprise'
-                            ]);
-                            return rawKeys
-                                .filter((k) => {
-                                    if (!k) return false;
-                                    const s = String(k);
-                                    if (/^\d+$/.test(s)) return false;
-                                    const low = s.toLowerCase();
-                                    const norm = low.replace(/[\._\-\s]+/g, '');
-                                    if (compositeMetrics.has(low) || compositeMetrics.has(norm)) return false;
-                                    if (personaEmotionKeysLower.includes(low) || personaEmotionKeysLower.includes(norm)) return false;
-                                    if (compositeEmotions.has(low) || compositeEmotions.has(norm)) return false;
-                                    return true;
-                                })
-                                .sort();
-                        } catch (e) {
-                            return [];
-                        }
-                    };
-
-                    let faceRows = [];
-                    const renderFaceList = () => {
-                        try {
-                            if (!faceList) return;
-                            const filter = (faceFilter && faceFilter.value) ? String(faceFilter.value).toLowerCase() : '';
-                            const keys = getFaceKeys().filter((k) => !filter || k.toLowerCase().includes(filter));
-                            const overrides = (animationHandler && typeof animationHandler.getDebugFaceOverrides === 'function') ? animationHandler.getDebugFaceOverrides() : {};
-
-                            faceList.innerHTML = '';
-                            faceRows = [];
-                            if (keys.length === 0) {
-                                const empty = document.createElement('div');
-                                empty.style.fontSize = '12px';
-                                empty.style.color = 'var(--text-soft)';
-                                empty.textContent = '—';
-                                faceList.appendChild(empty);
-                                return;
-                            }
-
-                            keys.forEach((k) => {
-                                const row = document.createElement('div');
-                                row.style.display = 'grid';
-                                row.style.gridTemplateColumns = '1fr 140px 56px 48px';
-                                row.style.alignItems = 'center';
-                                row.style.gap = '8px';
-
-                                const label = document.createElement('div');
-                                label.style.fontSize = '12px';
-                                label.style.color = 'var(--text)';
-                                label.style.overflow = 'hidden';
-                                label.style.textOverflow = 'ellipsis';
-                                label.style.whiteSpace = 'nowrap';
-                                label.title = k;
-                                label.textContent = k;
-
-                                const slider = document.createElement('input');
-                                slider.type = 'range';
-                                slider.min = '0';
-                                slider.max = '1';
-                                slider.step = '0.01';
-                                slider.value = String(clamp01((overrides[k] !== undefined) ? overrides[k] : (animationHandler && animationHandler._getFaceValue ? animationHandler._getFaceValue(k) : 0)));
-
-                                const num = document.createElement('input');
-                                num.type = 'number';
-                                num.min = '0';
-                                num.max = '1';
-                                num.step = '0.01';
-                                num.value = slider.value;
-                                num.style.padding = '6px';
-                                num.style.borderRadius = '8px';
-                                num.style.background = 'rgba(255,255,255,0.02)';
-                                num.style.border = '1px solid var(--border)';
-                                num.style.color = 'var(--text)';
-
-                                const cur = document.createElement('div');
-                                cur.style.fontSize = '11px';
-                                cur.style.color = 'var(--text-soft)';
-                                cur.textContent = '—';
-
-                                const apply = (v) => {
-                                    const vv = clamp01(v);
-                                    slider.value = String(vv);
-                                    num.value = String(vv);
-                                    try { animationHandler && animationHandler.setDebugFaceOverride && animationHandler.setDebugFaceOverride(k, vv); } catch (e) { /* ignore */ }
-                                };
-                                slider.addEventListener('input', () => apply(slider.value));
-                                num.addEventListener('change', () => apply(num.value));
-
-                                row.appendChild(label);
-                                row.appendChild(slider);
-                                row.appendChild(num);
-                                row.appendChild(cur);
-                                faceList.appendChild(row);
-
-                                faceRows.push({ key: k, curEl: cur, sliderEl: slider, numEl: num });
-                            });
-                        } catch (e) { /* ignore */ }
-                    };
-
-                    if (faceFilter) faceFilter.addEventListener('input', () => renderFaceList());
-                    if (faceClearBtn) {
-                        faceClearBtn.addEventListener('click', () => {
-                            try { animationHandler && animationHandler.clearDebugFaceOverrides && animationHandler.clearDebugFaceOverrides(); } catch (e) { /* ignore */ }
-                            renderFaceList();
-                        });
-                    }
-
-                    // Live status updater
-                    const stPaused = win.querySelector('#synth-debug-status-paused');
-                    const stCurrent = win.querySelector('#synth-debug-status-current');
-                    const stPhase = win.querySelector('#synth-debug-status-phase');
-                    const stFrame = win.querySelector('#synth-debug-status-frame');
-                    const stRemote = win.querySelector('#synth-debug-status-remote');
-
-                    setInterval(() => {
-                        try {
-                            if (stPaused) stPaused.textContent = isPaused() ? 'yes' : 'no';
-                            if (!animationHandler || !animationHandler.currentAction) {
-                                if (stCurrent) stCurrent.textContent = '—';
-                                if (stPhase) stPhase.textContent = '—';
-                                if (stFrame) stFrame.textContent = '—';
-                            } else {
-                                const act = animationHandler.currentAction;
-                                const clip = act.getClip ? act.getClip() : null;
-                                if (stCurrent) stCurrent.textContent = (animationHandler.currentActionName || clip?.name || 'unknown');
-                                if (stPhase) stPhase.textContent = animationHandler.currentActionPhase || '—';
-                                if (clip && clip._meta?.loopFrames && Number.isFinite(act.time)) {
-                                    const lm = clip._meta.loopFrames;
-                                    const fps = Number(lm.fps) || 30;
-                                    const span = Math.max(1, (Number(lm.endFrame) - Number(lm.startFrame)) + 1);
-                                    const localFrame = Math.floor(act.time * fps);
-                                    const currentFrame = Number(lm.startFrame) + ((localFrame % span) + span) % span;
-                                    if (stFrame) stFrame.textContent = `${currentFrame}f / ${lm.startFrame}-${lm.endFrame}`;
-                                } else if (clip && Number.isFinite(act.time)) {
-                                    const fps = 30;
-                                    const totalFrames = Math.max(1, Math.round(Number(clip.duration || 0) * fps));
-                                    const maxIdx = Math.max(0, totalFrames - 1);
-                                    const currentFrame = Math.min(maxIdx, Math.max(0, Math.floor(act.time * fps)));
-                                    if (stFrame) stFrame.textContent = `${currentFrame}f / 0-${maxIdx}`;
-                                } else {
-                                    if (stFrame) stFrame.textContent = '—';
-                                }
-                            }
-                            try {
-                                const s = window.__synth_current_animation_state || null;
-                                if (stRemote) stRemote.textContent = (s && (s.state || s.animation)) ? `${s.state || '—'} · ${(s.animation || '—')}` : '—';
-                            } catch (e) { if (stRemote) stRemote.textContent = '—'; }
-
-                            // Try a lazy autofill of loop end if still empty/0 (after preload/handler becomes ready)
-                            try {
-                                if (selFile && endInput && (String(endInput.value || '') === '' || String(endInput.value || '') === '0') && selFile.value) {
-                                    autofillLoopInputs();
-                                }
-                            } catch (e) { /* ignore */ }
-
-                            // refresh feelings + face current values
-                            renderFeelings();
-                            // Update current value cells without clobbering user input
-                            if (animationHandler && faceRows && faceRows.length) {
-                                faceRows.forEach((r) => {
-                                    try {
-                                        const vv = animationHandler._getFaceValue ? animationHandler._getFaceValue(r.key) : 0;
-                                        if (r.curEl) r.curEl.textContent = Number.isFinite(vv) ? vv.toFixed(2) : '—';
-                                    } catch (e) { /* ignore */ }
-                                });
-                            }
-                        } catch (e) { /* ignore */ }
-                    }, 300);
-
-                    async function resetLoopOverrideUI() {
-                        try {
-                            if (!selType || !selFile) return;
-                            try { selType.value = 'think'; } catch (e) { /* ignore */ }
-                            await refreshFilesForType('think');
-                            try { if (selFile) selFile.selectedIndex = 0; } catch (e) { /* ignore */ }
-                            await autofillLoopInputs();
-                        } catch (e) { /* ignore */ }
-                    }
-
-                    // Initial render
-                    renderFeelings();
-                    renderFaceList();
-                    try { if (pauseBtn) pauseBtn.textContent = isPaused() ? 'Resume' : 'Pause'; } catch (e) { /* ignore */ }
-
-                    // VRM capabilities arrive after load: refresh face keys when the avatar loads.
-                    try {
-                        if (!window.__synth_debug_on_vrm_loaded) {
-                            window.__synth_debug_on_vrm_loaded = () => {
-                                try { renderFaceList(); } catch (e) { /* ignore */ }
-                                try { __dbgFeelingsSig = ''; renderFeelings(); } catch (e) { /* ignore */ }
-                                try { autofillLoopInputs(); } catch (e) { /* ignore */ }
-                            };
-                            window.addEventListener('vrmLoaded', window.__synth_debug_on_vrm_loaded);
-                        }
-                    } catch (e) { /* ignore */ }
+                    // Live status updater, loop UI, feelings/face render and VRM hooks removed (consolidated into debug-window.mjs).
                 }
             } catch (err) {
                 console.warn('[synth_webui] Failed to init animation debug panel:', err);
@@ -6256,8 +5665,7 @@ import * as THREE from 'three';
                     const _activeTab = (typeof activeTab !== 'undefined') ? activeTab : (typeof window !== 'undefined' ? (window.activeTab || (localStorage && localStorage.getItem && localStorage.getItem('synth-webui-active-tab')) || (document.querySelector && document.querySelector('.nav-btn.active') && document.querySelector('.nav-btn.active').getAttribute('data-tab')) || 'home') : 'home');
                     if (_activeTab === 'home') {
                         try {
-                            const restoreFn = (typeof window !== 'undefined' && typeof window.restoreChatState === 'function') ? window.restoreChatState : null;
-                            if (restoreFn) restoreFn();
+                            try { if (window.SynthChat && typeof window.SynthChat.restoreChatState === 'function') window.SynthChat.restoreChatState(); } catch (e) { /* ignore */ }
                         } catch (error) {
                             console.error('[synth_webui] Failed to restore chat state on load:', error);
                         }
@@ -6847,7 +6255,7 @@ import * as THREE from 'three';
                 resizing = false;
                 startRect = null;
                 document.body.style.userSelect = '';
-                try { saveChatState(); } catch (e) { /* ignore */ }
+                try { if (window.SynthChat && typeof window.SynthChat.saveChatState === 'function') window.SynthChat.saveChatState(); } catch (e) { /* ignore */ }
                 try { if (window.__synth_active_interaction && window.__synth_active_interaction.type === 'resize') window.__synth_active_interaction = null; } catch (e) {}
             }
 
@@ -7025,332 +6433,22 @@ import * as THREE from 'three';
             return await res.json();
         }
 
-        // Modal archive manager
-        let archiveModal = null;
-        let archiveWinbox = null;
-        let archiveMultiSelect = false;
-        let archiveSelectedIds = new Set();
+        // Archive modal is delegated to consolidated module `archive-window.mjs`.
         function createArchiveModal() {
-            if (window.ArchiveWindow && typeof window.ArchiveWindow.createArchiveModal === 'function') {
-                try { return window.ArchiveWindow.createArchiveModal(); } catch (e) { console.warn('[archive] delegate failed', e); }
-            }
-            if (archiveModal) return archiveModal;
-            const panel = document.createElement('div');
-            panel.id = 'archive-panel';
-            panel.className = 'synth-window-panel archive-panel';
-            panel.style.display = 'flex';
-            panel.style.flexDirection = 'column';
-            panel.style.width = '100%';
-            panel.style.height = '100%';
-            // Determine mobile view to adjust modal behavior
-            const isMobileArchive = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768);
-            const canUseWinBox = !isMobileArchive && window.SynthWindowManager && typeof window.SynthWindowManager.create === 'function' && typeof window.WinBox !== 'undefined';
-            if (isMobileArchive) {
-                panel.style.cssText = `
-                    position: fixed;
-                    z-index: 10500;
-                    left: 0;
-                    top: 0;
-                    right: 0;
-                    bottom: 0;
-                    width: 100%;
-                    height: 100%;
-                    background: var(--panel-bg);
-                    color: var(--text);
-                    border: none;
-                    border-radius: 0;
-                    box-shadow: none;
-                    display: none; flex-direction: column; overflow: auto;
-                `;
-            } else if (!canUseWinBox) {
-                panel.style.cssText = `
-                    position: fixed;
-                    z-index: 10080;
-                    right: 2rem;
-                    bottom: 4rem;
-                    width: 720px;
-                    height: 520px;
-                    background: var(--panel-bg);
-                    color: var(--text);
-                    border: 1px solid var(--border);
-                    border-radius: 18px;
-                    box-shadow: 0 40px 80px -40px rgba(0,0,0,0.95);
-                    display: none; flex-direction: column; overflow: hidden;
-                `;
-            }
-            panel.innerHTML = `
-                <div id="archive-header" class="archive-header">
-                    <div class="archive-title">Archives</div>
-                    <div class="archive-controls">
-                        <button id="archive-minimize" class="pill secondary" type="button">—</button>
-                        <button id="archive-close" class="pill">Close</button>
-                    </div>
-                </div>
-                <div id="archive-list" class="archive-list"></div>
-                <div class="archive-footer">
-                    <button id="archive-edit" class="pill secondary" type="button">Edit</button>
-                    <button id="archive-refresh" class="pill" type="button">Refresh</button>
-                    <button id="archive-restore-btn" class="pill" disabled>Restore Selected</button>
-                </div>
-            `;
-            if (canUseWinBox) {
-                archiveWinbox = window.SynthWindowManager.create({
-                    id: 'archives',
-                    title: 'Archives',
-                    mount: panel,
-                    width: 720,
-                    height: 520,
-                    x: 64,
-                    y: 'bottom',
-                    iconText: '🗂️',
-                    dockLabel: 'Restore Archives',
-                    dockClass: 'chat-toggle-btn',
-                    className: 'synth-winbox no-full'
-                });
-                try {
-                    if (window.SynthWindowManager && typeof window.SynthWindowManager.attachHeaderTools === 'function') {
-                        window.SynthWindowManager.attachHeaderTools('archives', archiveWinbox, []);
-                    }
-                } catch (e) { /* ignore */ }
-            } else {
-                document.body.appendChild(panel);
-                // Dragging header (disabled on mobile where modal is fullscreen)
-                const header = panel.querySelector('#archive-header');
-                if (!isMobileArchive) {
-                    header.style.cursor = 'grab';
-                    let dragging = false, startX = 0, startY = 0, startRight = 18, startBottom = 60;
-                    header.addEventListener('pointerdown', (ev) => { dragging = true; startX = ev.clientX; startY = ev.clientY; startRight = parseFloat(getComputedStyle(panel).right); startBottom = parseFloat(getComputedStyle(panel).bottom); document.body.style.userSelect = 'none'; });
-                    window.addEventListener('pointermove', (ev) => { if(!dragging) return; const dx = ev.clientX - startX; const dy = ev.clientY - startY; panel.style.right = (startRight - dx) + 'px'; panel.style.bottom = (startBottom - dy) + 'px'; });
-                    window.addEventListener('pointerup', () => { dragging = false; document.body.style.userSelect = ''; });
-                } else {
-                    // On mobile, ensure header isn't draggable and shows close/controls clearly
-                    header.style.cursor = 'default';
-                }
-            }
-            if (canUseWinBox) {
-                const header = panel.querySelector('#archive-header');
-                if (header) header.style.cursor = 'default';
-            }
-            archiveModal = panel;
-            return panel;
-        }
-
-        // Buttons and interactions in the modal
-        function bindArchiveModalButtons() {
-            const modal = archiveModal || createArchiveModal();
-            const btnClose = modal.querySelector('#archive-close');
-            const btnRefresh = modal.querySelector('#archive-refresh');
-            const btnRestore = modal.querySelector('#archive-restore-btn');
-            const btnMinimize = modal.querySelector('#archive-minimize');
-            const btnEdit = modal.querySelector('#archive-edit');
-            btnClose.addEventListener('click', () => { modal.style.display = 'none'; });
-            if (btnMinimize) {
-                btnMinimize.addEventListener('click', () => {
-                    if (archiveWinbox && window.SynthWindowManager && typeof window.SynthWindowManager.minimize === 'function') {
-                        try { window.SynthWindowManager.minimize('archives'); } catch (e) { /* ignore */ }
-                        return;
-                    }
-                    try { modal.style.display = 'none'; } catch (e) { /* ignore */ }
-                });
-            }
-            if (btnEdit) {
-                btnEdit.addEventListener('click', () => { toggleArchiveEditMode(); });
-            }
-            btnRefresh.addEventListener('click', async () => { await refreshArchiveList(); });
-            btnRestore.addEventListener('click', async () => {
-                try {
-                    const ids = archiveMultiSelect ? Array.from(archiveSelectedIds) : [];
-                    if (!archiveMultiSelect) {
-                        const selected = modal.querySelector('.archive-row.selected');
-                        if (selected) ids.push(selected.dataset.id);
-                    }
-                    if (!ids.length) { showToast('Select an archive to restore', true); return; }
-                    const sessionId = getSessionId();
-                    showToast(`Restoring ${ids.length} archive(s)...`, false);
-                    for (const aid of ids) {
-                        const out = await apiPostJson('/api/chat/restore', { archive_id: aid, session_id: sessionId });
-                        if (out && out.success) {
-                            // We rely on WebSocket replay to render restored messages via _replay_history;
-                            // do not render `out.messages` here to avoid duplicates.
-                            if (out && out.deleted_archive_id) {
-                                try {
-                                    const deletedId = out.deleted_archive_id;
-                                    const row = document.querySelector(`#archive-list .archive-row[data-id='${deletedId}']`);
-                                    if (row) row.remove();
-                                } catch (err) { console.debug('[synth_webui] Failed to remove deleted archive row', err); }
-                            }
-                        } else {
-                            showToast(`Restore failed for ${aid}`, true);
-                        }
-                    }
-                    showToast('Restore completed', false);
-                    archiveSelectedIds.clear();
-                    updateArchiveRestoreState(modal);
-                    // Refresh archive list after successful restore
-                    try { await refreshArchiveList(); } catch (err) { console.debug('[synth_webui] Failed to refresh archive list after restore:', err); }
-                } catch (err) {
-                    console.error('[synth_webui] Restore failed', err);
-                    showToast('Restore error: ' + err.message, true);
-                }
-            });
-        }
-
-        function updateArchiveRestoreState(panel) {
-            const btnRestore = panel.querySelector('#archive-restore-btn');
-            const selectedRow = panel.querySelector('.archive-row.selected');
-            const count = archiveMultiSelect ? archiveSelectedIds.size : (selectedRow ? 1 : 0);
-            if (!btnRestore) return;
-            btnRestore.disabled = count === 0;
-            btnRestore.textContent = count > 1 ? `Restore Selected (${count})` : 'Restore Selected';
-        }
-
-        function toggleArchiveEditMode() {
-            const panel = archiveModal || createArchiveModal();
-            archiveMultiSelect = !archiveMultiSelect;
-            if (!archiveMultiSelect) {
-                archiveSelectedIds.clear();
-            }
-            try { panel.classList.toggle('archive-edit-mode', archiveMultiSelect); } catch (e) { /* ignore */ }
             try {
-                const btnEdit = panel.querySelector('#archive-edit');
-                if (btnEdit) btnEdit.textContent = archiveMultiSelect ? 'Done' : 'Edit';
-            } catch (e) { /* ignore */ }
-            updateArchiveRestoreState(panel);
-            renderArchiveList(Array.isArray(window.__synth_archive_cache) ? window.__synth_archive_cache : []);
-        }
-
-        async function refreshArchiveList() {
-            try {
-                const res = await fetch('/api/chat/archives');
-                if (!res.ok) throw new Error('HTTP ' + res.status);
-                const payload = await res.json();
-                const list = payload.archives || [];
-                window.__synth_archive_cache = list;
-                renderArchiveList(list);
+                if (window.ArchiveWindow && typeof window.ArchiveWindow.createArchiveModal === 'function') {
+                    try { return window.ArchiveWindow.createArchiveModal(); } catch (e) { console.warn('[archive] delegate failed', e); }
+                }
+                // Best-effort dynamic import to register module for older pages
+                try { import('/js/archive-window.mjs').then((mod) => { try { if (mod && typeof mod.createArchiveModal === 'function') { window.ArchiveWindow = window.ArchiveWindow || {}; window.ArchiveWindow.createArchiveModal = mod.createArchiveModal; } } catch (e) { console.warn('[archive] import handler failed', e); } }).catch((e) => { console.warn('[archive] Failed to import archive-window module', e); }); } catch (e) { /* ignore */ }
+                return null;
             } catch (err) {
-                console.error('[synth_webui] Failed to refresh archives:', err);
-                showToast('Failed to load archives: ' + err.message, true);
+                console.warn('[archive] createArchiveModal delegate failed', err);
+                return null;
             }
         }
 
-        function renderArchiveList(list) {
-            const panel = archiveModal || createArchiveModal();
-            const container = panel.querySelector('#archive-list');
-            container.innerHTML = '';
-            try { panel.classList.toggle('archive-edit-mode', archiveMultiSelect); } catch (e) { /* ignore */ }
-            const validIds = new Set(Array.isArray(list) ? list.map((a) => String(a.id)) : []);
-            for (const sid of Array.from(archiveSelectedIds)) {
-                if (!validIds.has(String(sid))) archiveSelectedIds.delete(sid);
-            }
-            if (!Array.isArray(list) || !list.length) {
-                const empty = document.createElement('div');
-                empty.className = 'empty-state';
-                empty.style.padding = '1rem';
-                empty.textContent = 'No archives found.';
-                container.appendChild(empty);
-                updateArchiveRestoreState(panel);
-                return;
-            }
-            for (const arch of list) {
-                const row = document.createElement('div');
-                row.className = 'archive-row';
-                const archId = String(arch.id);
-                row.dataset.id = archId;
-                row.style.display = 'flex'; row.style.gap = '8px'; row.style.alignItems = 'center'; row.style.justifyContent = 'space-between'; row.style.padding = '8px'; row.style.borderRadius='8px';
-                const check = document.createElement('input');
-                check.type = 'checkbox';
-                check.className = 'archive-check';
-                check.checked = archiveSelectedIds.has(archId);
-                // Left section: date/time + name
-                const left = document.createElement('div'); left.style.display='flex'; left.style.flexDirection='column';
-                const dt = document.createElement('div');
-                dt.textContent = formatTimestamp(arch.created_at || new Date().toISOString());
-                dt.style.fontSize = '0.85rem'; dt.style.opacity = 0.85;
-                const nameDiv = document.createElement('div'); nameDiv.style.fontWeight='600'; nameDiv.style.cursor='pointer';
-                nameDiv.textContent = arch.name || 'Chat';
-                left.appendChild(dt); left.appendChild(nameDiv);
-
-                // Center: msg count
-                const center = document.createElement('div'); center.textContent = `${arch.message_count} msgs`;
-                center.style.fontSize='0.85rem'; center.style.opacity=0.8;
-
-                // Right: actions
-                const right = document.createElement('div'); right.style.display='flex'; right.style.gap='6px';
-                const renameBtn = document.createElement('button'); renameBtn.className = 'pill'; renameBtn.type='button'; renameBtn.textContent = '✏️';
-                const deleteBtn = document.createElement('button'); deleteBtn.className = 'pill danger'; deleteBtn.type='button'; deleteBtn.textContent = '🗑️';
-                right.appendChild(renameBtn); right.appendChild(deleteBtn);
-
-                row.appendChild(check); row.appendChild(left); row.appendChild(center); row.appendChild(right);
-                container.appendChild(row);
-
-                // Selection handling
-                row.addEventListener('click', (ev) => {
-                    // ignore clicks on action buttons
-                    if (ev.target === deleteBtn || ev.target === renameBtn || ev.target === check) return;
-                    if (archiveMultiSelect) {
-                        check.checked = !check.checked;
-                        if (check.checked) archiveSelectedIds.add(archId); else archiveSelectedIds.delete(archId);
-                        row.classList.toggle('selected', check.checked);
-                        updateArchiveRestoreState(panel);
-                        return;
-                    }
-                    container.querySelectorAll('.archive-row').forEach(r => r.classList.remove('selected'));
-                    row.classList.add('selected');
-                    updateArchiveRestoreState(panel);
-                });
-
-                check.addEventListener('change', () => {
-                    if (check.checked) archiveSelectedIds.add(archId); else archiveSelectedIds.delete(archId);
-                    row.classList.toggle('selected', check.checked);
-                    updateArchiveRestoreState(panel);
-                });
-
-                // Delete
-                deleteBtn.addEventListener('click', async (ev) => {
-                    ev.stopPropagation();
-                    if (!confirm('Delete this archive? This action cannot be undone.')) return;
-                    try {
-                        const res = await fetch('/api/chat/archives/' + arch.id, { method: 'DELETE' });
-                        if (!res.ok) throw new Error('HTTP ' + res.status);
-                        showToast('Archive deleted', false);
-                        // remove row and refresh list
-                        row.remove();
-                        await refreshArchiveList();
-                    } catch (err) { showToast('Delete archive error: ' + err.message, true); }
-                });
-
-                // Rename
-                renameBtn.addEventListener('click', (ev) => {
-                    ev.stopPropagation();
-                    const input = document.createElement('input'); input.type='text'; input.value = arch.name || 'Chat'; input.style.minWidth='220px';
-                    nameDiv.replaceWith(input);
-                    input.focus();
-                    function finishRename() { 
-                        const newName = input.value.trim() || 'Chat';
-                        (async () => {
-                            try {
-                                const res = await fetch('/api/chat/archives/' + arch.id + '/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: newName }) });
-                                if (!res.ok) throw new Error('HTTP ' + res.status);
-                                const out = await res.json();
-                                if (out && out.success) {
-                                    nameDiv.textContent = newName;
-                                    input.replaceWith(nameDiv);
-                                    arch.name = newName;
-                                    showToast('Renamed', false);
-                                    await refreshArchiveList();
-                                } else {
-                                    showToast('Rename failed', true);
-                                    input.replaceWith(nameDiv);
-                                }
-                            } catch (err) { showToast('Rename error: ' + err.message, true); input.replaceWith(nameDiv);}    
-                        })(); 
-                    }
-                    input.addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ finishRename(); } });
-                    input.addEventListener('blur', finishRename);
-                });
-            }
-            updateArchiveRestoreState(panel);
-        }
+        // Legacy archive internal helpers removed. Use the consolidated archive module which encapsulates UI+logic.
 
         chatArchiveBtn?.addEventListener('click', async () => {
             try {
@@ -7382,14 +6480,22 @@ import * as THREE from 'three';
 
         chatRestoreBtn?.addEventListener('click', async () => {
             try {
-                const modal = createArchiveModal();
-                bindArchiveModalButtons();
-                if (archiveWinbox && window.SynthWindowManager && typeof window.SynthWindowManager.restore === 'function') {
-                    window.SynthWindowManager.restore('archives');
-                } else {
-                    modal.style.display = 'flex';
+                // Ensure the consolidated module is loaded and call its creator
+                let mod = window.ArchiveWindow;
+                if (!mod || !mod.createArchiveModal) {
+                    try { mod = await import('/js/archive-window.mjs'); if (mod && mod.createArchiveModal) { window.ArchiveWindow = window.ArchiveWindow || {}; window.ArchiveWindow.createArchiveModal = mod.createArchiveModal; } }
+                    catch (e) { console.warn('[synth_webui] Failed to import archive-window module', e); }
                 }
-                await refreshArchiveList();
+                const creator = (window.ArchiveWindow && window.ArchiveWindow.createArchiveModal) ? window.ArchiveWindow.createArchiveModal : (mod && mod.createArchiveModal ? mod.createArchiveModal : null);
+                if (!creator) throw new Error('Archive module not available');
+                const modal = creator();
+                // Try to restore via window manager if available, otherwise show panel
+                try {
+                    if (window.SynthWindowManager && typeof window.SynthWindowManager.restore === 'function') {
+                        try { window.SynthWindowManager.restore('archives'); return; } catch (e) {}
+                    }
+                } catch (e) {}
+                try { if (modal && modal.style) modal.style.display = 'flex'; } catch (e) {}
             } catch (err) {
                 console.error('[synth_webui] Open archives failed', err);
                 showToast('Open archives error: ' + err.message, true);

@@ -9,11 +9,29 @@ export async function createChatWindow() {
             }
         }
 
-        const mount = document.getElementById('chat');
+        // Locate mount element. If missing, attempt to (re)load the home section to ensure the template exists.
+        let mount = document.getElementById('chat');
         if (!mount) {
-            console.warn('[chat-window] mount element #chat not found');
+            try { if (window.SynthWebUI && typeof window.SynthWebUI.loadSection === 'function') await window.SynthWebUI.loadSection('home'); } catch (e) { /* ignore */ }
+            mount = document.getElementById('chat');
+        }
+        if (!mount) {
+            // Still missing — avoid spamming the console, return gracefully for now.
+            console.debug('[chat-window] mount element #chat not found after loading home');
             return null;
         }
+
+        // Clear any inline positioning styles or classes left from previous mounts
+        try {
+            mount.style.left = '';
+            mount.style.top = '';
+            mount.style.right = '';
+            mount.style.bottom = '';
+            // Also clear the shorthand inset property if present
+            mount.style.inset = '';
+            // Remove any window state classes to ensure a clean mount
+            try { mount.classList.remove('hidden', 'maximized', 'expanded', 'minimized'); } catch (e) { /* ignore */ }
+        } catch (e) { /* ignore */ }
 
         // If template not present yet, try to lazy-load the Home section so the template is available
         try {

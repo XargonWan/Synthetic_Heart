@@ -1,3 +1,4 @@
+import os
 import pytest
 
 
@@ -9,3 +10,12 @@ def _reset_animation_handler_singleton():
     ah._animation_handler = None
     yield
     ah._animation_handler = None
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _set_backups_dir(tmp_path_factory):
+    """Ensure tests use a writable backups directory to avoid permission issues."""
+    backups = tmp_path_factory.mktemp("backups")
+    # monkeypatch is function-scoped and cannot be used here, set env directly
+    os.environ["SYNTH_BACKUPS_DIR"] = str(backups)
+    return backups

@@ -848,20 +848,51 @@
         }
         .settings-grid {
             display: flex;
-            flex-wrap: wrap;
+            /* Force vertical stacking of settings cards by default */
+            flex-direction: column;
             gap: clamp(1rem, 2vw, 1.6rem);
             align-items: stretch;
         }
         .settings-grid > .card {
-            flex: 1 1 auto;
-            min-width: 280px;
+            /* Ensure cards take full width in vertical layout */
+            width: 100%;
+            min-width: 0;
         }
+        /* Backwards-compatible hook (no-op since .settings-grid is columnar by default) */
         #tab-settings .settings-grid {
-            flex-direction: column;
+            /* intentionally left empty */
         }
         #tab-settings .settings-grid > .card {
             max-width: none;
             width: 100%;
+        }
+
+        /* Make About / Settings / Components panels use the browser scroll (page scroll)
+           instead of internal scroll containers */
+        .tab-panel[data-tab="settings"],
+        .tab-panel[data-tab="components"],
+        .tab-panel[data-tab="about"] {
+            /* Do not override display for non-active panels; allow browser scroll when active (see .active override) */
+            height: auto;
+            min-height: 0;
+            overflow: visible;
+        }
+        /* When these panels are active, allow them to behave as normal document flow so the browser
+           handles scrolling (overrides the default .tab-panel.active flex/full-height behavior). */
+        .tab-panel[data-tab="settings"].active,
+        .tab-panel[data-tab="components"].active,
+        .tab-panel[data-tab="about"].active {
+            display: block;
+            height: auto;
+            min-height: 0;
+            overflow: visible;
+        }
+        .tab-panel[data-tab="settings"] .home-stage,
+        .tab-panel[data-tab="components"] .home-stage,
+        .tab-panel[data-tab="about"] .home-stage {
+            height: auto;
+            min-height: 0;
+            overflow: visible;
         }
         .card {
             background: var(--surface);

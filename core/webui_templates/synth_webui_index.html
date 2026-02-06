@@ -3937,7 +3937,7 @@
                         // Load debug module as an ES module and create the debug window when ready
                         const s = document.createElement('script');
                         s.type = 'module';
-                        s.src = '/res/synth_webui/js/debug-window.mjs';
+                        s.src = '/js/debug-window.mjs';
                         document.head.appendChild(s);
                         s.addEventListener('load', () => {
                             try { if (window.DebugWindow && typeof window.DebugWindow.createDebugWindow === 'function') window.DebugWindow.createDebugWindow(); } catch (e) { /* ignore */ }

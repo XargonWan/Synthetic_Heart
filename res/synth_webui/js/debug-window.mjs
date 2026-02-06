@@ -45,7 +45,7 @@ export function createDebugWindow() {
             panel.style.height = '100%';
             panel.innerHTML = `
             <div id="synth-debug-title-bar" style="display:flex;align-items:center;justify-content:space-between;gap:6px;padding:10px 12px;border-bottom:1px solid var(--border);cursor:move;user-select:none;">
-                <div id="synth-debug-title" style="font-weight:600;">Antimation Pause</div>
+                <div id="synth-debug-title" style="font-weight:600;">Debug</div>
                 <div id="synth-debug-header-tools" style="display:flex;gap:6px;align-items:center;"></div>
             </div>
             <div id="synth-debug-body" style="padding:12px;display:flex;flex-direction:column;gap:12px;overflow:auto;height:calc(100% - 52px);">
@@ -55,7 +55,6 @@ export function createDebugWindow() {
                         <button id="synth-debug-pause" class="pill secondary" type="button" title="⏸️" aria-label="Pause">⏸️</button>
                         <button id="synth-debug-resync" class="pill secondary" type="button" title="Sync">🛜</button>
                         <button id="synth-debug-reset" class="pill" type="button" title="Reset">🔁</button>
-                        <button id="synth-debug-minimize" class="pill secondary" type="button" title="Minimize">➖</button>
                     </div>
                 </div>
 
@@ -119,7 +118,7 @@ export function createDebugWindow() {
             win = panel;
             winbox = window.SynthWindowManager.create({
                 id: 'debug',
-                title: 'Antimation Pause',
+                title: 'Debug',
                 mount: panel,
                 width: 420,
                 height: 520,
@@ -134,21 +133,6 @@ export function createDebugWindow() {
                     const pauseBtn = panel.querySelector('#synth-debug-pause');
                     const resyncBtn = panel.querySelector('#synth-debug-resync');
                     const resetBtn = panel.querySelector('#synth-debug-reset');
-                    // Add a native-like minimize control and a native pause control to the WinBox header
-                    window.SynthWindowManager.attachHeaderTools('debug', winbox, [
-                        {
-                            label: '–',
-                            title: 'Minimize',
-                            className: 'synth-wb-tool-minimize',
-                            onClick: () => { try { window.SynthWindowManager.minimize('debug'); } catch (e) { /* ignore */ } }
-                        },
-                        {
-                            label: '⏸️',
-                            title: '⏸️',
-                            className: 'synth-wb-tool-pause',
-                            onClick: () => { try { if (pauseBtn) pauseBtn.click(); } catch (e) { /* ignore */ } }
-                        }
-                    ]);
                 }
             } catch (e) { /* ignore */ }
             return winbox;

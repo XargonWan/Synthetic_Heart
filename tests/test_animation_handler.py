@@ -317,10 +317,12 @@ async def test_websocket_message_format(animation_handler, mock_webui):
         loop=True
     )
     
-    # Check that send_json was called with correct format
-    mock_ws.send_json.assert_called_once()
-    call_args = mock_ws.send_json.call_args[0][0]
-    
+    # There may be preload messages or multiple send_json calls; find the animation payload
+    calls = [c[0][0] for c in mock_ws.send_json.call_args_list]
+    anim_calls = [c for c in calls if c.get("type") == "animation"]
+    assert len(anim_calls) == 1, f"Expected one 'animation' message, got: {anim_calls}"
+    call_args = anim_calls[0]
+
     assert call_args["type"] == "animation"
     assert isinstance(call_args["animation"], str)
     assert call_args["animation"].endswith("Thinking.fbx")
