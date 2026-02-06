@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 def test_mobile_auto_restore_comment_present():
-    shell = Path('core/webui_templates/synth_webui_shell_clean.html').read_text(encoding='utf-8')
+    shell = Path('core/webui_templates/synth_webui_shell.html').read_text(encoding='utf-8')
     home = Path('core/webui_templates/sections/home.html').read_text(encoding='utf-8')
     js = Path('res/synth_webui/js/main.js').read_text(encoding='utf-8')
     vrm = Path('res/synth_webui/js/vrm-viewer.mjs').read_text(encoding='utf-8')

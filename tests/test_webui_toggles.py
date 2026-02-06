@@ -5,7 +5,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 def test_synth_webui_has_toggle_switch_selectors():
-    path = ROOT / "core" / "webui_templates" / "synth_webui_shell_clean.html"
+    path = ROOT / "core" / "webui_templates" / "synth_webui_shell.html"
     content = path.read_text(encoding='utf-8')
 
     # The CSS should support both the immediate sibling .toggle-slider
