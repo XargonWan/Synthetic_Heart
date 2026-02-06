@@ -1484,6 +1484,22 @@
                         if (targetPanel) {
                             targetPanel.classList.add('active');
                         }
+
+                        // Toggle page scroll for About / Settings / Components
+                        // These sections are designed to use the browser page scroll instead of
+                        // internal scroll containers. Because the root `html, body` start with
+                        // `overflow: hidden`, we switch it to `auto` when one of these tabs
+                        // is active, and restore `hidden` for other tabs to keep the app
+                        // layout stable.
+                        if (['settings', 'components', 'about'].includes(tabName)) {
+                            document.documentElement.style.overflow = 'auto';
+                            document.body.style.overflow = 'auto';
+                            // Ensure the activated panel is visible at the top of the page
+                            try { targetPanel.scrollIntoView({ behavior: 'auto', block: 'start' }); } catch (e) {}
+                        } else {
+                            document.documentElement.style.overflow = 'hidden';
+                            document.body.style.overflow = 'hidden';
+                        }
                     });
                 });
             }

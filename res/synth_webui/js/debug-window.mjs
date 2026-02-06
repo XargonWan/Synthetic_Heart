@@ -126,15 +126,10 @@ export function createDebugWindow() {
                 y: 'bottom',
                 dockLabel: 'Restore Debug',
                 dockClass: 'chat-toggle-btn',
-                className: 'synth-winbox no-full'
+                className: 'synth-winbox no-full no-close'
             });
-            try {
-                if (window.SynthWindowManager && typeof window.SynthWindowManager.attachHeaderTools === 'function') {
-                    const pauseBtn = panel.querySelector('#synth-debug-pause');
-                    const resyncBtn = panel.querySelector('#synth-debug-resync');
-                    const resetBtn = panel.querySelector('#synth-debug-reset');
-                }
-            } catch (e) { /* ignore */ }
+            // Intentionally do not attach header tools for Debug — pause control lives inside the debug panel only.
+
             return winbox;
         };
 
@@ -397,6 +392,58 @@ export function createDebugWindow() {
             }
         }
 
+        if (selFile) {
+            selFile.addEventListener('change', async () => { await autofillLoopInputs(); });
+        }
+
+        // Populate initial file list and bind selType change to refresh files
+        (async () => {
+            try {
+                const initialType = (selType && selType.value) ? selType.value : 'think';
+                await refreshFilesForType(initialType);
+                try { if (selFile) selFile.selectedIndex = 0; } catch (e) { /* ignore */ }
+                await autofillLoopInputs();
+            } catch (e) { /* ignore */ }
+        })();
+
+        if (selType) {
+            selType.addEventListener('change', async () => {
+                try { await refreshFilesForType(selType.value); if (selFile) selFile.selectedIndex = 0; } catch (e) { /* ignore */ }
+                try { await autofillLoopInputs(); } catch (e) { /* ignore */ }
+            });
+            const refreshBtn = win.querySelector('#synth-debug-loop-refresh');
+            if (refreshBtn && selType) refreshBtn.addEventListener('click', async () => {
+                await refreshFilesForType(selType.value);
+                try { if (selFile) selFile.selectedIndex = 0; } catch (e) { /* ignore */ }
+                await autofillLoopInputs();
+            });
+        }
+
+        // Loop start / clear buttons
+        const loopStartBtn = win.querySelector('#synth-debug-loop-start-btn');
+        const loopClearBtn = win.querySelector('#synth-debug-loop-clear-btn');
+        if (loopStartBtn) {
+            loopStartBtn.addEventListener('click', async () => {
+                try {
+                    if (!window.animationHandler) return console.warn('[synth_webui] No animationHandler');
+                    const aType = selType ? selType.value : 'think';
+                    const aFile = (selFile && selFile.value) ? selFile.value : null;
+                    const s = parseInt((startInput && startInput.value) ? startInput.value : '0', 10);
+                    const e = parseInt((endInput && endInput.value) ? endInput.value : '0', 10);
+                    const fps = parseFloat((fpsInput && fpsInput.value) ? fpsInput.value : '30');
+                    if (!aFile) return alert('Please select an animation file first');
+                    if (!Number.isFinite(s) || !Number.isFinite(e)) return alert('Please enter numeric frame values');
+                    if (e <= s) return alert('end must be > start');
+                    await window.animationHandler.startTemporaryLoop(aType, aFile, s, e, Number.isFinite(fps) ? fps : 30);
+                } catch (err) { console.warn('[synth_webui] start temp loop error:', err); }
+            });
+        }
+        if (loopClearBtn) {
+            loopClearBtn.addEventListener('click', () => {
+                try { if (!window.animationHandler) return; window.animationHandler.clearTemporaryOverride(); } catch (err) { console.warn('[synth_webui] clear temp loop failed:', err); }
+            });
+        }
+
         const getDescriptorForFile = (file) => {
             try {
                 if (!file) return null;
@@ -466,51 +513,389 @@ export function createDebugWindow() {
             } catch (e) { /* ignore */ }
         };
 
-        let __dbgFeelingsSig = '';
-        let __dbgFeelingsRows = new Map();
+        // Feelings UI helpers (full impl copied from synth_webui_index)
+        const extractEmotionValues = () => {
+            try {
+                const out = {};
+                const mergeObj = (obj) => {
+                    if (!obj || typeof obj !== 'object') return;
+                    const values = (obj.values && typeof obj.values === 'object') ? obj.values : obj;
+                    if (!values || typeof values !== 'object') return;
+                    if (Array.isArray(values)) {
+                        values.forEach((it) => {
+                            try {
+                                const name = it && (it.type || it.name) ? String(it.type || it.name) : '';
+                                if (!name) return;
+                                if (/^\d+$/.test(String(name))) return;
+                                const raw = Number(it.intensity !== undefined ? it.intensity : it.value);
+                                if (!Number.isFinite(raw)) return;
+                                const v01 = (raw > 1) ? (raw / 10.0) : raw;
+                                const vv = Math.max(0, Math.min(1, v01));
+                                out[String(name)] = Math.max(out[String(name)] || 0, vv);
+                            } catch (e) { /* ignore */ }
+                        });
+                        return;
+                    }
+                    Object.keys(values).forEach((k) => {
+                        if (!k) return;
+                        if (/^\d+$/.test(String(k))) return;
+                        const v = Number(values[k]);
+                        if (!Number.isFinite(v)) return;
+                        const v01 = (v > 1) ? (v / 10.0) : v;
+                        const vv = Math.max(0, Math.min(1, v01));
+                        out[String(k)] = Math.max(out[String(k)] || 0, vv);
+                    });
+                };
+                mergeObj(window.animationHandler ? (window.animationHandler._lastEmotions || null) : null);
+                mergeObj(window.animationHandler ? (window.animationHandler._lastFeelings || null) : null);
+                return out;
+            } catch (e) {
+                return {};
+            }
+        };
+
+        const ensureFeelingsRows = (keys) => {
+            try {
+                if (!win) return;
+                const feelingsHost = win.querySelector('#synth-debug-feelings');
+                if (!feelingsHost) return;
+                const sig = keys.join('|');
+                if (__dbgFeelingsSig === sig && __dbgFeelingsRows.size) return;
+
+                __dbgFeelingsSig = sig;
+                __dbgFeelingsRows = new Map();
+                feelingsHost.innerHTML = '';
+
+                if (keys.length === 0) {
+                    const empty = document.createElement('div');
+                    empty.style.fontSize = '12px';
+                    empty.style.color = 'var(--text-soft)';
+                    empty.textContent = '—';
+                    feelingsHost.appendChild(empty);
+                    return;
+                }
+
+                keys.forEach((name) => {
+                    const row = document.createElement('div');
+                    row.style.display = 'grid';
+                    row.style.gridTemplateColumns = '1fr 140px 56px';
+                    row.style.alignItems = 'center';
+                    row.style.gap = '8px';
+
+                    const label = document.createElement('div');
+                    label.style.fontSize = '12px';
+                    label.style.color = 'var(--text)';
+                    label.textContent = name;
+
+                    const slider = document.createElement('input');
+                    slider.type = 'range';
+                    slider.min = '0';
+                    slider.max = '1';
+                    slider.step = '0.01';
+                    slider.value = '0';
+
+                    const num = document.createElement('input');
+                    num.type = 'number';
+                    num.min = '0';
+                    num.max = '1';
+                    num.step = '0.01';
+                    num.value = '0';
+                    num.style.padding = '6px';
+                    num.style.borderRadius = '8px';
+                    num.style.background = 'rgba(255,255,255,0.02)';
+                    num.style.border = '1px solid var(--border)';
+                    num.style.color = 'var(--text)';
+
+                    const apply = (v) => {
+                        const vv = clamp01(v);
+                        slider.value = String(vv);
+                        num.value = String(vv);
+                        try { window.animationHandler && window.animationHandler.setDebugEmotionOverride && window.animationHandler.setDebugEmotionOverride(name, vv); } catch (e) { /* ignore */ }
+                    };
+                    row.appendChild(label);
+                    row.appendChild(slider);
+                    row.appendChild(num);
+                    feelingsHost.appendChild(row);
+
+                    __dbgFeelingsRows.set(name, { slider, num });
+                });
+            } catch (e) { /* ignore */ }
+        };
 
         const renderFeelings = () => {
             try {
                 const feelingsHost = win.querySelector('#synth-debug-feelings');
                 if (!feelingsHost) return;
-                // Minimal placeholder: show an empty state until real data is available
-                feelingsHost.innerHTML = '';
-                const empty = document.createElement('div');
-                empty.style.fontSize = '12px';
-                empty.style.color = 'var(--text-soft)';
-                empty.textContent = '—';
-                feelingsHost.appendChild(empty);
+                const base = extractEmotionValues();
+                const overrides = (window.animationHandler && typeof window.animationHandler.getDebugEmotionOverrides === 'function') ? window.animationHandler.getDebugEmotionOverrides() : {}; 
+                const personaKeys = (window.__synth_persona_emotions_list && Array.isArray(window.__synth_persona_emotions_list)) ? window.__synth_persona_emotions_list : [];
+                const keysSet = new Set();
+                if (personaKeys && Array.isArray(personaKeys) && personaKeys.length) {
+                    personaKeys.forEach(k => keysSet.add(k));
+                    Object.keys(base).forEach(k => { if (personaKeys.includes(k)) keysSet.add(k); });
+                    Object.keys(overrides).forEach(k => { if (personaKeys.includes(k)) keysSet.add(k); });
+                } else {
+                    Object.keys(base).forEach(k => keysSet.add(k));
+                    Object.keys(overrides).forEach(k => keysSet.add(k));
+                }
+                const keys = Array.from(keysSet).filter(k => k && !/^\d+$/.test(String(k))).sort();
+                ensureFeelingsRows(keys);
+                if (!keys.length) return;
+                keys.forEach((name) => {
+                    const row = __dbgFeelingsRows.get(name);
+                    if (!row) return;
+                    const override = (overrides && overrides[name] !== undefined) ? clamp01(overrides[name]) : null;
+                    const current = (override !== null) ? override : clamp01(base[name] || 0);
+
+                    const active = document.activeElement;
+                    const isActive = (active === row.slider || active === row.num);
+                    if (!isActive || override !== null) {
+                        row.slider.value = String(current);
+                        row.num.value = String(current);
+                    }
+                });
             } catch (e) { /* ignore */ }
         };
 
+        // Facial morph UI (full impl)
+        const getFaceKeys = () => {
+            try {
+                const caps = window.__synth_vrm_capabilities || null;
+                const keys = (caps && Array.isArray(caps.expressionKeys)) ? caps.expressionKeys : [];
+                const extra = [
+                    'blink','blinkLeft','blinkRight','eye_blink_left','eye_blink_right',
+                    'eyes_closed','eyesClosed',
+                    'eyes_wide','mouth_open','mouth_frown','brow_down','brow_up',
+                    'mouth_smile','eyes_smile','mouth_O',
+                    'aa','ih','ou','ee','oh',
+                    'eye_look_left','eye_look_right','eye_look_up','eye_look_down'
+                ];
+                const rawKeys = Array.from(new Set([...(keys || []), ...extra].map(String)));
+                const compositeMetrics = new Set(['valence','arousal','stress','calm','relaxed','neutral']);
+                const personaEmotionKeys = (window.__synth_persona_emotions_list && Array.isArray(window.__synth_persona_emotions_list)) ? window.__synth_persona_emotions_list : [];
+                const personaEmotionKeysLower = personaEmotionKeys.map(k => String(k).toLowerCase());
+                const compositeEmotions = new Set([
+                    'sad','happy','angry','surprised','relaxed','neutral','scared','fear','disgust','joy','love','smile',
+                    'sorrow','fun','joy','anger','fear','disgust','surprise'
+                ]);
+                return rawKeys
+                    .filter((k) => {
+                        if (!k) return false;
+                        const s = String(k);
+                        if (/^\d+$/.test(s)) return false;
+                        const low = s.toLowerCase();
+                        const norm = low.replace(/[\._\-\s]+/g, '');
+                        if (compositeMetrics.has(low) || compositeMetrics.has(norm)) return false;
+                        if (personaEmotionKeysLower.includes(low) || personaEmotionKeysLower.includes(norm)) return false;
+                        if (compositeEmotions.has(low) || compositeEmotions.has(norm)) return false;
+                        return true;
+                    })
+                    .sort();
+            } catch (e) {
+                return [];
+            }
+        };
+
+        let faceRows = [];
         const renderFaceList = () => {
             try {
+                const faceFilter = win.querySelector('#synth-debug-face-filter');
                 const faceList = win.querySelector('#synth-debug-face-list');
                 if (!faceList) return;
+                const filter = (faceFilter && faceFilter.value) ? String(faceFilter.value).toLowerCase() : '';
+                const keys = getFaceKeys().filter((k) => !filter || k.toLowerCase().includes(filter));
+                const overrides = (window.animationHandler && typeof window.animationHandler.getDebugFaceOverrides === 'function') ? window.animationHandler.getDebugFaceOverrides() : {};
+
                 faceList.innerHTML = '';
-                const empty = document.createElement('div');
-                empty.style.fontSize = '12px';
-                empty.style.color = 'var(--text-soft)';
-                empty.textContent = '—';
-                faceList.appendChild(empty);
+                faceRows = [];
+                if (keys.length === 0) {
+                    const empty = document.createElement('div');
+                    empty.style.fontSize = '12px';
+                    empty.style.color = 'var(--text-soft)';
+                    empty.textContent = '—';
+                    faceList.appendChild(empty);
+                    return;
+                }
+
+                keys.forEach((k) => {
+                    const row = document.createElement('div');
+                    row.style.display = 'grid';
+                    row.style.gridTemplateColumns = '1fr 140px 56px 48px';
+                    row.style.alignItems = 'center';
+                    row.style.gap = '8px';
+
+                    const label = document.createElement('div');
+                    label.style.fontSize = '12px';
+                    label.style.color = 'var(--text)';
+                    label.style.overflow = 'hidden';
+                    label.style.textOverflow = 'ellipsis';
+                    label.style.whiteSpace = 'nowrap';
+                    label.title = k;
+                    label.textContent = k;
+
+                    const slider = document.createElement('input');
+                    slider.type = 'range';
+                    slider.min = '0';
+                    slider.max = '1';
+                    slider.step = '0.01';
+                    slider.value = String(clamp01((overrides[k] !== undefined) ? overrides[k] : (window.animationHandler && window.animationHandler._getFaceValue ? window.animationHandler._getFaceValue(k) : 0)));
+
+                    const num = document.createElement('input');
+                    num.type = 'number';
+                    num.min = '0';
+                    num.max = '1';
+                    num.step = '0.01';
+                    num.value = slider.value;
+                    num.style.padding = '6px';
+                    num.style.borderRadius = '8px';
+                    num.style.background = 'rgba(255,255,255,0.02)';
+                    num.style.border = '1px solid var(--border)';
+                    num.style.color = 'var(--text)';
+
+                    const cur = document.createElement('div');
+                    cur.style.fontSize = '11px';
+                    cur.style.color = 'var(--text-soft)';
+                    cur.textContent = '—';
+
+                    const apply = (v) => {
+                        const vv = clamp01(v);
+                        slider.value = String(vv);
+                        num.value = String(vv);
+                        try { window.animationHandler && window.animationHandler.setDebugFaceOverride && window.animationHandler.setDebugFaceOverride(k, vv); } catch (e) { /* ignore */ }
+                    };
+                    slider.addEventListener('input', () => apply(slider.value));
+                    num.addEventListener('change', () => apply(num.value));
+
+                    row.appendChild(label);
+                    row.appendChild(slider);
+                    row.appendChild(num);
+                    row.appendChild(cur);
+                    faceList.appendChild(row);
+
+                    faceRows.push({ key: k, curEl: cur, sliderEl: slider, numEl: num });
+                });
             } catch (e) { /* ignore */ }
         };
 
-        // Initial render
-        try { renderFeelings && renderFeelings(); } catch (e) { /* ignore */ }
-        try { renderFaceList && renderFaceList(); } catch (e) { /* ignore */ }
-        try { if (pauseBtn) pauseBtn.textContent = isPaused() ? '▶️' : '⏸️'; } catch (e) { /* ignore */ }
-
+        // Bind feelings & face controls
         try {
-            if (!window.__synth_debug_on_vrm_loaded) {
-                window.__synth_debug_on_vrm_loaded = () => {
-                    try { renderFaceList && renderFaceList(); } catch (e) { /* ignore */ }
-                    try { __dbgFeelingsSig = ''; renderFeelings && renderFeelings(); } catch (e) { /* ignore */ }
-                    try { autofillLoopInputs && autofillLoopInputs(); } catch (e) { /* ignore */ }
-                };
-                window.addEventListener('vrmLoaded', window.__synth_debug_on_vrm_loaded);
+            const feelingsClearBtn = win.querySelector('#synth-debug-feelings-clear');
+            if (feelingsClearBtn) {
+                feelingsClearBtn.addEventListener('click', () => {
+                    try { window.animationHandler && window.animationHandler.clearDebugEmotionOverrides && window.animationHandler.clearDebugEmotionOverrides(); } catch (e) { /* ignore */ }
+                    __dbgFeelingsSig = '';
+                    renderFeelings();
+                });
+            }
+
+            const faceFilter = win.querySelector('#synth-debug-face-filter');
+            const faceClearBtn = win.querySelector('#synth-debug-face-clear');
+            if (faceFilter) faceFilter.addEventListener('input', () => renderFaceList());
+            if (faceClearBtn) {
+                faceClearBtn.addEventListener('click', () => {
+                    try { window.animationHandler && window.animationHandler.clearDebugFaceOverrides && window.animationHandler.clearDebugFaceOverrides(); } catch (e) { /* ignore */ }
+                    renderFaceList();
+                });
             }
         } catch (e) { /* ignore */ }
+
+        // Live status updater
+        try {
+            const stPaused = win.querySelector('#synth-debug-status-paused');
+            const stCurrent = win.querySelector('#synth-debug-status-current');
+            const stPhase = win.querySelector('#synth-debug-status-phase');
+            const stFrame = win.querySelector('#synth-debug-status-frame');
+            const stRemote = win.querySelector('#synth-debug-status-remote');
+
+            setInterval(() => {
+                try {
+                    if (stPaused) stPaused.textContent = isPaused() ? 'yes' : 'no';
+                    if (!window.animationHandler || !window.animationHandler.currentAction) {
+                        if (stCurrent) stCurrent.textContent = '—';
+                        if (stPhase) stPhase.textContent = '—';
+                        if (stFrame) stFrame.textContent = '—';
+                    } else {
+                        const act = window.animationHandler.currentAction;
+                        const clip = act.getClip ? act.getClip() : null;
+                        if (stCurrent) stCurrent.textContent = (window.animationHandler.currentActionName || clip?.name || 'unknown');
+                        if (stPhase) stPhase.textContent = window.animationHandler.currentActionPhase || '—';
+                        if (clip && clip._meta?.loopFrames && Number.isFinite(act.time)) {
+                            const lm = clip._meta.loopFrames;
+                            const fps = Number(lm.fps) || 30;
+                            const span = Math.max(1, (Number(lm.endFrame) - Number(lm.startFrame)) + 1);
+                            const localFrame = Math.floor(act.time * fps);
+                            const currentFrame = Number(lm.startFrame) + ((localFrame % span) + span) % span;
+                            if (stFrame) stFrame.textContent = `${currentFrame}f / ${lm.startFrame}-${lm.endFrame}`;
+                        } else if (clip && Number.isFinite(act.time)) {
+                            const fps = 30;
+                            const totalFrames = Math.max(1, Math.round(Number(clip.duration || 0) * fps));
+                            const maxIdx = Math.max(0, totalFrames - 1);
+                            const currentFrame = Math.min(maxIdx, Math.max(0, Math.floor(act.time * fps)));
+                            if (stFrame) stFrame.textContent = `${currentFrame}f / 0-${maxIdx}`;
+                        } else {
+                            if (stFrame) stFrame.textContent = '—';
+                        }
+                    }
+                    try {
+                        const s = window.__synth_current_animation_state || null;
+                        if (stRemote) stRemote.textContent = (s && (s.state || s.animation)) ? `${s.state || '—'} · ${(s.animation || '—')}` : '—';
+                    } catch (e) { if (stRemote) stRemote.textContent = '—'; }
+
+                    // Try a lazy autofill of loop end if still empty/0 (after preload/handler becomes ready)
+                    try {
+                        const selFile = win.querySelector('#synth-debug-loop-file');
+                        const endInput = win.querySelector('#synth-debug-loop-end');
+                        if (selFile && endInput && (String(endInput.value || '') === '' || String(endInput.value || '') === '0') && selFile.value) {
+                            autofillLoopInputs();
+                        }
+                    } catch (e) { /* ignore */ }
+
+                    // refresh feelings + face current values
+                    renderFeelings();
+                    if (window.animationHandler && faceRows && faceRows.length) {
+                        faceRows.forEach((r) => {
+                            try {
+                                const vv = window.animationHandler._getFaceValue ? window.animationHandler._getFaceValue(r.key) : 0;
+                                if (r.curEl) r.curEl.textContent = Number.isFinite(vv) ? vv.toFixed(2) : '—';
+                            } catch (e) { /* ignore */ }
+                        });
+                    }
+                } catch (e) { /* ignore */ }
+            }, 300);
+
+            async function resetLoopOverrideUI() {
+                try {
+                    const selType = win.querySelector('#synth-debug-loop-type');
+                    const selFile = win.querySelector('#synth-debug-loop-file');
+                    const endInput = win.querySelector('#synth-debug-loop-end');
+                    if (!selType || !selFile) return;
+                    try { selType.value = 'think'; } catch (e) { /* ignore */ }
+                    await refreshFilesForType('think');
+                    try { if (selFile) selFile.selectedIndex = 0; } catch (e) { /* ignore */ }
+                    await autofillLoopInputs();
+                } catch (e) { /* ignore */ }
+            }
+
+            // Initial render
+            renderFeelings();
+            renderFaceList();
+            try { if (pauseBtn) pauseBtn.textContent = isPaused() ? 'Resume' : 'Pause'; } catch (e) { /* ignore */ }
+
+            // VRM capabilities arrive after load: refresh face keys when the avatar loads.
+            try {
+                if (!window.__synth_debug_on_vrm_loaded) {
+                    window.__synth_debug_on_vrm_loaded = () => {
+                        try { renderFaceList(); } catch (e) { /* ignore */ }
+                        try { __dbgFeelingsSig = ''; renderFeelings(); } catch (e) { /* ignore */ }
+                        try { autofillLoopInputs(); } catch (e) { /* ignore */ }
+                    };
+                    window.addEventListener('vrmLoaded', window.__synth_debug_on_vrm_loaded);
+                }
+            } catch (e) { /* ignore */ }
+
+        } catch (err) {
+            console.warn('[debug-window] init debug panel failed:', err);
+        }
 
         return win || winbox || null;
     } catch (err) {

@@ -307,12 +307,34 @@ function restoreChatState() {
             const rectRaw = localStorage.getItem(rectKey) || localStorage.getItem(sessionId ? `${CHAT_RECT_KEY}-${sessionId}` : CHAT_RECT_KEY) || localStorage.getItem(CHAT_RECT_KEY);
             if (rectRaw) {
                 const rect = JSON.parse(rectRaw);
-                if (typeof rect.left === 'number') chatEl.style.left = rect.left + 'px';
-                if (typeof rect.top === 'number') chatEl.style.top = rect.top + 'px';
-                if (typeof rect.width === 'number' && rect.width >= 260) chatEl.style.width = rect.width + 'px';
-                if (typeof rect.height === 'number' && rect.height >= 180) chatEl.style.height = rect.height + 'px';
-                chatEl.style.right = 'auto';
-                chatEl.style.bottom = 'auto';
+                // If the stored rect is positioned near the top of the viewport (likely an accidental top-left placement),
+                // prefer a safe bottom-left default for better UX.
+                const viewportH = (typeof window !== 'undefined' && window.innerHeight) ? window.innerHeight : 0;
+                const topThreshold = Math.max(80, Math.floor(viewportH * 0.15));
+                const placedAtTop = (typeof rect.top === 'number') ? (rect.top <= topThreshold) : false;
+
+                if (placedAtTop) {
+                    // Use bottom-left default and remove the saved rect so we don't reapply a broken state repeatedly
+                    try {
+                        chatEl.style.left = '18px';
+                        chatEl.style.bottom = '18px';
+                        chatEl.style.top = '';
+                        chatEl.style.right = 'auto';
+                        if (typeof rect.width === 'number' && rect.width >= 260) chatEl.style.width = rect.width + 'px';
+                        if (typeof rect.height === 'number' && rect.height >= 180) chatEl.style.height = rect.height + 'px';
+                        try { localStorage.removeItem(rectKey); } catch (e) { /* ignore */ }
+                    } catch (e) { /* ignore */ }
+                } else {
+                    if (typeof rect.left === 'number') chatEl.style.left = rect.left + 'px';
+                    if (typeof rect.top === 'number') chatEl.style.top = rect.top + 'px';
+                    if (typeof rect.width === 'number' && rect.width >= 260) chatEl.style.width = rect.width + 'px';
+                    if (typeof rect.height === 'number' && rect.height >= 180) chatEl.style.height = rect.height + 'px';
+                    chatEl.style.right = 'auto';
+                    chatEl.style.bottom = 'auto';
+                }
+            } else {
+                // No saved rect: ensure default bottom-left placement
+                try { chatEl.style.left = '18px'; chatEl.style.bottom = '18px'; chatEl.style.top = ''; chatEl.style.right = 'auto'; } catch (e) { /* ignore */ }
             }
         } catch (e) { /* ignore */ }
 

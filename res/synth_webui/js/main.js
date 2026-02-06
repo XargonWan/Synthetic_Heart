@@ -124,36 +124,6 @@
                             try { if (window.SynthWebUI && typeof window.SynthWebUI.loadSection === 'function') await window.SynthWebUI.loadSection('home'); } catch (e) { /* ignore */ }
                             // createChatWindow returns a Promise resolving to the WinBox instance (or null)
                             const winbox = await mod.createChatWindow().catch(() => null);
-                            try {
-                                attachHeaderTools('chat', winbox, [
-                                    {
-                                        label: '🗕',
-                                        title: 'Minimize',
-                                        onClick: () => {
-                                            try {
-                                                if (window.SynthWindowManager && typeof window.SynthWindowManager.minimize === 'function') {
-                                                    window.SynthWindowManager.minimize('chat');
-                                                } else if (winbox && typeof winbox.minimize === 'function') {
-                                                    winbox.minimize();
-                                                }
-                                            } catch (e) { /* ignore */ }
-                                        }
-                                    },
-                                    {
-                                        label: '↻',
-                                        title: 'Reset position',
-                                        onClick: () => {
-                                            try {
-                                                if (window.SynthWindowManager && typeof window.SynthWindowManager.restore === 'function') {
-                                                    window.SynthWindowManager.restore('chat');
-                                                } else if (typeof window.resetWindowPositions === 'function') {
-                                                    window.resetWindowPositions();
-                                                }
-                                            } catch (e) { /* ignore */ }
-                                        }
-                                    }
-                                ]);
-                            } catch (e) { /* ignore */ }
                         }
                     } catch (e) { /* ignore */ }
                 }).catch((e) => { try { console.debug('[synth_webui] chat-window import failed', e); } catch (e) {} });
@@ -638,6 +608,24 @@ try {
                             if (top < topbar) top = topbar;
                             entry.winbox.move(left, top);
                         }
+                    } else {
+                        // No saved rect: position chat at bottom-left by default for better UX
+                        try {
+                            const viewport = getViewportSize();
+                            const topbar = getTopbarHeight() || 0;
+                            const winEl = entry.winbox.window || entry.winbox.dom || entry.winbox.g || null;
+                            let height = 0;
+                            if (winEl && winEl.getBoundingClientRect) {
+                                const r = winEl.getBoundingClientRect();
+                                height = r.height || Math.round(viewport.height * 0.7);
+                            } else if (typeof entry.winbox.height === 'number') {
+                                height = entry.winbox.height;
+                            } else {
+                                height = Math.round(viewport.height * 0.7);
+                            }
+                            const top = Math.max(topbar, Math.round(viewport.height - height - 18));
+                            try { entry.winbox.move(18, top); } catch (e) { /* ignore */ }
+                        } catch (e) { /* ignore */ }
                     }
 
                     const stateKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}-${device}` : `${CHAT_WINDOW_STATE_KEY}-${device}`;

@@ -306,6 +306,26 @@
             border-color: var(--accent);
             color: var(--accent);
         }
+        /* Body pause button styling inside debug panel */
+        #synth-debug-pause {
+            background: linear-gradient(180deg, #ffbf91, #ff8c00) !important;
+            border-color: #ff8c00 !important;
+            color: #07070c !important;
+        }
+        /* Ensure loop override selects use dark theme so white text remains readable */
+        #synth-advanced-debug select,
+        #synth-advanced-debug select option {
+            background: #07070c !important;
+            color: #ffffff !important;
+        }
+        #synth-advanced-debug select {
+            border-color: rgba(255,255,255,0.06);
+            padding: 6px 8px;
+            border-radius: 8px;
+            -webkit-appearance: none;
+            appearance: none;
+        }
+
         #synth-advanced-debug.synth-window-managed #synth-debug-title-bar {
             flex-shrink: 0;
             display: none !important;
