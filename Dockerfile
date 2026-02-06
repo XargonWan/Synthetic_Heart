@@ -107,14 +107,18 @@ RUN apt-get update && \
       pavucontrol && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Copy project code and set up Python venv
+# Copy project code and set up Python venv in an isolated path to avoid accidental
+# overwrites when project files are copied into /app or when bind-mounting the repo
 COPY requirements.txt /app/requirements.txt
 WORKDIR /app
+ENV VENV_DIR=/opt/venv
 
-# Python venv (necessary for webtop environment)
-RUN python3 -m venv /app/venv && \
-    /app/venv/bin/pip install --no-cache-dir --upgrade pip setuptools && \
-    /app/venv/bin/pip install --no-cache-dir -r requirements.txt
+# Create Python venv outside /app so that copying project files into /app will not
+# overwrite the venv. Expose a symlink at /app/venv for backward compatibility.
+RUN python3 -m venv $VENV_DIR && \
+    $VENV_DIR/bin/pip install --no-cache-dir --upgrade pip setuptools && \
+    $VENV_DIR/bin/pip install --no-cache-dir -r requirements.txt && \
+    ln -sfn $VENV_DIR /app/venv
 
 # Copy essential scripts
 COPY automation_tools/cleanup_chrome.sh /usr/local/bin/cleanup_chrome.sh
@@ -134,7 +138,7 @@ COPY . /app
 # Verify venv integrity after copying project files: ensure the container's venv
 # was not overwritten by a host 'venv' directory. This check will fail the build
 # when a host virtualenv is accidentally copied, catching the root cause early.
-RUN /app/venv/bin/python3 -c "import sys, importlib; importlib.import_module('uvicorn'); print('uvicorn present after copy:', importlib.import_module('uvicorn').__version__)"
+RUN $VENV_DIR/bin/python3 -c "import sys, importlib; importlib.import_module('uvicorn'); print('uvicorn present after copy:', importlib.import_module('uvicorn').__version__)"
 
 # Seed Selkies TLS certs into /config/ssl (used by HTTPS on port 3001)
 RUN mkdir -p /config/ssl && \
