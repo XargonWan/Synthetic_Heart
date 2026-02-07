@@ -159,59 +159,9 @@
             height: 100%;
             display: block;
         }
-        /* Minimal chat mount styling — visual chrome handled by WinBox vendor CSS */
-        #chat {
-            position: fixed;
-            bottom: 1.5rem;
-            left: 1.5rem;
-            width: min(360px, calc(100vw - 3rem));
-            max-width: calc(100vw - 3rem);
-            min-width: 280px;
-            height: 52vh;
-            max-height: 60vh;
-            display: flex;
-            flex-direction: column;
-            overflow: hidden;
-            z-index: 50;
-        }
-        #chat.synth-window-managed {
-            /* intentionally empty: let WinBox control window chrome */
-        }
-        .synth-minimized-stack {
-            position: fixed;
-            bottom: 1.2rem;
-            left: auto;
-            right: 1.2rem;
-            display: flex;
-            flex-direction: column;
-            gap: 0.6rem;
-            align-items: flex-end;
-            z-index: 10650;
-        }
-        /* Circular minimized window badges */
-        .synth-dock-btn, .chat-toggle-btn {
-            width: 44px;
-            height: 44px;
-            border-radius: 50%;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02));
-            color: var(--text);
-            border: 1px solid rgba(255,255,255,0.06);
-            box-shadow: 0 6px 14px rgba(0,0,0,0.35);
-            cursor: pointer;
-            font-size: 1.05rem;
-            transition: transform .12s ease, box-shadow .12s ease;
-        }
-        .synth-dock-btn:hover, .chat-toggle-btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 20px rgba(0,0,0,0.42);
-        }
-        .synth-dock-btn:focus, .chat-toggle-btn:focus {
-            outline: 3px solid rgba(255,255,255,0.08);
-            outline-offset: 3px;
-        }
+        /* Chat CSS removed — rely on WinBox/default styling and component-level styles */
+        #chat { position: fixed; }
+        #chat.synth-window-managed { /* WinBox controls chrome */ }
         .winbox.synth-winbox .wb-title {
             color: var(--text);
             font-weight: 700;
@@ -237,7 +187,6 @@
         .winbox.synth-winbox {
             background: rgba(12, 12, 20, 0.6);
             backdrop-filter: blur(8px);
-                border-radius: 18px;
         }
         .winbox.synth-winbox .wb-drag {
             display: flex;
