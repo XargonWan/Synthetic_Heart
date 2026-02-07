@@ -2009,5 +2009,29 @@ else:
 # Expose the initialization function for the core
 __all__ = ['initialize_interface', 'shutdown_interface', 'reload_interface', 'TelegramInterface']
 
+# --- Automatic reload/start support ---------------------------------
+# Ensure that when BOTFATHER_TOKEN is loaded/changed (e.g., from DB), the
+# Telegram interface will attempt to start without requiring a container restart.
+try:
+    def _on_botfather_token_change(value):
+        """Called when BOTFATHER_TOKEN changes. Schedule start if token present."""
+        try:
+            if value:
+                import asyncio
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(start_bot())
+                except RuntimeError:
+                    # no loop available at import time; core will start interfaces later
+                    pass
+        except Exception as e:
+            from core.logging_utils import log_warning
+            log_warning(f"[telegram_bot] Token change handler failed: {e}")
+
+    # Register listener so notify_all_listeners() will trigger startup when DB values are loaded
+    config_registry.add_listener("BOTFATHER_TOKEN", _on_botfather_token_change)
+except Exception:
+    log_debug("[telegram_bot] Failed to register BOTFATHER_TOKEN change listener")
+
 
 
