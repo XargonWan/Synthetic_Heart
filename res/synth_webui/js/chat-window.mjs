@@ -1,5 +1,57 @@
 // chat-window.mjs — encapsulated Chat window management using SynthWindowManager/WinBox
 
+// Inject chat-specific styles (keeps chat CSS encapsulated inside this module)
+function injectChatStyles() {
+    try {
+        if (document.getElementById('synth-chat-styles')) return;
+        const style = document.createElement('style');
+        style.id = 'synth-chat-styles';
+        style.textContent = `
+        /* chat styles (injected by chat-window.mjs) */
+        .synth-chat { display:flex; flex-direction:column; height:100%; min-height:0; width:100%; position:relative; }
+        .synth-chat-body { flex:1 1 auto; min-height:0; overflow-y:auto; }
+        .synth-chat-footer { flex:0 0 auto; position:sticky; bottom:0; z-index:2; background: inherit; }
+        .synth-chat-composer { width:100%; display:flex; gap:0.6rem; align-items:flex-end; padding:0.6rem 1rem; box-sizing:border-box; }
+        #input { flex:1 1 auto; min-height:2.4rem; max-height:7rem; resize:none; }
+        #send { flex:0 0 auto; border-radius:50%; height:2.6rem; width:2.6rem; }
+        .synth-chat-archive { margin-left:auto; margin-top:0.4rem; margin-right:0.6rem; display:flex; gap:0.5rem; align-items:center; }
+        .synth-chat-archive .pill { padding:0.4rem 0.6rem; }
+        `;
+        document.head.appendChild(style);
+    } catch (e) { /* ignore */ }
+}
+
+function createChatTemplate() {
+    try {
+        injectChatStyles();
+        if (document.getElementById('chat-window-template')) return;
+        const tpl = document.createElement('template');
+        tpl.id = 'chat-window-template';
+        tpl.innerHTML = `
+            <div class="synth-chat">
+                <div class="synth-chat-header">
+                    <div class="synth-chat-archive" style="margin-left:auto;">
+                        <button id="chat-archive" title="Archive current chat" type="button" class="pill">📦 Archive</button>
+                        <button id="chat-restore" title="Open archives" type="button" class="pill">🗂️ Open Archive</button>
+                    </div>
+                </div>
+
+                <div class="synth-chat-body">
+                    <div id="messages" class="synth-chat-messages" role="log" aria-live="polite"></div>
+                </div>
+
+                <div class="synth-chat-footer synth-chat-toolbar">
+                    <form id="composer" class="synth-chat-composer" autocomplete="off">
+                        <textarea id="input" placeholder="Type a message…" rows="2"></textarea>
+                        <button id="send" type="submit" disabled="disabled">➤</button>
+                    </form>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(tpl);
+    } catch (e) { /* ignore */ }
+}
+
 export async function createChatWindow() {
     try {
         // Ensure WinBox is available
@@ -36,11 +88,16 @@ export async function createChatWindow() {
         // If template not present yet, try to lazy-load the Home section so the template is available
         try {
             let tpl = document.getElementById('chat-window-template');
-            if (!tpl && window.SynthWebUI && typeof window.SynthWebUI.loadSection === 'function') {
-                try {
-                    // loadSection will inject the template into the home panel
-                    await window.SynthWebUI.loadSection('home');
-                } catch (e) { /* ignore */ }
+            if (!tpl) {
+                // attempt to lazy load section if available
+                if (window.SynthWebUI && typeof window.SynthWebUI.loadSection === 'function') {
+                    try { await window.SynthWebUI.loadSection('home'); } catch (e) { /* ignore */ }
+                    tpl = document.getElementById('chat-window-template');
+                }
+            }
+            if (!tpl) {
+                // create the chat template and styles dynamically from this module
+                try { createChatTemplate(); } catch (e) { /* ignore */ }
                 tpl = document.getElementById('chat-window-template');
             }
             if (tpl && mount.children.length === 0) {

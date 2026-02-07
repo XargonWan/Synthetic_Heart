@@ -3,28 +3,6 @@
         <div class="home-content">
             <button id="chat-toggle" class="chat-toggle-btn" type="button" aria-label="Restore chat" title="Restore Chat" style="display:none;">💬</button>
 
-            <!-- Chat template (used to populate the WinBox-managed chat mount) -->
-            <template id="chat-window-template">
-                <div class="synth-chat">
-                    <div class="synth-chat-header">
-                        <div class="synth-chat-archive" style="margin-left:auto;">
-                            <button id="chat-archive" title="Archive current chat" type="button" class="pill">📦 Archive</button>
-                            <button id="chat-restore" title="Open archives" type="button" class="pill">🗂️ Open Archive</button>
-                        </div>
-                    </div>
-
-                    <div class="synth-chat-body">
-                        <div id="messages" class="synth-chat-messages" role="log" aria-live="polite"></div>
-                    </div>
-
-                    <div class="synth-chat-footer synth-chat-toolbar">
-                        <form id="composer" class="synth-chat-composer" autocomplete="off">
-                            <textarea id="input" placeholder="Type a message…" rows="2"></textarea>
-                            <button id="send" type="submit" disabled="disabled">➤</button>
-                        </form>
-                    </div>
-                </div>
-            </template>
 
             <!-- Mount point for chat window (populated from template by chat-window.mjs) -->
             <section id="chat" aria-label="Chat panel"></section>
