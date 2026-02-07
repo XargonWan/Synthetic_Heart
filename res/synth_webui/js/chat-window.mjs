@@ -160,6 +160,29 @@ export async function createChatWindow() {
 const CHAT_WINDOW_STATE_KEY = 'synth-webui-window-state';
 const CHAT_RECT_KEY = 'synth-webui-chat-rect';
 const TYPING_INDICATOR_KEY = 'synth-webui-typing-indicator';
+const TYPING_INDICATOR_TS_KEY = 'synth-webui-typing-indicator-ts';
+const TYPING_INDICATOR_DEFAULT_TTL_S = 300; // seconds - fallback when no RESPONSE_TIMEOUT exposed
+
+function _clearTypingTimeout() {
+    try {
+        if (window.__synth_typing_indicator_timeout) {
+            clearTimeout(window.__synth_typing_indicator_timeout);
+            window.__synth_typing_indicator_timeout = null;
+        }
+    } catch (e) { /* ignore */ }
+}
+
+function _scheduleTypingTimeout() {
+    try {
+        _clearTypingTimeout();
+        // Use exposed RESPONSE_TIMEOUT (in seconds) if available, otherwise default
+        const ttlS = (typeof window.RESPONSE_TIMEOUT === 'number' && window.RESPONSE_TIMEOUT > 0) ? Number(window.RESPONSE_TIMEOUT) : TYPING_INDICATOR_DEFAULT_TTL_S;
+        // Safety: convert to ms and schedule removal
+        window.__synth_typing_indicator_timeout = setTimeout(() => {
+            try { removeTypingIndicator(); } catch (e) { /* ignore */ }
+        }, Math.max(1000, ttlS * 1000));
+    } catch (e) { /* ignore */ }
+}
 
 function safeEscapeHtml(text) {
     try {
@@ -176,7 +199,12 @@ function addTypingIndicator() {
     try {
         const messagesEl = document.getElementById('messages');
         if (!messagesEl) return;
-        if (messagesEl.querySelector('.typing-indicator')) return;
+        if (messagesEl.querySelector('.typing-indicator')) {
+            // If it's already present, refresh timestamp and reschedule timeout
+            try { localStorage.setItem(TYPING_INDICATOR_TS_KEY, String(Date.now())); } catch (e) { /* ignore */ }
+            try { _scheduleTypingTimeout(); } catch (e) { /* ignore */ }
+            return;
+        }
         const container = document.createElement('div');
         container.className = 'message-container synth';
         const bubble = document.createElement('div');
@@ -186,6 +214,8 @@ function addTypingIndicator() {
         messagesEl.appendChild(container);
         messagesEl.scrollTop = messagesEl.scrollHeight;
         try { localStorage.setItem(TYPING_INDICATOR_KEY, '1'); } catch (e) { /* ignore */ }
+        try { localStorage.setItem(TYPING_INDICATOR_TS_KEY, String(Date.now())); } catch (e) { /* ignore */ }
+        try { _scheduleTypingTimeout(); } catch (e) { /* ignore */ }
     } catch (e) { /* ignore */ }
 }
 
@@ -196,6 +226,8 @@ function removeTypingIndicator() {
         const indicator = messagesEl.querySelector('.typing-indicator');
         if (indicator && indicator.parentElement) indicator.parentElement.remove();
         try { localStorage.removeItem(TYPING_INDICATOR_KEY); } catch (e) { /* ignore */ }
+        try { localStorage.removeItem(TYPING_INDICATOR_TS_KEY); } catch (e) { /* ignore */ }
+        try { _clearTypingTimeout(); } catch (e) { /* ignore */ }
     } catch (e) { /* ignore */ }
 }
 
@@ -318,6 +350,29 @@ export function initChatUI() {
         }
 
         connectWs();
+        try {
+            if (typeof localStorage !== 'undefined' && localStorage.getItem && localStorage.getItem(TYPING_INDICATOR_KEY)) {
+                // Respect configured RESPONSE_TIMEOUT: if typing indicator timestamp is older than allowed, clear it
+                try {
+                    const tsRaw = localStorage.getItem(TYPING_INDICATOR_TS_KEY);
+                    if (tsRaw) {
+                        const ts = Number(tsRaw) || 0;
+                        const ttlS = (typeof window.RESPONSE_TIMEOUT === 'number' && window.RESPONSE_TIMEOUT > 0) ? Number(window.RESPONSE_TIMEOUT) : TYPING_INDICATOR_DEFAULT_TTL_S;
+                        const ageMs = Date.now() - ts;
+                        if (ageMs > (ttlS * 1000)) {
+                            // expired - remove persisted indicator
+                            try { localStorage.removeItem(TYPING_INDICATOR_KEY); } catch (e) { /* ignore */ }
+                            try { localStorage.removeItem(TYPING_INDICATOR_TS_KEY); } catch (e) { /* ignore */ }
+                        } else {
+                            addTypingIndicator();
+                        }
+                    } else {
+                        // No timestamp provided - be conservative and restore indicator, scheduling a safety timeout
+                        addTypingIndicator();
+                    }
+                } catch (e) { try { addTypingIndicator(); } catch (e) { /* ignore */ } }
+            }
+        } catch (e) { /* ignore */ }
         window.__synth_chat_initialized = true;
 
     } catch (e) {
@@ -481,7 +536,35 @@ function restoreChatState() {
                     if (!res.ok) return;
                     const out = await res.json();
                     const meta = out && out.meta ? out.meta : {};
-                    if (meta && meta.processing) addTypingIndicator();
+                    if (meta && meta.processing) {
+                        // If server provides an explicit expiry/started timestamp, honor it to avoid stale indicators
+                        try {
+                            const now = Date.now();
+                            // Accept ISO timestamps or numeric ms timestamps
+                            const expiresRaw = meta.processing_expires_at || meta.processing_expires || null;
+                            const startedRaw = meta.processing_started_at || meta.processing_started || null;
+                            let expired = false;
+                            if (expiresRaw) {
+                                let expiresTs = 0;
+                                if (typeof expiresRaw === 'number') expiresTs = Number(expiresRaw);
+                                else expiresTs = Date.parse(String(expiresRaw)) || 0;
+                                if (expiresTs && now >= expiresTs) expired = true;
+                            } else if (startedRaw) {
+                                let startedTs = 0;
+                                if (typeof startedRaw === 'number') startedTs = Number(startedRaw);
+                                else startedTs = Date.parse(String(startedRaw)) || 0;
+                                const ttlS = (typeof window.RESPONSE_TIMEOUT === 'number' && window.RESPONSE_TIMEOUT > 0) ? Number(window.RESPONSE_TIMEOUT) : TYPING_INDICATOR_DEFAULT_TTL_S;
+                                if (startedTs && (now - startedTs) > (ttlS * 1000)) expired = true;
+                            }
+                            if (expired) {
+                                try { removeTypingIndicator(); } catch (e) { /* ignore */ }
+                            } else {
+                                addTypingIndicator();
+                            }
+                        } catch (e) {
+                            try { addTypingIndicator(); } catch (e) { /* ignore */ }
+                        }
+                    } else try { removeTypingIndicator(); } catch (e) { /* ignore */ }
                 } catch (e) { /* ignore */ }
             })();
         } catch (e) { /* ignore */ }
