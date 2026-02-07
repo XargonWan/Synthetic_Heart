@@ -152,7 +152,6 @@ def get_trainer_id() -> Optional[int]:
 say_sessions = {}
 context_memory = {}
 last_selected_chat = {}
-chat_attention_state = {}
 message_id = None
 
 # Throttling for bot None lookup warnings
@@ -622,10 +621,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     
     # Wake/sleep gating: awake follows normal routing, sleep ignores non-command messages.
+    from core.chat_attention import get_attention
+
     chat_id = message.chat.id
-    if chat_id not in chat_attention_state:
-        chat_attention_state[chat_id] = True
-    is_awake = chat_attention_state.get(chat_id, True)
+    is_awake = get_attention(chat_id, default=True)
     if not is_awake:
         log_debug(f"[telegram_bot] Chat {chat_id} is asleep; ignoring message")
         return

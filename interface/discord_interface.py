@@ -34,7 +34,7 @@ class DiscordInterface:
         self.bot_token = bot_token.strip() if bot_token else ""
         self.is_enabled = True
         self.disabled_reason = None
-        
+
         # Register custom validation with the new validation system
         self._register_custom_validation()
         
@@ -526,15 +526,17 @@ class DiscordInterface:
             is_wake_command = "hey 2b" in text_lower
             is_sleep_command = "bye 2b" in text_lower
 
+            from core.chat_attention import set_attention, get_attention
+
             chat_scope_id = thread_id if thread_id else channel_id
             if is_wake_command:
-                self.chat_attention_state[chat_scope_id] = True
+                set_attention(chat_scope_id, True)
                 log_debug(f"[discord_interface] Wake command detected in chat {chat_scope_id}")
             elif is_sleep_command:
-                self.chat_attention_state[chat_scope_id] = False
+                set_attention(chat_scope_id, False)
                 log_debug(f"[discord_interface] Sleep command detected in chat {chat_scope_id}")
 
-            is_awake = self.chat_attention_state.get(chat_scope_id, False)
+            is_awake = get_attention(chat_scope_id, default=False)
             is_explicit_trigger = is_wake_command or is_sleep_command
             if not is_explicit_trigger:
                 if "@" in content:
@@ -545,23 +547,18 @@ class DiscordInterface:
                     if getattr(reply_to.from_user, "id", None) == getattr(bot_user, "id", None):
                         is_explicit_trigger = True
 
-            directed, reason = await is_message_for_bot(wrapped, self.client)
+            # Centralize mention detection in core.message_queue - decide whether to skip the
+            # mention check based on the chat's attention state. If the chat is 'awake' we
+            # bypass the mention check so messages are always processed; otherwise we let
+            # the central queue call is_message_for_bot and decide if the message should be handled.
+            skip_mention_check = True if is_awake else False
 
-            if is_awake:
-                if not directed:
-                    directed = True
-                    reason = "awake_state"
-            else:
-                if directed and not is_explicit_trigger:
-                    directed = False
-                    reason = "asleep_state_no_trigger"
-                    log_debug(f"[discord_interface] Suppressed message due to Asleep state: {content}")
-                elif not directed and is_explicit_trigger:
-                    directed = True
-                    reason = "explicit_trigger_asleep"
-
-            if not directed:
-                return
+            if not is_awake and not is_explicit_trigger:
+                # Not awake and no explicit trigger (e.g., not a DM, not a mention, not a reply)
+                # Let the message_queue perform the directed check; if it decides the message
+                # is not directed to the bot it will drop it internally. We proceed to enqueue
+                # with skip_mention_check=False so the central logic runs.
+                pass
 
             try:
                 await message_queue.enqueue(
@@ -569,7 +566,7 @@ class DiscordInterface:
                     wrapped,
                     interface_id="discord_bot",
                     original_message=message,
-                    skip_mention_check=True,
+                    skip_mention_check=skip_mention_check,
                 )
             except Exception as e:  # pragma: no cover - queue errors
                 log_error(f"[discord_interface] message_queue enqueue failed: {e}")
@@ -757,6 +754,50 @@ def get_discord_token() -> str:
 log_info("[discord_interface] Creating Discord interface instance...")
 discord_interface = DiscordInterface(get_discord_token())
 log_info("[discord_interface] Discord interface instance created and registered")
+
+# --- Automatic reload/start support ---------------------------------
+# Ensure that when DISCORD_BOT_TOKEN is loaded/changed (e.g., from DB), the
+# Discord interface will attempt to start without requiring a container restart.
+try:
+    def _on_discord_token_change(value):
+        """Called when DISCORD_BOT_TOKEN changes. Schedule start if token present."""
+        try:
+            if value:
+                import asyncio
+                try:
+                    loop = asyncio.get_running_loop()
+                    # schedule start in event loop
+                    loop.create_task(discord_interface.start())
+                except RuntimeError:
+                    # no loop available at import time; core will start interfaces later
+                    pass
+        except Exception as e:
+            from core.logging_utils import log_warning
+            log_warning(f"[discord_interface] Token change handler failed: {e}")
+
+    # Register listener so notify_all_listeners() will trigger startup when DB values are loaded
+    config_registry.add_listener("DISCORD_BOT_TOKEN", _on_discord_token_change)
+
+    def reload_interface():
+        """Reload/start the Discord interface with updated configuration.
+
+        This is used by the CoreInitializer reload handler when a config with
+        needs_component_reload=True is changed via UI/API.
+        """
+        from core.logging_utils import log_info
+        log_info("[discord_interface] Reloading Discord interface...")
+        try:
+            import asyncio
+            loop = asyncio.get_running_loop()
+            loop.create_task(discord_interface.start())
+        except RuntimeError:
+            log_info("[discord_interface] No running event loop: reload scheduled for when loop is available")
+        return True
+except Exception:
+    # Defensive: do not let listener setup crash imports
+    pass
+
+# --------------------------------------------------------------------
 
 
 
