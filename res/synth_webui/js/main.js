@@ -367,12 +367,52 @@ try {
                 if (!entry || !entry.winbox) return;
                 const isMax = !!(entry.winbox.max || entry.winbox.maximized);
                 if (!isMax) return;
+                try {
+                    // Prefer using the dedicated desktop root size when available so
+                    // maximized windows fill the exact desktop area (no right/bottom gaps).
+                    const desktopRoot = document.getElementById('desktop-root');
+                    if (desktopRoot && typeof desktopRoot.getBoundingClientRect === 'function') {
+                        const r = desktopRoot.getBoundingClientRect();
+                        const left = Math.round(r.left || 0);
+                        const top = Math.round(r.top || getTopbarHeight() || 0);
+                        const width = Math.max(120, Math.round(r.width || entry.winbox.width || 0));
+                        const height = Math.max(120, Math.round(r.height || entry.winbox.height || 0));
+                        try { entry.winbox.move(left, top); } catch (e) { /* ignore */ }
+                        try { entry.winbox.resize(width, height); } catch (e) { /* ignore */ }
+                        // Compensate if the DOM rect is still smaller than requested (rounding/border issues)
+                        try {
+                            const winEl = entry.winbox.window || entry.winbox.dom || entry.winbox.g || null;
+                            if (winEl && winEl.getBoundingClientRect) {
+                                const rect = winEl.getBoundingClientRect();
+                                const dw = width - Math.round(rect.width || 0);
+                                const dh = height - Math.round(rect.height || 0);
+                                if ((dw > 0) || (dh > 0)) {
+                                    try { entry.winbox.resize(width + (dw > 0 ? 1 : 0), height + (dh > 0 ? 1 : 0)); } catch (e) { /* ignore */ }
+                                }
+                            }
+                        } catch (e) { /* ignore */ }
+                        return;
+                    }
+                } catch (e) { /* ignore */ }
+
+                // Fallback to viewport-based sizing if desktop root isn't available
                 const top = getTopbarHeight();
                 const viewport = getViewportSize();
                 const width = viewport.width || entry.winbox.width || 0;
                 const height = Math.max(120, (viewport.height || entry.winbox.height || 0) - top);
                 try { entry.winbox.move(0, top); } catch (e) { /* ignore */ }
                 try { entry.winbox.resize(width, height); } catch (e) { /* ignore */ }
+                try {
+                    const winEl = entry.winbox.window || entry.winbox.dom || entry.winbox.g || null;
+                    if (winEl && winEl.getBoundingClientRect) {
+                        const rect = winEl.getBoundingClientRect();
+                        const dw = width - Math.round(rect.width || 0);
+                        const dh = height - Math.round(rect.height || 0);
+                        if ((dw > 0) || (dh > 0)) {
+                            try { entry.winbox.resize(width + (dw > 0 ? 1 : 0), height + (dh > 0 ? 1 : 0)); } catch (e) { /* ignore */ }
+                        }
+                    }
+                } catch (e) { /* ignore */ }
             }
 
             function captureNormalRect(entry) {
@@ -506,12 +546,13 @@ try {
                 // Prevent double-minimize behavior
                 if (entry.minimized) return;
                 entry.minimized = true;
-                try { entry.winbox.hide(); } catch (e) { /* ignore */ }
-                try { entry.winbox.min = false; } catch (e) { /* ignore */ }
+                // Prefer the native WinBox minimize API so internal state and classes
+                // are updated correctly, fallback to hide() when not available.
                 try {
-                    const winEl = entry.winbox.window || entry.winbox.dom || entry.winbox.g || null;
-                    if (winEl && winEl.classList) winEl.classList.remove('min');
+                    if (typeof entry.winbox.minimize === 'function') entry.winbox.minimize();
+                    else entry.winbox.hide();
                 } catch (e) { /* ignore */ }
+
                 const dock = ensureDock();
                 const btn = ensureDockButton(entry);
                 btn.style.display = 'flex';
@@ -555,9 +596,16 @@ try {
                 const entry = windows.get(id);
                 if (!entry || !entry.winbox) return;
                 try {
-                    // If currently maximized, restore; otherwise maximize and apply constraints
+                    // If currently maximized, restore to previous size; otherwise maximize and apply constraints
                     if (entry.winbox.max || entry.winbox.maximized) {
                         try { entry.winbox.restore(); } catch (e) { /* ignore */ }
+                        // After restore, ensure we return to the captured normal rectangle
+                        if (entry.lastNormalRect) {
+                            try {
+                                entry.winbox.move(entry.lastNormalRect.x, entry.lastNormalRect.y);
+                                entry.winbox.resize(entry.lastNormalRect.width, entry.lastNormalRect.height);
+                            } catch (e) { /* ignore */ }
+                        }
                     } else {
                         try { captureNormalRect(entry); } catch (e) { /* ignore */ }
                         try { entry.winbox.maximize(); } catch (e) { /* ignore */ }
@@ -702,6 +750,56 @@ try {
                 });
                 try { console.debug('[SynthWindowManager] created winbox for', opts.id, 'instance=', winbox); } catch (e) { /* ignore */ }
                 entry.winbox = winbox;
+                // Override the native maximize button behavior to use our toggleMaximize
+                try {
+                    const winEl = winbox.window || winbox.dom || winbox.g || null;
+                    if (winEl) {
+                        const maxBtn = winEl.querySelector('.wb-max');
+                        if (maxBtn) {
+                            maxBtn.addEventListener('click', (e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                toggleMaximize(opts.id);
+                                return false;
+                            }, true); // Use capture phase
+                        }
+                    }
+                } catch (e) { /* ignore */ }
+
+                // When WinBox toggles classes (e.g., via programmatic calls),
+                // ensure maximize constraints are applied immediately by observing
+                // class attribute changes on the WinBox root element.
+                try {
+                    const winEl = winbox.window || winbox.dom || winbox.g || null;
+                    if (winEl && typeof MutationObserver !== 'undefined') {
+                        const mo = new MutationObserver((mutations) => {
+                            try {
+                                // Only apply maximize constraints if the window is actually maximized
+                                // and the class change involves max-related classes
+                                const isMax = !!(entry.winbox.max || entry.winbox.maximized);
+                                if (!isMax) return;
+
+                                let hasMaxClassChange = false;
+                                for (const mutation of mutations) {
+                                    if (mutation.type === 'attributes' && mutation.attributeName === 'class') {
+                                        const oldClass = mutation.oldValue || '';
+                                        const newClass = winEl.className || '';
+                                        if ((oldClass.includes('max') || newClass.includes('max')) ||
+                                            (oldClass.includes('maximized') || newClass.includes('maximized'))) {
+                                            hasMaxClassChange = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (hasMaxClassChange) {
+                                    applyMaximizeConstraints(entry);
+                                }
+                            } catch (e) { /* ignore */ }
+                        });
+                        mo.observe(winEl, { attributes: true, attributeFilter: ['class'], attributeOldValue: true });
+                        entry._maximizeObserver = mo;
+                    }
+                } catch (e) { /* ignore */ }
                 windows.set(opts.id, entry);
                 ensureDockButton(entry);
                 try { applyViewportInsets(entry); } catch (e) { /* ignore */ }

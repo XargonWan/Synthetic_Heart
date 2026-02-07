@@ -75,7 +75,7 @@ export async function createChatWindow() {
                 dockLabel: 'Chat',
                 dockButton: chatToggleBtn || null,
                 dockClass: 'chat-toggle-btn',
-                className: 'synth-winbox no-close chat-window'
+                className: 'synth-winbox'
             });
 
             // Slight title size tweak for visibility

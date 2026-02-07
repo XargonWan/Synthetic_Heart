@@ -159,6 +159,7 @@
             height: 100%;
             display: block;
         }
+        /* Minimal chat mount styling — visual chrome handled by WinBox vendor CSS */
         #chat {
             position: fixed;
             bottom: 1.5rem;
@@ -166,51 +167,15 @@
             width: min(360px, calc(100vw - 3rem));
             max-width: calc(100vw - 3rem);
             min-width: 280px;
-                height: 52vh;
-                max-height: 60vh;
+            height: 52vh;
+            max-height: 60vh;
             display: flex;
             flex-direction: column;
-            background: rgba(12, 12, 20, 0.9);
-            border: 1px solid var(--border);
-            border-radius: 22px;
-            box-shadow: 0 24px 45px -38px rgba(0, 0, 0, 0.9);
             overflow: hidden;
             z-index: 50;
         }
         #chat.synth-window-managed {
-            position: static;
-            inset: auto;
-            width: 100%;
-            height: 100%;
-            max-height: none;
-            border: none;
-            border-radius: 16px;
-            box-shadow: none;
-            background: rgba(12, 12, 20, 0.9);
-            overflow: hidden;
-        }
-        #chat.synth-window-managed #chat-title-bar {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 0.8rem;
-            padding: 0.85rem 1rem;
-            background: rgba(12, 12, 20, 0.82);
-            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-        }
-        #chat.synth-window-managed #chat-title-bar {
-            display: none !important;
-        }
-        #chat-title-bar .chat-title {
-            display: inline-flex;
-            align-items: center;
-            gap: 0.5rem;
-            font-weight: 600;
-            letter-spacing: 0.03em;
-        }
-        #chat-title-bar .chat-controls .pill {
-            border: 1px solid rgba(255, 255, 255, 0.12);
-            background: rgba(255, 255, 255, 0.04);
+            /* intentionally empty: let WinBox control window chrome */
         }
         .synth-minimized-stack {
             position: fixed;
