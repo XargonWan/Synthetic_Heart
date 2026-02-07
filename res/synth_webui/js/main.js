@@ -4,11 +4,8 @@
 
     // Minimal config accessor
     window.SynthConfig = window.__SYNTH_CONFIG || {};
-    // Enable iframe-based desktop by default. This can be overridden by
-    // server-side config `__SYNTH_CONFIG.DESKTOP_IFRAME = false;` or by the
-    // client setting `window.SynthConfig.DESKTOP_IFRAME = false` before the
-    // script runs.
-    if (typeof window.SynthConfig.DESKTOP_IFRAME === 'undefined') window.SynthConfig.DESKTOP_IFRAME = true;
+    // Use a dedicated desktop root instead of iframe separation.
+    window.SynthConfig.DESKTOP_IFRAME = false;
     window.SynthWebUISetStatus = window.SynthWebUISetStatus || function setSynthWebUIStatus(message, level) {
         try {
             const label = document.getElementById('status-label');
@@ -562,6 +559,7 @@ try {
                     if (entry.winbox.max || entry.winbox.maximized) {
                         try { entry.winbox.restore(); } catch (e) { /* ignore */ }
                     } else {
+                        try { captureNormalRect(entry); } catch (e) { /* ignore */ }
                         try { entry.winbox.maximize(); } catch (e) { /* ignore */ }
                         try { applyMaximizeConstraints(entry); } catch (e) { /* ignore */ }
                     }
@@ -686,52 +684,27 @@ try {
                     minimized: false,
                     lastNormalRect: null
                 };
+                const className = `${opts.className || 'synth-winbox no-full no-close'} modern`;
+                const desktopRoot = document.getElementById('desktop-root');
+                const topbarOffset = getTopbarHeight() || 0;
                 const winbox = new WinBox({
                     id: opts.id,
                     title: opts.title || 'Window',
                     mount: mountEl,
+                    root: desktopRoot || undefined,
                     x: opts.x !== undefined ? opts.x : 24,
                     y: opts.y !== undefined ? opts.y : 'bottom',
+                    top: topbarOffset,
                     width: opts.width || 420,
                     height: opts.height || '70%',
                     overflow: opts.overflow,
-                    class: opts.className || 'synth-winbox no-full no-close',
-                    onmove: () => {
-                        try { clampToTopbar(entry); } catch (e) { /* ignore */ }
-                        try { captureNormalRect(entry); } catch (e) { /* ignore */ }
-                        try { saveState(opts.id); } catch (e) { /* ignore */ }
-                    },
-                    onresize: () => {
-                        try { applyMaximizeConstraints(entry); } catch (e) { /* ignore */ }
-                        try { clampToTopbar(entry); } catch (e) { /* ignore */ }
-                        try { captureNormalRect(entry); } catch (e) { /* ignore */ }
-                        try { saveState(opts.id); } catch (e) { /* ignore */ }
-                    },
-                    onrestore: () => {
-                        try {
-                            if (entry.lastNormalRect && !entry.winbox.max && !entry.winbox.maximized) {
-                                const rect = entry.lastNormalRect;
-                                if (rect.width && rect.height) entry.winbox.resize(rect.width, rect.height);
-                                if (rect.x !== undefined && rect.y !== undefined) entry.winbox.move(rect.x, rect.y);
-                            }
-                        } catch (e) { /* ignore */ }
-                        try { clampToTopbar(entry); } catch (e) { /* ignore */ }
-                        try { saveState(opts.id); } catch (e) { /* ignore */ }
-                    },
-                    onminimize: () => {
-                        try { minimize(opts.id); } catch (e) { /* ignore */ }
-                    },
-                    onmaximize: () => {
-                        try { captureNormalRect(entry); } catch (e) { /* ignore */ }
-                        try { applyMaximizeConstraints(entry); } catch (e) { /* ignore */ }
-                    }
+                    class: className
                 });
                 try { console.debug('[SynthWindowManager] created winbox for', opts.id, 'instance=', winbox); } catch (e) { /* ignore */ }
                 entry.winbox = winbox;
                 windows.set(opts.id, entry);
                 ensureDockButton(entry);
                 try { applyViewportInsets(entry); } catch (e) { /* ignore */ }
-                try { applyMaximizeConstraints(entry); } catch (e) { /* ignore */ }
                 return winbox;
             }
 
@@ -1225,7 +1198,7 @@ try {
                     } catch (e) { /* ignore */ }
                 }
 
-                // Desktop iframe helper (optional)
+                // Desktop iframe helper
                 function setupDesktopIframe(initialSection) {
                     try {
                         const iframe = document.getElementById('desktop-iframe');
@@ -1283,18 +1256,10 @@ try {
                 try {
                     const saved = (localStorage && localStorage.getItem && localStorage.getItem('synth-webui-active-tab')) || 'home';
                     setActiveTab(saved);
-                    if (window.SynthConfig && window.SynthConfig.DESKTOP_IFRAME) {
-                        try { setupDesktopIframe(saved); } catch (e) { /* ignore */ }
-                    } else if (window.SynthWebUI && typeof window.SynthWebUI.loadSection === 'function') {
-                        try { window.SynthWebUI.loadSection(saved); } catch (e) { /* ignore */ }
-                    }
+                    try { setupDesktopIframe(saved); } catch (e) { /* ignore */ }
                 } catch (e) {
                     setActiveTab('home');
-                    if (window.SynthConfig && window.SynthConfig.DESKTOP_IFRAME) {
-                        try { setupDesktopIframe('home'); } catch (e) { /* ignore */ }
-                    } else if (window.SynthWebUI && typeof window.SynthWebUI.loadSection === 'function') {
-                        window.SynthWebUI.loadSection('home');
-                    }
+                    try { setupDesktopIframe('home'); } catch (e) { /* ignore */ }
                 }
 
                 try {

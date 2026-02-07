@@ -58,6 +58,7 @@ export function createArchiveModal() {
                 <div class="archive-title">Archives</div>
                 <div class="archive-controls">
                     <label><input id="show-archived" type="checkbox" /> Show archived</label>
+                    <button id="archive-edit" class="pill secondary">Edit</button>
                     <button id="archive-refresh" class="pill secondary">Refresh</button>
                 </div>
             </div>
@@ -87,7 +88,7 @@ export function createArchiveModal() {
                     y: 'center',
                     dockLabel: 'Archives',
                     dockClass: 'archive-toggle-btn',
-                    className: 'synth-winbox no-close'
+                    className: 'synth-winbox'
                 });
                 // If created, hide initially to mimic modal behavior until restored
                 try { if (archiveWinbox && typeof archiveWinbox.hide === 'function') archiveWinbox.hide(); } catch (e) { /* ignore */ }
@@ -101,16 +102,41 @@ export function createArchiveModal() {
             const listEl = panel.querySelector('#archive-list');
             const showArchived = panel.querySelector('#show-archived');
             const refreshBtn = panel.querySelector('#archive-refresh');
+            const editBtn = panel.querySelector('#archive-edit');
+            const deleteBtn = panel.querySelector('#archive-delete-btn');
+
+            const updateEditState = () => {
+                try {
+                    if (!panel) return;
+                    if (archiveMultiSelect) panel.classList.add('archive-edit-mode');
+                    else panel.classList.remove('archive-edit-mode');
+                    if (editBtn) editBtn.textContent = archiveMultiSelect ? 'Done' : 'Edit';
+                } catch (e) { /* ignore */ }
+            };
+
+            const updateSelectedState = () => {
+                try {
+                    if (!panel) return;
+                    const rows = panel.querySelectorAll('.archive-row');
+                    rows.forEach((row) => {
+                        const archId = row.dataset.id;
+                        const selected = archId && archiveSelectedIds.has(archId);
+                        row.classList.toggle('selected', !!selected);
+                        const check = row.querySelector('input.archive-check');
+                        if (check) check.checked = !!selected;
+                    });
+                } catch (e) { /* ignore */ }
+            };
 
             const load = async () => {
                 try {
                     if (!listEl) return;
                     listEl.innerHTML = '<div class="meta">Loading…</div>';
-                    const res = await fetch('/api/history?include_archived=1');
+                    const res = await fetch('/api/chat/archives');
                     if (!res.ok) { listEl.innerHTML = '<div class="meta">Failed to load</div>'; return; }
                     const data = await res.json();
                     listEl.innerHTML = '';
-                    const items = Array.isArray(data.items) ? data.items : [];
+                    const items = (data && data.success && Array.isArray(data.archives)) ? data.archives : [];
                     if (!items.length) {
                         listEl.innerHTML = '<div class="meta">No archived items</div>';
                         return;
@@ -119,9 +145,43 @@ export function createArchiveModal() {
                         const row = document.createElement('div');
                         row.className = 'archive-row';
                         row.dataset.id = it.id;
-                        row.innerHTML = `<div style="font-weight:600">${it.title || 'Entry'}</div><div style="font-size:12px;color:var(--text-soft)">${it.summary || ''}</div>`;
+                        const title = it.name || it.title || 'Chat';
+                        const created = it.created_at ? `· ${it.created_at}` : '';
+                        const count = (typeof it.message_count === 'number') ? `· ${it.message_count} msgs` : '';
+                        row.innerHTML = `
+                            <input class="archive-check" type="checkbox" />
+                            <div>
+                                <div style="font-weight:600">${title}</div>
+                                <div style="font-size:12px;color:var(--text-soft)">${created} ${count}</div>
+                            </div>
+                        `;
+                        row.addEventListener('click', (ev) => {
+                            try {
+                                if (!archiveMultiSelect) return;
+                                const target = ev?.target;
+                                if (target && target.classList && target.classList.contains('archive-check')) {
+                                    return;
+                                }
+                                const archId = row.dataset.id;
+                                if (!archId) return;
+                                if (archiveSelectedIds.has(archId)) archiveSelectedIds.delete(archId);
+                                else archiveSelectedIds.add(archId);
+                                updateSelectedState();
+                            } catch (e) { /* ignore */ }
+                        });
+                        const check = row.querySelector('input.archive-check');
+                        if (check) {
+                            check.addEventListener('change', () => {
+                                const archId = row.dataset.id;
+                                if (!archId) return;
+                                if (check.checked) archiveSelectedIds.add(archId);
+                                else archiveSelectedIds.delete(archId);
+                                updateSelectedState();
+                            });
+                        }
                         listEl.appendChild(row);
                     });
+                    updateSelectedState();
                 } catch (e) {
                     try { listEl.innerHTML = '<div class="meta">Failed to load</div>'; } catch (e) {}
                 }
@@ -129,6 +189,27 @@ export function createArchiveModal() {
 
             if (refreshBtn) refreshBtn.addEventListener('click', () => { load(); });
             if (showArchived) showArchived.addEventListener('change', () => { load(); });
+            if (editBtn) editBtn.addEventListener('click', () => {
+                archiveMultiSelect = !archiveMultiSelect;
+                if (!archiveMultiSelect) archiveSelectedIds.clear();
+                updateEditState();
+                updateSelectedState();
+            });
+            if (deleteBtn) deleteBtn.addEventListener('click', async () => {
+                try {
+                    if (!archiveMultiSelect || archiveSelectedIds.size === 0) return;
+                    if (!confirm(`Delete ${archiveSelectedIds.size} archives? This cannot be undone.`)) return;
+                    const ids = Array.from(archiveSelectedIds);
+                    for (const archId of ids) {
+                        try { await fetch(`/api/chat/archives/${archId}`, { method: 'DELETE' }); } catch (e) { /* ignore */ }
+                    }
+                    archiveSelectedIds.clear();
+                    archiveMultiSelect = false;
+                    updateEditState();
+                    await load();
+                } catch (e) { /* ignore */ }
+            });
+            updateEditState();
             // initial load
             load();
         } catch (e) { /* ignore */ }
