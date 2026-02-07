@@ -489,6 +489,8 @@ class SynthWebUIInterface:
         self.app.get("/api/animation_state")(_animation_state_endpoint)
         # Allow authorized clients to request a centralized state change
         self.app.post("/api/animation_state")(self.set_animation_state)
+        # Emotion state endpoint (separate from animation_state) — returns current emotion intensities
+        self.app.get("/api/emotion_state")(self.get_emotion_state_endpoint)
         self.app.get("/api/locations")(self.get_suggested_locations)
 
         # Template sections route for modular loading

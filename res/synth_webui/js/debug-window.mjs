@@ -554,8 +554,27 @@ export function createDebugWindow() {
                         out[String(k)] = Math.max(out[String(k)] || 0, vv);
                     });
                 };
+
+                // Merge engine-provided emotions and feelings if present
                 mergeObj(window.animationHandler ? (window.animationHandler._lastEmotions || null) : null);
                 mergeObj(window.animationHandler ? (window.animationHandler._lastFeelings || null) : null);
+
+                // Fallback: if animation state contains expressions (array of {type/name,intensity}), merge them too
+                try {
+                    const st = window.animationHandler && window.animationHandler._lastAnimationState ? window.animationHandler._lastAnimationState : null;
+                    if (st && Array.isArray(st.expressions) && st.expressions.length) {
+                        mergeObj({ values: st.expressions });
+                    }
+                } catch (e) { /* ignore */ }
+
+                // Final fallback: if we have a cached server-side emotion snapshot from /api/emotion_state, merge it
+                try {
+                    if ((!Object.keys(out).length) && window.__synth_debug_cached_emotions && typeof window.__synth_debug_cached_emotions === 'object') {
+                        mergeObj(window.__synth_debug_cached_emotions);
+                    }
+                } catch (e) { /* ignore */ }
+
+                try { console.debug('[debug-window] extractEmotionValues ->', out); } catch (e) {}
                 return out;
             } catch (e) {
                 return {};
@@ -618,7 +637,28 @@ export function createDebugWindow() {
                         const vv = clamp01(v);
                         slider.value = String(vv);
                         num.value = String(vv);
-                        try { window.animationHandler && window.animationHandler.setDebugEmotionOverride && window.animationHandler.setDebugEmotionOverride(name, vv); } catch (e) { /* ignore */ }
+                        try {
+                            // track applied emotion keys so Clear can remove local changes
+                            try { if (!window.__synth_debug_applied_emotions) window.__synth_debug_applied_emotions = new Set(); } catch (e) { window.__synth_debug_applied_emotions = {}; }
+                            try { if (window.__synth_debug_applied_emotions instanceof Set) window.__synth_debug_applied_emotions.add(name); } catch (e) {}
+
+                            const helper = window.__synth_applyDebugEmotion || null;
+                            if (helper) {
+                                const ok = helper(name, vv);
+                                if (ok) console.debug('[debug-window] applied emotion via helper', name, vv);
+                                else {
+                                    window.__synth_pending_debug_actions = window.__synth_pending_debug_actions || [];
+                                    window.__synth_pending_debug_actions.push({ type: 'setDebugEmotionOverride', name, value: vv });
+                                    console.debug('[debug-window] queued debug emotion action (helper failed)', name, vv);
+                                }
+                            } else if (window.animationHandler && window.animationHandler.setDebugEmotionOverride) {
+                                try { window.animationHandler.setDebugEmotionOverride(name, vv); console.debug('[debug-window] applied emotion via animationHandler', name, vv); } catch (e) { /* ignore */ }
+                            } else {
+                                window.__synth_pending_debug_actions = window.__synth_pending_debug_actions || [];
+                                window.__synth_pending_debug_actions.push({ type: 'setDebugEmotionOverride', name, value: vv });
+                                console.debug('[debug-window] queued debug emotion action (no helper)', name, vv);
+                            }
+                        } catch (e) { console.warn('[debug-window] setDebugEmotionOverride failed', e); }
                     };
                     row.appendChild(label);
                     row.appendChild(slider);
@@ -635,20 +675,33 @@ export function createDebugWindow() {
                 const feelingsHost = win.querySelector('#synth-debug-feelings');
                 if (!feelingsHost) return;
                 const base = extractEmotionValues();
-                const overrides = (window.animationHandler && typeof window.animationHandler.getDebugEmotionOverrides === 'function') ? window.animationHandler.getDebugEmotionOverrides() : {}; 
+                const overrides = (window.animationHandler && typeof window.animationHandler.getDebugEmotionOverrides === 'function') ? window.animationHandler.getDebugEmotionOverrides() : {};
                 const personaKeys = (window.__synth_persona_emotions_list && Array.isArray(window.__synth_persona_emotions_list)) ? window.__synth_persona_emotions_list : [];
+
+                try { console.debug('[debug-window] renderFeelings baseKeys=', Object.keys(base).slice(0,20), 'overrides=', Object.keys(overrides).slice(0,20), 'personaKeys=', personaKeys && personaKeys.length ? personaKeys.slice(0,20) : personaKeys); } catch (e) {}
+
                 const keysSet = new Set();
+                const cached = (window.__synth_debug_cached_emotions && typeof window.__synth_debug_cached_emotions === 'object') ? window.__synth_debug_cached_emotions : null;
                 if (personaKeys && Array.isArray(personaKeys) && personaKeys.length) {
                     personaKeys.forEach(k => keysSet.add(k));
                     Object.keys(base).forEach(k => { if (personaKeys.includes(k)) keysSet.add(k); });
                     Object.keys(overrides).forEach(k => { if (personaKeys.includes(k)) keysSet.add(k); });
                 } else {
+                    // No persona list: prefer base and overrides, but if both are empty, use cached server snapshot
                     Object.keys(base).forEach(k => keysSet.add(k));
                     Object.keys(overrides).forEach(k => keysSet.add(k));
+                    if ((!Object.keys(base).length) && (!Object.keys(overrides).length) && cached) {
+                        Object.keys(cached).forEach(k => keysSet.add(k));
+                        // Merge cached into base for display values
+                        try { Object.keys(cached).forEach(k => { if (!base[k]) base[k] = Number(cached[k]); }); } catch (e) { /* ignore */ }
+                    }
                 }
                 const keys = Array.from(keysSet).filter(k => k && !/^\d+$/.test(String(k))).sort();
                 ensureFeelingsRows(keys);
-                if (!keys.length) return;
+                if (!keys.length) {
+                    try { console.debug('[debug-window] renderFeelings: no keys to show'); } catch (e) {}
+                    return;
+                }
                 keys.forEach((name) => {
                     const row = __dbgFeelingsRows.get(name);
                     if (!row) return;
@@ -815,9 +868,27 @@ export function createDebugWindow() {
             const feelingsClearBtn = win.querySelector('#synth-debug-feelings-clear');
             if (feelingsClearBtn) {
                 feelingsClearBtn.addEventListener('click', () => {
-                    try { window.animationHandler && window.animationHandler.clearDebugEmotionOverrides && window.animationHandler.clearDebugEmotionOverrides(); } catch (e) { /* ignore */ }
+                    try {
+                        // Immediate local clear of keys applied by this UI
+                        try {
+                            const applied = (window.__synth_debug_applied_emotions && window.__synth_debug_applied_emotions instanceof Set) ? Array.from(window.__synth_debug_applied_emotions) : [];
+                            if (applied.length) {
+                                try { console.debug('[debug-window] clearing local applied emotions', applied); } catch (e) {}
+                                applied.forEach(n => { try { window.__synth_applyDebugEmotion ? window.__synth_applyDebugEmotion(n, null) : null; } catch (e) {} });
+                                try { if (window.__synth_debug_applied_emotions instanceof Set) window.__synth_debug_applied_emotions.clear(); } catch (e) {}
+                            }
+                        } catch (e) { /* ignore */ }
+
+                        if (window.animationHandler && window.animationHandler.clearDebugEmotionOverrides) {
+                            try { window.animationHandler.clearDebugEmotionOverrides(); console.debug('[debug-window] invoked animationHandler.clearDebugEmotionOverrides'); } catch (e) { /* ignore */ }
+                        } else {
+                            window.__synth_pending_debug_actions = window.__synth_pending_debug_actions || [];
+                            window.__synth_pending_debug_actions.push({ type: 'clearDebugEmotionOverrides' });
+                            console.debug('[debug-window] queued clearDebugEmotionOverrides');
+                        }
+                    } catch (e) { /* ignore */ }
                     __dbgFeelingsSig = '';
-                    renderFeelings();
+                    try { renderFeelings(); } catch (e) {}
                 });
             }
 
@@ -965,40 +1036,73 @@ export function createDebugWindow() {
                                 try { console.debug('[debug-window] attempting flush of', q.length, 'pending debug actions'); } catch (e) {}
                                 // Diagnostic: log animationHandler presence and override keys
                                 try { console.debug('[debug-window] flush check: animationHandler=', !!window.animationHandler, 'hasClear=', !!(window.animationHandler && window.animationHandler.clearDebugFaceOverrides), '_debugFaceOverridesKeys=', Object.keys(window.animationHandler && window.animationHandler._debugFaceOverrides ? window.animationHandler._debugFaceOverrides : {}).slice(0,20)); } catch (e) { /* ignore */ }
+
                                 const helper = window.__synth_applyDebugFace || null;
                                 const newQ = [];
                                 q.forEach((act) => {
                                     try {
                                         let applied = false;
                                         if (!act || !act.type) return;
+
+                                        // Apply face override actions
                                         if (act.type === 'setDebugFaceOverride') {
-                                            if (helper) applied = !!helper(act.key, act.value);
-                                            else if (window.animationHandler && typeof window.animationHandler.setDebugFaceOverride === 'function') {
+                                            if (helper) {
+                                                try { applied = !!helper(act.key, act.value); } catch (e) { applied = false; }
+                                            } else if (window.animationHandler && typeof window.animationHandler.setDebugFaceOverride === 'function') {
                                                 try { window.animationHandler.setDebugFaceOverride(act.key, act.value); applied = true; } catch (e) { applied = false; }
                                             }
-                                        } else if (act.type === 'clearDebugFaceOverrides') {
+                                        }
+
+                                        // Handle clear action
+                                        else if (act.type === 'clearDebugFaceOverrides') {
                                             try {
                                                 if (window.animationHandler && typeof window.animationHandler.clearDebugFaceOverrides === 'function') {
                                                     window.animationHandler.clearDebugFaceOverrides();
                                                     applied = true;
-                                                    console.debug('[debug-window] applied clearDebugFaceOverrides via animationHandler');
+                                                    try { console.debug('[debug-window] applied clearDebugFaceOverrides via animationHandler'); } catch (e) {}
                                                 } else if (window.__synth_applyDebugFace) {
                                                     // as fallback, iterate known keys and clear them
                                                     try {
                                                         const keys = Object.keys(window.animationHandler && window.animationHandler._debugFaceOverrides ? window.animationHandler._debugFaceOverrides : {});
                                                         keys.forEach(k => { try { window.__synth_applyDebugFace(k, null); } catch (e) {} });
                                                         applied = keys.length > 0;
-                                                        if (applied) console.debug('[debug-window] applied clearDebugFaceOverrides via helper on keys', keys);
+                                                        if (applied) try { console.debug('[debug-window] applied clearDebugFaceOverrides via helper on keys', keys); } catch (e) {}
                                                     } catch (e) { /* ignore */ }
                                                 }
                                             } catch (e) { /* ignore */ }
                                         }
+
                                         if (!applied) newQ.push(act);
-                                    } catch (e) { /* ignore */ }
+                                    } catch (e) { newQ.push(act); }
                                 });
                                 try { window.__synth_pending_debug_actions = newQ; } catch (e) { /* ignore */ }
                             }
+
+                            // If feelings/base keys are empty or persona keys are missing, try to fetch server-side emotion snapshot
+                            try {
+                                const base = extractEmotionValues();
+                                const personaKeys = (window.__synth_persona_emotions_list && Array.isArray(window.__synth_persona_emotions_list)) ? window.__synth_persona_emotions_list : [];
+                                const needFetch = (!base || !Object.keys(base).length) && (!personaKeys || !personaKeys.length);
+                                if (needFetch) {
+                                    (async () => {
+                                        try {
+                                            const r = await fetch('/api/emotion_state');
+                                            if (r && r.ok) {
+                                                const j = await r.json();
+                                                if (j && j.emotions && typeof j.emotions === 'object') {
+                                                    window.__synth_debug_cached_emotions = j.emotions;
+                                                    try { console.debug('[debug-window] fetched /api/emotion_state keys=', Object.keys(j.emotions).slice(0,20)); } catch (e) {}
+                                                    // trigger immediate re-render
+                                                    try { renderFeelings(); } catch (e) {}
+                                                }
+                                            }
+                                        } catch (e) { /* ignore */ }
+                                    })();
+                                }
+                            } catch (e) { /* ignore */ }
+
                         } catch (e) { /* ignore */ }
+
                         try { resyncFromBackend().catch(e => {/*ignore*/}); } catch (e) { /* ignore */ }
                     }, 2000);
                 }
