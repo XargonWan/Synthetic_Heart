@@ -993,6 +993,64 @@ try {
                             });
                             select.disabled = !isEditable;
                             inputEl = select;
+                        } else if (item.ui_type === 'file') {
+                            // File upload control for exposed file variables
+                            const fileWrap = document.createElement('div');
+                            fileWrap.className = 'file-upload-wrap';
+
+                            const current = document.createElement('div');
+                            current.className = 'file-current';
+                            if (value) {
+                                try {
+                                    // Show a download link pointing to the file endpoint
+                                    const link = document.createElement('a');
+                                    link.textContent = (typeof value === 'string') ? value.split('/').pop() : 'file';
+                                    link.href = `/api/config/${encodeURIComponent(item.key)}/file`;
+                                    link.target = '_blank';
+                                    current.appendChild(link);
+                                } catch (e) {
+                                    current.textContent = String(value);
+                                }
+                            } else {
+                                current.textContent = 'No file uploaded.';
+                            }
+
+                            const inputFile = document.createElement('input');
+                            inputFile.type = 'file';
+                            inputFile.disabled = !isEditable;
+
+                            const uploadBtn = document.createElement('button');
+                            uploadBtn.textContent = 'Upload';
+                            uploadBtn.disabled = !isEditable;
+                            uploadBtn.addEventListener('click', async () => {
+                                const f = inputFile.files && inputFile.files[0];
+                                if (!f) { alert('Select a file to upload'); return; }
+                                try {
+                                    const fd = new FormData();
+                                    fd.append('file', f);
+                                    uploadBtn.disabled = true;
+                                    uploadBtn.textContent = 'Uploading...';
+                                    const res = await fetch(`/api/config/${encodeURIComponent(item.key)}/upload`, { method: 'POST', body: fd });
+                                    if (!res.ok) {
+                                        const txt = await res.text();
+                                        alert('Upload failed: ' + txt);
+                                    } else {
+                                        await refreshConfig();
+                                    }
+                                } catch (e) {
+                                    console.error('[synth_webui] File upload failed', e);
+                                    alert('File upload failed');
+                                } finally {
+                                    uploadBtn.disabled = false;
+                                    uploadBtn.textContent = 'Upload';
+                                }
+                            });
+
+                            fileWrap.appendChild(current);
+                            fileWrap.appendChild(inputFile);
+                            fileWrap.appendChild(uploadBtn);
+
+                            inputEl = fileWrap;
                         } else if (item.ui_type === 'textarea' || item.value_type === 'json') {
                             const textarea = document.createElement('textarea');
                             textarea.rows = 3;

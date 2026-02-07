@@ -404,6 +404,9 @@ class SynthWebUIInterface:
         self.app.post("/api/components/dev/toggle")(self.toggle_dev_components)
         self.app.post("/api/system/restart")(self.restart_system)
         self.app.get("/api/config")(self.config_summary)
+        # File-backed exposed variables: upload/download handlers
+        self.app.post("/api/config/{key}/upload")(self.upload_exposed_file)
+        self.app.get("/api/config/{key}/file")(self.get_exposed_file)
         # Debug endpoints (only enabled when WEB_DEBUG=1)
         self.app.get("/api/debug/db_pool")(self.db_pool_debug)
         self.app.post("/api/config")(self.update_config_entry)
@@ -4188,11 +4191,128 @@ class SynthWebUIInterface:
                     destination.unlink()
                     log_debug(f"{LOG_PREFIX} Cleaned up partial upload: {destination}")
                 except Exception as cleanup_exc:
-                    log_error(f"{LOG_PREFIX} Failed to cleanup partial upload: {cleanup_exc}")
-            raise HTTPException(status_code=500, detail="Failed to store VRM file")
+                    log_warning(f"{LOG_PREFIX} Failed to cleanup partial VRM upload: {cleanup_exc}")
+            raise HTTPException(status_code=500, detail="Failed to store uploaded VRM") from exc
         finally:
-            await file.close()
+            try:
+                await file.close()
+            except Exception:
+                pass
             log_debug(f"{LOG_PREFIX} File handle closed")
+
+    async def upload_exposed_file(self, key: str, file: UploadFile = File(...)):
+        """Upload a file for an exposed variable of type 'file'.
+
+        Saves the uploaded file into: <STORAGE_ROOT>/<key>/<original_filename>
+        and updates the exposed variable value to the file's stored path.
+        """
+        log_info(f"{LOG_PREFIX} 📁 Exposed file upload start: key={key}, filename={file.filename if file else 'none'}")
+        try:
+            from core.variables_engine import exposed_vars
+            definition = exposed_vars.get_definition(key)
+            if not definition:
+                log_warning(f"{LOG_PREFIX} Unknown exposed variable key for file upload: {key}")
+                raise HTTPException(status_code=404, detail="Unknown exposed variable")
+            if definition.ui_type != 'file':
+                log_warning(f"{LOG_PREFIX} Exposed variable {key} is not a file type (ui_type={definition.ui_type})")
+                raise HTTPException(status_code=400, detail="Variable is not a file type")
+            if definition.readonly:
+                log_warning(f"{LOG_PREFIX} Attempt to upload to readonly exposed variable {key}")
+                raise HTTPException(status_code=403, detail="Variable is read-only")
+
+            if not file or not getattr(file, 'filename', None):
+                raise HTTPException(status_code=400, detail="No file uploaded")
+
+            # Storage root is configurable via env var; default to /config/storage
+            storage_root = Path(os.getenv('SYNTH_EXPOSED_STORAGE_ROOT', '/config/storage'))
+            try:
+                storage_root.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                log_warning(f"{LOG_PREFIX} Could not ensure storage root exists: {storage_root}")
+
+            dest_dir = storage_root / key
+            dest_dir.mkdir(parents=True, exist_ok=True)
+
+            # Preserve original filename as requested (use basename to avoid directory components)
+            original_name = Path(file.filename).name
+            destination = dest_dir / original_name
+
+            log_debug(f"{LOG_PREFIX} Writing exposed file to: {destination}")
+            bytes_written = 0
+            try:
+                with destination.open('wb') as fh:
+                    while True:
+                        chunk = await file.read(1 << 20)
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+                        bytes_written += len(chunk)
+                # set restrictive permissions
+                try:
+                    os.chmod(destination, 0o600)
+                except Exception:
+                    log_debug(f"{LOG_PREFIX} Could not chmod destination: {destination}")
+
+                stored_path = str(destination.resolve())
+
+                # Persist the file path into the exposed variable so callers can retrieve it
+                await exposed_vars.set_value(key, stored_path)
+
+                log_info(f"{LOG_PREFIX} ✅ Exposed file uploaded: {destination} ({bytes_written} bytes)")
+                return JSONResponse({"status": "ok", "stored_path": stored_path, "original_filename": original_name})
+            except Exception as exc:
+                log_error(f"{LOG_PREFIX} Failed to write exposed file {destination}: {exc}")
+                if destination.exists():
+                    try:
+                        destination.unlink()
+                    except Exception:
+                        pass
+                raise HTTPException(status_code=500, detail="Failed to store uploaded file") from exc
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Unexpected error in upload_exposed_file: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def get_exposed_file(self, key: str):
+        """Retrieve the stored file for an exposed variable of type 'file'.
+
+        Serves the file as an attachment using the original filename.
+        """
+        log_debug(f"{LOG_PREFIX} Request to download exposed file for key: {key}")
+        try:
+            from core.variables_engine import exposed_vars
+            definition = exposed_vars.get_definition(key)
+            if not definition or definition.ui_type != 'file':
+                log_warning(f"{LOG_PREFIX} Download requested for unknown or non-file variable: {key}")
+                raise HTTPException(status_code=404, detail="File not found")
+
+            stored = exposed_vars.get_value(key)
+            if not stored:
+                log_warning(f"{LOG_PREFIX} No file stored for variable: {key}")
+                raise HTTPException(status_code=404, detail="No file stored for this variable")
+
+            file_path = Path(str(stored))
+            if not file_path.exists() or not file_path.is_file():
+                log_warning(f"{LOG_PREFIX} Stored file path missing or invalid: {file_path}")
+                raise HTTPException(status_code=404, detail="Stored file not found")
+
+            storage_root = Path(os.getenv('SYNTH_EXPOSED_STORAGE_ROOT', '/config/storage')).resolve()
+            try:
+                # Ensure the file is inside the storage root to avoid path escape
+                file_path_resolved = file_path.resolve()
+                file_path_resolved.relative_to(storage_root)
+            except Exception:
+                log_warning(f"{LOG_PREFIX} Stored file path is outside allowed storage: {file_path}")
+                raise HTTPException(status_code=403, detail="Access denied")
+
+            headers = {"Content-Disposition": f'attachment; filename="{file_path.name}"'}
+            return FileResponse(str(file_path_resolved), media_type="application/octet-stream", headers=headers)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Unexpected error in get_exposed_file: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
         log_info(f"{LOG_PREFIX} Setting active VRM to: model.vrm")
         # Persist marker pointing to model.vrm

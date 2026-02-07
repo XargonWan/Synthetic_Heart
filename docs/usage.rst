@@ -78,6 +78,9 @@ Components are configured through environment variables in the ``.env`` file:
     - ``DISCORD_BOT_TOKEN``: Discord bot token
     - ``REDDIT_*``: Reddit API credentials
 
+**File Storage**
+    - ``SYNTH_EXPOSED_STORAGE_ROOT``: Files uploaded for `file`-type exposed variables are stored here. Defaults to ``/config/storage``.
+
 **LLM API Keys**
     - ``OPENAI_API_KEY``: OpenAI API access
     - ``GEMINI_API_KEY``: Google Gemini access
