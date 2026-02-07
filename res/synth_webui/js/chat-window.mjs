@@ -32,8 +32,8 @@ function createChatTemplate() {
             <div class="synth-chat">
                 <div class="synth-chat-header">
                     <div class="synth-chat-archive">
-                        <button id="chat-archive" title="Archive current chat" type="button" class="pill">📦 Archive</button>
-                        <button id="chat-restore" title="Open archives" type="button" class="pill">🗂️ Open Archive</button>
+                        <button id="chat-archive" title="Archive current chat" type="button" class="pill">📦 Archive Chat</button>
+                        <button id="chat-restore" title="Open archives" type="button" class="pill">🗂️ Open Archives</button>
                     </div>
                 </div>
 
