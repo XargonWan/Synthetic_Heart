@@ -9,12 +9,13 @@ function injectChatStyles() {
         style.textContent = `
         /* chat styles (injected by chat-window.mjs) */
         .synth-chat { display:flex; flex-direction:column; height:100%; min-height:0; width:100%; position:relative; }
+        .synth-chat-header { width:100%; display:flex; align-items:center; justify-content:flex-start; padding:0.35rem 0.6rem 0 0.6rem; }
         .synth-chat-body { flex:1 1 auto; min-height:0; overflow-y:auto; }
         .synth-chat-footer { flex:0 0 auto; position:sticky; bottom:0; z-index:2; background: inherit; }
         .synth-chat-composer { width:100%; display:flex; gap:0.6rem; align-items:flex-end; padding:0.6rem 1rem; box-sizing:border-box; }
         #input { flex:1 1 auto; min-height:2.4rem; max-height:7rem; resize:none; }
         #send { flex:0 0 auto; border-radius:50%; height:2.6rem; width:2.6rem; }
-        .synth-chat-archive { margin-left:auto; margin-top:0.4rem; margin-right:0.6rem; display:flex; gap:0.5rem; align-items:center; }
+        .synth-chat-archive { margin-left:auto; margin-top:0.6rem; margin-right:0.6rem; display:flex; gap:0.5rem; align-items:center; }
         .synth-chat-archive .pill { padding:0.4rem 0.6rem; }
         `;
         document.head.appendChild(style);
@@ -30,7 +31,7 @@ function createChatTemplate() {
         tpl.innerHTML = `
             <div class="synth-chat">
                 <div class="synth-chat-header">
-                    <div class="synth-chat-archive" style="margin-left:auto;">
+                    <div class="synth-chat-archive">
                         <button id="chat-archive" title="Archive current chat" type="button" class="pill">📦 Archive</button>
                         <button id="chat-restore" title="Open archives" type="button" class="pill">🗂️ Open Archive</button>
                     </div>
@@ -104,6 +105,8 @@ export async function createChatWindow() {
                 mount.appendChild(tpl.content.cloneNode(true));
             }
             try { bindArchiveButton(); } catch (e) { /* ignore */ }
+            // Ensure chat UI event handlers are initialized after the template is mounted
+            try { if (typeof initChatUI === 'function') initChatUI(); } catch (e) { /* ignore */ }
         } catch (e) { /* ignore */ }
 
         // If already created, return existing instance
@@ -132,7 +135,7 @@ export async function createChatWindow() {
                 dockLabel: 'Chat',
                 dockButton: chatToggleBtn || null,
                 dockClass: 'chat-toggle-btn',
-                className: 'synth-winbox'
+                className: 'synth-winbox no-close'
             });
 
             // Slight title size tweak for visibility
