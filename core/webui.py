@@ -490,6 +490,8 @@ class SynthWebUIInterface:
 
         # Template sections route for modular loading
         self.app.get("/templates/{section}.html")(self.serve_template_section)
+        # Endpoint serving an iframe host page for embedding sections inside an iframe
+        self.app.get("/iframe/{section}")(self.iframe_host)
 
     def _is_missing_agent_table_error(self, exc: Exception) -> bool:
         """Return True when agent tables are missing so endpoints can degrade gracefully."""
@@ -1078,6 +1080,96 @@ class SynthWebUIInterface:
             raise HTTPException(status_code=404, detail="Template section not found")
         except Exception as exc:
             log_error(f"{LOG_PREFIX} Failed to serve template section {section}: {exc}")
+
+    async def iframe_host(self, section: str):
+        """Serve a lightweight host page that dynamically loads a template section.
+        This enables embedding the 'desktop' UI inside an iframe so the top menu
+        (header) remains part of the parent document and cannot be hidden by
+        content inside the desktop area.
+        """
+        try:
+            # Validate section name to prevent path traversal
+            allowed_sections = {'home', 'skins', 'logs', 'diary', 'history', 'config', 'components', 'settings', 'about', 'agent'}
+            if section not in allowed_sections:
+                raise HTTPException(status_code=404, detail="Template section not found")
+
+            # Build a small host HTML that will fetch the actual section template and
+            # inject it into the iframe's DOM. The host listens to postMessage
+            # messages of the form { type: 'load', section: '<name>' } to navigate.
+            safe_section = section
+            host_html = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <base href="/" />
+  <title>%%BRAND_NAME%% — embedded</title>
+  <style>html,body{height:100%;margin:0;background:transparent;color:var(--text, #fff);font-family:system-ui,Segoe UI,Arial,sans-serif}#root{height:100%;width:100%;box-sizing:border-box}/* Ensure full height */main{height:100%;min-height:0;}</style>
+</head>
+<body>
+  <div id="root"><main id="iframe-root" role="main"></main></div>
+  <script>
+    (function(){
+      async function loadSection(section) {
+        try {
+          const resp = await fetch('/templates/' + encodeURIComponent(section) + '.html');
+          if (!resp.ok) {
+            document.getElementById('iframe-root').innerHTML = '<div class="meta">Failed to load section: ' + resp.status + '</div>';
+            return;
+          }
+          const text = await resp.text();
+          const parser = new DOMParser();
+          const doc = parser.parseFromString(text, 'text/html');
+          // Replace root contents
+          const root = document.getElementById('iframe-root');
+          root.innerHTML = '';
+          Array.from(doc.body.children || []).forEach(n => root.appendChild(n));
+          // Execute scripts in inserted content (preserve order)
+          const scripts = Array.from(root.querySelectorAll('script'));
+          for (const old of scripts) {
+            const el = document.createElement('script');
+            if (old.type) el.type = old.type;
+            if (old.src) {
+              el.src = old.src;
+              el.async = false;
+              document.head.appendChild(el);
+              await new Promise((resolve) => { el.onload = () => resolve(); el.onerror = () => resolve(); });
+            } else {
+              el.textContent = old.textContent;
+              document.head.appendChild(el);
+            }
+            old.remove();
+          }
+        } catch (e) {
+          try { document.getElementById('iframe-root').innerText = 'Failed to load section: ' + e; } catch (e) {}
+        }
+      }
+      // Listen for parent messages
+      window.addEventListener('message', (ev) => {
+        try {
+          const d = ev.data || {};
+          if (d && d.type === 'load' && d.section) {
+            loadSection(d.section);
+          }
+        } catch (e) { /* ignore */ }
+      });
+      // Initial load
+      loadSection('__SECTION_PLACEHOLDER__');
+    })();
+  </script>
+</body>
+</html>"""
+            host_html = host_html.replace('__SECTION_PLACEHOLDER__', safe_section)
+
+
+            # Replace placeholders
+            host_html = host_html.replace('%%BRAND_NAME%%', BRAND_NAME)
+            return HTMLResponse(content=host_html)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="Template section not found")
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} iframe_host failed: {exc}")
+            raise HTTPException(status_code=500, detail=f"Failed to render iframe host: {exc}") from exc
             raise HTTPException(status_code=500, detail="Unable to load template section")
 
     # ------------------------------------------------------------------

@@ -2280,7 +2280,12 @@ import * as THREE from 'three';
                         // Accept either filename (resolved under /skins/<skin>/animations/<state>/)
                         // or full URL/path (descriptor expected at `<anim>.json`).
                         let descriptorPath = null;
-                        if (typeof cleanAnim === 'string' && (cleanAnim.includes('/') || cleanAnim.startsWith('http'))) {
+                        if (typeof cleanAnim === 'string' && (cleanAnim.includes('/skins/') || cleanAnim.startsWith('/skins/'))) {
+                            const skinName = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
+                            const fileName = cleanAnim.split('/').pop();
+                            const encodedFile = encodeURIComponent(String(fileName || '') + '.json');
+                            descriptorPath = `/api/skins/${skinName}/animations/${actionName}/${encodedFile}`;
+                        } else if (typeof cleanAnim === 'string' && (cleanAnim.includes('/') || cleanAnim.startsWith('http'))) {
                             descriptorPath = `${cleanAnim}.json`;
                         } else {
                             // Prefer API endpoint for descriptors. The API will return

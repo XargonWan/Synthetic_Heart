@@ -4,6 +4,11 @@
 
     // Minimal config accessor
     window.SynthConfig = window.__SYNTH_CONFIG || {};
+    // Enable iframe-based desktop by default. This can be overridden by
+    // server-side config `__SYNTH_CONFIG.DESKTOP_IFRAME = false;` or by the
+    // client setting `window.SynthConfig.DESKTOP_IFRAME = false` before the
+    // script runs.
+    if (typeof window.SynthConfig.DESKTOP_IFRAME === 'undefined') window.SynthConfig.DESKTOP_IFRAME = true;
     window.SynthWebUISetStatus = window.SynthWebUISetStatus || function setSynthWebUIStatus(message, level) {
         try {
             const label = document.getElementById('status-label');
@@ -350,12 +355,14 @@ try {
             }
 
             function applyViewportInsets(entry) {
+                // NOTE: previously we altered winbox inset properties (right/bottom) to
+                // accommodate scrollbars. Writing negative inset values causes WinBox's
+                // internal maximize/resize math to behave incorrectly. Avoid modifying
+                // those properties; rely on resize events and explicit constraints
+                // instead.
                 if (!entry || !entry.winbox) return;
                 try {
-                    const deltaW = Math.max(0, (window.innerWidth || 0) - (document.documentElement?.clientWidth || 0));
-                    const deltaH = Math.max(0, (window.innerHeight || 0) - (document.documentElement?.clientHeight || 0));
-                    if (deltaW) entry.winbox.right = -deltaW;
-                    if (deltaH) entry.winbox.bottom = -deltaH;
+                    // Keep function for debugging hooks; don't mutate winbox insets here.
                 } catch (e) { /* ignore */ }
             }
 
@@ -460,8 +467,11 @@ try {
                         }
                         const topbar = getTopbarHeight() || 0;
                         const viewport = getViewportSize();
+                        // Allow a small overhang beyond the viewport bottom to avoid the "invisible wall" effect.
+                        // Overhang is configurable via `window.SynthConfig.WINDOW_DRAG_BOTTOM_OVERHANG` (numeric, px).
+                        const overhang = (window.SynthConfig && Number.isFinite(Number(window.SynthConfig.WINDOW_DRAG_BOTTOM_OVERHANG))) ? Math.max(0, Math.abs(Number(window.SynthConfig.WINDOW_DRAG_BOTTOM_OVERHANG))) : 180;
                         const maxX = Math.max(0, viewport.width - w);
-                        const maxY = Math.max(topbar, viewport.height - h);
+                        const maxY = Math.max(topbar, viewport.height - h + overhang);
                         const targetX = Math.min(maxX, Math.max(0, Math.round((winX || 0) + dx)));
                         const targetY = Math.min(maxY, Math.max(topbar, Math.round((winY || 0) + dy)));
                         winbox.move(targetX, targetY);
@@ -562,16 +572,16 @@ try {
             function saveState(id) {
                 const entry = windows.get(id);
                 if (!entry || !entry.winbox) return;
-                if (id !== 'chat') return;
                 try {
                     const device = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768) ? 'mobile' : 'desktop';
-                    const stateKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}-${device}` : `${CHAT_WINDOW_STATE_KEY}-${device}`;
+                    // Use id in keys so we can persist multiple windows (chat, debug, etc.)
+                    const stateKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${id}-${sessionId}-${device}` : `${CHAT_WINDOW_STATE_KEY}-${id}-${device}`;
                     let state = 'normal';
                     if (entry.minimized) state = 'minimized';
                     else if (entry.winbox.max) state = 'maximized';
                     try { localStorage.setItem(stateKey, state); } catch (e) { /* ignore */ }
 
-                    const rectKey = sessionId ? `${CHAT_RECT_KEY}-${sessionId}-${device}` : `${CHAT_RECT_KEY}-${device}`;
+                    const rectKey = sessionId ? `${CHAT_RECT_KEY}-${id}-${sessionId}-${device}` : `${CHAT_RECT_KEY}-${id}-${device}`;
                     const payload = {
                         left: Math.round(entry.winbox.x || 0),
                         top: Math.round(entry.winbox.y || 0),
@@ -585,11 +595,10 @@ try {
             function restoreState(id) {
                 const entry = windows.get(id);
                 if (!entry || !entry.winbox) return false;
-                if (id !== 'chat') return false;
                 try {
                     const device = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768) ? 'mobile' : 'desktop';
-                    const rectKey = sessionId ? `${CHAT_RECT_KEY}-${sessionId}-${device}` : `${CHAT_RECT_KEY}-${device}`;
-                    const rectRaw = localStorage.getItem(rectKey) || localStorage.getItem(sessionId ? `${CHAT_RECT_KEY}-${sessionId}` : CHAT_RECT_KEY) || localStorage.getItem(CHAT_RECT_KEY);
+                    const rectKey = sessionId ? `${CHAT_RECT_KEY}-${id}-${sessionId}-${device}` : `${CHAT_RECT_KEY}-${id}-${device}`;
+                    const rectRaw = localStorage.getItem(rectKey) || localStorage.getItem(sessionId ? `${CHAT_RECT_KEY}-${id}-${sessionId}` : `${CHAT_RECT_KEY}-${id}`) || localStorage.getItem(CHAT_RECT_KEY);
                     if (rectRaw) {
                         const rect = JSON.parse(rectRaw);
                         const hasWidth = typeof rect.width === 'number' && rect.width >= 260;
@@ -609,7 +618,7 @@ try {
                             entry.winbox.move(left, top);
                         }
                     } else {
-                        // No saved rect: position chat at bottom-left by default for better UX
+                        // No saved rect: position at bottom-left by default
                         try {
                             const viewport = getViewportSize();
                             const topbar = getTopbarHeight() || 0;
@@ -628,8 +637,8 @@ try {
                         } catch (e) { /* ignore */ }
                     }
 
-                    const stateKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}-${device}` : `${CHAT_WINDOW_STATE_KEY}-${device}`;
-                    const localState = localStorage.getItem(stateKey) || localStorage.getItem(sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}` : CHAT_WINDOW_STATE_KEY) || localStorage.getItem(CHAT_WINDOW_STATE_KEY);
+                    const stateKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${id}-${sessionId}-${device}` : `${CHAT_WINDOW_STATE_KEY}-${id}-${device}`;
+                    const localState = localStorage.getItem(stateKey) || localStorage.getItem(sessionId ? `${CHAT_WINDOW_STATE_KEY}-${id}-${sessionId}` : `${CHAT_WINDOW_STATE_KEY}-${id}`) || localStorage.getItem(CHAT_WINDOW_STATE_KEY);
                     if (localState === 'minimized') {
                         minimize(id);
                     } else if (localState === 'maximized') {
@@ -685,6 +694,7 @@ try {
                     y: opts.y !== undefined ? opts.y : 'bottom',
                     width: opts.width || 420,
                     height: opts.height || '70%',
+                    overflow: opts.overflow,
                     class: opts.className || 'synth-winbox no-full no-close',
                     onmove: () => {
                         try { clampToTopbar(entry); } catch (e) { /* ignore */ }
@@ -1215,6 +1225,20 @@ try {
                     } catch (e) { /* ignore */ }
                 }
 
+                // Desktop iframe helper (optional)
+                function setupDesktopIframe(initialSection) {
+                    try {
+                        const iframe = document.getElementById('desktop-iframe');
+                        if (!iframe) return null;
+                        iframe.style.display = '';
+                        // Mark document so CSS can hide redundant tab-panels while iframe is active
+                        try { document.documentElement.classList.add('desktop-iframe-enabled'); } catch (e) { /* ignore */ }
+                        const desired = '/iframe/' + (initialSection || 'home');
+                        if (iframe.getAttribute('src') !== desired) iframe.setAttribute('src', desired);
+                        return iframe;
+                    } catch (e) { /* ignore */ return null; }
+                }
+
                 navButtons.forEach(btn => {
                     btn.addEventListener('click', async () => {
                         const tab = btn.getAttribute('data-tab');
@@ -1222,9 +1246,21 @@ try {
                         try {
                             setActiveTab(tab);
                             try { window.activeTab = tab; if (localStorage && localStorage.setItem) localStorage.setItem('synth-webui-active-tab', tab); } catch (e) { /* ignore */ }
-                            if (window.SynthWebUI && typeof window.SynthWebUI.loadSection === 'function') {
-                                await window.SynthWebUI.loadSection(tab);
+
+                            // If the desktop is embedded in an iframe, post a message to request a section load
+                            if (window.SynthConfig && window.SynthConfig.DESKTOP_IFRAME) {
+                                try {
+                                    const iframe = document.getElementById('desktop-iframe');
+                                    if (iframe && iframe.contentWindow) {
+                                        iframe.contentWindow.postMessage({ type: 'load', section: tab }, window.location.origin);
+                                    }
+                                } catch (e) { /* ignore */ }
+                            } else {
+                                if (window.SynthWebUI && typeof window.SynthWebUI.loadSection === 'function') {
+                                    await window.SynthWebUI.loadSection(tab);
+                                }
                             }
+
                             if (tab === 'history' && window.SynthWebUI && typeof window.SynthWebUI.initHistoryTab === 'function') {
                                 try { window.SynthWebUI.initHistoryTab(); } catch (e) { /* ignore */ }
                             }
@@ -1247,12 +1283,16 @@ try {
                 try {
                     const saved = (localStorage && localStorage.getItem && localStorage.getItem('synth-webui-active-tab')) || 'home';
                     setActiveTab(saved);
-                    if (window.SynthWebUI && typeof window.SynthWebUI.loadSection === 'function') {
-                        window.SynthWebUI.loadSection(saved);
+                    if (window.SynthConfig && window.SynthConfig.DESKTOP_IFRAME) {
+                        try { setupDesktopIframe(saved); } catch (e) { /* ignore */ }
+                    } else if (window.SynthWebUI && typeof window.SynthWebUI.loadSection === 'function') {
+                        try { window.SynthWebUI.loadSection(saved); } catch (e) { /* ignore */ }
                     }
                 } catch (e) {
                     setActiveTab('home');
-                    if (window.SynthWebUI && typeof window.SynthWebUI.loadSection === 'function') {
+                    if (window.SynthConfig && window.SynthConfig.DESKTOP_IFRAME) {
+                        try { setupDesktopIframe('home'); } catch (e) { /* ignore */ }
+                    } else if (window.SynthWebUI && typeof window.SynthWebUI.loadSection === 'function') {
                         window.SynthWebUI.loadSection('home');
                     }
                 }

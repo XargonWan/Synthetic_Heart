@@ -45,6 +45,7 @@ getting started.
    vrm_animations
    animation_system
    webui_debug
+   webui_desktop_iframe
    window_manager
    interfaces
    compose_env_vars

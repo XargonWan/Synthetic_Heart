@@ -123,11 +123,16 @@
             height: 100%;
             display: block;
             width: 100%;
+            position: relative;
         }
         .tab-panel {
             display: none;
             height: 100%;
         }
+        /* When iframe-based desktop is enabled hide internal tab panels and
+           make the iframe fill the available area so the header stays outside */
+        .desktop-iframe-enabled .tab-panel { display: none !important; }
+        .desktop-iframe-enabled #desktop-iframe { display: block !important; position: absolute; inset: 0; z-index: 1; height: calc(100vh - var(--topbar-height, 80px)); width:100%; border:0; }
         .tab-panel.active {
             display: flex;
             flex-direction: column;
@@ -172,6 +177,17 @@
             overflow: hidden;
             z-index: 50;
         }
+        #chat.synth-window-managed {
+            position: relative;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            max-height: 100%;
+            max-width: 100%;
+            padding-top: 0;
+            border-radius: 0;
+            box-shadow: none;
+        }
         #chat.hidden {
             display: none;
         }
@@ -188,7 +204,7 @@
         /* Chat structural layout */
         .synth-chat { display:flex; flex-direction:column; height:100%; min-height:0; width:100%; position:relative; }
         /* Ensure the chat body is the only scrollable area and reserve space for sticky footer */
-        .synth-chat-body { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; overflow:hidden; padding-bottom: 84px; }
+        .synth-chat-body { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; overflow:hidden; }
         #messages {
             flex: 1 1 auto;
             overflow-y: auto;
@@ -206,7 +222,7 @@
         .synth-chat-header .synth-chat-archive { margin-left:auto; }
 
         /* Footer anchored to bottom with sticky positioning */
-        .synth-chat-footer { position: sticky; bottom: 0; flex: 0 0 auto; display:flex; align-items:center; justify-content:space-between; padding:0.6rem 1.1rem; border-top:1px solid rgba(255,255,255,0.02); background: linear-gradient(to top, rgba(0,0,0,0.04), transparent); z-index:2; }
+        .synth-chat-footer { flex: 0 0 auto; display:flex; align-items:center; justify-content:space-between; padding:0.6rem 1.1rem; border-top:1px solid rgba(255,255,255,0.02); background: linear-gradient(to top, rgba(0,0,0,0.04), transparent); }
         .synth-chat-footer #composer { width:100%; display:flex; gap:0.6rem; align-items:flex-end; }
         .synth-chat-footer #composer textarea { width:100%; resize:none; }
         .synth-chat-footer #send { flex: 0 0 auto; }
@@ -285,7 +301,7 @@
         .synth-chat-archive .pill { padding:0.5rem 0.8rem; }
 
         /* Footer (composer) */
-        .synth-chat-footer { flex: 0 0 auto; display:flex; align-items:center; justify-content:space-between; padding:0.6rem 1.1rem; border-top:1px solid rgba(255,255,255,0.02); }
+        .synth-chat-footer { flex: 0 0 auto; display:flex; align-items:center; justify-content:space-between; padding:0.6rem 1.1rem; border-top:1px solid rgba(255,255,255,0.02); background: linear-gradient(to top, rgba(0,0,0,0.04), transparent); }
         .synth-chat-footer #composer { width:100%; display:flex; gap:0.6rem; align-items:flex-end; }
         .synth-chat-footer #composer textarea { width:100%; resize:none; }
         .synth-chat-footer #send { flex: 0 0 auto; }
@@ -1329,7 +1345,10 @@
             </button>
         </nav>
     </header>
-    <main id="main-content"><!-- dynamic --></main>
+    <main id="main-content">
+        <iframe id="desktop-iframe" title="Desktop content" sandbox="allow-scripts allow-same-origin" style="display:none;width:100%;height:100%;border:0;min-height:0;"></iframe>
+        <!-- dynamic -->
+    </main>
     <!-- Debug overlay. Rendered only when WEB_DEBUG=1. Default is 0 (disabled). -->
     <div id="synth-debug" data-debug-enabled="%%WEB_DEBUG%%" aria-hidden="false" style="position:fixed;right:12px;bottom:12px;z-index:9999;padding:0.5rem 0.75rem;background:rgba(0,0,0,0.6);color:#fff;border-radius:8px;font-size:12px;max-width:320px;box-shadow:0 8px 20px rgba(0,0,0,0.6)">
         <div style="font-weight:600;margin-bottom:0.25rem;">SyntH Debug</div>

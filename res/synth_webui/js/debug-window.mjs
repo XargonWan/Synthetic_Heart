@@ -52,7 +52,7 @@ export function createDebugWindow() {
 
                 <div style="display:flex;gap:8px;align-items:center;justify-content:flex-start;">
                     <div id="synth-debug-controls" style="display:flex;gap:8px;align-items:center;">
-                        <button id="synth-debug-pause" class="pill secondary" type="button" title="⏸️" aria-label="Pause">⏸️</button>
+                        <button id="synth-debug-pause" class="pill secondary" type="button" title="⏸️">⏸️</button>
                         <button id="synth-debug-resync" class="pill secondary" type="button" title="Sync">🛜</button>
                         <button id="synth-debug-reset" class="pill" type="button" title="Reset">🔁</button>
                     </div>
@@ -116,13 +116,13 @@ export function createDebugWindow() {
             if (typeof window.WinBox === 'undefined') return null;
             const panel = buildDebugPanel();
             win = panel;
-            winbox = window.SynthWindowManager.create({
+                winbox = window.SynthWindowManager.create({
                 id: 'debug',
                 title: 'Debug',
                 mount: panel,
                 width: 420,
                 height: 520,
-                x: 24,
+                    x: 'right',
                 y: 'bottom',
                 dockLabel: 'Debug',
                 dockClass: 'debug-toggle-btn',

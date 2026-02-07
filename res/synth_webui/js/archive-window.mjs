@@ -74,6 +74,28 @@ export function createArchiveModal() {
             </div>
         `;
 
+        // If a managed WinBox is available, create the WinBox instance and keep it hidden
+        if (canUseWinBox && window.SynthWindowManager && typeof window.SynthWindowManager.create === 'function') {
+            try {
+                archiveWinbox = window.SynthWindowManager.create({
+                    id: 'archives',
+                    title: 'Archives',
+                    mount: panel,
+                    width: 720,
+                    height: 520,
+                    x: 'center',
+                    y: 'center',
+                    dockLabel: 'Archives',
+                    dockClass: 'archive-toggle-btn',
+                    className: 'synth-winbox no-close'
+                });
+                // If created, hide initially to mimic modal behavior until restored
+                try { if (archiveWinbox && typeof archiveWinbox.hide === 'function') archiveWinbox.hide(); } catch (e) { /* ignore */ }
+                try { window.__archive_modal_winbox = archiveWinbox; } catch (e) { /* ignore */ }
+                try { console.debug('[archive-window] WinBox instance created for archives'); } catch (e) { /* ignore */ }
+            } catch (e) { console.warn('[archive-window] WinBox creation failed', e); }
+        }
+
         // Setup basic behaviors for now. The rest of the history rendering logic lives in history.js
         try {
             const listEl = panel.querySelector('#archive-list');

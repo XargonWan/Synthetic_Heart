@@ -56,3 +56,16 @@ container in the WebUI shell templates. The most relevant selectors are:
 
 For additional windows (debug/archives), use the window manager API and
 provide a custom icon label for the minimized stack.
+
+Runtime configuration & persistence
+----------------------------------
+
+- ``window.SynthConfig.WINDOW_DRAG_BOTTOM_OVERHANG`` (number, px, default: 180)
+  - When set, allows windows to be dragged slightly below the viewport to
+    accommodate UX workflows that benefit from a small overhang. This replaces
+    the previous negative ``bottom`` override which caused maximize/restore
+    calculations to be incorrect.
+
+- Per-window state is now persisted independently (e.g. chat, debug). The
+  state and rect keys stored in ``localStorage`` include the window id so
+  restore/restoreState works for multiple windows.
