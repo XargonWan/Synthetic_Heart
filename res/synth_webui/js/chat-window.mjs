@@ -46,6 +46,7 @@ export async function createChatWindow() {
             if (tpl && mount.children.length === 0) {
                 mount.appendChild(tpl.content.cloneNode(true));
             }
+            try { bindArchiveButton(); } catch (e) { /* ignore */ }
         } catch (e) { /* ignore */ }
 
         // If already created, return existing instance
@@ -166,48 +167,10 @@ export function initChatUI() {
         const input = document.getElementById('input');
         const form = document.getElementById('composer');
         const sendBtn = document.getElementById('send');
-        const chatRestoreBtn = document.getElementById('chat-restore');
 
         if (!messages || !input || !form || !sendBtn) return;
 
-        async function openArchives() {
-            try {
-                let mod = window.ArchiveWindow;
-                if (!mod || !mod.createArchiveModal) {
-                    try {
-                        mod = await import('/js/archive-window.mjs');
-                        if (mod && mod.createArchiveModal) {
-                            window.ArchiveWindow = window.ArchiveWindow || {};
-                            window.ArchiveWindow.createArchiveModal = mod.createArchiveModal;
-                        }
-                    } catch (e) {
-                        console.warn('[chat-window] Failed to import archive-window module', e);
-                    }
-                }
-                const creator = (window.ArchiveWindow && window.ArchiveWindow.createArchiveModal)
-                    ? window.ArchiveWindow.createArchiveModal
-                    : (mod && mod.createArchiveModal ? mod.createArchiveModal : null);
-                if (!creator) throw new Error('Archive module not available');
-                const modal = creator();
-                try {
-                    if (window.SynthWindowManager && typeof window.SynthWindowManager.restore === 'function') {
-                        try { window.SynthWindowManager.restore('archives'); return; } catch (e) {}
-                    }
-                } catch (e) {}
-                try { if (modal && modal.style) modal.style.display = 'flex'; } catch (e) {}
-            } catch (err) {
-                const msg = 'Open archives error: ' + (err && err.message ? err.message : err);
-                try { if (window.showToast) window.showToast(msg, true); } catch (e) {}
-                console.error('[chat-window] Open archives failed', err);
-            }
-        }
-
-        try {
-            if (chatRestoreBtn && !chatRestoreBtn.dataset.synthBound) {
-                chatRestoreBtn.addEventListener('click', async () => { await openArchives(); });
-                chatRestoreBtn.dataset.synthBound = '1';
-            }
-        } catch (e) { /* ignore */ }
+        try { bindArchiveButton(); } catch (e) { /* ignore */ }
 
         let ws = null;
 
@@ -300,6 +263,48 @@ export function initChatUI() {
     } catch (e) {
         console.warn('[chat-window] initChatUI failed', e);
     }
+}
+
+async function openArchives() {
+    try {
+        let mod = window.ArchiveWindow;
+        if (!mod || !mod.createArchiveModal) {
+            try {
+                mod = await import('/js/archive-window.mjs');
+                if (mod && mod.createArchiveModal) {
+                    window.ArchiveWindow = window.ArchiveWindow || {};
+                    window.ArchiveWindow.createArchiveModal = mod.createArchiveModal;
+                }
+            } catch (e) {
+                console.warn('[chat-window] Failed to import archive-window module', e);
+            }
+        }
+        const creator = (window.ArchiveWindow && window.ArchiveWindow.createArchiveModal)
+            ? window.ArchiveWindow.createArchiveModal
+            : (mod && mod.createArchiveModal ? mod.createArchiveModal : null);
+        if (!creator) throw new Error('Archive module not available');
+        const modal = creator();
+        try {
+            if (window.SynthWindowManager && typeof window.SynthWindowManager.restore === 'function') {
+                try { window.SynthWindowManager.restore('archives'); return; } catch (e) {}
+            }
+        } catch (e) {}
+        try { if (modal && modal.style) modal.style.display = 'flex'; } catch (e) {}
+    } catch (err) {
+        const msg = 'Open archives error: ' + (err && err.message ? err.message : err);
+        try { if (window.showToast) window.showToast(msg, true); } catch (e) {}
+        console.error('[chat-window] Open archives failed', err);
+    }
+}
+
+function bindArchiveButton() {
+    try {
+        const chatRestoreBtn = document.getElementById('chat-restore');
+        if (chatRestoreBtn && !chatRestoreBtn.dataset.synthBound) {
+            chatRestoreBtn.addEventListener('click', async () => { await openArchives(); });
+            chatRestoreBtn.dataset.synthBound = '1';
+        }
+    } catch (e) { /* ignore */ }
 }
 
 // Save/restore helpers
