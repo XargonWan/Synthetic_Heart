@@ -1371,6 +1371,20 @@ try {
                     } catch (e) { /* ignore */ return null; }
                 }
 
+                // Helper to toggle page-level scrolling for long document-style tabs
+                function _adjustPageScroll(tab) {
+                    try {
+                        if (['settings', 'components', 'about'].includes(tab)) {
+                            document.documentElement.style.overflow = 'auto';
+                            document.body.style.overflow = 'auto';
+                            try { const targetPanel = document.querySelector(`[data-tab="${tab}"]`); if (targetPanel) targetPanel.scrollIntoView({ behavior: 'auto', block: 'start' }); } catch (e) { /* ignore */ }
+                        } else {
+                            document.documentElement.style.overflow = 'hidden';
+                            document.body.style.overflow = 'hidden';
+                        }
+                    } catch (e) { /* ignore */ }
+                }
+
                 navButtons.forEach(btn => {
                     btn.addEventListener('click', async () => {
                         const tab = btn.getAttribute('data-tab');
@@ -1396,6 +1410,9 @@ try {
                             if (tab === 'history' && window.SynthWebUI && typeof window.SynthWebUI.initHistoryTab === 'function') {
                                 try { window.SynthWebUI.initHistoryTab(); } catch (e) { /* ignore */ }
                             }
+
+                            // Ensure page-level scrolling behavior matches the active tab
+                            _adjustPageScroll(tab);
                         } catch (e) {
                             console.warn('[synth_webui] tab switch failed', e);
                         }
@@ -1416,6 +1433,8 @@ try {
                     const saved = (localStorage && localStorage.getItem && localStorage.getItem('synth-webui-active-tab')) || 'home';
                     setActiveTab(saved);
                     try { setupDesktopIframe(saved); } catch (e) { /* ignore */ }
+                    // Ensure page scroll state matches the restored tab (fix for settings not scrollable)
+                    try { _adjustPageScroll(saved); } catch (e) { /* ignore */ }
                 } catch (e) {
                     setActiveTab('home');
                     try { setupDesktopIframe('home'); } catch (e) { /* ignore */ }
