@@ -369,7 +369,52 @@ export function createDebugWindow() {
 
         async function refreshFilesForType(actionType) {
             try {
-                const files = window.animationHandler ? await window.animationHandler.getAnimationsForType(actionType) : (window.animationMappings ? (window.animationMappings[actionType] || []) : []);
+                try { if (loadedSpan) loadedSpan.textContent = 'Loading...'; } catch (e) {}
+                try { console.debug('[debug-window] refreshFilesForType called', { actionType, hasHandler: !!window.animationHandler, hasWindowAnimationMappings: !!window.animationMappings, hasVRMAnimationMappings: !!window.VRMAnimationMappings }); } catch (e) {}
+
+                // Prefer using the live handler if available
+                let files = null;
+                let source = null;
+                try {
+                    if (window.animationHandler && typeof window.animationHandler.getAnimationsForType === 'function') {
+                        files = await window.animationHandler.getAnimationsForType(actionType);
+                        source = 'handler';
+                    }
+                } catch (e) { /* ignore */ }
+
+                // If handler unavailable or returned nothing, check global mappings (VRMAnimationMappings preferred)
+                try {
+                    if ((!files || !Array.isArray(files) || files.length === 0) && window.VRMAnimationMappings && typeof window.VRMAnimationMappings === 'object') {
+                        // Determine skin: prefer activeSkinName, else first key in mappings, else null
+                        const skinFromActive = (window.activeSkinName && String(window.activeSkinName).split('/').pop().replace('.vrm','')) ? String(window.activeSkinName).split('/').pop().replace('.vrm','') : null;
+                        const skin = skinFromActive || Object.keys(window.VRMAnimationMappings || {})[0] || 'Rei';
+                        try { files = window.VRMAnimationMappings[skin] && Array.isArray(window.VRMAnimationMappings[skin][actionType]) ? window.VRMAnimationMappings[skin][actionType] : null; } catch (e) { files = null; }
+                        if (Array.isArray(files) && files.length) source = `mapping:${skin}`;
+                    }
+                } catch (e) { /* ignore */ }
+
+                // Final fallback: call server API directly
+                try {
+                    if ((!files || !Array.isArray(files) || files.length === 0)) {
+                        // Derive skin for API call
+                        const skinFromActive = (window.activeSkinName && String(window.activeSkinName).split('/').pop().replace('.vrm','')) ? String(window.activeSkinName).split('/').pop().replace('.vrm','') : null;
+                        const skin = skinFromActive || (window.VRMAnimationMappings && Object.keys(window.VRMAnimationMappings || {})[0]) || 'Rei';
+                        try {
+                            const resp = await fetch(`/api/animations/${encodeURIComponent(skin)}/${encodeURIComponent(actionType)}`);
+                            if (resp && resp.ok) {
+                                const j = await resp.json();
+                                if (j && Array.isArray(j.animations)) {
+                                    files = j.animations;
+                                    source = `api:${skin}`;
+                                }
+                            } else {
+                                try { console.debug('[debug-window] /api/animations returned non-ok status', resp && resp.status); } catch (e) {}
+                            }
+                        } catch (e) { /* ignore */ }
+                    }
+                } catch (e) { /* ignore */ }
+
+                try { console.debug('[debug-window] refreshFilesForType result', { actionType, source: source, files: Array.isArray(files) ? files.slice(0,20) : files, count: Array.isArray(files) ? files.length : 0 }); } catch (e) {}
                 if (selFile) selFile.innerHTML = '';
                 if (!files || files.length === 0) {
                     if (selFile) {
@@ -388,8 +433,12 @@ export function createDebugWindow() {
                     if (selFile) selFile.appendChild(o);
                 });
                 if (loadedSpan) loadedSpan.textContent = String(files.length);
+                // Auto-select first file and autofill frame inputs so the UI is ready to Start
+                try { if (selFile && selFile.options && selFile.options.length) selFile.selectedIndex = 0; } catch (e) { /* ignore */ }
+                try { await autofillLoopInputs(); } catch (e) { /* ignore */ }
             } catch (err) {
                 console.warn('[synth_webui] Failed to refresh debug file list:', err);
+                try { if (loadedSpan) loadedSpan.textContent = '0'; } catch (e) {}
             }
         }
 
@@ -426,6 +475,7 @@ export function createDebugWindow() {
         if (loopStartBtn) {
             loopStartBtn.addEventListener('click', async () => {
                 try {
+                    console.debug('[debug-window] loop Start clicked', { hasHandler: !!window.animationHandler, selType: selType && selType.value, selFile: selFile && selFile.value, start: startInput && startInput.value, end: endInput && endInput.value, fps: fpsInput && fpsInput.value });
                     if (!window.animationHandler) {
                         try {
                             window.__synth_pending_actions = window.__synth_pending_actions || [];
@@ -435,14 +485,32 @@ export function createDebugWindow() {
                         return console.warn('[synth_webui] animationHandler not ready — action queued');
                     }
                     const aType = selType ? selType.value : 'think';
-                    const aFile = (selFile && selFile.value) ? selFile.value : null;
+                    let aFile = (selFile && selFile.value) ? selFile.value : null;
+                    // Defensive: if no value but options exist, pick the first non-empty option
+                    try {
+                        if (!aFile && selFile && selFile.options && selFile.options.length) {
+                            for (let i=0;i<selFile.options.length;i++) {
+                                const v = String(selFile.options[i].value || '').trim();
+                                if (v) { selFile.selectedIndex = i; aFile = v; break; }
+                            }
+                        }
+                    } catch (e) { /* ignore */ }
                     const s = parseInt((startInput && startInput.value) ? startInput.value : '0', 10);
                     const e = parseInt((endInput && endInput.value) ? endInput.value : '0', 10);
                     const fps = parseFloat((fpsInput && fpsInput.value) ? fpsInput.value : '30');
-                    if (!aFile) return alert('Please select an animation file first');
+                    if (!aFile) {
+                        alert('Please select an animation file first');
+                        try { console.debug('[debug-window] No animation file selected; selFile.options=', selFile && selFile.options ? Array.from(selFile.options).map(o=>o.value) : null); } catch (e) {}
+                        return;
+                    }
                     if (!Number.isFinite(s) || !Number.isFinite(e)) return alert('Please enter numeric frame values');
                     if (e <= s) return alert('end must be > start');
-                    await window.animationHandler.startTemporaryLoop(aType, aFile, s, e, Number.isFinite(fps) ? fps : 30);
+                    try {
+                        await window.animationHandler.startTemporaryLoop(aType, aFile, s, e, Number.isFinite(fps) ? fps : 30);
+                        try { console.debug('[debug-window] startTemporaryLoop called successfully'); } catch (e) {}
+                    } catch (ex) {
+                        console.warn('[synth_webui] start temp loop error (from handler):', ex);
+                    }
                 } catch (err) { console.warn('[synth_webui] start temp loop error:', err); }
             });
         }
@@ -1019,6 +1087,14 @@ export function createDebugWindow() {
                         try { renderFaceList(); } catch (e) { /* ignore */ }
                         try { __dbgFeelingsSig = ''; renderFeelings(); } catch (e) { /* ignore */ }
                         try { autofillLoopInputs(); } catch (e) { /* ignore */ }
+                        // Try to refresh loop files now that VRM and animations are likely available
+                        try {
+                            const t = (selType && selType.value) ? selType.value : null;
+                            if (t) {
+                                try { console.debug('[debug-window] vrmLoaded -> refreshing loop files for type=', t); } catch (e) {}
+                                refreshFilesForType(t).catch(e => {/*ignore*/});
+                            }
+                        } catch (e) { /* ignore */ }
                     };
                     window.addEventListener('vrmLoaded', window.__synth_debug_on_vrm_loaded);
                 }
@@ -1098,6 +1174,24 @@ export function createDebugWindow() {
                                             }
                                         } catch (e) { /* ignore */ }
                                     })();
+                                }
+                            } catch (e) { /* ignore */ }
+
+                            // If the loop-file selector is empty (no files loaded), attempt a retry when animations become available
+                            try {
+                                try { if (!window.__synth_debug_last_files_refresh_ts) window.__synth_debug_last_files_refresh_ts = 0; } catch (e) {}
+                                const nowTs = Date.now();
+                                const loadedCount = (loadedSpan && loadedSpan.textContent) ? Number(loadedSpan.textContent) : (selFile && selFile.options ? selFile.options.length - 0 : 0);
+                                const hasNoFiles = (!loadedCount || loadedCount === 0) || (selFile && selFile.options && selFile.options.length === 1 && selFile.options[0] && String(selFile.options[0].value || '') === '');
+                                if (hasNoFiles && (nowTs - (window.__synth_debug_last_files_refresh_ts || 0) > 3000)) {
+                                    try {
+                                        window.__synth_debug_last_files_refresh_ts = nowTs;
+                                        const t = (selType && selType.value) ? selType.value : null;
+                                        if (t) {
+                                            try { console.debug('[debug-window] retrying refreshFilesForType because no files present for type=', t); } catch (e) {}
+                                            (async () => { try { await refreshFilesForType(t); try { await autofillLoopInputs(); } catch (e) {} } catch (e) { /* ignore */ } })();
+                                        }
+                                    } catch (e) { /* ignore */ }
                                 }
                             } catch (e) { /* ignore */ }
 

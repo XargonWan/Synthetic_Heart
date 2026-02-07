@@ -3953,9 +3953,10 @@ import * as THREE from 'three';
                         }
 
                         if (!clip) {
-                            console.warn('[AnimationHandler] No clip available to create temporary loop');
+                            console.warn('[AnimationHandler] No clip available to create temporary loop', { actionName, animationFile, pick: clip });
                             return null;
                         }
+                        try { console.debug('[AnimationHandler] startTemporaryLoop using clip', { name: clip && (clip.name || clip._clipName || '(unknown)'), duration: clip && clip.duration, frames: Math.round((clip && clip.duration || 0) * tfps) }); } catch (e) {}
 
                         // Create subclip using frame indices.
                         // Note: THREE.AnimationUtils.subclip expects an *exclusive* end frame.
@@ -4937,6 +4938,29 @@ import * as THREE from 'three';
                     getDebugFaceOverrides: !!animationHandler.getDebugFaceOverrides,
                     _setFaceValue: !!animationHandler._setFaceValue,
                 });
+
+                // Immediately flush any pending actions queued while the stub was active
+                try {
+                    const pa = window.__synth_pending_actions || [];
+                    if (Array.isArray(pa) && pa.length) {
+                        try { console.debug('[synth_webui] Immediately flushing', pa.length, 'pending actions on handler exposure'); } catch (e) {}
+                        pa.forEach((act) => {
+                            try {
+                                if (!act || !act.type) return;
+                                console.debug('[synth_webui] applying pending action:', act.type, act.args || []);
+                                if (act.type === 'startAction' && typeof animationHandler.startAction === 'function') {
+                                    animationHandler.startAction(...(act.args || []));
+                                } else if (act.type === 'startTemporaryLoop' && typeof animationHandler.startTemporaryLoop === 'function') {
+                                    animationHandler.startTemporaryLoop(...(act.args || []));
+                                } else if (act.type === 'clearTemporaryOverride' && typeof animationHandler.clearTemporaryOverride === 'function') {
+                                    animationHandler.clearTemporaryOverride(...(act.args || []));
+                                }
+                            } catch (e) { console.warn('[synth_webui] Failed to apply pending action', e); }
+                        });
+                        try { window.__synth_pending_actions = []; } catch (e) { /* ignore */ }
+                    }
+                } catch (e) { /* ignore */ }
+
 
                 // Install minimal shims for debug APIs if they are missing. This keeps
                 // the debug UI functional even when the instance doesn't expose these
