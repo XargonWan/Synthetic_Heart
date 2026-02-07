@@ -19,3 +19,16 @@ test('loads skins section and calls init if present', async ({ page }) => {
   const html = await page.innerHTML('#tab-skins');
   expect(html.length).toBeGreaterThan(10);
 });
+
+test('settings panel enables page scroll', async ({ page }) => {
+  await page.goto(BASE, { waitUntil: 'networkidle' });
+  // Click the settings nav button
+  await page.click('.nav-btn[data-tab="settings"]');
+  // Give time for client-side handlers to run
+  await page.waitForTimeout(100);
+  const bodyOverflow = await page.evaluate(() => ({
+    doc: document.documentElement.style.overflow,
+    body: document.body.style.overflow
+  }));
+  expect(bodyOverflow.doc === 'auto' || bodyOverflow.body === 'auto').toBeTruthy();
+});
