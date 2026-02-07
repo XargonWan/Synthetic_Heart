@@ -246,7 +246,7 @@
             padding-right: 120px;
         }
         .winbox.synth-winbox .synth-wb-tools {
-                min-height: 320px;
+                min-height: 0;
             display: flex;
             align-items: center;
             gap: 6px;
@@ -271,11 +271,23 @@
             border-color: var(--accent);
             color: var(--accent);
         }
-        /* Body pause button styling inside debug panel */
+
+        /* Body pause button styling inside debug panel: emoji-only, no orange background */
         #synth-debug-pause {
-            background: linear-gradient(180deg, #ffbf91, #ff8c00) !important;
-            border-color: #ff8c00 !important;
-            color: #07070c !important;
+            background: transparent !important;
+            border-color: transparent !important;
+            color: inherit !important;
+            padding: 6px !important;
+            min-width: 36px !important;
+            min-height: 36px !important;
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            border-radius: 8px !important;
+        }
+        #synth-debug-pause:hover {
+            background: transparent !important;
+            transform: none !important;
         }
         /* Ensure loop override selects use dark theme so white text remains readable */
         #synth-advanced-debug select,

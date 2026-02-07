@@ -1,6 +1,7 @@
 // debug-window.mjs — Extracted Debug window logic
 export function createDebugWindow() {
     try {
+        console.log('[debug-window] module loaded');
         // clamp01 helper
         const clamp01 = (x) => {
             const v = Number(x);
@@ -768,7 +769,32 @@ export function createDebugWindow() {
                         const vv = clamp01(v);
                         slider.value = String(vv);
                         num.value = String(vv);
-                        try { window.animationHandler && window.animationHandler.setDebugFaceOverride && window.animationHandler.setDebugFaceOverride(k, vv); } catch (e) { /* ignore */ }
+                        try {
+                            const helper = window.__synth_applyDebugFace || null;
+                            if (!window.__synth_debug_applied_keys) try { window.__synth_debug_applied_keys = new Set(); } catch (e) { window.__synth_debug_applied_keys = {}; }
+                            if (helper) {
+                                const ok = helper(k, vv);
+                                if (ok) {
+                                    try { if (window.__synth_debug_applied_keys instanceof Set) window.__synth_debug_applied_keys.add(k); } catch (e) {}
+                                    console.debug('[debug-window] applied via helper', k, vv);
+                                } else {
+                                    window.__synth_pending_debug_actions = window.__synth_pending_debug_actions || [];
+                                    window.__synth_pending_debug_actions.push({ type: 'setDebugFaceOverride', key: k, value: vv });
+                                    try { if (window.__synth_debug_applied_keys instanceof Set) window.__synth_debug_applied_keys.add(k); } catch (e) {}
+                                    console.debug('[debug-window] queued debug face action (helper failed)', k, vv);
+                                }
+                            } else if (window.animationHandler && window.animationHandler.setDebugFaceOverride) {
+                                try { window.animationHandler.setDebugFaceOverride(k, vv); try { if (window.__synth_debug_applied_keys instanceof Set) window.__synth_debug_applied_keys.add(k); } catch (e) {} console.debug('[debug-window] applied via animationHandler', k, vv); } catch (e) { /* ignore */ }
+                            } else {
+                                // Queue the debug action until the handler/helper is available
+                                try {
+                                    window.__synth_pending_debug_actions = window.__synth_pending_debug_actions || [];
+                                    window.__synth_pending_debug_actions.push({ type: 'setDebugFaceOverride', key: k, value: vv });
+                                    try { if (window.__synth_debug_applied_keys instanceof Set) window.__synth_debug_applied_keys.add(k); } catch (e) {}
+                                    console.debug('[debug-window] queued debug face action (no helper)', k, vv);
+                                } catch (e) { /* ignore */ }
+                            }
+                        } catch (e) { console.warn('[debug-window] apply face failed', e); }
                     };
                     slider.addEventListener('input', () => apply(slider.value));
                     num.addEventListener('change', () => apply(num.value));
@@ -800,8 +826,28 @@ export function createDebugWindow() {
             if (faceFilter) faceFilter.addEventListener('input', () => renderFaceList());
             if (faceClearBtn) {
                 faceClearBtn.addEventListener('click', () => {
-                    try { window.animationHandler && window.animationHandler.clearDebugFaceOverrides && window.animationHandler.clearDebugFaceOverrides(); } catch (e) { /* ignore */ }
-                    renderFaceList();
+                    try {
+                        // Immediate local clear of keys applied by this UI
+                        try {
+                            const appliedKeys = (window.__synth_debug_applied_keys && window.__synth_debug_applied_keys instanceof Set) ? Array.from(window.__synth_debug_applied_keys) : [];
+                            if (appliedKeys.length) {
+                                try { console.debug('[debug-window] clearing local applied keys', appliedKeys); } catch (e) {}
+                                appliedKeys.forEach(k => {
+                                    try { window.__synth_applyDebugFace ? window.__synth_applyDebugFace(k, null) : null; } catch (e) {}
+                                });
+                                try { if (window.__synth_debug_applied_keys instanceof Set) window.__synth_debug_applied_keys.clear(); } catch (e) {}
+                            }
+                        } catch (e) { /* ignore */ }
+
+                        if (window.animationHandler && window.animationHandler.clearDebugFaceOverrides) {
+                            try { window.animationHandler.clearDebugFaceOverrides(); console.debug('[debug-window] invoked animationHandler.clearDebugFaceOverrides'); } catch (e) { /* ignore */ }
+                        } else {
+                            window.__synth_pending_debug_actions = window.__synth_pending_debug_actions || [];
+                            window.__synth_pending_debug_actions.push({ type: 'clearDebugFaceOverrides' });
+                            console.debug('[debug-window] queued clearDebugFaceOverrides');
+                        }
+                    } catch (e) { /* ignore */ }
+                    try { renderFaceList(); } catch (e) {}
                 });
             }
         } catch (e) { /* ignore */ }
@@ -883,10 +929,17 @@ export function createDebugWindow() {
                 } catch (e) { /* ignore */ }
             }
 
+            // Expose helper for external code (backwards-compatibility)
+            try { window.resetLoopOverrideUI = resetLoopOverrideUI; } catch (e) { /* ignore */ }
+            try { window.__synth_debug_resyncFromBackend = resyncFromBackend; } catch (e) { /* ignore */ }
+
             // Initial render
             renderFeelings();
             renderFaceList();
             try { if (pauseBtn) pauseBtn.textContent = isPaused() ? 'Resume' : 'Pause'; } catch (e) { /* ignore */ }
+
+            // Try an initial resync from backend to populate feelings/animation state
+            try { resyncFromBackend().catch(e => {/*ignore*/}); } catch (e) { /* ignore */ }
 
             // VRM capabilities arrive after load: refresh face keys when the avatar loads.
             try {
@@ -897,6 +950,57 @@ export function createDebugWindow() {
                         try { autofillLoopInputs(); } catch (e) { /* ignore */ }
                     };
                     window.addEventListener('vrmLoaded', window.__synth_debug_on_vrm_loaded);
+                }
+            } catch (e) { /* ignore */ }
+
+            // Periodic background: attempt to flush any queued debug actions when the
+            // handler/helper becomes available and periodically resync feelings.
+            try {
+                if (!window.__synth_debug_interval_set) {
+                    window.__synth_debug_interval_set = true;
+                    setInterval(() => {
+                        try {
+                            const q = window.__synth_pending_debug_actions || [];
+                            if (q && Array.isArray(q) && q.length) {
+                                try { console.debug('[debug-window] attempting flush of', q.length, 'pending debug actions'); } catch (e) {}
+                                // Diagnostic: log animationHandler presence and override keys
+                                try { console.debug('[debug-window] flush check: animationHandler=', !!window.animationHandler, 'hasClear=', !!(window.animationHandler && window.animationHandler.clearDebugFaceOverrides), '_debugFaceOverridesKeys=', Object.keys(window.animationHandler && window.animationHandler._debugFaceOverrides ? window.animationHandler._debugFaceOverrides : {}).slice(0,20)); } catch (e) { /* ignore */ }
+                                const helper = window.__synth_applyDebugFace || null;
+                                const newQ = [];
+                                q.forEach((act) => {
+                                    try {
+                                        let applied = false;
+                                        if (!act || !act.type) return;
+                                        if (act.type === 'setDebugFaceOverride') {
+                                            if (helper) applied = !!helper(act.key, act.value);
+                                            else if (window.animationHandler && typeof window.animationHandler.setDebugFaceOverride === 'function') {
+                                                try { window.animationHandler.setDebugFaceOverride(act.key, act.value); applied = true; } catch (e) { applied = false; }
+                                            }
+                                        } else if (act.type === 'clearDebugFaceOverrides') {
+                                            try {
+                                                if (window.animationHandler && typeof window.animationHandler.clearDebugFaceOverrides === 'function') {
+                                                    window.animationHandler.clearDebugFaceOverrides();
+                                                    applied = true;
+                                                    console.debug('[debug-window] applied clearDebugFaceOverrides via animationHandler');
+                                                } else if (window.__synth_applyDebugFace) {
+                                                    // as fallback, iterate known keys and clear them
+                                                    try {
+                                                        const keys = Object.keys(window.animationHandler && window.animationHandler._debugFaceOverrides ? window.animationHandler._debugFaceOverrides : {});
+                                                        keys.forEach(k => { try { window.__synth_applyDebugFace(k, null); } catch (e) {} });
+                                                        applied = keys.length > 0;
+                                                        if (applied) console.debug('[debug-window] applied clearDebugFaceOverrides via helper on keys', keys);
+                                                    } catch (e) { /* ignore */ }
+                                                }
+                                            } catch (e) { /* ignore */ }
+                                        }
+                                        if (!applied) newQ.push(act);
+                                    } catch (e) { /* ignore */ }
+                                });
+                                try { window.__synth_pending_debug_actions = newQ; } catch (e) { /* ignore */ }
+                            }
+                        } catch (e) { /* ignore */ }
+                        try { resyncFromBackend().catch(e => {/*ignore*/}); } catch (e) { /* ignore */ }
+                    }, 2000);
                 }
             } catch (e) { /* ignore */ }
 

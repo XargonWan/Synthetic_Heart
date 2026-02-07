@@ -22,7 +22,11 @@ async function loadAgentTask(id){
     const data = await resp.json();
     const detail = document.getElementById('agent-task-detail');
     const iterations = (data.iterations_meta||[]).map(it=>`<div style="border-top:1px solid var(--border);padding:6px;">Iteration ${it.iteration}: <pre style="white-space:pre-wrap;">${JSON.stringify(it.actions_result || it.result || {}, null, 2)}</pre></div>`).join('');
-    detail.innerHTML = `<div class="card"><h3>Task #${data.id} — ${data.engine}</h3><div style="margin-bottom:8px;"><strong>Status:</strong> ${data.status}</div><div>${iterations}</div><div style="margin-top:8px;"><button onclick="pauseTask(${data.id})">Pause</button> <button onclick="resumeTask(${data.id})">Resume</button> <button onclick="cancelTask(${data.id})">Cancel</button></div></div>`;
+    detail.innerHTML = `<div class="card"><h3>Task #${data.id} — ${data.engine}</h3><div style="margin-bottom:8px;"><strong>Status:</strong> ${data.status}</div><div>${iterations}</div><div style="margin-top:8px;">
+                                <button class="pill secondary" onclick="pauseTask(${data.id})" title="⏸️">⏸️</button>
+                                <button class="pill" onclick="resumeTask(${data.id})" title="▶️">▶️</button>
+                                <button class="pill" onclick="cancelTask(${data.id})" title="✖️">✖️</button>
+                            </div></div>`;
   }catch(e){ console.error(e); }
 }
 

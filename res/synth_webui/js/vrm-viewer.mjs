@@ -390,6 +390,7 @@ import * as THREE from 'three';
                 _setFaceValue(key, value) {
                     try {
                         const ctrl = this._getFaceController();
+                        console.debug('[AnimationHandler] _setFaceValue called', key, value, 'controller:', ctrl && ctrl.kind);
                         if (!ctrl) return false;
 
                         // Resolve the input key to one or more concrete VRM keys.
@@ -445,6 +446,7 @@ import * as THREE from 'three';
                 setDebugFaceOverride(key, value) {
                     try {
                         const k = (key !== undefined && key !== null) ? String(key) : '';
+                        console.debug('[AnimationHandler] setDebugFaceOverride called', k, value);
                         if (!k) return;
                         if (!this._debugFaceOverrides || typeof this._debugFaceOverrides !== 'object') this._debugFaceOverrides = {};
                         if (value === null || value === undefined || value === '') {
@@ -457,6 +459,7 @@ import * as THREE from 'three';
                                     this._debugFaceApplyRaf = requestAnimationFrame(() => {
                                         try {
                                             const dirty = this._debugFaceDirty || {};
+                                            console.debug('[AnimationHandler] applying debug face dirty keys', dirty);
                                             this._debugFaceDirty = {};
                                             this._debugFaceApplyRaf = 0;
                                             Object.keys(dirty).forEach((kk) => {
@@ -595,6 +598,7 @@ import * as THREE from 'three';
                 clearDebugFaceOverrides() {
                     try {
                         const prev = (this._debugFaceOverrides && typeof this._debugFaceOverrides === 'object') ? this._debugFaceOverrides : {};
+                        try { console.debug('[AnimationHandler] clearDebugFaceOverrides called, prev keys:', Object.keys(prev || {})); } catch (e) { /* ignore */ }
                         this._debugFaceOverrides = {};
                         try { this._debugFaceDirty = {}; } catch (e) { /* ignore */ }
                         try { if (this._debugFaceApplyRaf) cancelAnimationFrame(this._debugFaceApplyRaf); } catch (e) { /* ignore */ }
@@ -610,6 +614,7 @@ import * as THREE from 'three';
                             });
                         } catch (e) { /* ignore */ }
                         try { this._flushFaceNow(); } catch (e) { /* ignore */ }
+                        try { console.debug('[AnimationHandler] clearDebugFaceOverrides done'); } catch (e) { /* ignore */ }
                     } catch (e) { /* ignore */ }
                 }
 
@@ -4924,6 +4929,49 @@ import * as THREE from 'three';
             window.animationHandler = animationHandler;
             console.log('[synth_webui] Animation functions exposed globally via window.VRMAnimations');
             console.log('[synth_webui] animationHandler exposed globally');
+            try {
+                const keys = Object.keys(animationHandler || {}).sort();
+                console.debug('[synth_webui] animationHandler methods:', keys);
+                console.debug('[synth_webui] has debug methods:', {
+                    setDebugFaceOverride: !!animationHandler.setDebugFaceOverride,
+                    getDebugFaceOverrides: !!animationHandler.getDebugFaceOverrides,
+                    _setFaceValue: !!animationHandler._setFaceValue,
+                });
+
+                // Install minimal shims for debug APIs if they are missing. This keeps
+                // the debug UI functional even when the instance doesn't expose these
+                // helpers as direct properties (some builds may attach them differently).
+                try {
+                    if (!animationHandler.setDebugFaceOverride || typeof animationHandler.setDebugFaceOverride !== 'function') {
+                        animationHandler.setDebugFaceOverride = function(key, value) {
+                            try {
+                                const k = (key !== undefined && key !== null) ? String(key) : '';
+                                if (!k) return;
+                                if (!this._debugFaceOverrides || typeof this._debugFaceOverrides !== 'object') this._debugFaceOverrides = {};
+                                if (value === null || value === undefined || value === '') {
+                                    delete this._debugFaceOverrides[k];
+                                    try { this._setFaceValue(k, 0); } catch (e) {}
+                                    try { this._setFaceValue(k.replace(/\./g,'_'), 0); } catch (e) {}
+                                    try { this._flushFaceNow(); } catch (e) {}
+                                    return;
+                                }
+                                const v = Math.max(0, Math.min(1, Number(value) || 0));
+                                try { this._debugFaceOverrides[k] = v; } catch (e) {}
+                                try { this._setFaceValue(k, v); } catch (e) {}
+                                try { this._flushFaceNow(); } catch (e) {}
+                            } catch (e) { console.warn('[synth_webui] shim.setDebugFaceOverride failed', e); }
+                        };
+                        console.debug('[synth_webui] shim setDebugFaceOverride installed');
+                    }
+                    if (!animationHandler.getDebugFaceOverrides || typeof animationHandler.getDebugFaceOverrides !== 'function') {
+                        animationHandler.getDebugFaceOverrides = function() {
+                            try { return (this._debugFaceOverrides && typeof this._debugFaceOverrides === 'object') ? this._debugFaceOverrides : {}; } catch (e) { return {}; }
+                        };
+                        console.debug('[synth_webui] shim getDebugFaceOverrides installed');
+                    }
+                } catch (e) { /* ignore */ }
+
+            } catch (e) { /* ignore */ }
 
             // Flush any preloaded descriptors queued before the handler was ready
             try {
@@ -4936,11 +4984,91 @@ import * as THREE from 'three';
                 }
             } catch (e) { /* ignore */ }
 
-            // Flush queued actions that were recorded while the handler was not available
+// Utilities: expose robust debug helper functions on window that
+                // try multiple application strategies so UIs don't rely on fragile
+                // internal shapes.
+                try {
+                    window.__synth_applyDebugFace = function(key, value) {
+                        try {
+                            if (!key) return false;
+                            // Prefer official API if present
+                            if (animationHandler && typeof animationHandler.setDebugFaceOverride === 'function') {
+                                try { animationHandler.setDebugFaceOverride(key, value); return true; } catch (e) { /* ignore */ }
+                            }
+                            // Fallback to direct setter
+                            try {
+                                if (animationHandler && typeof animationHandler._setFaceValue === 'function') {
+                                    animationHandler._setFaceValue(key, (value === null || value === undefined) ? 0 : Math.max(0, Math.min(1, Number(value) || 0)));
+                                    animationHandler._flushFaceNow && animationHandler._flushFaceNow();
+                                    return true;
+                                }
+                            } catch (e) { /* ignore */ }
+
+                            // Final fallback: attempt to resolve controller and call setValue directly
+                            try {
+                                const ctrl = (animationHandler && typeof animationHandler._getFaceController === 'function') ? animationHandler._getFaceController() : null;
+                                if (ctrl && typeof ctrl.setValue === 'function') {
+                                    ctrl.setValue(key, (value === null || value === undefined) ? 0 : Math.max(0, Math.min(1, Number(value) || 0)));
+                                    try { if (animationHandler) animationHandler._flushFaceNow && animationHandler._flushFaceNow(); } catch (e) {}
+                                    return true;
+                                }
+                            } catch (e) { /* ignore */ }
+
+                            return false;
+                        } catch (e) { return false; }
+                    };
+
+                    window.__synth_applyDebugEmotion = function(name, intensity) {
+                        try {
+                            if (!name) return false;
+                            if (animationHandler && typeof animationHandler.setDebugEmotionOverride === 'function') {
+                                try { animationHandler.setDebugEmotionOverride(name, intensity); return true; } catch (e) { /* ignore */ }
+                            }
+                            // Best-effort: store in _debugEmotionOverrides and trigger apply
+                            try {
+                                if (animationHandler) {
+                                    animationHandler._debugEmotionOverrides = animationHandler._debugEmotionOverrides || {};
+                                    if (intensity === null || intensity === undefined || intensity === '') {
+                                        delete animationHandler._debugEmotionOverrides[name];
+                                    } else {
+                                        animationHandler._debugEmotionOverrides[name] = Math.max(0, Math.min(1, Number(intensity) || 0));
+                                    }
+                                    try { animationHandler.setDebugEmotionOverride && animationHandler.setDebugEmotionOverride(name, animationHandler._debugEmotionOverrides[name]); } catch (e) {}
+                                    return true;
+                                }
+                            } catch (e) { /* ignore */ }
+                            return false;
+                        } catch (e) { return false; }
+                    };
+
+                    console.debug('[synth_webui] debug helper functions installed on window');
+                } catch (e) { /* ignore */ }
+
+                // Flush queued debug actions (face overrides) if any were queued before handler was ready
+                try {
+                    const q = window.__synth_pending_debug_actions || [];
+                    if (q && Array.isArray(q) && q.length) {
+                        try { console.debug('[synth_webui] Flushing', q.length, 'pending debug actions'); } catch (e) {}
+                        for (const act of q) {
+                            try {
+                                if (!act || !act.type) continue;
+                                if (act.type === 'setDebugFaceOverride') {
+                                    try { window.__synth_applyDebugFace && window.__synth_applyDebugFace(act.key, act.value); } catch (e) { /* ignore */ }
+                                } else if (act.type === 'clearDebugFaceOverrides') {
+                                    try { animationHandler.clearDebugFaceOverrides && animationHandler.clearDebugFaceOverrides(); } catch (e) { /* ignore */ }
+                                }
+                            } catch (e) { /* ignore */ }
+                        }
+                        try { window.__synth_pending_debug_actions = []; } catch (e) { /* ignore */ }
+                    }
+                } catch (e) { /* ignore */ }
+
+            // Flush pending actions queued before the handler was ready
             try {
-                if (window.__synth_pending_actions && Array.isArray(window.__synth_pending_actions) && window.__synth_pending_actions.length) {
-                    try { console.debug('[synth_webui] Flushing', window.__synth_pending_actions.length, 'pending animation actions'); } catch (e) {}
-                    window.__synth_pending_actions.forEach((act) => {
+                const pa = window.__synth_pending_actions || [];
+                if (Array.isArray(pa) && pa.length) {
+                    try { console.debug('[synth_webui] Flushing', pa.length, 'pending actions'); } catch (e) {}
+                    pa.forEach((act) => {
                         try {
                             if (!act || !act.type) return;
                             if (act.type === 'startAction' && typeof animationHandler.startAction === 'function') {

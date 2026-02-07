@@ -807,6 +807,9 @@ try {
             }
 
             function attachHeaderTools(id, winbox, tools) {
+                // Prevent external callers from injecting header tools into the Debug window —
+                // the Debug window manages its own header tools internally in `debug-window.mjs`.
+                if (id === 'debug') return null;
                 if (!winbox || !tools || !Array.isArray(tools)) return null;
                 const winEl = winbox.window || winbox.dom || winbox.g || null;
                 if (!winEl) return null;
