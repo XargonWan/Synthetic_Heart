@@ -68,11 +68,15 @@ export async function createChatWindow() {
                 height: '70%',
                 x: 24,
                 y: 'bottom',
+                // Allow a small negative bottom so the window can be dragged slightly offscreen
+                // This removes the "invisible wall" at the viewport bottom that prevented further downward dragging
+                // If present, `window.SynthConfig.CHAT_BOTTOM_OFFSET` (number) can override this value
+                bottom: (window.SynthConfig && Number.isFinite(Number(window.SynthConfig.CHAT_BOTTOM_OFFSET))) ? Number(window.SynthConfig.CHAT_BOTTOM_OFFSET) : -180,
                 iconText: '💬',
-                dockLabel: 'Restore Chat',
+                dockLabel: 'Chat',
                 dockButton: chatToggleBtn || null,
                 dockClass: 'chat-toggle-btn',
-                className: 'synth-winbox no-full no-close chat-window'
+                className: 'synth-winbox no-close chat-window'
             });
 
             // Slight title size tweak for visibility

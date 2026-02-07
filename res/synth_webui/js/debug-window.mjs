@@ -124,9 +124,9 @@ export function createDebugWindow() {
                 height: 520,
                 x: 24,
                 y: 'bottom',
-                dockLabel: 'Restore Debug',
-                dockClass: 'chat-toggle-btn',
-                className: 'synth-winbox no-full no-close'
+                dockLabel: 'Debug',
+                dockClass: 'debug-toggle-btn',
+                className: 'synth-winbox no-close'
             });
             // Intentionally do not attach header tools for Debug — pause control lives inside the debug panel only.
 
@@ -155,10 +155,10 @@ export function createDebugWindow() {
 
             const dock = getDock();
             try {
-                const chatToggleBtn = document.getElementById('chat-toggle');
-                if (chatToggleBtn && chatToggleBtn.parentElement !== dock) {
-                    dock.appendChild(chatToggleBtn);
-                    try { chatToggleBtn.style.position = 'static'; chatToggleBtn.style.right = ''; chatToggleBtn.style.bottom = ''; } catch (e) { /* ignore */ }
+                const debugToggleBtn = document.getElementById('debug-toggle');
+                if (debugToggleBtn && debugToggleBtn.parentElement !== dock) {
+                    dock.appendChild(debugToggleBtn);
+                    try { debugToggleBtn.style.position = 'static'; debugToggleBtn.style.right = ''; debugToggleBtn.style.bottom = ''; } catch (e) { /* ignore */ }
                 }
             } catch (e) { /* ignore */ }
         }
@@ -425,7 +425,14 @@ export function createDebugWindow() {
         if (loopStartBtn) {
             loopStartBtn.addEventListener('click', async () => {
                 try {
-                    if (!window.animationHandler) return console.warn('[synth_webui] No animationHandler');
+                    if (!window.animationHandler) {
+                        try {
+                            window.__synth_pending_actions = window.__synth_pending_actions || [];
+                            // best-effort: queue a no-op action so the request isn't lost
+                            window.__synth_pending_actions.push({ type: 'clearTemporaryOverride', args: [] });
+                        } catch (e) { /* ignore */ }
+                        return console.warn('[synth_webui] animationHandler not ready — action queued');
+                    }
                     const aType = selType ? selType.value : 'think';
                     const aFile = (selFile && selFile.value) ? selFile.value : null;
                     const s = parseInt((startInput && startInput.value) ? startInput.value : '0', 10);

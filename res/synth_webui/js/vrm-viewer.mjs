@@ -4920,6 +4920,37 @@ import * as THREE from 'three';
             console.log('[synth_webui] Animation functions exposed globally via window.VRMAnimations');
             console.log('[synth_webui] animationHandler exposed globally');
 
+            // Flush any preloaded descriptors queued before the handler was ready
+            try {
+                if (window.__synth_pending_preloads) {
+                    try { console.debug('[synth_webui] Flushing', Object.keys(window.__synth_pending_preloads || {}).length, 'pending animation preloads'); } catch (e) {}
+                    for (const nm in window.__synth_pending_preloads) {
+                        try { animationHandler.preloadAnimation(nm, window.__synth_pending_preloads[nm]); } catch (e) { /* ignore */ }
+                    }
+                    try { window.__synth_pending_preloads = {}; } catch (e) { /* ignore */ }
+                }
+            } catch (e) { /* ignore */ }
+
+            // Flush queued actions that were recorded while the handler was not available
+            try {
+                if (window.__synth_pending_actions && Array.isArray(window.__synth_pending_actions) && window.__synth_pending_actions.length) {
+                    try { console.debug('[synth_webui] Flushing', window.__synth_pending_actions.length, 'pending animation actions'); } catch (e) {}
+                    window.__synth_pending_actions.forEach((act) => {
+                        try {
+                            if (!act || !act.type) return;
+                            if (act.type === 'startAction' && typeof animationHandler.startAction === 'function') {
+                                animationHandler.startAction(...(act.args || []));
+                            } else if (act.type === 'startTemporaryLoop' && typeof animationHandler.startTemporaryLoop === 'function') {
+                                animationHandler.startTemporaryLoop(...(act.args || []));
+                            } else if (act.type === 'clearTemporaryOverride' && typeof animationHandler.clearTemporaryOverride === 'function') {
+                                animationHandler.clearTemporaryOverride(...(act.args || []));
+                            }
+                        } catch (e) { /* ignore per-action errors */ }
+                    });
+                    try { window.__synth_pending_actions = []; } catch (e) { /* ignore */ }
+                }
+            } catch (e) { /* ignore */ }
+
             // When a structured action's outro finishes, the AnimationHandler will
             // emit a custom event so we can resume any queued lower-priority
             // state (that we previously cached instead of dropping).

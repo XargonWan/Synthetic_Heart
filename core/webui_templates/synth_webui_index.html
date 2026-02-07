@@ -3945,103 +3945,7 @@
                     } catch (e) {
                         console.warn('[synth_webui] Failed to load debug-window module', e);
                     }
-                }                        // Dragging (simple, chat-like)
-                        (function makeDraggable(el) {
-                            const header = el.querySelector('#synth-debug-title-bar');
-                            if (!header) return;
-                            let dragging = false;
-                            let startX = 0, startY = 0;
-                            let offsetX = 0, offsetY = 0;
-                            header.addEventListener('pointerdown', (ev) => {
-                                try {
-                                    // Prevent resize handles beneath the title bar from stealing pointer events
-                                    try { ev.stopPropagation(); } catch (e) {}
-                                    // Respect global active interactions (avoid interfering with chat drag/other resizes)
-                                    try { if (window.__synth_active_interaction) return; } catch (e) {}
-                                    // Don't start dragging when the user is clicking controls in the title bar.
-                                    const t = ev && ev.target ? ev.target : null;
-                                    if (t && typeof t.closest === 'function') {
-                                        if (t.closest('button, input, select, textarea, a')) return;
-                                    }
-                                    dragging = true;
-                                    const dragPointerId = (ev.pointerId !== undefined) ? ev.pointerId : 'mouse';
-                                    try { window.__synth_active_interaction = { type: 'debug_drag', id: dragPointerId }; } catch (e) {}
-                                    // Normalize to left/top positioning so drag+resize behave consistently.
-                                    const r = el.getBoundingClientRect();
-                                    try {
-                                        el.style.left = r.left + 'px';
-                                        el.style.top = r.top + 'px';
-                                        el.style.right = 'auto';
-                                        el.style.bottom = 'auto';
-                                    } catch (e) { /* ignore */ }
-                                    startX = ev.clientX;
-                                    startY = ev.clientY;
-                                    offsetX = startX - r.left;
-                                    offsetY = startY - r.top;
-                                    try { header.setPointerCapture && header.setPointerCapture(ev.pointerId); } catch (e) {}
-                                } catch (e) { /* ignore */ }
-                            });
-                            window.addEventListener('pointermove', (ev) => {
-                                if (!dragging) return;
-                                try {
-                                    el.style.left = (ev.clientX - offsetX) + 'px';
-                                    el.style.top = (ev.clientY - offsetY) + 'px';
-                                    el.style.right = 'auto';
-                                    el.style.bottom = 'auto';
-                                } catch (e) { /* ignore */ }
-                            });
-                            window.addEventListener('pointerup', (ev) => { try { dragging = false; if (window.__synth_active_interaction && window.__synth_active_interaction.type === 'debug_drag') window.__synth_active_interaction = null; } catch (e) {} });
-                        })(win);
-
-                        // Add chat-like resize handles for the debug window so resizing anchors work
-                        try { createResizeHandlesForElement(win); } catch (e) { /* ignore */ }
-
-                        // Dock button for minimized state
-                        let debugDockBtn = null;
-                        const ensureDebugDockBtn = () => {
-                            if (debugDockBtn && debugDockBtn.isConnected) return debugDockBtn;
-                            debugDockBtn = document.createElement('button');
-                            debugDockBtn.type = 'button';
-                            // Match chat bubble styling when minimized.
-                            debugDockBtn.className = 'chat-toggle-btn';
-                            debugDockBtn.textContent = '💻';
-                            debugDockBtn.setAttribute('aria-label', 'Restore debug');
-                            debugDockBtn.title = 'Restore Debug';
-                            try {
-                                // When in the minimized stack, behave as a normal element.
-                                debugDockBtn.style.position = 'static';
-                                debugDockBtn.style.top = '';
-                                debugDockBtn.style.right = '';
-                                debugDockBtn.style.bottom = '';
-                                debugDockBtn.style.left = '';
-                                debugDockBtn.style.zIndex = '';
-                            } catch (e) { /* ignore */ }
-                            debugDockBtn.addEventListener('click', () => {
-                                try { win.style.display = ''; } catch (e) { /* ignore */ }
-                                try { if (debugDockBtn && debugDockBtn.parentElement) debugDockBtn.parentElement.removeChild(debugDockBtn); } catch (e) { /* ignore */ }
-                            });
-                            return debugDockBtn;
-                        };
-
-                        const minimizeBtnLegacy = win.querySelector('#synth-debug-minimize');
-                        if (minimizeBtnLegacy) {
-                            minimizeBtnLegacy.addEventListener('click', () => {
-                                try { win.style.display = 'none'; } catch (e) { /* ignore */ }
-                                try { getDock().appendChild(ensureDebugDockBtn()); } catch (e) { /* ignore */ }
-                            });
-                        }
-                    }
-
-                    const minimizeBtn = win.querySelector('#synth-debug-minimize');
-                    if (minimizeBtn) {
-                        minimizeBtn.addEventListener('click', () => {
-                            if (winbox && window.SynthWindowManager && typeof window.SynthWindowManager.minimize === 'function') {
-                                try { window.SynthWindowManager.minimize('debug'); } catch (e) { /* ignore */ }
-                                return;
-                            }
-                        });
-                    }
-
+                } // Legacy debug UI removed — delegated to `/js/debug-window.mjs` (single source-of-truth).
                     async function resyncFromBackend() {
                         try {
                             if (!animationHandler) return;
@@ -4296,7 +4200,6 @@
                     if (loopStartBtn) {
                         loopStartBtn.addEventListener('click', async () => {
                             try {
-                                if (!animationHandler) return console.warn('[synth_webui] No animationHandler');
                                 const aType = selType ? selType.value : 'think';
                                 const aFile = (selFile && selFile.value) ? selFile.value : null;
                                 const s = parseInt((startInput && startInput.value) ? startInput.value : '0', 10);
@@ -4305,6 +4208,13 @@
                                 if (!aFile) return alert('Please select an animation file first');
                                 if (!Number.isFinite(s) || !Number.isFinite(e)) return alert('Please enter numeric frame values');
                                 if (e <= s) return alert('end must be > start');
+                                if (!animationHandler) {
+                                    try {
+                                        window.__synth_pending_actions = window.__synth_pending_actions || [];
+                                        window.__synth_pending_actions.push({ type: 'startTemporaryLoop', args: [aType, aFile, s, e, Number.isFinite(fps) ? fps : 30] });
+                                    } catch (e) { /* ignore */ }
+                                    return console.warn('[synth_webui] animationHandler not ready — queued startTemporaryLoop');
+                                }
                                 await animationHandler.startTemporaryLoop(aType, aFile, s, e, Number.isFinite(fps) ? fps : 30);
                             } catch (err) { console.warn('[synth_webui] start temp loop error:', err); }
                         });
@@ -5769,270 +5679,26 @@
             return await res.json();
         }
 
-        // Modal archive manager
-        let archiveModal = null;
-        let archiveWinbox = null;
-        let archiveMultiSelect = false;
-        let archiveSelectedIds = new Set();
-        function createArchiveModal() {
-            if (archiveModal) return archiveModal;
-            const panel = document.createElement('div');
-            panel.id = 'archive-panel';
-            panel.className = 'synth-window-panel archive-panel';
-            panel.style.display = 'flex';
-            panel.style.flexDirection = 'column';
-            panel.style.width = '100%';
-            panel.style.height = '100%';
-            // Determine mobile view to adjust modal behavior
-            const isMobileArchive = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768);
-            const canUseWinBox = !isMobileArchive && window.SynthWindowManager && typeof window.SynthWindowManager.create === 'function' && typeof window.WinBox !== 'undefined';
-            if (isMobileArchive) {
-                panel.style.cssText = `
-                    position: fixed;
-                    z-index: 10500;
-                    left: 0;
-                    top: 0;
-                    right: 0;
-                    bottom: 0;
-                    width: 100%;
-                    height: 100%;
-                    background: var(--panel-bg);
-                    color: var(--text);
-                    border: none;
-                    border-radius: 0;
-                    box-shadow: none;
-                    display: none; flex-direction: column; overflow: auto;
-                `;
-            } else if (!canUseWinBox) {
-                panel.style.cssText = `
-                    position: fixed;
-                    z-index: 10080;
-                    right: 2rem;
-                    bottom: 4rem;
-                    width: 720px;
-                    height: 520px;
-                    background: var(--panel-bg);
-                    color: var(--text);
-                    border: 1px solid var(--border);
-                    border-radius: 14px;
-                    box-shadow: 0 40px 80px -40px rgba(0,0,0,0.95);
-                    display: none; flex-direction: column; overflow: hidden;
-                `;
-            }
-            panel.innerHTML = `
-                <div id="archive-header" class="archive-header">
-                    <div class="archive-title">Archives</div>
-                    <div class="archive-controls">
-                        <button id="archive-minimize" class="pill secondary" type="button">—</button>
-                        <button id="archive-edit" class="pill secondary" type="button">Edit</button>
-                        <button id="archive-refresh" class="pill">Refresh</button>
-                        <button id="archive-close" class="pill">Close</button>
-                    </div>
-                </div>
-                <div id="archive-list" class="archive-list"></div>
-                <div class="archive-footer">
-                    <button id="archive-restore-btn" class="pill" disabled>Restore Selected</button>
-                </div>
-            `;
-            if (canUseWinBox) {
-                archiveWinbox = window.SynthWindowManager.create({
-                    id: 'archives',
-                    title: 'Archives',
-                    mount: panel,
-                    width: 720,
-                    height: 520,
-                    x: 64,
-                    y: 'bottom',
-                    iconText: '🗂️',
-                    dockLabel: 'Restore Archives',
-                    dockClass: 'chat-toggle-btn',
-                    className: 'synth-winbox no-full'
-                });
-                try {
-                    if (window.SynthWindowManager && typeof window.SynthWindowManager.attachHeaderTools === 'function') {
-                        window.SynthWindowManager.attachHeaderTools('archives', archiveWinbox, [
-                            {
-                                label: '🔄',
-                                title: 'Refresh archives',
-                                onClick: () => { try { refreshArchiveList(); } catch (e) { /* ignore */ } }
-                            },
-                            {
-                                label: '✏️',
-                                title: 'Edit selection',
-                                onClick: () => { try { toggleArchiveEditMode(); } catch (e) { /* ignore */ } }
-                            }
-                        ]);
-                    }
-                } catch (e) { /* ignore */ }
-            } else {
-                document.body.appendChild(panel);
-                // Dragging header (disabled on mobile where modal is fullscreen)
-                const header = panel.querySelector('#archive-header');
-                if (!isMobileArchive) {
-                    header.style.cursor = 'grab';
-                    let dragging = false, startX = 0, startY = 0, startRight = 18, startBottom = 60;
-                    header.addEventListener('pointerdown', (ev) => { dragging = true; startX = ev.clientX; startY = ev.clientY; startRight = parseFloat(getComputedStyle(panel).right); startBottom = parseFloat(getComputedStyle(panel).bottom); document.body.style.userSelect = 'none'; });
-                    window.addEventListener('pointermove', (ev) => { if(!dragging) return; const dx = ev.clientX - startX; const dy = ev.clientY - startY; panel.style.right = (startRight - dx) + 'px'; panel.style.bottom = (startBottom - dy) + 'px'; });
-                    window.addEventListener('pointerup', () => { dragging = false; document.body.style.userSelect = ''; });
-                } else {
-                    // On mobile, ensure header isn't draggable and shows close/controls clearly
-                    header.style.cursor = 'default';
-                }
-            }
-            if (canUseWinBox) {
-                const header = panel.querySelector('#archive-header');
-                if (header) header.style.cursor = 'default';
-            }
-            archiveModal = panel;
-            return panel;
-        }
-
-        // Buttons and interactions in the modal
-        function bindArchiveModalButtons() {
-            const modal = archiveModal || createArchiveModal();
-            const btnClose = modal.querySelector('#archive-close');
-            const btnRefresh = modal.querySelector('#archive-refresh');
-            const btnRestore = modal.querySelector('#archive-restore-btn');
-            const btnMinimize = modal.querySelector('#archive-minimize');
-            const btnEdit = modal.querySelector('#archive-edit');
-            btnClose.addEventListener('click', () => {
-                if (archiveWinbox) {
-                    try { archiveWinbox.hide(); } catch (e) { /* ignore */ }
-                } else {
-                    modal.style.display = 'none';
-                }
-            });
-            if (btnMinimize) {
-                btnMinimize.addEventListener('click', () => {
-                    if (archiveWinbox && window.SynthWindowManager && typeof window.SynthWindowManager.minimize === 'function') {
-                        try { window.SynthWindowManager.minimize('archives'); } catch (e) { /* ignore */ }
-                        return;
-                    }
-                    try { modal.style.display = 'none'; } catch (e) { /* ignore */ }
-                });
-            }
-            if (btnEdit) {
-                btnEdit.addEventListener('click', () => { toggleArchiveEditMode(); });
-            }
-            btnRefresh.addEventListener('click', async () => { await refreshArchiveList(); });
-            btnRestore.addEventListener('click', async () => {
-                try {
-                    const ids = archiveMultiSelect ? Array.from(archiveSelectedIds) : [];
-                    if (!archiveMultiSelect) {
-                        const selected = modal.querySelector('.archive-row.selected');
-                        if (selected) ids.push(selected.dataset.id);
-                    }
-                    if (!ids.length) { showToast('Select an archive to restore', true); return; }
-                    showToast(`Restoring ${ids.length} archive(s)...`, false);
-                    for (const aid of ids) {
-                        const out = await apiPostJson('/api/chat/restore', { archive_id: aid, session_id: sessionId });
-                        if (out && out.success) {
-                            // We rely on WebSocket replay to render restored messages via _replay_history;
-                            // do not render `out.messages` here to avoid duplicates.
-                            if (out && out.deleted_archive_id) {
-                                try {
-                                    const deletedId = out.deleted_archive_id;
-                                    const row = document.querySelector(`#archive-list .archive-row[data-id='${deletedId}']`);
-                                    if (row) row.remove();
-                                } catch (err) { console.debug('[synth_webui] Failed to remove deleted archive row', err); }
-                            }
-                        } else {
-                            showToast(`Restore failed for ${aid}`, true);
-                        }
-                    }
-                    showToast('Restore completed', false);
-                    archiveSelectedIds.clear();
-                    updateArchiveRestoreState(modal);
-                    try { await refreshArchiveList(); } catch (err) { console.debug('[synth_webui] Failed to refresh archive list after restore:', err); }
-                } catch (err) {
-                    console.error('[synth_webui] Restore failed', err);
-                    showToast('Restore error: ' + err.message, true);
-                }
-            });
-        }
-
-        function updateArchiveRestoreState(panel) {
-            const btnRestore = panel.querySelector('#archive-restore-btn');
-            const selectedRow = panel.querySelector('.archive-row.selected');
-            const count = archiveMultiSelect ? archiveSelectedIds.size : (selectedRow ? 1 : 0);
-            if (!btnRestore) return;
-            btnRestore.disabled = count === 0;
-            btnRestore.textContent = count > 1 ? `Restore Selected (${count})` : 'Restore Selected';
-        }
-
-        function toggleArchiveEditMode() {
-            const panel = archiveModal || createArchiveModal();
-            archiveMultiSelect = !archiveMultiSelect;
-            if (!archiveMultiSelect) {
-                archiveSelectedIds.clear();
-            }
+        // Archive UI consolidated — legacy inline implementation removed.
+        // Use the external module `archive-window.mjs` as single source-of-truth.
+        async function ensureArchiveModule() {
             try {
-                panel.classList.toggle('archive-edit-mode', archiveMultiSelect);
-            } catch (e) { /* ignore */ }
-            try {
-                const btnEdit = panel.querySelector('#archive-edit');
-                if (btnEdit) btnEdit.textContent = archiveMultiSelect ? 'Done' : 'Edit';
-            } catch (e) { /* ignore */ }
-            updateArchiveRestoreState(panel);
-            renderArchiveList(Array.isArray(window.__synth_archive_cache) ? window.__synth_archive_cache : []);
-        }
-
-        async function refreshArchiveList() {
-            try {
-                const res = await fetch('/api/chat/archives');
-                if (!res.ok) throw new Error('HTTP ' + res.status);
-                const payload = await res.json();
-                const list = payload.archives || [];
-                window.__synth_archive_cache = list;
-                renderArchiveList(list);
+                if (window.ArchiveWindow && typeof window.ArchiveWindow.createArchiveModal === 'function') return window.ArchiveWindow;
+                const mod = await import('/js/archive-window.mjs');
+                try { if (mod && typeof mod.createArchiveModal === 'function') { window.ArchiveWindow = window.ArchiveWindow || {}; window.ArchiveWindow.createArchiveModal = mod.createArchiveModal; } } catch (e) {}
+                return window.ArchiveWindow || mod;
             } catch (err) {
-                console.error('[synth_webui] Failed to refresh archives:', err);
-                showToast('Failed to load archives: ' + err.message, true);
+                console.warn('[synth_webui] Failed to load archive module', err);
+                return null;
             }
         }
 
-        function renderArchiveList(list) {
-            const panel = archiveModal || createArchiveModal();
-            const container = panel.querySelector('#archive-list');
-            container.innerHTML = '';
-            try { panel.classList.toggle('archive-edit-mode', archiveMultiSelect); } catch (e) { /* ignore */ }
-            const validIds = new Set(Array.isArray(list) ? list.map((a) => String(a.id)) : []);
-            for (const sid of Array.from(archiveSelectedIds)) {
-                if (!validIds.has(String(sid))) archiveSelectedIds.delete(sid);
-            }
-            if (!Array.isArray(list) || !list.length) {
-                const empty = document.createElement('div');
-                empty.className = 'empty-state';
-                empty.style.padding = '1rem';
-                empty.textContent = 'No archives found.';
-                container.appendChild(empty);
-                updateArchiveRestoreState(panel);
-                return;
-            }
-            for (const arch of list) {
-                const row = document.createElement('div');
-                row.className = 'archive-row';
-                const archId = String(arch.id);
-                row.dataset.id = archId;
-                row.style.display = 'flex'; row.style.gap = '8px'; row.style.alignItems = 'center'; row.style.justifyContent = 'space-between'; row.style.padding = '8px'; row.style.borderRadius='8px';
-                const check = document.createElement('input');
-                check.type = 'checkbox';
-                check.className = 'archive-check';
-                check.checked = archiveSelectedIds.has(archId);
-
-                // Left section: date/time + name
-                const left = document.createElement('div'); left.style.display='flex'; left.style.flexDirection='column';
-                const dt = document.createElement('div');
-                dt.textContent = formatTimestamp(arch.created_at || new Date().toISOString());
-                dt.style.fontSize = '0.85rem'; dt.style.opacity = 0.85;
-                const nameDiv = document.createElement('div'); nameDiv.style.fontWeight='600'; nameDiv.style.cursor='pointer';
-                nameDiv.textContent = arch.name || 'Chat';
-                left.appendChild(dt); left.appendChild(nameDiv);
-
-                // Center: msg count
-                const center = document.createElement('div'); center.textContent = `${arch.message_count} msgs`;
-                center.style.fontSize='0.85rem'; center.style.opacity=0.8;
-
+        function createArchiveModal() {
+            try {
+                if (window.ArchiveWindow && typeof window.ArchiveWindow.createArchiveModal === 'function') return window.ArchiveWindow.createArchiveModal();
+                return null;
+            } catch (e) { console.warn('[synth_webui] createArchiveModal delegate failed', e); return null; }
+        }
                 // Right: actions
                 const right = document.createElement('div'); right.style.display='flex'; right.style.gap='6px';
                 const renameBtn = document.createElement('button'); renameBtn.className = 'pill'; renameBtn.type='button'; renameBtn.textContent = '✏️';
@@ -6135,14 +5801,15 @@
 
         chatRestoreBtn?.addEventListener('click', async () => {
             try {
-                const modal = createArchiveModal();
-                bindArchiveModalButtons();
-                if (archiveWinbox && window.SynthWindowManager && typeof window.SynthWindowManager.restore === 'function') {
-                    window.SynthWindowManager.restore('archives');
-                } else {
-                    modal.style.display = 'flex';
-                }
-                await refreshArchiveList();
+                const mod = await ensureArchiveModule();
+                if (!mod || typeof mod.createArchiveModal !== 'function') throw new Error('Archive module not available');
+                const modal = mod.createArchiveModal();
+                try {
+                    if (window.SynthWindowManager && typeof window.SynthWindowManager.restore === 'function' && window.SynthWindowManager.has && window.SynthWindowManager.has('archives')) {
+                        try { window.SynthWindowManager.restore('archives'); return; } catch (e) {}
+                    }
+                } catch (e) {}
+                try { if (modal && modal.style) modal.style.display = 'flex'; } catch (e) {}
             } catch (err) {
                 console.error('[synth_webui] Open archives failed', err);
                 showToast('Open archives error: ' + err.message, true);
