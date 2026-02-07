@@ -1070,6 +1070,68 @@ try {
 
                         if (inputEl) inputWrap.appendChild(inputEl);
                         if (extraEl) inputWrap.appendChild(extraEl);
+
+                        // Attach save handlers for editable inputs so pressing Enter or changing
+                        // selects/checkboxes persists values via the /api/config endpoint
+                        if (isEditable && inputEl) {
+                            const saveValue = async (val) => {
+                                try {
+                                    // Provide immediate visual feedback by disabling control
+                                    if (inputEl && typeof inputEl.disabled !== 'undefined') inputEl.disabled = true;
+                                    const payload = { key: item.key, value: val };
+                                    const res = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                                    if (!res.ok) {
+                                        const txt = await res.text();
+                                        try { window.showToast('Save failed: ' + txt, true); } catch (e) {}
+                                    } else {
+                                        try {
+                                            const out = await res.json();
+                                            window.showToast('Saved', false);
+                                            if (out && out.requires_reload) {
+                                                window.showToast(out.message || 'Component reload recommended', false);
+                                            }
+                                            // Refresh configuration so UI reflects authoritative values
+                                            try { await refreshConfig(); } catch (e) { /* ignore */ }
+                                        } catch (e) {
+                                            window.showToast('Saved', false);
+                                        }
+                                    }
+                                } catch (e) {
+                                    try { window.showToast('Save failed', true); } catch (e) {}
+                                } finally {
+                                    try { if (inputEl && typeof inputEl.disabled !== 'undefined') inputEl.disabled = false; } catch (e) {}
+                                }
+                            };
+
+                            // Checkbox
+                            if (inputEl.tagName && inputEl.tagName.toLowerCase() === 'input' && inputEl.type === 'checkbox') {
+                                inputEl.addEventListener('change', () => { saveValue(inputEl.checked); });
+                            } else if (inputEl.tagName && inputEl.tagName.toLowerCase() === 'select') {
+                                inputEl.addEventListener('change', () => { saveValue(inputEl.value); });
+                            } else if (inputEl.tagName && inputEl.tagName.toLowerCase() === 'textarea') {
+                                // Ctrl+Enter to submit JSON/textarea; blur to auto-save
+                                let debounced = null;
+                                inputEl.addEventListener('keydown', (ev) => {
+                                    if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) {
+                                        ev.preventDefault();
+                                        saveValue(inputEl.value);
+                                    }
+                                    // simple debounce to avoid excessive saves on blur
+                                    if (debounced) clearTimeout(debounced);
+                                });
+                                inputEl.addEventListener('blur', () => { debounced = setTimeout(() => saveValue(inputEl.value), 150); });
+                            } else {
+                                // Default: single-line inputs — Enter to save, blur to save
+                                inputEl.addEventListener('keydown', (ev) => {
+                                    if (ev.key === 'Enter' && !ev.shiftKey && !ev.ctrlKey && !ev.metaKey) {
+                                        ev.preventDefault();
+                                        saveValue(inputEl.value);
+                                    }
+                                });
+                                inputEl.addEventListener('blur', () => { saveValue(inputEl.value); });
+                            }
+                        }
+
                         row.appendChild(inputWrap);
                         container.appendChild(row);
                     });
@@ -1715,6 +1777,7 @@ try {
                     notificationsEnabled = state;
                     toggle.checked = state;
                     statusEl.textContent = label;
+                    try { if (state) window.showToast('Notifications enabled', false); else window.showToast('Notifications disabled', false); } catch (e) {}
                 };
 
                 if (typeof Notification !== 'undefined' && Notification.permission === 'granted' && enabled) {
@@ -1731,6 +1794,7 @@ try {
                     }
                     if (typeof Notification === 'undefined') {
                         setStatus(false, 'Unsupported');
+                        try { window.showToast('Notifications not supported in this environment', true); } catch (e) {}
                         return;
                     }
                     try {
@@ -1740,9 +1804,11 @@ try {
                             setStatus(true, 'Enabled');
                         } else {
                             setStatus(false, permission === 'denied' ? 'Blocked by browser' : 'Disabled');
+                            try { window.showToast(permission === 'denied' ? 'Notifications blocked by browser' : 'Notifications not enabled', true); } catch (e) {}
                         }
                     } catch (e) {
                         setStatus(false, 'Disabled');
+                        try { window.showToast('Notifications failed', true); } catch (e) {}
                     }
                 });
             }
