@@ -3942,14 +3942,30 @@ import * as THREE from 'three';
                         }
 
                         let clip = null;
+                        try { console.debug('[AnimationHandler] resolving clip', { animationFile, loadedAnimationsKeys: Object.keys(this.loadedAnimations || {}).slice(0,50) }); } catch (e) {}
                         if (animationFile) {
                             // ensure it's loaded
-                            clip = this.loadedAnimations[animationFile] || await this.loadAnimation(actionName, animationFile);
+                            try {
+                                clip = this.loadedAnimations[animationFile] || await this.loadAnimation(actionName, animationFile);
+                                try { console.debug('[AnimationHandler] load attempt result for animationFile', { animationFile, clip: clip && (clip.name || clip._clipName) }); } catch (e) {}
+                            } catch (errLoad) {
+                                console.warn('[AnimationHandler] loadAnimation threw for animationFile', animationFile, errLoad);
+                                clip = null;
+                            }
                         } else {
                             // no file provided: try to pick a default for the action
-                            const files = await this.getAnimationsForType(actionName);
-                            const pick = (files && files.length) ? files[0] : null;
-                            clip = pick ? (this.loadedAnimations[pick] || await this.loadAnimation(actionName, pick)) : null;
+                            try {
+                                const files = await this.getAnimationsForType(actionName);
+                                const pick = (files && files.length) ? files[0] : null;
+                                try { console.debug('[AnimationHandler] picked file for action', { actionName, pick, filesCount: files && files.length }); } catch (e) {}
+                                try {
+                                    clip = pick ? (this.loadedAnimations[pick] || await this.loadAnimation(actionName, pick)) : null;
+                                    try { console.debug('[AnimationHandler] load attempt result for pick', { pick, clip: clip && (clip.name || clip._clipName) }); } catch (e) {}
+                                } catch (errPick) {
+                                    console.warn('[AnimationHandler] loadAnimation threw for pick', pick, errPick);
+                                    clip = null;
+                                }
+                            } catch (e) { console.warn('[AnimationHandler] getAnimationsForType failed:', e); }
                         }
 
                         if (!clip) {
@@ -5095,24 +5111,25 @@ import * as THREE from 'three';
                     pa.forEach((act) => {
                         try {
                             if (!act || !act.type) return;
-                            if (act.type === 'startAction' && typeof animationHandler.startAction === 'function') {
-                                animationHandler.startAction(...(act.args || []));
-                            } else if (act.type === 'startTemporaryLoop' && typeof animationHandler.startTemporaryLoop === 'function') {
-                                animationHandler.startTemporaryLoop(...(act.args || []));
-                            } else if (act.type === 'clearTemporaryOverride' && typeof animationHandler.clearTemporaryOverride === 'function') {
-                                animationHandler.clearTemporaryOverride(...(act.args || []));
-                            }
-                        } catch (e) { /* ignore per-action errors */ }
-                    });
-                    try { window.__synth_pending_actions = []; } catch (e) { /* ignore */ }
-                }
-            } catch (e) { /* ignore */ }
+                                try { console.debug('[synth_webui] applying pending action:', act.type, act.args || []); } catch (e) {}
+                                if (act.type === 'startAction' && typeof animationHandler.startAction === 'function') {
+                                    animationHandler.startAction(...(act.args || []));
+                                } else if (act.type === 'startTemporaryLoop' && typeof animationHandler.startTemporaryLoop === 'function') {
+                                    animationHandler.startTemporaryLoop(...(act.args || []));
+                                } else if (act.type === 'clearTemporaryOverride' && typeof animationHandler.clearTemporaryOverride === 'function') {
+                                    animationHandler.clearTemporaryOverride(...(act.args || []));
+                                }
+                            } catch (e) { console.warn('[synth_webui] Failed to apply pending action', act.type, e); }
+                        });
+                        try { window.__synth_pending_actions = []; } catch (e) { /* ignore */ }
+                    }
+                } catch (e) { /* ignore */ }
 
-            // When a structured action's outro finishes, the AnimationHandler will
-            // emit a custom event so we can resume any queued lower-priority
-            // state (that we previously cached instead of dropping).
-            try {
-                // Add the outro-completed listener only once (idempotent)
+                // Notify interested clients that the animationHandler is now ready
+                try {
+                    try { window.dispatchEvent(new CustomEvent('synth_animation_handler_ready')); } catch (e) {}
+                    try { window.dispatchEvent(new CustomEvent('synth_animation_handler_ready_local')); } catch (e) {}
+                    try { window.dispatchEvent(new CustomEvent('synth_animation_handler_ready_global')); } catch (e) {}
                 if (!window.__synth_animation_outro_completed_handler) {
                     window.__synth_animation_outro_completed_handler = (ev) => {
                         try {

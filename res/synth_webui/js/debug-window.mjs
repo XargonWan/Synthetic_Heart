@@ -476,14 +476,8 @@ export function createDebugWindow() {
             loopStartBtn.addEventListener('click', async () => {
                 try {
                     console.debug('[debug-window] loop Start clicked', { hasHandler: !!window.animationHandler, selType: selType && selType.value, selFile: selFile && selFile.value, start: startInput && startInput.value, end: endInput && endInput.value, fps: fpsInput && fpsInput.value });
-                    if (!window.animationHandler) {
-                        try {
-                            window.__synth_pending_actions = window.__synth_pending_actions || [];
-                            // best-effort: queue a no-op action so the request isn't lost
-                            window.__synth_pending_actions.push({ type: 'clearTemporaryOverride', args: [] });
-                        } catch (e) { /* ignore */ }
-                        return console.warn('[synth_webui] animationHandler not ready — action queued');
-                    }
+
+                    // Compute the target args early so they can be queued if the handler is not ready
                     const aType = selType ? selType.value : 'think';
                     let aFile = (selFile && selFile.value) ? selFile.value : null;
                     // Defensive: if no value but options exist, pick the first non-empty option
@@ -498,6 +492,8 @@ export function createDebugWindow() {
                     const s = parseInt((startInput && startInput.value) ? startInput.value : '0', 10);
                     const e = parseInt((endInput && endInput.value) ? endInput.value : '0', 10);
                     const fps = parseFloat((fpsInput && fpsInput.value) ? fpsInput.value : '30');
+
+                    // Basic validation before queuing
                     if (!aFile) {
                         alert('Please select an animation file first');
                         try { console.debug('[debug-window] No animation file selected; selFile.options=', selFile && selFile.options ? Array.from(selFile.options).map(o=>o.value) : null); } catch (e) {}
@@ -505,7 +501,60 @@ export function createDebugWindow() {
                     }
                     if (!Number.isFinite(s) || !Number.isFinite(e)) return alert('Please enter numeric frame values');
                     if (e <= s) return alert('end must be > start');
+
+                    if (!window.animationHandler) {
+                        try {
+                            // Queue the actual startTemporaryLoop action so it runs when the handler becomes available
+                            window.__synth_pending_actions = window.__synth_pending_actions || [];
+                            window.__synth_pending_actions.push({ type: 'startTemporaryLoop', args: [aType, aFile, s, e, Number.isFinite(fps) ? fps : 30] });
+                            try { console.debug('[debug-window] queued startTemporaryLoop action', { aType, aFile, s, e, fps }); } catch (e) {}
+                            // Provide visual feedback: disable start button and mark as queued
+                            try { if (loopStartBtn) { loopStartBtn.disabled = true; loopStartBtn.textContent = 'Queued'; loopStartBtn.title = 'Queued until animation handler is ready'; } } catch (e) {}
+                        } catch (e) { /* ignore */ }
+                        return console.warn('[synth_webui] animationHandler not ready — start action queued');
+                    }
+
                     try {
+                        // Try to ensure the requested clip is actually loadable first - call loadAnimation if available
+                        let clipOk = false;
+                        try {
+                            if (typeof window.animationHandler.loadAnimation === 'function') {
+                                try {
+                                    const loaded = await window.animationHandler.loadAnimation(aType, aFile);
+                                    console.debug('[debug-window] loadAnimation pre-check result', { aFile, loaded: !!loaded, duration: loaded && loaded.duration });
+                                    clipOk = !!loaded;
+                                } catch (e) {
+                                    console.debug('[debug-window] loadAnimation threw during pre-check', e);
+                                    clipOk = false;
+                                }
+                            }
+                        } catch (e) { /* ignore */ }
+
+                        // If not loadable by filename, attempt a full-path fallback using detected skin
+                        if (!clipOk) {
+                            try {
+                                const skin = (window.activeSkinName && String(window.activeSkinName).split('/').pop().replace('.vrm','')) ? String(window.activeSkinName).split('/').pop().replace('.vrm','') : 'Rei';
+                                const candidatePath = `/skins/${skin}/animations/${aType}/${encodeURIComponent(aFile)}`;
+                                try {
+                                    const loaded2 = await window.animationHandler.loadAnimation(aType, candidatePath);
+                                    console.debug('[debug-window] loadAnimation fallback result', { candidatePath, loaded: !!loaded2 });
+                                    clipOk = !!loaded2;
+                                    if (clipOk) {
+                                        // If successful, replace the aFile with the full path for the start call
+                                        aFile = candidatePath;
+                                    }
+                                } catch (e) {
+                                    console.debug('[debug-window] loadAnimation fallback threw', e);
+                                }
+                            } catch (e) { /* ignore */ }
+                        }
+
+                        if (!clipOk) {
+                            alert('Failed to load animation clip. Check console for details.');
+                            console.warn('[debug-window] Aborting startTemporaryLoop - clip not found', { aType, aFile });
+                            return;
+                        }
+
                         await window.animationHandler.startTemporaryLoop(aType, aFile, s, e, Number.isFinite(fps) ? fps : 30);
                         try { console.debug('[debug-window] startTemporaryLoop called successfully'); } catch (e) {}
                     } catch (ex) {
@@ -516,7 +565,16 @@ export function createDebugWindow() {
         }
         if (loopClearBtn) {
             loopClearBtn.addEventListener('click', () => {
-                try { if (!window.animationHandler) return; window.animationHandler.clearTemporaryOverride(); } catch (err) { console.warn('[synth_webui] clear temp loop failed:', err); }
+                try {
+                    if (!window.animationHandler) {
+                        // Queue clear so it runs when the handler becomes available
+                        window.__synth_pending_actions = window.__synth_pending_actions || [];
+                        window.__synth_pending_actions.push({ type: 'clearTemporaryOverride', args: [] });
+                        try { console.debug('[debug-window] queued clearTemporaryOverride (handler not ready)'); } catch (e) {}
+                        return;
+                    }
+                    window.animationHandler.clearTemporaryOverride();
+                } catch (err) { console.warn('[synth_webui] clear temp loop failed:', err); }
             });
         }
 
@@ -1098,6 +1156,62 @@ export function createDebugWindow() {
                     };
                     window.addEventListener('vrmLoaded', window.__synth_debug_on_vrm_loaded);
                 }
+
+                // Unblock queued Start button when the real handler becomes available
+                if (!window.__synth_animation_handler_ready_listener) {
+                    window.__synth_animation_handler_ready_listener = () => {
+                        try {
+                            if (loopStartBtn) {
+                                loopStartBtn.disabled = false;
+                                try { loopStartBtn.textContent = isPaused() ? 'Resume' : 'Start'; } catch (e) { loopStartBtn.textContent = 'Start'; }
+                                try { loopStartBtn.title = 'Start temporary loop'; } catch (e) {}
+                            }
+                            try { console.debug('[debug-window] animation handler ready - Start button re-enabled'); } catch (e) {}
+                        } catch (e) { /* ignore */ }
+                    };
+                    window.addEventListener('synth_animation_handler_ready', window.__synth_animation_handler_ready_listener);
+                }
+
+                // Defensive polling: if handler becomes available later, re-enable Start and try to apply queued startTemporaryLoop actions
+                try {
+                    if (!window.__synth_debug_handler_poll_set) {
+                        window.__synth_debug_handler_poll_set = true;
+                        const poll = setInterval(async () => {
+                            try {
+                                if (!loopStartBtn) return;
+                                if (window.animationHandler) {
+                                    if (loopStartBtn.disabled) {
+                                        loopStartBtn.disabled = false;
+                                        try { loopStartBtn.textContent = isPaused() ? 'Resume' : 'Start'; } catch (e) { loopStartBtn.textContent = 'Start'; }
+                                        try { loopStartBtn.title = 'Start temporary loop'; } catch (e) {}
+                                    }
+                                    // Attempt to process queued startTemporaryLoop actions from here (best-effort; vrm-viewer also flushes them)
+                                    try {
+                                        const pa = window.__synth_pending_actions || [];
+                                        if (Array.isArray(pa) && pa.length) {
+                                            const remaining = [];
+                                            for (const act of pa) {
+                                                try {
+                                                    if (act && act.type === 'startTemporaryLoop' && typeof window.animationHandler.startTemporaryLoop === 'function') {
+                                                        try { console.debug('[debug-window] applying queued startTemporaryLoop', act.args); } catch (e) {}
+                                                        await window.animationHandler.startTemporaryLoop(...(act.args || []));
+                                                    } else {
+                                                        remaining.push(act);
+                                                    }
+                                                } catch (e) {
+                                                    remaining.push(act);
+                                                }
+                                            }
+                                            try { window.__synth_pending_actions = remaining; } catch (e) {}
+                                        }
+                                    } catch (e) { /* ignore */ }
+                                    // Once handler is present and we've attempted processing, stop polling
+                                    clearInterval(poll);
+                                }
+                            } catch (e) { /* ignore */ }
+                        }, 500);
+                    }
+                } catch (e) { /* ignore */ }
             } catch (e) { /* ignore */ }
 
             // Periodic background: attempt to flush any queued debug actions when the
