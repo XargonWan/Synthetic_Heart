@@ -186,6 +186,8 @@ WebUI & templates linting (important):
   - If using Node toolchain: `npx eslint "core/webui_templates/**/*.html" --ext .html,.js` or an equivalent npm script (e.g. `npm run lint:webui`) and `htmlhint` / `tidy` for HTML validation.
   - If Node is not available, at minimum perform a browser smoke test (open WebUI, check DevTools Console for syntax errors and failed fetches) and validate that inline scripts are balanced and templates load correctly.
 - Add or update WebUI-related tests (E2E/browser test or a smoke test) when making changes that affect rendering, script execution, or template injection logic.
+- Always run linters and `node --check` when you modify WebUI-related files.
+- If you edit the WebUI and the files pass the checks, inject them into the dev container to test immediately — you do not need to restart the container for the WebUI.
 
 If you need to restar the dev container use:
 ```bash
