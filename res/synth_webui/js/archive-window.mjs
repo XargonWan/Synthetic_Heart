@@ -4,9 +4,19 @@ export function createArchiveModal() {
         // Keep local state in module-scope
         if (window.__archive_modal_instance) {
             try {
-                if (window.__archive_modal_instance.querySelector && !window.__archive_modal_instance.querySelector('#archive-edit')) {
-                    // stale instance (old version) - remove and recreate
-                    try { window.__archive_modal_instance.remove(); } catch (e) { /* ignore */ }
+                const existing = window.__archive_modal_instance;
+                const editBtn = (existing.querySelector && existing.querySelector('#archive-edit')) ? existing.querySelector('#archive-edit') : null;
+                const isVisible = (el) => {
+                    try {
+                        if (!el) return false;
+                        const cs = (window.getComputedStyle && window.getComputedStyle(el)) || {};
+                        return !(cs.display === 'none' || cs.visibility === 'hidden' || el.offsetParent === null);
+                    } catch (e) { return false; }
+                };
+                if (!editBtn || !isVisible(editBtn)) {
+                    // stale or hidden instance - remove and recreate to ensure visibility
+                    try { existing.remove(); } catch (e) { /* ignore */ }
+                    try { window.__archive_modal_winbox && window.__archive_modal_winbox.hide && window.__archive_modal_winbox.hide(); } catch (e) { /* ignore */ }
                     window.__archive_modal_instance = null;
                 } else {
                     return window.__archive_modal_instance;
@@ -68,7 +78,6 @@ export function createArchiveModal() {
                 <div class="archive-title">Archives</div>
                 <div class="archive-controls">
                     <label><input id="show-archived" type="checkbox" /> Show archived</label>
-                    <button id="archive-edit" class="pill secondary">Edit</button>
                     <button id="archive-refresh" class="pill secondary">Refresh</button>
                 </div>
             </div>
@@ -77,13 +86,41 @@ export function createArchiveModal() {
             </div>
             <div class="archive-footer" style="padding:12px;border-top:1px solid var(--border);display:flex;gap:8px;align-items:center;justify-content:space-between;">
                 <div>
-                    <button id="archive-delete-btn" class="pill secondary" type="button">Delete</button>
-                    <button id="archive-restore-btn" class="pill" type="button">Restore</button>
+                    <button id="archive-edit" class="pill secondary" type="button">Edit</button>
+                    <button id="archive-delete-btn" class="pill secondary" type="button" style="display:none">Delete</button>
+                    <button id="archive-restore-btn" class="pill" type="button" style="display:none">Restore</button>
                 </div>
                 <div id="archive-pagination" style="display:flex;gap:8px;align-items:center;">
                 </div>
             </div>
         `;
+
+        // Inject archive-specific styles into the document head (guarded to run once)
+        try {
+            if (!document.getElementById('archive-window-styles')) {
+                const s = document.createElement('style');
+                s.id = 'archive-window-styles';
+                s.textContent = `
+#archive-panel .archive-header { padding: 10px 14px; display: flex; align-items: center; justify-content: space-between; background: var(--surface-alt); border-bottom: 1px solid var(--border); }
+#archive-panel .archive-title { font-weight: 600; letter-spacing: 0.02em; }
+#archive-panel .archive-controls { display: flex; gap: 6px; align-items: center; }
+#archive-panel .archive-list { flex: 1; overflow: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+#archive-panel .archive-footer { padding: 10px 12px; border-top: 1px solid var(--border); display: flex; gap: 8px; justify-content: flex-end; background: rgba(255, 255, 255, 0.02); }
+#archive-panel .archive-row { background: rgba(255, 255, 255, 0.03); border: 1px solid var(--border); padding: 8px 10px; }
+#archive-panel .archive-row-inner { display:flex; gap:12px; align-items:flex-start; }
+#archive-panel .archive-row .archive-check { display: none; accent-color: var(--accent); width:18px; height:18px; margin-top:2px; margin-right:8px; }
+#archive-panel.archive-edit-mode .archive-row .archive-check { display: inline-block; }
+#archive-panel.archive-edit-mode .archive-row { cursor: pointer; }
+#archive-panel .archive-row:hover { border-color: var(--border-strong); }
+#archive-panel .archive-row.selected { border-color: var(--accent); background: var(--accent-soft); }
+#archive-panel .archive-row .archive-row-inner .meta { color: var(--text-soft); font-size:12px; margin-top:4px; }
+#archive-panel .archive-row .archive-row-inner .archive-title { font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+#archive-panel .archive-row input { background: rgba(255, 255, 255, 0.04); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 6px 8px; }
+#archive-panel .archive-row input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px rgba(255, 107, 214, 0.2); }
+                `;
+                document.head.appendChild(s);
+            }
+        } catch (e) { /* ignore style injection errors */ }
 
         // If a managed WinBox is available, create the WinBox instance and keep it hidden
         if (canUseWinBox && window.SynthWindowManager && typeof window.SynthWindowManager.create === 'function') {
@@ -115,6 +152,32 @@ export function createArchiveModal() {
                             };
                         }
                     } catch (e) { /* ignore */ }
+
+                    // Attach Edit to the WinBox header so it's always visible and accessible.
+                    try {
+                        const renderHeaderTools = () => {
+                            try {
+                                const tools = [{
+                                    label: archiveMultiSelect ? 'Done' : 'Edit',
+                                    title: archiveMultiSelect ? 'Done' : 'Edit',
+                                    className: 'archive-edit-btn',
+                                    onClick: () => {
+                                        try {
+                                            archiveMultiSelect = !archiveMultiSelect;
+                                            if (!archiveMultiSelect) archiveSelectedIds.clear();
+                                            updateEditState();
+                                            updateSelectedState();
+                                            // re-render header tools to reflect label change
+                                            setTimeout(renderHeaderTools, 0);
+                                        } catch (e) { /* ignore */ }
+                                    }
+                                }];
+                                try { /* header tool disabled: Edit is rendered in footer for consistent placement */ } catch (e) {}
+                            } catch (e) { /* ignore */ }
+                        };
+                        renderHeaderTools();
+                    } catch (e) { /* ignore */ }
+
                 } catch (e) { /* ignore */ }
             } catch (e) { console.warn('[archive-window] WinBox creation failed', e); }
         }
@@ -154,9 +217,14 @@ export function createArchiveModal() {
             const updateArchiveRestoreState = () => {
                 try {
                     const hasSelection = archiveSelectedIds.size > 0;
-                    if (deleteBtn) deleteBtn.disabled = !hasSelection;
+                    // Show/hide buttons based on selection — edit button remains always visible
+                    if (deleteBtn) {
+                        deleteBtn.style.display = hasSelection ? 'inline-flex' : 'none';
+                    }
                     const restoreBtn = panel.querySelector('#archive-restore-btn');
-                    if (restoreBtn) restoreBtn.disabled = !hasSelection;
+                    if (restoreBtn) {
+                        restoreBtn.style.display = hasSelection ? 'inline-flex' : 'none';
+                    }
                 } catch (e) { /* ignore */ }
             };
 
@@ -178,13 +246,32 @@ export function createArchiveModal() {
                         row.className = 'archive-row';
                         row.dataset.id = it.id;
                         const title = it.name || it.title || 'Chat';
-                        const created = it.created_at ? `· ${it.created_at}` : '';
+                        // Format created_at to DD/MM/YYYY HH:MM for better readability
+                        const formatDate = (s) => {
+                            try {
+                                if (!s) return '';
+                                const d = new Date(s);
+                                if (Number.isNaN(d.getTime())) return s;
+                                const pad = (n) => (n < 10 ? '0' + n : n);
+                                const day = pad(d.getDate());
+                                const month = pad(d.getMonth() + 1);
+                                const year = d.getFullYear();
+                                const hours = pad(d.getHours());
+                                const mins = pad(d.getMinutes());
+                                return `${day}/${month}/${year} ${hours}:${mins}`;
+                            } catch (e) { return s; }
+                        };
+                        const created = it.created_at ? `· ${formatDate(it.created_at)}` : '';
                         const count = (typeof it.message_count === 'number') ? `· ${it.message_count} msgs` : '';
                         row.innerHTML = `
-                            <input class="archive-check" type="checkbox" />
-                            <div>
-                                <div style="font-weight:600">${title}</div>
-                                <div style="font-size:12px;color:var(--text-soft)">${created} ${count}</div>
+                            <div class="archive-row-inner" style="display:flex;gap:12px;align-items:center;">
+                                <div style="flex:0 0 auto; width:28px; display:flex; align-items:flex-start; justify-content:center;">
+                                    <input class="archive-check" type="checkbox" />
+                                </div>
+                                <div style="flex:1 1 auto; min-width:0;">
+                                    <div style="font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${title}</div>
+                                    <div style="font-size:12px;color:var(--text-soft); margin-top:4px;">${created} ${count}</div>
+                                </div>
                             </div>
                         `;
                         row.addEventListener('click', (ev) => {
@@ -255,7 +342,7 @@ export function createArchiveModal() {
                 try {
                     if (archiveSelectedIds.size === 0) return;
                     const count = archiveSelectedIds.size;
-                    if (!confirm(`Restore ${count} archive${count === 1 ? '' : 's'}? This will replace the current chat.`)) return;
+                    if (!confirm(`Restore ${count} archive${count === 1 ? '' : 's'}? This will archive the current chat (if non-empty) and replace it.`)) return;
                     const ids = Array.from(archiveSelectedIds);
                     for (const archId of ids) {
                         try {
