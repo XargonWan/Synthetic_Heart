@@ -17,6 +17,12 @@ function injectChatStyles() {
         #send { flex:0 0 auto; border-radius:50%; height:2.6rem; width:2.6rem; }
         .synth-chat-archive { margin-left:auto; margin-top:0.6rem; margin-right:0.6rem; display:flex; gap:0.5rem; align-items:center; }
         .synth-chat-archive .pill { padding:0.4rem 0.6rem; }
+        /* Message day separator */
+        .message-day { display:flex; justify-content:center; align-items:center; margin: 0.6rem 0; }
+        .message-day .day-label { background: rgba(255,255,255,0.04); color: var(--text); padding: 0.35rem 0.8rem; border-radius: 999px; font-weight:600; font-size:0.9rem; }
+        /* Message timestamp in bubble */
+        .bubble { position: relative; padding: 1rem 1.2rem 1.8rem; }
+        .bubble-time { position: absolute; right: 8px; bottom: 6px; font-size: 0.75rem; color: var(--text-soft); opacity: 0.9; }
         `;
         document.head.appendChild(style);
     } catch (e) { /* ignore */ }
@@ -231,15 +237,53 @@ function removeTypingIndicator() {
     } catch (e) { /* ignore */ }
 }
 
-function appendMessage(container, sender, text) {
+function appendMessage(container, sender, text, ts) {
     if (!container) return;
+
+    // Determine timestamp (fallback to now)
+    const dt = ts ? (typeof ts === 'number' ? new Date(ts) : new Date(ts)) : new Date();
+    // date key for day grouping: YYYY-MM-DD
+    const dayKey = dt.getFullYear() + '-' + (dt.getMonth()+1).toString().padStart(2,'0') + '-' + dt.getDate().toString().padStart(2,'0');
+
+    // If day changed since last rendered message, insert a day separator
+    try {
+        const lastDay = container.dataset.lastDay || null;
+        if (!lastDay || lastDay !== dayKey) {
+            const dayEl = document.createElement('div');
+            dayEl.className = 'message-day';
+            const label = document.createElement('div');
+            label.className = 'day-label';
+            try {
+                label.textContent = dt.toLocaleDateString(undefined, { month: 'long', day: 'numeric' });
+            } catch (e) {
+                label.textContent = `${dt.getMonth()+1}/${dt.getDate()}`;
+            }
+            dayEl.appendChild(label);
+            container.appendChild(dayEl);
+            container.dataset.lastDay = dayKey;
+        }
+    } catch (e) { /* ignore day grouping errors */ }
+
     const wrapper = document.createElement('div');
     wrapper.className = `message-container ${sender}`;
 
     const bubble = document.createElement('div');
     bubble.className = `bubble ${sender}`;
     const senderLabel = sender === 'synth' ? (window.SynthConfig && (window.SynthConfig.SYNTH_NAME || window.SynthConfig.BRAND_NAME) ? (window.SynthConfig.SYNTH_NAME || window.SynthConfig.BRAND_NAME) : 'SyntH') : 'You';
-    bubble.innerHTML = `<div class="bubble-sender">${senderLabel}</div>${safeEscapeHtml(text)}`;
+
+    // Format time for the small timestamp
+    let timeText = '';
+    try {
+        timeText = dt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+    } catch (e) {
+        const hh = dt.getHours().toString().padStart(2,'0');
+        const mm = dt.getMinutes().toString().padStart(2,'0');
+        timeText = `${hh}:${mm}`;
+    }
+
+    // Use safe-escaped content and preserve newlines
+    const escaped = safeEscapeHtml(text).replace(/\n/g, '<br>');
+    bubble.innerHTML = `<div class="bubble-sender">${senderLabel}</div><div class="bubble-content">${escaped}</div><div class="bubble-time">${timeText}</div>`;
     wrapper.appendChild(bubble);
     container.appendChild(wrapper);
     container.scrollTop = container.scrollHeight;
@@ -299,7 +343,8 @@ export function initChatUI() {
                     try {
                         const data = JSON.parse(event.data);
                         if (data && data.type === 'message') {
-                            appendMessage(messages, data.sender === 'synth' ? 'synth' : 'user', data.text || '');
+                            const ts = data.ts || data.timestamp || Date.now();
+                            appendMessage(messages, data.sender === 'synth' ? 'synth' : 'user', data.text || '', ts);
                         } else if (data && data.type === 'action_state') {
                             const phase = String(data.phase || '').toUpperCase();
                             if (phase === 'THINKING' || phase === 'WRITING' || phase === 'TALKING') {
@@ -339,6 +384,18 @@ export function initChatUI() {
 
         if (input) {
             input.addEventListener('input', updateSendState);
+            // Send on Enter (Shift+Enter for newline)
+            input.addEventListener('keydown', (ev) => {
+                try {
+                    if (ev.key === 'Enter' && !ev.shiftKey) {
+                        ev.preventDefault();
+                        // Trigger the same submit handler the form uses
+                        if (form) {
+                            form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+                        }
+                    }
+                } catch (e) { /* ignore */ }
+            });
         }
 
         if (form) {
@@ -349,9 +406,11 @@ export function initChatUI() {
                 if (!text) return;
                 try {
                     ws.send(JSON.stringify({ text }));
-                    appendMessage(messages, 'user', text);
+                    appendMessage(messages, 'user', text, Date.now());
                     input.value = '';
                     updateSendState();
+                    // keep focus on input
+                    try { input.focus(); } catch (e) { /* ignore */ }
                 } catch (e) {
                     console.warn('[chat-window] send failed', e);
                 }
