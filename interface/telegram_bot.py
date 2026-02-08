@@ -1063,14 +1063,22 @@ async def start_bot():
     This function assumes the core has already been initialized.
     It should be called from TelegramInterface.start() or during autostart.
     """
-    global _bot_started
+    global _bot_started, _polling_task, telegram_interface
     if _bot_started:
-        log_debug("[telegram_bot] start_bot() already called, skipping duplicate startup")
-        return
+        # If bot was marked started but the polling task isn't running, clear the flag and continue
+        if _polling_task is not None and not _polling_task.done():
+            # Show detailed task status for debugging why it is considered active
+            try:
+                log_debug(f"[telegram_bot] start_bot() already called, skipping duplicate startup - _bot_started={_bot_started} _polling_task={repr(_polling_task)} done={_polling_task.done()} cancelled={_polling_task.cancelled()}")
+            except Exception as e:
+                log_debug(f"[telegram_bot] start_bot() already called, skipping duplicate startup (error formatting task info: {e})")
+            return
+        else:
+            log_warning("[telegram_bot] _bot_started True but no active polling task; clearing flag and continuing")
+            _bot_started = False
 
     log_info("[telegram_bot] start_bot() function called")
-    _bot_started = True
-    
+
     if not BOTFATHER_TOKEN:
         log_warning("[telegram_bot] BOTFATHER_TOKEN not configured - skipping Telegram bot startup")
         return
@@ -1204,7 +1212,10 @@ async def start_bot():
             log_info("[telegram_bot] Existing updater stopped")
 
         # Update the global interface instance with the bot
-        global telegram_interface, _polling_task
+        # Ensure interface instance exists before assigning bus instance
+        if telegram_interface is None:
+            log_debug("[telegram_bot] telegram_interface is None, initializing interface now")
+            initialize_interface()
         telegram_interface.bot = app.bot
         telegram_interface.is_enabled = True
         telegram_interface.disabled_reason = None
@@ -1222,6 +1233,8 @@ async def start_bot():
         log_info("[telegram_bot] Creating background polling task...")
         _polling_task = asyncio.create_task(_run_polling_loop())
         _polling_task.set_name("telegram_polling")
+        # Mark bot as started only after background polling task was successfully scheduled
+        _bot_started = True
         log_info("[telegram_bot] Background polling task created and scheduled")
         log_info("[telegram_bot] start_bot() completed successfully - polling running in background")
         
