@@ -750,6 +750,20 @@ try {
                 });
                 try { console.debug('[SynthWindowManager] created winbox for', opts.id, 'instance=', winbox); } catch (e) { /* ignore */ }
                 entry.winbox = winbox;
+                // Ensure we cleanup windows map when the WinBox instance is closed so
+                // it can be recreated correctly on subsequent opens (hot-reload / repeated opens).
+                try {
+                    winbox.onclose = function() {
+                        try {
+                            windows.delete(opts.id);
+                        } catch (e) { /* ignore */ }
+                        try {
+                            // Attempt to unmount and clear any references
+                            if (winbox && winbox.g && winbox.g.winbox) winbox.g.winbox = null;
+                        } catch (e) { /* ignore */ }
+                    };
+                } catch (e) { /* ignore */ }
+
                 // Override the native maximize button behavior to use our toggleMaximize
                 try {
                     const winEl = winbox.window || winbox.dom || winbox.g || null;

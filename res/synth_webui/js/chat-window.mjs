@@ -401,7 +401,15 @@ async function openArchives() {
         const modal = creator();
         try {
             if (window.SynthWindowManager && typeof window.SynthWindowManager.restore === 'function') {
-                try { window.SynthWindowManager.restore('archives'); return; } catch (e) {}
+                try {
+                    window.SynthWindowManager.restore('archives');
+                    // If the archive panel is already visible after restore, return.
+                    const panelCheck = document.getElementById('archive-panel');
+                    if (panelCheck && panelCheck.offsetParent !== null) return;
+                    // Otherwise fall through and show the newly created modal (robust against stale/hidden winbox)
+                } catch (e) {
+                    // ignore and continue to show modal
+                }
             }
         } catch (e) {}
         try { if (modal && modal.style) modal.style.display = 'flex'; } catch (e) {}

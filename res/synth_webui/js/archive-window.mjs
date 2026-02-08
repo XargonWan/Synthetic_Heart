@@ -2,7 +2,17 @@
 export function createArchiveModal() {
     try {
         // Keep local state in module-scope
-        if (window.__archive_modal_instance) return window.__archive_modal_instance;
+        if (window.__archive_modal_instance) {
+            try {
+                if (window.__archive_modal_instance.querySelector && !window.__archive_modal_instance.querySelector('#archive-edit')) {
+                    // stale instance (old version) - remove and recreate
+                    try { window.__archive_modal_instance.remove(); } catch (e) { /* ignore */ }
+                    window.__archive_modal_instance = null;
+                } else {
+                    return window.__archive_modal_instance;
+                }
+            } catch (e) { return window.__archive_modal_instance; }
+        }
 
         let archiveModal = null;
         let archiveWinbox = null;
@@ -93,7 +103,19 @@ export function createArchiveModal() {
                 // If created, hide initially to mimic modal behavior until restored
                 try { if (archiveWinbox && typeof archiveWinbox.hide === 'function') archiveWinbox.hide(); } catch (e) { /* ignore */ }
                 try { window.__archive_modal_winbox = archiveWinbox; } catch (e) { /* ignore */ }
-                try { console.debug('[archive-window] WinBox instance created for archives'); } catch (e) { /* ignore */ }
+                try { 
+                    console.debug('[archive-window] WinBox instance created for archives'); 
+                    try {
+                        if (archiveWinbox && typeof archiveWinbox.onclose === 'function') {
+                            const prev = archiveWinbox.onclose;
+                            archiveWinbox.onclose = function(ev) {
+                                try { window.__archive_modal_instance = null; } catch (e) {}
+                                try { window.__archive_modal_winbox = null; } catch (e) {}
+                                try { if (typeof prev === 'function') prev.call(this, ev); } catch (e) {}
+                            };
+                        }
+                    } catch (e) { /* ignore */ }
+                } catch (e) { /* ignore */ }
             } catch (e) { console.warn('[archive-window] WinBox creation failed', e); }
         }
 
@@ -125,6 +147,16 @@ export function createArchiveModal() {
                         const check = row.querySelector('input.archive-check');
                         if (check) check.checked = !!selected;
                     });
+                    updateArchiveRestoreState();
+                } catch (e) { /* ignore */ }
+            };
+
+            const updateArchiveRestoreState = () => {
+                try {
+                    const hasSelection = archiveSelectedIds.size > 0;
+                    if (deleteBtn) deleteBtn.disabled = !hasSelection;
+                    const restoreBtn = panel.querySelector('#archive-restore-btn');
+                    if (restoreBtn) restoreBtn.disabled = !hasSelection;
                 } catch (e) { /* ignore */ }
             };
 
@@ -157,15 +189,20 @@ export function createArchiveModal() {
                         `;
                         row.addEventListener('click', (ev) => {
                             try {
-                                if (!archiveMultiSelect) return;
                                 const target = ev?.target;
-                                if (target && target.classList && target.classList.contains('archive-check')) {
-                                    return;
-                                }
+                                // Ignore clicks on the checkbox itself
+                                if (target && target.classList && target.classList.contains('archive-check')) return;
                                 const archId = row.dataset.id;
                                 if (!archId) return;
-                                if (archiveSelectedIds.has(archId)) archiveSelectedIds.delete(archId);
-                                else archiveSelectedIds.add(archId);
+                                if (archiveMultiSelect) {
+                                    // toggle in multi-select mode
+                                    if (archiveSelectedIds.has(archId)) archiveSelectedIds.delete(archId);
+                                    else archiveSelectedIds.add(archId);
+                                } else {
+                                    // single-select: clear previous and select this one
+                                    archiveSelectedIds.clear();
+                                    archiveSelectedIds.add(archId);
+                                }
                                 updateSelectedState();
                             } catch (e) { /* ignore */ }
                         });
@@ -197,8 +234,9 @@ export function createArchiveModal() {
             });
             if (deleteBtn) deleteBtn.addEventListener('click', async () => {
                 try {
-                    if (!archiveMultiSelect || archiveSelectedIds.size === 0) return;
-                    if (!confirm(`Delete ${archiveSelectedIds.size} archives? This cannot be undone.`)) return;
+                    if (archiveSelectedIds.size === 0) return;
+                    const count = archiveSelectedIds.size;
+                    if (!confirm(`Delete ${count} archive${count === 1 ? '' : 's'}? This cannot be undone.`)) return;
                     const ids = Array.from(archiveSelectedIds);
                     for (const archId of ids) {
                         try { await fetch(`/api/chat/archives/${archId}`, { method: 'DELETE' }); } catch (e) { /* ignore */ }
@@ -206,9 +244,42 @@ export function createArchiveModal() {
                     archiveSelectedIds.clear();
                     archiveMultiSelect = false;
                     updateEditState();
+                    updateSelectedState();
                     await load();
                 } catch (e) { /* ignore */ }
             });
+
+            // Restore selected archive(s)
+            const restoreBtn = panel.querySelector('#archive-restore-btn');
+            if (restoreBtn) restoreBtn.addEventListener('click', async () => {
+                try {
+                    if (archiveSelectedIds.size === 0) return;
+                    const count = archiveSelectedIds.size;
+                    if (!confirm(`Restore ${count} archive${count === 1 ? '' : 's'}? This will replace the current chat.`)) return;
+                    const ids = Array.from(archiveSelectedIds);
+                    for (const archId of ids) {
+                        try {
+                            await fetch('/api/chat/restore', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ archive_id: archId }) });
+                        } catch (e) { /* ignore */ }
+                    }
+                    try { if (archiveWinbox && typeof archiveWinbox.hide === 'function') archiveWinbox.hide(); else if (panel && panel.style) panel.style.display = 'none'; } catch (e) { /* ignore */ }
+                } catch (e) { /* ignore */ }
+            });
+            // Ensure edit button visible (hot-reload support)
+            try {
+                const editBtn = panel.querySelector('#archive-edit');
+                if (editBtn) {
+                    const cs = (window.getComputedStyle && window.getComputedStyle(editBtn)) || {};
+                    if (cs.display === 'none' || cs.visibility === 'hidden' || editBtn.offsetParent === null) {
+                        editBtn.style.display = 'inline-flex';
+                        editBtn.style.visibility = 'visible';
+                        editBtn.style.opacity = '1';
+                    }
+                    const header = panel.querySelector('#archive-header');
+                    if (header) header.style.display = 'flex';
+                }
+            } catch (e) { /* ignore */ }
+
             updateEditState();
             // initial load
             load();
