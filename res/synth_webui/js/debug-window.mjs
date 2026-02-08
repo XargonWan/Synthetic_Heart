@@ -52,6 +52,7 @@ export function createDebugWindow() {
             <div id="synth-debug-body" style="padding:12px;display:flex;flex-direction:column;gap:12px;overflow:auto;height:calc(100% - 52px);">
 
                 <div style="display:flex;gap:8px;align-items:center;justify-content:flex-start;">
+                    <div style="font-size:12px;color:var(--text-soft);margin-right:6px;">Animation</div>
                     <div id="synth-debug-controls" style="display:flex;gap:8px;align-items:center;">
                         <button id="synth-debug-pause" class="pill secondary" type="button" title="⏸️">⏸️</button>
                         <button id="synth-debug-resync" class="pill secondary" type="button" title="Sync">🛜</button>
@@ -77,9 +78,18 @@ export function createDebugWindow() {
                         <select id="synth-debug-loop-file" style="flex:2 1 220px;min-width:160px;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);"></select>
                     </div>
                     <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;">
-                        <input id="synth-debug-loop-start" type="number" placeholder="start" style="flex:1 1 120px;min-width:100px;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);" />
-                        <input id="synth-debug-loop-end" type="number" placeholder="end" style="flex:1 1 120px;min-width:100px;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);" />
-                        <input id="synth-debug-loop-fps" type="number" placeholder="fps" style="flex:0 0 86px;min-width:86px;padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);" />
+                        <div style="display:flex;flex-direction:column;gap:4px;flex:1 1 120px;min-width:100px;">
+                            <label style="font-size:11px;color:var(--text-soft);">Start frame</label>
+                            <input id="synth-debug-loop-start" type="number" placeholder="start" style="padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);" />
+                        </div>
+                        <div style="display:flex;flex-direction:column;gap:4px;flex:1 1 120px;min-width:100px;">
+                            <label style="font-size:11px;color:var(--text-soft);">End frame</label>
+                            <input id="synth-debug-loop-end" type="number" placeholder="end" style="padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);" />
+                        </div>
+                        <div style="display:flex;flex-direction:column;gap:4px;flex:0 0 86px;min-width:86px;">
+                            <label style="font-size:11px;color:var(--text-soft);">FPS</label>
+                            <input id="synth-debug-loop-fps" type="number" placeholder="fps" style="padding:6px;border-radius:8px;background:rgba(255,255,255,0.02);border:1px solid var(--border);color:var(--text);" />
+                        </div>
                     </div>
                     <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;">
                         <button id="synth-debug-loop-start-btn" class="pill" type="button" style="flex:1;">Start</button>
@@ -490,8 +500,31 @@ export function createDebugWindow() {
                         }
                     } catch (e) { /* ignore */ }
                     const s = parseInt((startInput && startInput.value) ? startInput.value : '0', 10);
-                    const e = parseInt((endInput && endInput.value) ? endInput.value : '0', 10);
+                    const eRaw = (endInput && String(endInput.value).trim() !== '') ? parseInt(endInput.value, 10) : NaN;
+                    let e = Number.isFinite(eRaw) ? eRaw : NaN;
                     const fps = parseFloat((fpsInput && fpsInput.value) ? fpsInput.value : '30');
+
+                    // If end not provided or invalid/<=start, try to compute it from the clip descriptor or loaded animation
+                    if (!Number.isFinite(e) || e <= s) {
+                        try {
+                            let computedMax = 0;
+                            const descriptor = (window.animationHandler && window.animationHandler.loadedDescriptors) ? (window.animationHandler.loadedDescriptors[aFile] || null) : null;
+                            const desiredFps = (descriptor && Number.isFinite(Number(descriptor.fps))) ? Number(descriptor.fps) : Number(fps || 30);
+                            const useFps = (Number.isFinite(desiredFps) && desiredFps > 0) ? desiredFps : 30;
+                            try {
+                                if (window.animationHandler && window.animationHandler.loadedAnimations) {
+                                    const norm = (typeof window.animationHandler._normalizeAnimationKey === 'function') ? window.animationHandler._normalizeAnimationKey(aFile) : aFile;
+                                    const clip = window.animationHandler.loadedAnimations[norm] || window.animationHandler.loadedAnimations[aFile] || null;
+                                    if (clip) computedMax = computeMaxFramesFromClip(clip, useFps);
+                                }
+                            } catch (e2) { /* ignore */ }
+                            if (!computedMax) computedMax = computeMaxFramesFromDescriptor(descriptor);
+                            if (computedMax && computedMax > s) {
+                                e = computedMax;
+                                try { if (endInput) endInput.value = String(e); } catch (e) { /* ignore */ }
+                            }
+                        } catch (e3) { /* ignore */ }
+                    }
 
                     // Basic validation before queuing
                     if (!aFile) {
@@ -504,14 +537,14 @@ export function createDebugWindow() {
 
                     if (!window.animationHandler) {
                         try {
-                            // Queue the actual startTemporaryLoop action so it runs when the handler becomes available
+                            // Preview semantics: visually indicate Preview (handler will run it when ready). Keep the queued action so it will execute later, but label it 'Preview' to reflect intent.
                             window.__synth_pending_actions = window.__synth_pending_actions || [];
                             window.__synth_pending_actions.push({ type: 'startTemporaryLoop', args: [aType, aFile, s, e, Number.isFinite(fps) ? fps : 30] });
-                            try { console.debug('[debug-window] queued startTemporaryLoop action', { aType, aFile, s, e, fps }); } catch (e) {}
-                            // Provide visual feedback: disable start button and mark as queued
-                            try { if (loopStartBtn) { loopStartBtn.disabled = true; loopStartBtn.textContent = 'Queued'; loopStartBtn.title = 'Queued until animation handler is ready'; } } catch (e) {}
+                            try { console.debug('[debug-window] preview queued startTemporaryLoop action', { aType, aFile, s, e, fps }); } catch (e) {}
+                            // Provide visual feedback: disable start button and mark as Preview
+                            try { if (loopStartBtn) { loopStartBtn.disabled = true; loopStartBtn.textContent = 'Preview'; loopStartBtn.title = 'Preview (will start when animation handler is ready)'; } } catch (e) {}
                         } catch (e) { /* ignore */ }
-                        return console.warn('[synth_webui] animationHandler not ready — start action queued');
+                        return console.warn('[synth_webui] animationHandler not ready — preview queued');
                     }
 
                     try {
@@ -629,19 +662,65 @@ export function createDebugWindow() {
                 if (!selFile || !startInput || !endInput) return;
                 const file = selFile.value;
                 if (!file) return;
-                const descriptor = (window.animationHandler && window.animationHandler.loadedDescriptors) ? (window.animationHandler.loadedDescriptors[file] || null) : null;
+                // Normalize file key for lookups (handler may normalize names internally)
+                const normFile = (typeof window.animationHandler !== 'undefined' && typeof window.animationHandler._normalizeAnimationKey === 'function') ? window.animationHandler._normalizeAnimationKey(file) : file;
+                const descriptor = (window.animationHandler && window.animationHandler.loadedDescriptors) ? (window.animationHandler.loadedDescriptors[normFile] || window.animationHandler.loadedDescriptors[file] || null) : null;
                 const desiredFps = (descriptor && Number.isFinite(Number(descriptor.fps))) ? Number(descriptor.fps) : Number((fpsInput && fpsInput.value) ? fpsInput.value : 30);
                 const fps = (Number.isFinite(desiredFps) && desiredFps > 0) ? desiredFps : 30;
                 try { if (fpsInput) fpsInput.value = String(fps); } catch (e) { /* ignore */ }
                 let maxFrameIndex = 0;
                 try {
                     if (window.animationHandler && window.animationHandler.loadedAnimations) {
-                        const norm = (typeof window.animationHandler._normalizeAnimationKey === 'function') ? window.animationHandler._normalizeAnimationKey(file) : file;
-                        const clip = window.animationHandler.loadedAnimations[norm] || window.animationHandler.loadedAnimations[file] || null;
+                        // Prefer normalized key, else try raw
+                        const clip = window.animationHandler.loadedAnimations[normFile] || window.animationHandler.loadedAnimations[file] || null;
                         if (clip) maxFrameIndex = computeMaxFramesFromClip(clip, fps);
                     }
                 } catch (e) { /* ignore */ }
+
+                // If not found in loadedAnimations, try to dynamically load the clip (if handler supports it)
+                if (!maxFrameIndex) {
+                    try {
+                        if (window.animationHandler && typeof window.animationHandler.loadAnimation === 'function') {
+                            try {
+                                const aType = selType && selType.value ? selType.value : 'think';
+                                // Try short name first
+                                let loaded = await window.animationHandler.loadAnimation(aType, file).catch(() => null);
+                                if (loaded) {
+                                    maxFrameIndex = computeMaxFramesFromClip(loaded, fps);
+                                } else {
+                                    // Fallback to candidate path using skin
+                                    const skin = (window.activeSkinName && String(window.activeSkinName).split('/').pop().replace('.vrm','')) ? String(window.activeSkinName).split('/').pop().replace('.vrm','') : 'Rei';
+                                    const candidatePath = `/skins/${skin}/animations/${aType}/${encodeURIComponent(file)}`;
+                                    loaded = await window.animationHandler.loadAnimation(aType, candidatePath).catch(() => null);
+                                    if (loaded) {
+                                        maxFrameIndex = computeMaxFramesFromClip(loaded, fps);
+                                        try { selFile.value = candidatePath; } catch (e) { /* ignore */ }
+                                    }
+                                }
+                            } catch (e) { /* ignore */ }
+                        }
+                    } catch (e) { /* ignore */ }
+                }
+
+                // If still not found, attempt a full-path lookup from loadedAnimations
+                if (!maxFrameIndex) {
+                    try {
+                        const skin = (window.activeSkinName && String(window.activeSkinName).split('/').pop().replace('.vrm','')) ? String(window.activeSkinName).split('/').pop().replace('.vrm','') : 'Rei';
+                        const candidatePath = `/skins/${skin}/animations/${encodeURIComponent(selType && selType.value ? selType.value : 'think')}/${encodeURIComponent(file)}`;
+                        const normCand = (typeof window.animationHandler !== 'undefined' && typeof window.animationHandler._normalizeAnimationKey === 'function') ? window.animationHandler._normalizeAnimationKey(candidatePath) : candidatePath;
+                        const clip2 = window.animationHandler && window.animationHandler.loadedAnimations ? (window.animationHandler.loadedAnimations[normCand] || window.animationHandler.loadedAnimations[candidatePath] || null) : null;
+                        if (clip2) {
+                            maxFrameIndex = computeMaxFramesFromClip(clip2, fps);
+                            try { selFile.value = candidatePath; } catch (e) { /* ignore */ }
+                        }
+                    } catch (e) { /* ignore */ }
+                }
+
                 if (!maxFrameIndex) maxFrameIndex = computeMaxFramesFromDescriptor(descriptor);
+
+                // Debug log to help diagnose autofill failures
+                try { console.debug('[debug-window] autofillLoopInputs', { file, normFile, fps, maxFrameIndex, descriptor: !!descriptor }); } catch (e) {}
+
                 startInput.value = '0';
                 endInput.value = String(maxFrameIndex || 0);
             } catch (e) { /* ignore */ }
@@ -1133,12 +1212,57 @@ export function createDebugWindow() {
             // Initial render
             renderFeelings();
             renderFaceList();
-            try { if (pauseBtn) pauseBtn.textContent = isPaused() ? 'Resume' : 'Pause'; } catch (e) { /* ignore */ }
+            try {
+                if (pauseBtn) {
+                    pauseBtn.textContent = isPaused() ? '▶️' : '⏸️';
+                    pauseBtn.title = isPaused() ? '▶️' : '⏸️';
+                    pauseBtn.setAttribute('aria-label', isPaused() ? 'Play' : 'Pause');
+                }
+            } catch (e) { /* ignore */ }
 
             // Try an initial resync from backend to populate feelings/animation state
             try { resyncFromBackend().catch(e => {/*ignore*/}); } catch (e) { /* ignore */ }
 
-            // VRM capabilities arrive after load: refresh face keys when the avatar loads.
+                // If persona emotion keys were not injected, try loading persona JSON via animationHandler as a fallback
+                try {
+                    if (!window.__synth_persona_emotions_list) {
+                        const skin = window.activeSkinName ? (window.activeSkinName.split('/').pop() || '').replace('.vrm','') : 'Rei';
+                        // Try animationHandler loader if available
+                        try {
+                            if (window.animationHandler && typeof window.animationHandler._loadPersonaForSkin === 'function') {
+                                window.animationHandler._loadPersonaForSkin(skin).then((persona) => {
+                                    try {
+                                        if (persona && persona.emotions && typeof persona.emotions === 'object') {
+                                            window.__synth_persona_emotions_list = Object.keys(persona.emotions);
+                                            __dbgFeelingsSig = '';
+                                            try { renderFeelings(); } catch (e) { /* ignore */ }
+                                        }
+                                    } catch (e) { /* ignore */ }
+                                }).catch(() => {});
+                            }
+                        } catch (e) { /* ignore */ }
+
+                        // HTTP fallback: directly fetch persona.json if still missing
+                        try {
+                            if (!window.__synth_persona_emotions_list) {
+                                (async () => {
+                                    try {
+                                        const url = `/skins/${encodeURIComponent(skin)}/persona.json`;
+                                        const r = await fetch(url);
+                                        if (r && r.ok) {
+                                            const j = await r.json();
+                                            if (j && j.emotions && typeof j.emotions === 'object') {
+                                                window.__synth_persona_emotions_list = Object.keys(j.emotions);
+                                                __dbgFeelingsSig = '';
+                                                try { renderFeelings(); } catch (e) { /* ignore */ }
+                                            }
+                                        }
+                                    } catch (e) { /* ignore */ }
+                                })();
+                            }
+                        } catch (e) { /* ignore */ }
+                    }
+                } catch (e) { /* ignore */ }
             try {
                 if (!window.__synth_debug_on_vrm_loaded) {
                     window.__synth_debug_on_vrm_loaded = () => {
@@ -1185,6 +1309,12 @@ export function createDebugWindow() {
                                         try { loopStartBtn.textContent = isPaused() ? 'Resume' : 'Start'; } catch (e) { loopStartBtn.textContent = 'Start'; }
                                         try { loopStartBtn.title = 'Start temporary loop'; } catch (e) {}
                                     }
+                                    // Refresh file list and autofill inputs now that handler is ready
+                                    try {
+                                        try { if (selType && typeof refreshFilesForType === 'function') await refreshFilesForType(selType.value); } catch (e) { /* ignore */ }
+                                        try { await autofillLoopInputs(); } catch (e) { /* ignore */ }
+                                    } catch (e) { /* ignore */ }
+
                                     // Attempt to process queued startTemporaryLoop actions from here (best-effort; vrm-viewer also flushes them)
                                     try {
                                         const pa = window.__synth_pending_actions || [];
