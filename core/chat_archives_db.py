@@ -96,6 +96,11 @@ async def list_archives(session_id: Optional[str] = None) -> List[Dict[str, Any]
         log_debug(f"[chat_archives_db] list_archives called with session_id={session_id}")
         await init_chat_archives_table()
         async with get_conn_ctx() as conn:
+            # Try to use a dict cursor but pass it as a positional arg to be compatible
+            # with different aiomysql / connection wrappers that may not accept
+            # keyword-only API for cursor creation.
+            # Use default cursor (tuple rows). We handle dict rows when present
+            # to maximize compatibility across different DB adapters / wrappers.
             async with conn.cursor() as cur:
                 # Use JSON_LENGTH to count number of messages when possible; fall back to CHAR_LENGTH if not supported
                 if session_id:
@@ -110,13 +115,31 @@ async def list_archives(session_id: Optional[str] = None) -> List[Dict[str, Any]
                 rows = await cur.fetchall()
                 out: List[Dict[str, Any]] = []
                 for r in rows:
-                    out.append({
-                        "id": r[0],
-                        "session_id": r[1],
-                        "name": r[2] or 'Chat',
-                        "created_at": r[3].isoformat() if hasattr(r[3], 'isoformat') else str(r[3]),
-                        "message_count": int(r[4]) if r[4] else 0,
-                    })
+                    # Support both dict-row and tuple-row results for maximum compatibility
+                    try:
+                        if isinstance(r, dict):
+                            aid = r.get('id')
+                            sid = r.get('session_id')
+                            name = r.get('name') or 'Chat'
+                            created = r.get('created_at')
+                            msgcount = r.get('message_count')
+                        else:
+                            # tuple-style fallback
+                            aid = r[0]
+                            sid = r[1]
+                            name = r[2] or 'Chat'
+                            created = r[3]
+                            msgcount = r[4] if len(r) > 4 else 0
+
+                        out.append({
+                            "id": aid,
+                            "session_id": sid,
+                            "name": name,
+                            "created_at": created.isoformat() if hasattr(created, 'isoformat') else str(created),
+                            "message_count": int(msgcount) if msgcount else 0,
+                        })
+                    except Exception as ex:
+                        log_warning(f"[chat_archives_db] Skipping malformed row while listing archives: {ex}")
                 return out
     except Exception as e:
         log_warning(f"[chat_archives_db] Failed to list archives: {e}")
@@ -135,12 +158,28 @@ async def load_archive(archive_id: str) -> Dict[str, Any]:
     try:
         await init_chat_archives_table()
         async with get_conn_ctx() as conn:
+            # Use default cursor (tuple rows) for max compatibility
             async with conn.cursor() as cur:
                 await cur.execute("SELECT id, session_id, name, messages, metadata, created_at FROM chat_archives WHERE id = %s", (archive_id,))
                 row = await cur.fetchone()
                 if not row:
                     log_debug(f"[chat_archives_db] load_archive: archive {archive_id} not found in DB")
                     raise FileNotFoundError(archive_id)
+
+                # Support both dict-style and tuple-style rows
+                if isinstance(row, dict):
+                    messages = json.loads(row.get('messages')) if row.get('messages') else []
+                    metadata = json.loads(row.get('metadata')) if row.get('metadata') else None
+                    created = row.get('created_at')
+                    return {
+                        "id": row.get('id'),
+                        "session_id": row.get('session_id'),
+                        "name": row.get('name'),
+                        "messages": messages,
+                        "metadata": metadata,
+                        "created_at": created.isoformat() if hasattr(created, 'isoformat') else str(created)
+                    }
+
                 return {
                     "id": row[0],
                     "session_id": row[1],
@@ -181,12 +220,27 @@ async def rename_archive(archive_id: str, new_name: str) -> Dict[str, Any]:
     try:
         await init_chat_archives_table()
         async with get_conn_ctx() as conn:
+            # Use default cursor (tuple rows) for max compatibility
             async with conn.cursor() as cur:
                 await cur.execute("UPDATE chat_archives SET name=%s WHERE id=%s", (new_name, archive_id))
                 await cur.execute("SELECT id, session_id, name, messages, metadata, created_at FROM chat_archives WHERE id = %s", (archive_id,))
                 row = await cur.fetchone()
                 if not row:
                     raise FileNotFoundError(archive_id)
+
+                if isinstance(row, dict):
+                    messages = json.loads(row.get('messages')) if row.get('messages') else []
+                    metadata = json.loads(row.get('metadata')) if row.get('metadata') else None
+                    created = row.get('created_at')
+                    return {
+                        "id": row.get('id'),
+                        "session_id": row.get('session_id'),
+                        "name": row.get('name'),
+                        "messages": messages,
+                        "metadata": metadata,
+                        "created_at": created.isoformat() if hasattr(created, 'isoformat') else str(created)
+                    }
+
                 return {
                     "id": row[0],
                     "session_id": row[1],

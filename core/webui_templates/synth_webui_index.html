@@ -4607,7 +4607,6 @@
             let totalEntries = 0;
             
             function loadDiaryEntries(page = 1, perPage = currentPerPage) {
-                const showArchived = document.getElementById('show-archived').checked;
                 const searchTerm = document.getElementById('diary-search').value.toLowerCase();
                 
                 currentPage = page;
@@ -4777,11 +4776,11 @@
 
             function updateActionButtons() {
                 const hasSelection = selectedEntries.size > 0;
-                const showArchived = document.getElementById('show-archived').checked;
-                
-                document.getElementById('archive-btn').style.display = hasSelection && !showArchived ? 'inline-block' : 'none';
-                document.getElementById('unarchive-btn').style.display = hasSelection && showArchived ? 'inline-block' : 'none';
-                document.getElementById('delete-btn').style.display = hasSelection && showArchived ? 'inline-block' : 'none';
+
+                document.getElementById('archive-btn').style.display = hasSelection ? 'inline-block' : 'none';
+                // Hide unarchive/delete by default; enable only via context-specific logic when needed
+                document.getElementById('unarchive-btn').style.display = 'none';
+                document.getElementById('delete-btn').style.display = 'none';
             }
 
             function escapeHtml(text) {
@@ -4801,7 +4800,7 @@
                     loadDiaryEntries(1, currentPerPage);
                 }, 300); // Debounce search
             });
-            document.getElementById('show-archived').addEventListener('change', loadDiaryEntries);
+
             document.getElementById('group-by-date').addEventListener('change', renderDiaryEntries);
             
             document.getElementById('edit-mode-btn').addEventListener('click', function() {

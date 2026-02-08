@@ -306,6 +306,25 @@ async def get_conn() -> aiomysql.Connection:
         log_error("[db] TIMEOUT acquiring connection from pool after 30 seconds - pool may be exhausted")
         raise TimeoutError("Database connection pool exhausted - timeout acquiring connection")
 
+    # Compatibility shim: some code mistakenly calls conn.cursor(cursor=SomeCursorClass)
+    # which raises TypeError on aiomysql connection objects (they expect positional args).
+    # Wrap the connection's cursor method to accept a 'cursor' keyword (backwards compatible).
+    try:
+        orig_cursor = conn.cursor
+        def _compat_cursor(*args, **kwargs):
+            if 'cursor' in kwargs:
+                cursor_val = kwargs.pop('cursor')
+                return orig_cursor(cursor_val, *args, **kwargs)
+            return orig_cursor(*args, **kwargs)
+        # Replace the instance attribute only; keep original conn object identity for pool.release
+        try:
+            conn.cursor = _compat_cursor  # type: ignore
+        except Exception:
+            # If we cannot monkeypatch, ignore — it's a best-effort shim
+            pass
+    except Exception:
+        pass
+
     # Set query timeout to prevent long-running queries from holding connections indefinitely
     try:
         async with conn.cursor() as cur:

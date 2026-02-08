@@ -318,6 +318,15 @@ export function initChatUI() {
                                     });
                                 }
                             } catch (e) { /* ignore */ }
+                        } else if (data && typeof data.type === 'string' && data.type.indexOf('archive') === 0) {
+                            // Backend notified about archive changes (create/delete/restore)
+                            try {
+                                console.debug('[chat-window] Received archive event via WS:', data);
+                                const panel = window.__archive_modal_instance;
+                                if (panel && typeof panel.dispatchEvent === 'function') {
+                                    panel.dispatchEvent(new CustomEvent('archive:refresh', { detail: data }));
+                                }
+                            } catch (e) { /* ignore */ }
                         }
                     } catch (e) {
                         // ignore non-JSON
@@ -385,7 +394,9 @@ async function openArchives() {
         let mod = window.ArchiveWindow;
         if (!mod || !mod.createArchiveModal) {
             try {
-                mod = await import('/js/archive-window.mjs');
+                // dynamic import with cache-busting to avoid stale module instances during hot-reload
+                const _ts = (window.__synth_assets_bust || Date.now());
+                mod = await import(`/js/archive-window.mjs?t=${_ts}`);
                 if (mod && mod.createArchiveModal) {
                     window.ArchiveWindow = window.ArchiveWindow || {};
                     window.ArchiveWindow.createArchiveModal = mod.createArchiveModal;
@@ -403,6 +414,34 @@ async function openArchives() {
             if (window.SynthWindowManager && typeof window.SynthWindowManager.restore === 'function') {
                 try {
                     window.SynthWindowManager.restore('archives');
+                    // Ask underlying panel to refresh its list if available
+                    try { const panel = window.__archive_modal_instance; if (panel) panel.dispatchEvent(new CustomEvent('archive:refresh')); } catch (e) { /* ignore */ }
+
+                    // Defensive check: if the restored WinBox exists but its body is empty (stale instance),
+                    // re-attach a fresh panel instance to ensure content is visible and up-to-date.
+                    try {
+                        const winboxEl = document.getElementById('archives');
+                        if (winboxEl) {
+                            const wbBody = winboxEl.querySelector('.wb-body');
+                            const isEmptyBody = wbBody && (!wbBody.firstElementChild || wbBody.childElementCount === 0);
+                            if (isEmptyBody) {
+                                // Create or reuse a fresh panel and mount it into the WinBox body
+                                try {
+                                    const freshPanel = window.__archive_modal_instance || creator();
+                                    if (freshPanel && wbBody) {
+                                        // Clean any stray nodes and append the panel
+                                        while (wbBody.firstChild) wbBody.removeChild(wbBody.firstChild);
+                                        wbBody.appendChild(freshPanel);
+                                        // Ensure the window-level refs are consistent
+                                        try { window.__archive_modal_instance = freshPanel; } catch (e) {}
+                                        try { if (window.__archive_modal_winbox && typeof window.__archive_modal_winbox.mount === 'function') window.__archive_modal_winbox.mount(freshPanel); } catch (e) {}
+                                        try { freshPanel.dispatchEvent(new CustomEvent('archive:refresh')); } catch (e) {}
+                                    }
+                                } catch (e) { /* ignore mounting errors */ }
+                            }
+                        }
+                    } catch (e) { /* ignore */ }
+
                     // If the archive panel is already visible after restore, return.
                     const panelCheck = document.getElementById('archive-panel');
                     if (panelCheck && panelCheck.offsetParent !== null) return;
@@ -412,7 +451,7 @@ async function openArchives() {
                 }
             }
         } catch (e) {}
-        try { if (modal && modal.style) modal.style.display = 'flex'; } catch (e) {}
+        try { if (modal && modal.style) { modal.style.display = 'flex'; try { modal.dispatchEvent(new CustomEvent('archive:refresh')); } catch (e) {} } } catch (e) {}
     } catch (err) {
         const msg = 'Open archives error: ' + (err && err.message ? err.message : err);
         try { if (window.showToast) window.showToast(msg, true); } catch (e) {}
@@ -426,6 +465,43 @@ function bindArchiveButton() {
         if (chatRestoreBtn && !chatRestoreBtn.dataset.synthBound) {
             chatRestoreBtn.addEventListener('click', async () => { await openArchives(); });
             chatRestoreBtn.dataset.synthBound = '1';
+        }
+        const chatArchiveBtn = document.getElementById('chat-archive');
+        if (chatArchiveBtn && !chatArchiveBtn.dataset.synthBound) {
+            chatArchiveBtn.addEventListener('click', async () => {
+                try {
+                    const messagesEl = document.getElementById('messages');
+                    const hasMessages = (messagesEl && messagesEl.children && messagesEl.children.length > 0) || (Array.isArray(historyBuffer) && historyBuffer.length > 0);
+                    if (!hasMessages) {
+                        try { if (window.showToast) window.showToast('Chat is empty. Nothing to archive.', true); } catch (e) {}
+                        return;
+                    }
+                    try { if (window.showToast) window.showToast('Archiving chat...', false); } catch (e) {}
+                    // Ensure session context persisted (best-effort)
+                    try { if (window.SynthChat && typeof window.SynthChat.saveChatState === 'function') window.SynthChat.saveChatState(); } catch (e) { /* ignore */ }
+                    // Attempt archive request (include session_id if available)
+                    const payload = { session_id: typeof sessionId !== 'undefined' ? sessionId : null };
+                    let out = null;
+                    try {
+                        const res = await fetch('/api/chat/archive', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                        out = res.ok ? await res.json() : null;
+                    } catch (e) { out = null; }
+
+                    if (out && out.success) {
+                        try { if (window.showToast) window.showToast('Chat archived: ' + out.archive_id, false); } catch (e) {}
+                        if (messagesEl) messagesEl.innerHTML = '';
+                        historyBuffer = [];
+                        try { localStorage.removeItem(HISTORY_KEY); } catch (e) { /* ignore */ }
+                        try { saveChatState(); } catch (e) { /* ignore */ }
+                    } else {
+                        try { if (window.showToast) window.showToast('Archive failed', true); } catch (e) {}
+                    }
+                } catch (err) {
+                    console.error('[chat-window] Archive failed', err);
+                    try { if (window.showToast) window.showToast('Archive error: ' + (err && err.message ? err.message : String(err)), true); } catch (e) {}
+                }
+            });
+            chatArchiveBtn.dataset.synthBound = '1';
         }
     } catch (e) { /* ignore */ }
 }

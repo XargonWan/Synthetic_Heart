@@ -77,7 +77,6 @@ export function createArchiveModal() {
             <div id="archive-header" class="archive-header">
                 <div class="archive-title">Archives</div>
                 <div class="archive-controls">
-                    <label><input id="show-archived" type="checkbox" /> Show archived</label>
                     <button id="archive-refresh" class="pill secondary">Refresh</button>
                 </div>
             </div>
@@ -185,7 +184,6 @@ export function createArchiveModal() {
         // Setup basic behaviors for now. The rest of the history rendering logic lives in history.js
         try {
             const listEl = panel.querySelector('#archive-list');
-            const showArchived = panel.querySelector('#show-archived');
             const refreshBtn = panel.querySelector('#archive-refresh');
             const editBtn = panel.querySelector('#archive-edit');
             const deleteBtn = panel.querySelector('#archive-delete-btn');
@@ -231,12 +229,14 @@ export function createArchiveModal() {
             const load = async () => {
                 try {
                     if (!listEl) return;
+                    console.debug('[archive-window] load() start');
                     listEl.innerHTML = '<div class="meta">Loading…</div>';
                     const res = await fetch('/api/chat/archives');
-                    if (!res.ok) { listEl.innerHTML = '<div class="meta">Failed to load</div>'; return; }
+                    if (!res.ok) { listEl.innerHTML = '<div class="meta">Failed to load</div>'; console.warn('[archive-window] fetch returned non-ok', res.status); return; }
                     const data = await res.json();
-                    listEl.innerHTML = '';
                     const items = (data && data.success && Array.isArray(data.archives)) ? data.archives : [];
+                    console.debug('[archive-window] load() got items:', (items && items.length) || 0, items);
+                    listEl.innerHTML = '';
                     if (!items.length) {
                         listEl.innerHTML = '<div class="meta">No archived items</div>';
                         return;
@@ -307,12 +307,12 @@ export function createArchiveModal() {
                     });
                     updateSelectedState();
                 } catch (e) {
+                    console.error('[archive-window] load() error', e);
                     try { listEl.innerHTML = '<div class="meta">Failed to load</div>'; } catch (e) {}
                 }
             };
 
             if (refreshBtn) refreshBtn.addEventListener('click', () => { load(); });
-            if (showArchived) showArchived.addEventListener('change', () => { load(); });
             if (editBtn) editBtn.addEventListener('click', () => {
                 archiveMultiSelect = !archiveMultiSelect;
                 if (!archiveMultiSelect) archiveSelectedIds.clear();
@@ -344,14 +344,40 @@ export function createArchiveModal() {
                     const count = archiveSelectedIds.size;
                     if (!confirm(`Restore ${count} archive${count === 1 ? '' : 's'}? This will archive the current chat (if non-empty) and replace it.`)) return;
                     const ids = Array.from(archiveSelectedIds);
+                    let successCount = 0;
                     for (const archId of ids) {
                         try {
-                            await fetch('/api/chat/restore', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ archive_id: archId }) });
+                            const res = await fetch('/api/chat/restore', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ archive_id: archId }) });
+                            if (res && res.ok) {
+                                try { const out = await res.json(); if (out && out.success) successCount++; } catch (e) { /* ignore */ }
+                            }
                         } catch (e) { /* ignore */ }
                     }
+                    // Clear selection and update UI
+                    try { archiveSelectedIds.clear(); archiveMultiSelect = false; updateEditState(); updateSelectedState(); } catch (e) { /* ignore */ }
+                    // Notify user about restore result
+                    try {
+                        if (typeof window.showToast === 'function') {
+                            if (successCount > 0) window.showToast(`Restored ${successCount} archive${successCount === 1 ? '' : 's'}`, false);
+                            else window.showToast('Restore completed (no messages restored)', true);
+                        }
+                    } catch (e) { /* ignore */ }
+                    // Mark global timestamp and dispatch window event so all instances refresh
+                    try { window.__archive_last_changed_ts = Date.now(); window.dispatchEvent(new CustomEvent('synth:archive-changed', { detail: { deleted_ids: ids, restored_count: successCount } })); } catch (e) { /* ignore */ }
+                    // Reload the list to reflect server-side changes (deleted archives)
+                    try { await load(); } catch (e) { /* ignore */ }
+                    // Hide the panel after refresh to mimic previous behavior
                     try { if (archiveWinbox && typeof archiveWinbox.hide === 'function') archiveWinbox.hide(); else if (panel && panel.style) panel.style.display = 'none'; } catch (e) { /* ignore */ }
                 } catch (e) { /* ignore */ }
             });
+
+            // Allow external refresh via CustomEvent 'archive:refresh'
+            try { panel.addEventListener('archive:refresh', () => { try { load(); } catch (e) { /* ignore */ } }); } catch (e) {}
+            // Also listen for global synth-level archive change events (useful if archive was changed while panel closed)
+            try { window.addEventListener('synth:archive-changed', (ev) => { try { load(); } catch (e) { /* ignore */ } }); } catch (e) {}
+            // On creation, if a recent change marker exists, trigger load() to ensure fresh list
+            try { if (window.__archive_last_changed_ts) { try { load(); } catch (e) { /* ignore */ } } } catch (e) {}
+
             // Ensure edit button visible (hot-reload support)
             try {
                 const editBtn = panel.querySelector('#archive-edit');
@@ -383,3 +409,4 @@ export function createArchiveModal() {
 }
 
 export default { createArchiveModal };
+

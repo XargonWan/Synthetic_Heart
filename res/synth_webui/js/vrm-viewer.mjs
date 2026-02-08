@@ -5891,7 +5891,6 @@ import * as THREE from 'three';
             let totalEntries = 0;
             
             function loadDiaryEntries(page = 1, perPage = currentPerPage) {
-                const showArchived = document.getElementById('show-archived').checked;
                 const searchTerm = document.getElementById('diary-search').value.toLowerCase();
                 
                 currentPage = page;
@@ -5900,7 +5899,7 @@ import * as THREE from 'three';
                 let url = '/api/diary?';
                 const params = [];
                 
-                if (showArchived) params.push('include_archived=true');
+
                 
                 // Always use server-side pagination for better performance
                 if (currentPerPage !== 'unlimited') {
@@ -6061,16 +6060,15 @@ import * as THREE from 'three';
 
             function updateActionButtons() {
                 const hasSelection = selectedEntries.size > 0;
-                const showArchivedEl = document.getElementById('show-archived');
                 const archiveBtn = document.getElementById('archive-btn');
                 const unarchiveBtn = document.getElementById('unarchive-btn');
                 const deleteBtn = document.getElementById('delete-btn');
-                if (!showArchivedEl || !archiveBtn || !unarchiveBtn || !deleteBtn) return;
-                const showArchived = showArchivedEl.checked;
+                if (!archiveBtn || !unarchiveBtn || !deleteBtn) return;
 
-                archiveBtn.style.display = hasSelection && !showArchived ? 'inline-block' : 'none';
-                unarchiveBtn.style.display = hasSelection && showArchived ? 'inline-block' : 'none';
-                deleteBtn.style.display = hasSelection && showArchived ? 'inline-block' : 'none';
+                archiveBtn.style.display = hasSelection ? 'inline-block' : 'none';
+                // By default, hide unarchive/delete controls; they will be enabled by context-specific logic elsewhere if needed
+                unarchiveBtn.style.display = 'none';
+                deleteBtn.style.display = 'none';
             }
 
             function escapeHtml(text) {
@@ -6090,8 +6088,7 @@ import * as THREE from 'three';
                     loadDiaryEntries(1, currentPerPage);
                 }, 300); // Debounce search
             });
-            const showArchivedEl = document.getElementById('show-archived');
-            if (showArchivedEl) showArchivedEl.addEventListener('change', loadDiaryEntries);
+
             const groupByDateEl = document.getElementById('group-by-date');
             if (groupByDateEl) groupByDateEl.addEventListener('change', renderDiaryEntries);
             
@@ -6645,7 +6642,10 @@ import * as THREE from 'three';
                     try { return window.ArchiveWindow.createArchiveModal(); } catch (e) { console.warn('[archive] delegate failed', e); }
                 }
                 // Best-effort dynamic import to register module for older pages
-                try { import('/js/archive-window.mjs').then((mod) => { try { if (mod && typeof mod.createArchiveModal === 'function') { window.ArchiveWindow = window.ArchiveWindow || {}; window.ArchiveWindow.createArchiveModal = mod.createArchiveModal; } } catch (e) { console.warn('[archive] import handler failed', e); } }).catch((e) => { console.warn('[archive] Failed to import archive-window module', e); }); } catch (e) { /* ignore */ }
+                try {
+                    const _ts = (window.__synth_assets_bust || Date.now());
+                    import(`/js/archive-window.mjs?t=${_ts}`).then((mod) => { try { if (mod && typeof mod.createArchiveModal === 'function') { window.ArchiveWindow = window.ArchiveWindow || {}; window.ArchiveWindow.createArchiveModal = mod.createArchiveModal; } } catch (e) { console.warn('[archive] import handler failed', e); } }).catch((e) => { console.warn('[archive] Failed to import archive-window module', e); });
+                } catch (e) { /* ignore */ }
                 return null;
             } catch (err) {
                 console.warn('[archive] createArchiveModal delegate failed', err);
@@ -6674,6 +6674,10 @@ import * as THREE from 'three';
                     try { persistHistory(); } catch (e) { /* ignore */ }
                     try { localStorage.removeItem(HISTORY_KEY); } catch (e) { /* ignore */ }
                     saveChatState();
+                    // If archive panel is open, ask it to refresh; also dispatch to potential stale instance
+                    try { const panel = window.__archive_modal_instance; if (panel && typeof panel.dispatchEvent === 'function') panel.dispatchEvent(new CustomEvent('archive:refresh', { detail: out })); } catch (e) { /* ignore */ }
+                    // Also set a global flag + dispatch a window-level event so other instances (or future panels) can refresh
+                    try { window.__archive_last_changed_ts = Date.now(); window.dispatchEvent(new CustomEvent('synth:archive-changed', { detail: out })); } catch (e) { /* ignore */ }
                 } else {
                     showToast('Archive failed', true);
                 }

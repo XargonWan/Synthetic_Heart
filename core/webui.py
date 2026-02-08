@@ -3799,6 +3799,14 @@ class SynthWebUIInterface:
             response = {"success": True, "archive_id": archive.get('id'), "saved_count": len(messages)}
             if archive.get('path'):
                 response['path'] = archive.get('path')
+            # Notify connected WebUI clients that archives changed so they can refresh
+            try:
+                try:
+                    await self.broadcast_event('archive:changed', {'archive_id': archive.get('id'), 'session_id': session_id, 'saved_count': len(messages)})
+                except Exception as be:
+                    log_debug(f"{LOG_PREFIX} Failed to broadcast archive change: {be}")
+            except Exception:
+                pass
             return JSONResponse(response)
         except Exception as exc:
             log_error(f"{LOG_PREFIX} Failed to archive chat: {exc}")
@@ -3810,7 +3818,9 @@ class SynthWebUIInterface:
             archives = await list_archives()
             return JSONResponse({"success": True, "archives": archives})
         except Exception as exc:
-            log_error(f"{LOG_PREFIX} Failed to list chat archives: {exc}")
+            import traceback
+            tb = traceback.format_exc()
+            log_error(f"{LOG_PREFIX} Failed to list chat archives: {exc}\n{tb}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
 
     async def get_chat_archive(self, archive_id: str):
@@ -3929,6 +3939,16 @@ class SynthWebUIInterface:
                         log_debug(f"{LOG_PREFIX} Archive {archive_id} message {i+1} keys: {keys}")
                 except Exception as e:
                     log_debug(f"{LOG_PREFIX} Failed to log archive message keys: {e}")
+
+            # Broadcast archive change to connected clients to prompt refresh
+            try:
+                try:
+                    await self.broadcast_event('archive:changed', {'deleted_archive_id': deleted_archive_id or None, 'session_id': session_id, 'restored': len(messages), 'saved_count': saved_count})
+                except Exception as e:
+                    log_debug(f"{LOG_PREFIX} Failed to broadcast archive change after restore: {e}")
+            except Exception:
+                pass
+
             # Note: do not return raw messages here to avoid double-rendering on client
             # We always replay the restored messages via WebSocket (_replay_history), so
             # the client should rely on the WebSocket replay instead of rendering
@@ -3937,13 +3957,23 @@ class SynthWebUIInterface:
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail="Archive not found")
         except Exception as exc:
-            log_error(f"{LOG_PREFIX} Failed to restore chat archive: {exc}")
+            import traceback
+            tb = traceback.format_exc()
+            log_error(f"{LOG_PREFIX} Failed to restore chat archive: {exc}\n{tb}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
 
     async def delete_chat_archive(self, archive_id: str):
         try:
             from core.chat_archives_db import delete_archive
             await delete_archive(archive_id)
+            # Notify clients so UI can refresh
+            try:
+                try:
+                    await self.broadcast_event('archive:changed', {'deleted_archive_id': archive_id})
+                except Exception as be:
+                    log_debug(f"{LOG_PREFIX} Failed to broadcast archive delete: {be}")
+            except Exception:
+                pass
             return JSONResponse({"success": True})
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail="Archive not found")
@@ -5562,7 +5592,6 @@ class SynthWebUIInterface:
             <h2>AI Diary</h2>
             <div class="diary-controls">
                 <input type="text" id="diary-search" placeholder="Search diary entries..." />
-                <label><input type="checkbox" id="show-archived" /> Show archived</label>
                 <label><input type="checkbox" id="group-by-date" checked /> Group by date</label>
                 <button id="edit-mode-btn">Edit</button>
                 <button id="archive-btn" style="display: none;">Archive Selected</button>
@@ -5581,8 +5610,7 @@ class SynthWebUIInterface:
 
         async function loadDiaryEntries() {{
             try {{
-                const showArchived = document.getElementById('show-archived').checked;
-                const response = await fetch(`/api/diary?days=365&limit=1000&include_archived=${{showArchived}}`);
+                const response = await fetch('/api/diary?days=365&limit=1000');
                 const data = await response.json();
                 
                 if (data.diary && data.diary.entries) {{
