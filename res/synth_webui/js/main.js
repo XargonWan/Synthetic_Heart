@@ -182,11 +182,6 @@ try {
         const logSearchInput = document.getElementById('log-search');
         const chatPanel = document.getElementById('chat');
         const chatToggleBtn = document.getElementById('chat-toggle');
-        // Track original nav parent so we can temporarily move nav out of header
-        // when opening mobile menu to avoid clipping caused by header's backdrop-filter
-        let navOriginalParent = null;
-        let navOriginalNextSibling = null;
-        let navWasMoved = false;
         const componentsLLMSummary = document.getElementById('components-llm-summary');
         const componentsLLMList = document.getElementById('components-llm-list');
         const componentsInterfacesList = document.getElementById('components-interfaces-list');
@@ -292,15 +287,6 @@ try {
                     }
                 });
                 return winboxReadyPromise;
-            }
-
-            function isMobileViewport() {
-                try {
-                    // Consider mobile primarily by viewport width or explicit mobile UA.
-                    if (window.innerWidth && window.innerWidth <= 768) return true;
-                    if (/Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)) return true;
-                } catch (e) { /* ignore */ }
-                return false;
             }
 
             function ensureDock() {
@@ -449,6 +435,50 @@ try {
                 if (!rect || rect.top >= top) return;
                 const x = Number.isFinite(entry.winbox.x) ? entry.winbox.x : rect.left;
                 try { entry.winbox.move(x, top); } catch (e) { /* ignore */ }
+            }
+
+            /* Ensure a window is fully (or mostly) inside the current viewport.
+             * If it is partially offscreen, move it inwards and reduce size when
+             * necessary so the WinBox chrome remains accessible on all devices.
+             */
+            function clampEntryToViewport(entry) {
+                if (!entry || !entry.winbox) return;
+                try {
+                    // don't clamp minimized windows or maximized ones (we handle maximize elsewhere)
+                    if (entry.minimized) return;
+                    const winEl = entry.winbox.window || entry.winbox.dom || entry.winbox.g || null;
+                    if (!winEl || !winEl.getBoundingClientRect) return;
+                    const rect = winEl.getBoundingClientRect();
+                    const viewport = getViewportSize();
+                    const topbar = getTopbarHeight() || 0;
+
+                    // minimum usable dimensions
+                    const minWidth = 260;
+                    const minHeight = 120;
+
+                    let newWidth = Math.round(rect.width || entry.winbox.width || minWidth);
+                    let newHeight = Math.round(rect.height || entry.winbox.height || minHeight);
+                    let newLeft = Math.round(rect.left || (entry.winbox.x || 0));
+                    let newTop = Math.round(rect.top || (entry.winbox.y || 0));
+
+                    // If window is wider/taller than viewport, shrink it (respecting min)
+                    if (newWidth > viewport.width) newWidth = Math.max(minWidth, viewport.width - 40);
+                    if (newHeight > (viewport.height - topbar)) newHeight = Math.max(minHeight, viewport.height - topbar - 40);
+
+                    // Ensure left/top are inside viewport bounds (allow small padding)
+                    newLeft = Math.min(Math.max(8, newLeft), Math.max(8, viewport.width - newWidth - 8));
+                    newTop = Math.min(Math.max(topbar, newTop), Math.max(topbar, viewport.height - newHeight - 8));
+
+                    // Apply changes only when needed to avoid janky behavior
+                    const needsMove = (Math.abs((entry.winbox.x || 0) - newLeft) > 1) || (Math.abs((entry.winbox.y || 0) - newTop) > 1);
+                    const needsResize = (Math.abs((entry.winbox.width || 0) - newWidth) > 1) || (Math.abs((entry.winbox.height || 0) - newHeight) > 1);
+                    if (needsResize) {
+                        try { entry.winbox.resize(newWidth, newHeight); } catch (e) { /* ignore */ }
+                    }
+                    if (needsMove) {
+                        try { entry.winbox.move(newLeft, newTop); } catch (e) { /* ignore */ }
+                    }
+                } catch (e) { /* ignore */ }
             }
 
             function ensureDockButton(entry) {
@@ -619,15 +649,14 @@ try {
                 const entry = windows.get(id);
                 if (!entry || !entry.winbox) return;
                 try {
-                    const device = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768) ? 'mobile' : 'desktop';
                     // Use id in keys so we can persist multiple windows (chat, debug, etc.)
-                    const stateKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${id}-${sessionId}-${device}` : `${CHAT_WINDOW_STATE_KEY}-${id}-${device}`;
+                    const stateKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${id}-${sessionId}` : `${CHAT_WINDOW_STATE_KEY}-${id}`;
                     let state = 'normal';
                     if (entry.minimized) state = 'minimized';
                     else if (entry.winbox.max) state = 'maximized';
                     try { localStorage.setItem(stateKey, state); } catch (e) { /* ignore */ }
 
-                    const rectKey = sessionId ? `${CHAT_RECT_KEY}-${id}-${sessionId}-${device}` : `${CHAT_RECT_KEY}-${id}-${device}`;
+                    const rectKey = sessionId ? `${CHAT_RECT_KEY}-${id}-${sessionId}` : `${CHAT_RECT_KEY}-${id}`;
                     const payload = {
                         left: Math.round(entry.winbox.x || 0),
                         top: Math.round(entry.winbox.y || 0),
@@ -642,9 +671,10 @@ try {
                 const entry = windows.get(id);
                 if (!entry || !entry.winbox) return false;
                 try {
-                    const device = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768) ? 'mobile' : 'desktop';
-                    const rectKey = sessionId ? `${CHAT_RECT_KEY}-${id}-${sessionId}-${device}` : `${CHAT_RECT_KEY}-${id}-${device}`;
-                    const rectRaw = localStorage.getItem(rectKey) || localStorage.getItem(sessionId ? `${CHAT_RECT_KEY}-${id}-${sessionId}` : `${CHAT_RECT_KEY}-${id}`) || localStorage.getItem(CHAT_RECT_KEY);
+                    const rectKey = sessionId ? `${CHAT_RECT_KEY}-${id}-${sessionId}` : `${CHAT_RECT_KEY}-${id}`;
+                    const legacyRectMobileKey = sessionId ? `${CHAT_RECT_KEY}-${id}-${sessionId}-mobile` : `${CHAT_RECT_KEY}-${id}-mobile`;
+                    const legacyRectDesktopKey = sessionId ? `${CHAT_RECT_KEY}-${id}-${sessionId}-desktop` : `${CHAT_RECT_KEY}-${id}-desktop`;
+                    const rectRaw = localStorage.getItem(rectKey) || localStorage.getItem(legacyRectDesktopKey) || localStorage.getItem(legacyRectMobileKey) || localStorage.getItem(sessionId ? `${CHAT_RECT_KEY}-${id}-${sessionId}` : `${CHAT_RECT_KEY}-${id}`) || localStorage.getItem(CHAT_RECT_KEY);
                     if (rectRaw) {
                         const rect = JSON.parse(rectRaw);
                         const hasWidth = typeof rect.width === 'number' && rect.width >= 260;
@@ -683,8 +713,10 @@ try {
                         } catch (e) { /* ignore */ }
                     }
 
-                    const stateKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${id}-${sessionId}-${device}` : `${CHAT_WINDOW_STATE_KEY}-${id}-${device}`;
-                    const localState = localStorage.getItem(stateKey) || localStorage.getItem(sessionId ? `${CHAT_WINDOW_STATE_KEY}-${id}-${sessionId}` : `${CHAT_WINDOW_STATE_KEY}-${id}`) || localStorage.getItem(CHAT_WINDOW_STATE_KEY);
+                    const stateKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${id}-${sessionId}` : `${CHAT_WINDOW_STATE_KEY}-${id}`;
+                    const legacyStateMobileKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${id}-${sessionId}-mobile` : `${CHAT_WINDOW_STATE_KEY}-${id}-mobile`;
+                    const legacyStateDesktopKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${id}-${sessionId}-desktop` : `${CHAT_WINDOW_STATE_KEY}-${id}-desktop`;
+                    const localState = localStorage.getItem(stateKey) || localStorage.getItem(legacyStateDesktopKey) || localStorage.getItem(legacyStateMobileKey) || localStorage.getItem(sessionId ? `${CHAT_WINDOW_STATE_KEY}-${id}-${sessionId}` : `${CHAT_WINDOW_STATE_KEY}-${id}`) || localStorage.getItem(CHAT_WINDOW_STATE_KEY);
                     if (localState === 'minimized') {
                         minimize(id);
                     } else if (localState === 'maximized') {
@@ -692,10 +724,12 @@ try {
                         entry.winbox.show();
                         try { entry.winbox.maximize(); } catch (e) { /* ignore */ }
                         try { applyMaximizeConstraints(entry); } catch (e) { /* ignore */ }
+                        try { clampEntryToViewport(entry); } catch (e) { /* ignore */ }
                     } else {
                         entry.minimized = false;
                         entry.winbox.show();
                         entry.winbox.restore();
+                        try { clampEntryToViewport(entry); } catch (e) { /* ignore */ }
                     }
                 } catch (e) { /* ignore */ }
                 return true;
@@ -717,7 +751,6 @@ try {
                     }
                     return null;
                 }
-                if (isMobileViewport()) { try { console.debug('[SynthWindowManager] mobile viewport, skipping WinBox creation for', opts.id); } catch (e) {} return null; }
                 if (windows.has(opts.id)) return windows.get(opts.id).winbox;
 
                 const mountEl = opts.mount;
@@ -817,6 +850,7 @@ try {
                 windows.set(opts.id, entry);
                 ensureDockButton(entry);
                 try { applyViewportInsets(entry); } catch (e) { /* ignore */ }
+                try { clampEntryToViewport(entry); } catch (e) { /* ignore */ }
                 return winbox;
             }
 
@@ -878,7 +912,7 @@ try {
 
             try {
                 window.addEventListener('resize', () => {
-                    try { windows.forEach((entry) => { applyViewportInsets(entry); applyMaximizeConstraints(entry); }); } catch (e) { /* ignore */ }
+                    try { windows.forEach((entry) => { applyViewportInsets(entry); applyMaximizeConstraints(entry); clampEntryToViewport(entry); }); } catch (e) { /* ignore */ }
                 });
             } catch (e) { /* ignore */ }
 
@@ -1419,7 +1453,6 @@ try {
 
             function setupNavigation() {
                 const navButtons = document.querySelectorAll('.nav-btn[data-tab]');
-                const hamburger = document.querySelector('.hamburger');
                 const nav = document.querySelector('nav.main-nav');
 
                 function updateTopbarHeight() {
@@ -1429,6 +1462,71 @@ try {
                         const height = header.offsetHeight || header.getBoundingClientRect().height;
                         if (height && document.documentElement) {
                             document.documentElement.style.setProperty('--topbar-height', `${Math.round(height)}px`);
+                        }
+                    } catch (e) { /* ignore */ }
+                }
+
+                function measureNavRequiredWidth(nav) {
+                    try {
+                        if (!nav) return 0;
+                        const prevWrap = nav.style.flexWrap;
+                        const prevWidth = nav.style.width;
+                        const prevMaxWidth = nav.style.maxWidth;
+                        nav.style.flexWrap = 'nowrap';
+                        nav.style.width = 'max-content';
+                        nav.style.maxWidth = 'none';
+                        const required = nav.getBoundingClientRect().width || nav.scrollWidth || 0;
+                        nav.style.flexWrap = prevWrap;
+                        nav.style.width = prevWidth;
+                        nav.style.maxWidth = prevMaxWidth;
+                        return required;
+                    } catch (e) { /* ignore */ }
+                    return 0;
+                }
+
+                function adjustTopbarLayout() {
+                    try {
+                        const header = document.querySelector('header.top-bar');
+                        const brand = header ? header.querySelector('.brand') : null;
+                        const brandText = brand ? brand.querySelector('.brand-text') : null;
+                        const nav = header ? header.querySelector('nav.main-nav') : null;
+                        if (!header || !brand || !nav) return;
+
+                        const headerStyle = window.getComputedStyle ? window.getComputedStyle(header) : null;
+                        const paddingLeft = headerStyle ? (Number.parseFloat(headerStyle.paddingLeft) || 0) : 0;
+                        const paddingRight = headerStyle ? (Number.parseFloat(headerStyle.paddingRight) || 0) : 0;
+                        const gapVal = headerStyle ? (headerStyle.columnGap || headerStyle.gap || '0') : '0';
+                        const headerGap = Number.parseFloat(gapVal) || 0;
+
+                        header.classList.remove('topbar--compact');
+                        header.classList.remove('topbar--wrap');
+
+                        const headerWidth = header.getBoundingClientRect().width || 0;
+                        const brandWidth = brand.getBoundingClientRect().width || 0;
+                        const navRequired = measureNavRequiredWidth(nav);
+                        const available = Math.max(0, headerWidth - paddingLeft - paddingRight - brandWidth - headerGap);
+
+                        const tolerance = 2;
+                        let compact = navRequired > (available + tolerance);
+                        let lines = 1;
+                        try {
+                            const buttons = Array.from(nav.querySelectorAll('.nav-btn'));
+                            const tops = buttons.map((btn) => Math.round(btn.getBoundingClientRect().top));
+                            const unique = Array.from(new Set(tops));
+                            lines = unique.length || 1;
+                        } catch (e) { /* ignore */ }
+                        if (lines >= 3) {
+                            compact = true;
+                        }
+                        if (compact && brandText) {
+                            header.classList.add('topbar--compact');
+                        }
+
+                        const brandWidthCompact = brand.getBoundingClientRect().width || 0;
+                        const availableCompact = Math.max(0, headerWidth - paddingLeft - paddingRight - brandWidthCompact - headerGap);
+                        const wrap = navRequired > (availableCompact + tolerance);
+                        if (wrap) {
+                            header.classList.add('topbar--wrap');
                         }
                     } catch (e) { /* ignore */ }
                 }
@@ -1492,17 +1590,8 @@ try {
                         } catch (e) {
                             console.warn('[synth_webui] tab switch failed', e);
                         }
-                        if (nav && nav.classList.contains('open')) {
-                            nav.classList.remove('open');
-                        }
                     });
                 });
-
-                if (hamburger && nav) {
-                    hamburger.addEventListener('click', () => {
-                        nav.classList.toggle('open');
-                    });
-                }
 
                 // Restore last active tab and load its section once.
                 try {
@@ -1528,6 +1617,14 @@ try {
 
                 updateTopbarHeight();
                 window.addEventListener('resize', updateTopbarHeight);
+                try {
+                    const header = document.querySelector('header.top-bar');
+                    if (header && typeof ResizeObserver !== 'undefined') {
+                        const ro = new ResizeObserver(() => { try { updateTopbarHeight(); adjustTopbarLayout(); } catch (e) { /* ignore */ } });
+                        ro.observe(header);
+                    }
+                } catch (e) { /* ignore */ }
+                try { adjustTopbarLayout(); } catch (e) { /* ignore */ }
             }
 
             function getSynthDisplayName() {

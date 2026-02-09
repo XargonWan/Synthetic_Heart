@@ -53,11 +53,6 @@ export function createDebugWindow() {
 
                 <div style="display:flex;gap:8px;align-items:center;justify-content:flex-start;">
                     <div style="font-size:12px;color:var(--text-soft);margin-right:6px;">Animation</div>
-                    <div id="synth-debug-controls" style="display:flex;gap:8px;align-items:center;">
-                        <button id="synth-debug-pause" class="pill secondary" type="button" title="⏸️">⏸️</button>
-                        <button id="synth-debug-resync" class="pill secondary" type="button" title="Sync">🛜</button>
-                        <button id="synth-debug-reset" class="pill" type="button" title="Reset">🔁</button>
-                    </div>
                 </div>
 
                 <div class="card" style="margin:0;">
@@ -123,66 +118,78 @@ export function createDebugWindow() {
         let win = null;
         let winbox = null;
         const tryCreateWinBox = () => {
-            if (!window.SynthWindowManager || typeof window.SynthWindowManager.create !== 'function') return null;
-            if (typeof window.WinBox === 'undefined') return null;
-            const panel = buildDebugPanel();
-            win = panel;
-                winbox = window.SynthWindowManager.create({
-                id: 'debug',
-                title: 'Debug',
-                mount: panel,
-                width: 420,
-                height: 520,
-                    x: 'right',
-                y: 'bottom',
-                dockLabel: 'Debug',
-                dockClass: 'debug-toggle-btn',
-                className: 'synth-winbox no-close'
-            });
-            // Intentionally do not attach header tools for Debug — pause control lives inside the debug panel only.
+            try {
+                if (!window.SynthWindowManager || typeof window.SynthWindowManager.create !== 'function') return null;
+                const panel = buildDebugPanel();
+                win = panel;
+                const createNow = () => {
+                    try {
+                        winbox = window.SynthWindowManager.create({
+                            id: 'debug',
+                            title: 'Debug',
+                            mount: panel,
+                            width: 420,
+                            height: 520,
+                            x: 'right',
+                            y: 'bottom',
+                            dockLabel: 'Debug',
+                            dockClass: 'debug-toggle-btn',
+                            className: 'synth-winbox no-close'
+                        });
+                        // Show WinBox by default when debug is enabled so it is visible to the user
+                        try { if (winbox && typeof winbox.show === 'function') winbox.show(); } catch (e) {}
+                    } catch (e) {
+                        console.warn('[debug-window] WinBox creation failed', e);
+                        winbox = null;
+                    }
+                };
 
-            return winbox;
+                if (typeof window.WinBox === 'undefined' && typeof window.SynthWindowManager.ensureWinBoxAssets === 'function') {
+                    // Load WinBox assets and create when ready
+                    window.SynthWindowManager.ensureWinBoxAssets().then((ok) => { if (ok) createNow(); }).catch(() => {});
+                    return null;
+                }
+                if (typeof window.WinBox === 'undefined') return null;
+                createNow();
+                try { renderHeaderToolsIntoWinBox(); } catch (e) { /* ignore */ }
+                return winbox;
+            } catch (e) { return null; }
         };
 
         if (!tryCreateWinBox()) {
-            win = buildDebugPanel();
-            win.style.position = 'fixed';
-            win.style.right = '18px';
-            win.style.bottom = '86px';
-            win.style.width = '420px';
-            win.style.maxWidth = 'calc(100% - 40px)';
-            win.style.minWidth = '320px';
-            win.style.height = '520px';
-            win.style.maxHeight = 'calc(100vh - 140px)';
-            win.style.minHeight = '240px';
-            win.style.zIndex = 99998;
-            win.style.background = 'var(--surface)';
-            win.style.color = 'var(--text)';
-            win.style.border = '1px solid var(--border)';
-            win.style.borderRadius = '12px';
-            win.style.overflow = 'hidden';
-            win.style.resize = 'both';
-            document.body.appendChild(win);
-
-            const dock = getDock();
+            // WinBox not available synchronously — create a visible DOM fallback so the Debug panel is usable.
             try {
-                const debugToggleBtn = document.getElementById('debug-toggle');
-                if (debugToggleBtn && debugToggleBtn.parentElement !== dock) {
-                    dock.appendChild(debugToggleBtn);
-                    try { debugToggleBtn.style.position = 'static'; debugToggleBtn.style.right = ''; debugToggleBtn.style.bottom = ''; } catch (e) { /* ignore */ }
-                }
-            } catch (e) { /* ignore */ }
-        }
+                win = buildDebugPanel();
+                // Default desktop styling
+                win.style.position = 'fixed';
+                win.style.right = '18px';
+                win.style.bottom = '86px';
+                win.style.width = '420px';
+                win.style.maxWidth = 'calc(100% - 40px)';
+                win.style.minWidth = '320px';
+                win.style.height = '520px';
+                win.style.maxHeight = 'calc(100vh - 140px)';
+                win.style.minHeight = '240px';
+                win.style.zIndex = 999999;
+                win.style.background = 'var(--surface)';
+                win.style.color = 'var(--text)';
+                win.style.border = '1px solid var(--border)';
+                win.style.borderRadius = '12px';
+                win.style.overflow = 'hidden';
+                win.style.resize = 'both';
+                document.body.appendChild(win);
 
-        if (!winbox) {
-            (function makeDraggable(el) {
-                const header = el.querySelector('#synth-debug-title-bar');
-                if (!header) return;
-                let dragging = false;
-                let startX = 0, startY = 0;
-                let offsetX = 0, offsetY = 0;
-                header.addEventListener('pointerdown', (ev) => {
-                    try {
+                // Legacy fallback remains a normal fixed-size panel (no mobile fullscreen override to avoid custom mobile window behavior).
+
+                // Initialize interactions that expect a legacy DOM window (minimize/drag/resize)
+                try { createResizeHandlesForElement(win); } catch (e) { /* ignore */ }
+                (function makeDraggable(el) {
+                    const header = el.querySelector('#synth-debug-title-bar');
+                    if (!header) return;
+                    let dragging = false;
+                    let startX = 0, startY = 0;
+                    let offsetX = 0, offsetY = 0;
+                    header.addEventListener('pointerdown', (ev) => {
                         try { ev.stopPropagation(); } catch (e) {}
                         try { if (window.__synth_active_interaction) return; } catch (e) {}
                         const t = ev && ev.target ? ev.target : null;
@@ -204,53 +211,29 @@ export function createDebugWindow() {
                         offsetX = startX - r.left;
                         offsetY = startY - r.top;
                         try { header.setPointerCapture && header.setPointerCapture(ev.pointerId); } catch (e) {}
-                    } catch (e) { /* ignore */ }
-                });
-                window.addEventListener('pointermove', (ev) => {
-                    if (!dragging) return;
-                    try {
-                        el.style.left = (ev.clientX - offsetX) + 'px';
-                        el.style.top = (ev.clientY - offsetY) + 'px';
-                        el.style.right = 'auto';
-                        el.style.bottom = 'auto';
-                    } catch (e) { /* ignore */ }
-                });
-                window.addEventListener('pointerup', (ev) => { try { dragging = false; if (window.__synth_active_interaction && window.__synth_active_interaction.type === 'debug_drag') window.__synth_active_interaction = null; } catch (e) {} });
-            })(win);
+                    });
+                    window.addEventListener('pointermove', (ev) => {
+                        if (!dragging) return;
+                        try {
+                            el.style.left = (ev.clientX - offsetX) + 'px';
+                            el.style.top = (ev.clientY - offsetY) + 'px';
+                            el.style.right = 'auto';
+                            el.style.bottom = 'auto';
+                        } catch (e) { /* ignore */ }
+                    });
+                    window.addEventListener('pointerup', (ev) => { try { dragging = false; if (window.__synth_active_interaction && window.__synth_active_interaction.type === 'debug_drag') window.__synth_active_interaction = null; } catch (e) {} });
+                })(win);
 
-            try { createResizeHandlesForElement(win); } catch (e) { /* ignore */ }
-
-            let debugDockBtn = null;
-            const ensureDebugDockBtn = () => {
-                if (debugDockBtn && debugDockBtn.isConnected) return debugDockBtn;
-                debugDockBtn = document.createElement('button');
-                debugDockBtn.type = 'button';
-                debugDockBtn.className = 'chat-toggle-btn';
-                debugDockBtn.textContent = '💻';
-                debugDockBtn.setAttribute('aria-label', 'Restore debug');
-                debugDockBtn.title = 'Restore Debug';
-                try {
-                    debugDockBtn.style.position = 'static';
-                    debugDockBtn.style.top = '';
-                    debugDockBtn.style.right = '';
-                    debugDockBtn.style.bottom = '';
-                    debugDockBtn.style.left = '';
-                    debugDockBtn.style.zIndex = '';
-                } catch (e) { /* ignore */ }
-                debugDockBtn.addEventListener('click', () => {
-                    try { win.style.display = ''; } catch (e) { /* ignore */ }
-                    try { if (debugDockBtn && debugDockBtn.parentElement) debugDockBtn.parentElement.removeChild(debugDockBtn); } catch (e) { /* ignore */ }
-                });
-                return debugDockBtn;
-            };
-
-            const minimizeBtnLegacy = win.querySelector('#synth-debug-minimize');
-            if (minimizeBtnLegacy) {
-                minimizeBtnLegacy.addEventListener('click', () => {
-                    try { win.style.display = 'none'; } catch (e) { /* ignore */ }
-                    try { getDock().appendChild(ensureDebugDockBtn()); } catch (e) { /* ignore */ }
-                });
+            } catch (e) {
+                console.warn('[debug-window] WinBox not available and fallback creation failed', e);
+                try { if (window.SynthWindowManager && typeof window.SynthWindowManager.ensureWinBoxAssets === 'function') window.SynthWindowManager.ensureWinBoxAssets().then((ok) => { if (ok) tryCreateWinBox(); }); } catch (ex) {}
             }
+        }
+
+        if (!winbox) {
+            // Legacy DOM-managed debug window removed — WinBox is the canonical window manager.
+            // If WinBox becomes available later, the panel will be created automatically via ensureWinBoxAssets.
+            console.warn('[debug-window] running without WinBox; legacy DOM window support removed.');
         }
 
         const minimizeBtn = win.querySelector('#synth-debug-minimize');
@@ -298,9 +281,77 @@ export function createDebugWindow() {
             } catch (e) { /* ignore */ }
         }
 
-        const pauseBtn = (win && win.querySelector) ? win.querySelector('#synth-debug-pause') : null;
-        const resyncBtn = (win && win.querySelector) ? win.querySelector('#synth-debug-resync') : null;
-        const resetBtn = (win && win.querySelector) ? win.querySelector('#synth-debug-reset') : null;
+
+
+        // Attach header tools both for WinBox-managed header and legacy DOM header area
+        const renderHeaderToolsIntoWinBox = () => {
+            try {
+                if (!winbox) return;
+                const winEl = winbox.window || winbox.dom || winbox.g || null;
+                if (!winEl) return;
+                const drag = winEl.querySelector('.wb-drag');
+                if (!drag) return;
+                let toolsEl = drag.querySelector('.synth-wb-tools[data-tools-id="debug"]');
+                if (!toolsEl) {
+                    toolsEl = document.createElement('div');
+                    toolsEl.className = 'synth-wb-tools';
+                    toolsEl.dataset.toolsId = 'debug';
+                    drag.appendChild(toolsEl);
+                }
+                toolsEl.innerHTML = '';
+                const addBtn = (label, title, clickFn, cls) => {
+                    const btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = 'synth-wb-tool-btn' + (cls ? (' ' + cls) : '');
+                    btn.textContent = label;
+                    if (title) { btn.title = title; btn.setAttribute('aria-label', title); }
+                    btn.addEventListener('pointerdown', (ev) => { try { ev.stopPropagation(); } catch (e) {} });
+                    btn.addEventListener('click', (ev) => { try { ev.stopPropagation(); } catch (e) {} try { if (typeof clickFn === 'function') clickFn(); } catch (e) {} });
+                    toolsEl.appendChild(btn);
+                };
+                // No header tools for Debug (buttons removed)
+                // Rendered header area intentionally kept empty to avoid duplicate controls.
+            } catch (e) { /* ignore */ }
+        };
+
+        const renderHeaderToolsIntoDOM = () => {
+            try {
+                const headerTools = (win && win.querySelector) ? win.querySelector('#synth-debug-header-tools') : null;
+                if (!headerTools) return;
+                headerTools.innerHTML = '';
+                const addBtn = (label, title, clickFn, cls) => {
+                    const btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = 'synth-wb-tool-btn' + (cls ? (' ' + cls) : '');
+                    btn.textContent = label;
+                    if (title) { btn.title = title; btn.setAttribute('aria-label', title); }
+                    btn.addEventListener('click', (ev) => { try { ev.stopPropagation(); } catch (e) {} try { if (typeof clickFn === 'function') clickFn(); } catch (e) {} });
+                    headerTools.appendChild(btn);
+                };
+                // No header tools for Debug (buttons removed)
+            } catch (e) { /* ignore */ }
+        };
+
+        // Try to render header tools now and again after WinBox becomes available or DOM ready
+        try { renderHeaderToolsIntoDOM(); } catch (e) {}
+        try { renderHeaderToolsIntoWinBox(); } catch (e) {}
+        setTimeout(() => { try { renderHeaderToolsIntoWinBox(); } catch (e) {} try { renderHeaderToolsIntoDOM(); } catch (e) {} }, 300);
+        window.addEventListener('synth-winbox-ready', () => { try { renderHeaderToolsIntoWinBox(); } catch (e) {} });
+
+        // Ensure that if advanced debug UI failed to appear we fall back to the inline debug overlay
+        setTimeout(() => {
+            try {
+                const adv = document.getElementById('synth-advanced-debug');
+                const debugRoot = document.getElementById('synth-debug');
+                const advVisible = adv && (adv.offsetParent !== null || getComputedStyle(adv).display !== 'none');
+                if (!advVisible && debugRoot) {
+                    try { debugRoot.style.display = 'block'; } catch (e) {}
+                    try { debugRoot.setAttribute('data-debug-enabled', '1'); } catch (e) {}
+                    try { if (typeof updateDebug === 'function') updateDebug('Advanced debug unavailable — falling back to inline overlay'); } catch (e) {}
+                    console.warn('[debug-window] Advanced debug UI not visible, falling back to inline overlay');
+                }
+            } catch (e) { /* ignore */ }
+        }, 800);
 
         const setPaused = async (paused) => {
             try {
@@ -319,44 +370,13 @@ export function createDebugWindow() {
                 }
             } catch (e) { /* ignore */ }
 
-            try {
-                if (pauseBtn) {
-                    pauseBtn.textContent = paused ? '▶️' : '⏸️';
-                    // Use emojis for title as requested; keep aria-label descriptive for accessibility
-                    pauseBtn.title = paused ? '▶️' : '⏸️';
-                    pauseBtn.setAttribute('aria-label', paused ? 'Play' : 'Pause');
-                }
-                if (winbox) {
-                    const winEl = winbox.window || winbox.dom || winbox.g || null;
-                    const toolBtn = winEl ? winEl.querySelector('.synth-wb-tool-pause') : null;
-                    if (toolBtn) {
-                        toolBtn.textContent = paused ? '▶️' : '⏸️';
-                        toolBtn.title = paused ? '▶️' : '⏸️';
-                        toolBtn.setAttribute('aria-label', paused ? 'Play' : 'Pause');
-                    }
-                }
-            } catch (e) { /* ignore */ }
+
             if (!paused) {
                 await resyncFromBackend();
             }
         };
 
-        if (pauseBtn) {
-            pauseBtn.addEventListener('click', async () => {
-                try { await setPaused(!isPaused()); } catch (e) { /* ignore */ }
-            });
-        }
-        if (resyncBtn) {
-            resyncBtn.addEventListener('click', async () => { await resyncFromBackend(); });
-        }
-        if (resetBtn) {
-            resetBtn.addEventListener('click', async () => {
-                try { if (window.animationHandler) { window.animationHandler.clearDebugFaceOverrides?.(); window.animationHandler.clearDebugEmotionOverrides?.(); window.animationHandler.clearTemporaryOverride?.(); } } catch (e) { /* ignore */ }
-                try { await resetLoopOverrideUI(); } catch (e) { /* ignore */ }
-                await setPaused(false);
-                await resyncFromBackend();
-            });
-        }
+        
 
         // Loop override controls
         const types = ['idle','think','talk','write','touch'];

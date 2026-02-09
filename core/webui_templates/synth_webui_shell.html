@@ -58,11 +58,13 @@
             display: flex;
             gap: 1.5rem;
             align-items: center;
-            justify-content: space-between;
-            padding: 1.2rem min(4vw, 2.4rem);
+            justify-content: flex-start;
+            padding: 0.9rem min(4vw, 2.4rem);
             background: linear-gradient(135deg, rgba(12, 12, 20, 0.78), rgba(34, 30, 46, 0.78));
             border-bottom: 1px solid var(--border);
             backdrop-filter: blur(18px);
+            /* Allow the top-bar to wrap (brand + nav) when the viewport is narrow */
+            flex-wrap: nowrap;
         }
         .brand {
             display: flex;
@@ -84,6 +86,12 @@
             display: flex;
             flex-wrap: wrap;
             gap: 0.6rem;
+            width: auto;
+            flex: 1 1 auto;
+            min-width: 0;
+            align-content: flex-start;
+            justify-content: flex-end;
+            margin-left: auto;
         }
         .nav-btn {
             display: inline-flex;
@@ -98,12 +106,33 @@
             letter-spacing: 0.05em;
             cursor: pointer;
             transition: transform 0.15s ease, background 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
+            white-space: nowrap;
+            /* Allow buttons to shrink and wrap to a new line when there is not enough space */
+            flex: 0 1 auto;
+            max-width: 100%;
         }
         .nav-btn .icon { font-size: 1.05rem; }
         .nav-btn.active {
             background: var(--accent);
             color: #07070c;
             box-shadow: 0 18px 35px -24px rgba(255, 107, 214, 0.95);
+        }
+
+        header.top-bar.topbar--compact .brand-text {
+            display: none;
+        }
+        header.top-bar.topbar--compact .brand {
+            gap: 0.6rem;
+        }
+        header.top-bar.topbar--wrap {
+            flex-wrap: wrap;
+            align-items: flex-start;
+        }
+        header.top-bar.topbar--wrap nav.main-nav {
+            width: 100%;
+            margin-left: 0;
+            margin-top: 0.5rem;
+            justify-content: flex-start;
         }
         main {
             flex: 1;
@@ -221,29 +250,17 @@
             color: var(--accent);
         }
 
-        /* Body pause button styling inside debug panel: emoji-only, no orange background */
-        #synth-debug-pause {
-            background: transparent !important;
-            border-color: transparent !important;
-            color: inherit !important;
-            padding: 6px !important;
-            min-width: 36px !important;
-            min-height: 36px !important;
-            display: inline-flex !important;
-            align-items: center !important;
-            justify-content: center !important;
-            border-radius: 8px !important;
-        }
-        #synth-debug-pause:hover {
-            background: transparent !important;
-            transform: none !important;
-        }
+
         /* Ensure loop override selects use dark theme so white text remains readable */
         #synth-advanced-debug select,
         #synth-advanced-debug select option {
             background: #07070c !important;
             color: #ffffff !important;
         }
+
+        /* Keep WinBox chrome above canvas and ensure header tools are visible */
+        .winbox.synth-winbox { z-index: 999999 !important; }
+
         #synth-advanced-debug select {
             border-color: rgba(255,255,255,0.06);
             padding: 6px 8px;
@@ -946,32 +963,6 @@
             color: var(--warn);
             border-color: rgba(243, 192, 77, 0.5);
         }
-        .hamburger {
-            display: none;
-            background: none;
-            border: none;
-            color: var(--text);
-            font-size: 1.5rem;
-            cursor: pointer;
-        }
-        @media (max-width: 768px) {
-            .hamburger { display: block; }
-            nav.main-nav {
-                display: none;
-                position: absolute;
-                top: 100%;
-                left: 0;
-                right: 0;
-                background: rgba(12, 12, 20, 0.95);
-                border-bottom: 1px solid var(--border);
-                padding: 1rem;
-                flex-direction: column;
-                gap: 0.8rem;
-                z-index: 10600;
-            }
-            nav.main-nav.open { display: flex; position: fixed; bottom: 0; }
-            #chat { width: calc(100% - 2rem); height: 50vh; }
-        }
     </style>
     <script type="importmap">
         {
@@ -1002,7 +993,6 @@ window.__SYNTH_CONFIG = {
                 <h1>%%BRAND_NAME%%</h1>
             </div>
         </div>
-        <button class="hamburger" aria-label="Toggle menu">☰</button>
         <nav class="main-nav" aria-label="Primary navigation">
             <button class="nav-btn active" data-tab="home" aria-controls="tab-home" aria-pressed="true">
                 <span class="icon" aria-hidden="true">🏠</span><span>Home</span>

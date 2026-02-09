@@ -37,26 +37,10 @@ export function createArchiveModal() {
         panel.style.width = '100%';
         panel.style.height = '100%';
 
-        const isMobileArchive = (typeof window !== 'undefined' && window.innerWidth && window.innerWidth <= 768);
-        const canUseWinBox = !isMobileArchive && window.SynthWindowManager && typeof window.SynthWindowManager.create === 'function' && typeof window.WinBox !== 'undefined';
-        if (isMobileArchive) {
-            panel.style.cssText = `
-                position: fixed;
-                z-index: 10500;
-                left: 0;
-                top: 0;
-                right: 0;
-                bottom: 0;
-                width: 100%;
-                height: 100%;
-                background: var(--panel-bg);
-                color: var(--text);
-                border: none;
-                border-radius: 0;
-                box-shadow: none;
-                display: none; flex-direction: column; overflow: auto;
-            `;
-        } else if (!canUseWinBox) {
+        // Prefer WinBox unconditionally when available. Fallback to legacy panel only when WinBox is not present.
+        const canUseWinBox = window.SynthWindowManager && typeof window.SynthWindowManager.create === 'function' && typeof window.WinBox !== 'undefined';
+        if (!canUseWinBox) {
+            // Legacy panel fallback when WinBox is not available.
             panel.style.cssText = `
                 position: fixed;
                 z-index: 10080;
@@ -124,19 +108,20 @@ export function createArchiveModal() {
         // If a managed WinBox is available, create the WinBox instance and keep it hidden
         if (canUseWinBox && window.SynthWindowManager && typeof window.SynthWindowManager.create === 'function') {
             try {
-                archiveWinbox = window.SynthWindowManager.create({
+                const opts = {
                     id: 'archives',
                     title: 'Archives',
                     mount: panel,
-                    width: 720,
-                    height: 520,
-                    x: 'center',
-                    y: 'center',
                     dockLabel: 'Archives',
                     dockClass: 'archive-toggle-btn',
-                    className: 'synth-winbox'
-                });
-                // If created, hide initially to mimic modal behavior until restored
+                    className: 'synth-winbox no-close'
+                };
+                opts.width = 720;
+                opts.height = 520;
+                opts.x = 'center';
+                opts.y = 'center';
+                archiveWinbox = window.SynthWindowManager.create(opts);
+                // If created, hide initially to mimic modal behavior until restored.
                 try { if (archiveWinbox && typeof archiveWinbox.hide === 'function') archiveWinbox.hide(); } catch (e) { /* ignore */ }
                 try { window.__archive_modal_winbox = archiveWinbox; } catch (e) { /* ignore */ }
                 try { 
