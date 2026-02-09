@@ -125,17 +125,13 @@ class AgentPlugin(AIPluginBase):
             import asyncio
             async def _attach():
                 try:
-                    from core.config import get_active_llm
-                    from core.llm_registry import get_llm_registry
-                    active = await get_active_llm()
-                    engine_name = None
-                    if isinstance(active, dict):
-                        engine_name = active.get('engine')
-                    else:
-                        engine_name = active
+                    from core.config import get_active_cortex_engine
+                    from core.cortex_registry import get_cortex_registry
+                    active = await get_active_cortex_engine()
+                    engine_name = active
                     if not engine_name:
                         return
-                    registry = get_llm_registry()
+                    registry = get_cortex_registry()
                     engine = registry.get_engine(engine_name)
                     if engine and hasattr(engine, 'attach_agent'):
                         try:
@@ -560,8 +556,8 @@ class AgentPlugin(AIPluginBase):
             try:
                 if not engine:
                     # Try to determine active engine (async helper)
-                    from core.config import get_active_llm
-                    active = await get_active_llm()
+                    from core.config import get_active_cortex_engine
+                    active = await get_active_cortex_engine()
                     if isinstance(active, dict):
                         engine = active.get("engine")
                     else:

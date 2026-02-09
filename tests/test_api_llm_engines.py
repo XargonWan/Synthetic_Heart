@@ -4,7 +4,7 @@ import time
 from fastapi.testclient import TestClient
 
 from core.webui import SynthWebUIInterface
-from core.llm_registry import get_llm_registry
+from core.cortex_registry import get_cortex_registry
 
 
 def test_components_includes_llm_login_fields():
@@ -27,7 +27,7 @@ def test_llm_login_endpoint_starts_flow(monkeypatch):
     webui = SynthWebUIInterface(autostart=False)
     client = TestClient(webui.app)
 
-    registry = get_llm_registry()
+    registry = get_cortex_registry()
     # Ensure selenium_chatgpt is loadable
     try:
         engine = registry.load_engine("selenium_chatgpt")
@@ -63,8 +63,8 @@ def test_llm_login_endpoint_errors_for_missing_or_non_selenium():
     assert resp.status_code == 404
 
     # Load a non-selenium engine (manual) and try
-    from core.llm_registry import get_llm_registry
-    registry = get_llm_registry()
+    from core.cortex_registry import get_cortex_registry
+    registry = get_cortex_registry()
     try:
         manual = registry.load_engine('manual')
     except Exception:

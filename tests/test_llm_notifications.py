@@ -75,7 +75,7 @@ async def test_switch_active_llm_notifies_on_start_failure(monkeypatch):
     mock_plugin.start = failing_start
     mock_registry.load_engine = Mock(return_value=mock_plugin)
 
-    monkeypatch.setattr("core.plugin_instance.get_llm_registry", Mock(return_value=mock_registry))
+    monkeypatch.setattr("core.plugin_instance.get_cortex_registry", Mock(return_value=mock_registry))
 
     with patch("core.notifier.notify_trainer") as mock_notify:
         with pytest.raises(Exception):
@@ -93,13 +93,13 @@ async def test_switch_active_llm_reloads_when_config_matches_but_plugin_differs(
 
     # Ensure isolation from other tests that may have loaded a plugin
     original_plugin = plugin_instance.plugin
-    plugin_instance.plugin = type("Dummy", (), {"__module__": "llm_engines.other"})()
+    plugin_instance.plugin = type("Dummy", (), {"__module__": "cortex.llm_engine.other"})()
 
     # ACTIVE_LLM already set to 'manual', but loaded plugin is 'other'
     async def fake_get_active_llm():
         return "manual"
 
-    monkeypatch.setattr("core.config.get_active_llm", fake_get_active_llm)
+    monkeypatch.setattr("core.config.get_active_cortex_engine", fake_get_active_llm)
     monkeypatch.setattr("core.config.list_available_llms", lambda: ["manual", "other"])
 
     called = {"count": 0}
@@ -108,7 +108,7 @@ async def test_switch_active_llm_reloads_when_config_matches_but_plugin_differs(
         called["count"] += 1
         assert name == "manual"
         # emulate successful load
-        plugin_instance.plugin = type("Dummy", (), {"__module__": "llm_engines.manual"})()
+        plugin_instance.plugin = type("Dummy", (), {"__module__": "cortex.llm_engine.manual"})()
 
     monkeypatch.setattr("core.config.set_active_llm", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("core.plugin_instance.load_plugin", fake_load_plugin)
@@ -135,7 +135,7 @@ async def test_load_plugin_ensures_start_propagates(monkeypatch):
     mock_plugin.start = failing_start
     mock_registry.load_engine = Mock(return_value=mock_plugin)
 
-    monkeypatch.setattr("core.plugin_instance.get_llm_registry", Mock(return_value=mock_registry))
+    monkeypatch.setattr("core.plugin_instance.get_cortex_registry", Mock(return_value=mock_registry))
 
     # Ensure global plugin is reset to avoid interference from other tests
     import core.plugin_instance as plugin_module

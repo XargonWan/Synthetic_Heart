@@ -99,8 +99,8 @@ def get_interface_limits() -> dict:
     """Get the limits and capabilities for OpenAI ChatGPT interface."""
     # Get current model from active LLM or use default
     try:
-        from core.config import get_active_llm
-        active_llm = get_active_llm()
+        from core.config import get_active_cortex_engine
+        active_engine = get_active_cortex_engine()
         model_name = active_llm.get("model_name", OPENAI_CONFIG["default_model"]) if active_llm else OPENAI_CONFIG["default_model"]
     except:
         model_name = OPENAI_CONFIG["default_model"]

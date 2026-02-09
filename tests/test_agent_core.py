@@ -28,8 +28,8 @@ async def test_attach_to_engine_calls_attach(monkeypatch):
         def load_engine(self, name):
             return fake_engine
 
-    monkeypatch.setattr('core.config.get_active_llm', lambda: asyncio.sleep(0, result='gemini_api'))
-    monkeypatch.setattr('core.llm_registry.get_llm_registry', lambda: FakeRegistry())
+    monkeypatch.setattr('core.config.get_active_cortex_engine', lambda: asyncio.sleep(0, result='gemini_api'))
+    monkeypatch.setattr('core.cortex_registry.get_cortex_registry', lambda: FakeRegistry())
 
     agent = AgentCore()
     agent._enabled = True

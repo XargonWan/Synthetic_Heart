@@ -1008,12 +1008,12 @@ class SynthWebUIInterface:
         components_count = 0
         try:
             from core.core_initializer import PLUGIN_REGISTRY, INTERFACE_REGISTRY
-            from core.llm_registry import get_llm_registry
+            from core.cortex_registry import get_cortex_registry
 
             components_count += len(PLUGIN_REGISTRY)
             components_count += len(INTERFACE_REGISTRY)
             try:
-                components_count += len(get_llm_registry().get_available_engines())
+                components_count += len(get_cortex_registry().get_available_engines())
             except Exception:
                 pass
         except Exception:
@@ -2436,7 +2436,7 @@ class SynthWebUIInterface:
         unsafe_actions = set()
         try:
             from core.core_initializer import PLUGIN_REGISTRY, INTERFACE_REGISTRY
-            from core.llm_registry import get_llm_registry
+            from core.cortex_registry import get_cortex_registry
             # Plugins
             for plugin in PLUGIN_REGISTRY.values():
                 try:
@@ -2459,10 +2459,10 @@ class SynthWebUIInterface:
                     pass
             # LLM engines
             try:
-                llmreg = get_llm_registry()
-                for name in llmreg.get_available_engines():
+                cortex_reg = get_cortex_registry()
+                for name in cortex_reg.get_available_engines():
                     try:
-                        inst = llmreg.get_engine(name)
+                        inst = cortex_reg.get_engine(name)
                         if inst and hasattr(inst, 'get_supported_actions'):
                             sup = inst.get_supported_actions() or {}
                             for k, v in sup.items():
@@ -2477,12 +2477,12 @@ class SynthWebUIInterface:
 
         loaded_llm_engines = set()
         try:
-            from core.llm_registry import get_llm_registry
+            from core.cortex_registry import get_cortex_registry
 
-            llmreg = get_llm_registry()
-            for name in llmreg.get_available_engines():
+            cortex_reg = get_cortex_registry()
+            for name in cortex_reg.get_available_engines():
                 try:
-                    if llmreg.get_engine(name) is not None:
+                    if cortex_reg.get_engine(name) is not None:
                         loaded_llm_engines.add(name)
                 except Exception:
                     pass
@@ -4670,39 +4670,54 @@ class SynthWebUIInterface:
     async def components_summary(self):
         try:
             from core.core_initializer import PLUGIN_REGISTRY, INTERFACE_REGISTRY, core_initializer
-            from core.llm_registry import get_llm_registry
-            from core.config import list_available_llms, get_active_llm
+            from core.cortex_registry import get_cortex_registry
+            from core.config import (
+                list_available_cortexs,
+                list_available_cortex_engines,
+                get_active_cortex,
+                get_active_cortex_engine,
+            )
         except Exception as exc:  # pragma: no cover - defensive
             log_error(f"{LOG_PREFIX} component inspection import failure: {exc}")
             raise HTTPException(status_code=500, detail="Unable to inspect components") from exc
 
-        available_llms = []
+        available_cortexs = []
         try:
-            available_llms = list_available_llms()
+            available_cortexs = list_available_cortexs()
         except Exception as exc:
-            log_warning(f"{LOG_PREFIX} unable to list available LLMs: {exc}")
+            log_warning(f"{LOG_PREFIX} unable to list available cortex kinds: {exc}")
 
         try:
-            active_llm = await get_active_llm()
+            active_cortex = await get_active_cortex()
         except Exception as exc:
-            log_error(f"{LOG_PREFIX} unable to resolve active LLM: {exc}")
-            active_llm = None
+            log_error(f"{LOG_PREFIX} unable to resolve active cortex: {exc}")
+            active_cortex = None
 
-        llm_registry = get_llm_registry()
+        cortex_reg = get_cortex_registry()
         engine_names = set()
         try:
-            engine_names.update(llm_registry.get_available_engines())
+            if active_cortex:
+                engine_names.update(cortex_reg.get_available_engines(active_cortex))
+            else:
+                engine_names.update(cortex_reg.get_available_engines())
         except Exception as exc:
-            log_warning(f"{LOG_PREFIX} unable to list registered LLM engines: {exc}")
-        engine_names.update(available_llms)
-        if active_llm:
-            engine_names.add(active_llm)
+            log_warning(f"{LOG_PREFIX} unable to list registered engines: {exc}")
+        try:
+            engine_names.update(list_available_cortex_engines(None))
+        except Exception:
+            pass
+        try:
+            active_engine = await get_active_cortex_engine()
+        except Exception:
+            active_engine = None
+        if active_engine:
+            engine_names.add(active_engine)
 
         llm_engines: List[dict] = []
         for engine_name in sorted(engine_names):
             instance = None
             try:
-                instance = llm_registry.get_engine(engine_name)
+                instance = cortex_reg.get_engine(engine_name)
             except Exception as exc:
                 log_warning(f"{LOG_PREFIX} unable to retrieve engine {engine_name}: {exc}")
             actions = []
@@ -4743,7 +4758,7 @@ class SynthWebUIInterface:
                 {
                     "name": engine_name,
                     "display_name": self._get_display_name(engine_name, instance),
-                    "active": engine_name == active_llm,
+                    "active": engine_name == active_engine,
                     "loaded": instance is not None,
                     "description": self._extract_description(instance),
                     "status": meta["status"],
@@ -4752,6 +4767,7 @@ class SynthWebUIInterface:
                     "login_state": login_state,
                     "logged_in": logged_in,
                     "actions": actions,
+                    "cortex": cortex_reg._engine_meta.get(engine_name, {}).get("cortex", "llm"),
                 }
             )
 
@@ -4892,10 +4908,27 @@ class SynthWebUIInterface:
         except Exception as exc:
             log_warning(f"{LOG_PREFIX} unable to check dev components status: {exc}")
 
+        # Provide both backward-compatible LLM view and Cortex-native view
+        # Build a cortex -> engines mapping for the UI
+        by_cortex: dict[str, list[dict]] = {}
+        try:
+            for e in llm_engines:
+                k = e.get('cortex', 'llm')
+                by_cortex.setdefault(k, []).append(e)
+        except Exception:
+            by_cortex = {}
+
         payload = {
+            "cortex": {
+                "available_kinds": available_cortexs,
+                "active_kind": active_cortex,
+                "active_engine": active_engine,
+                "engines": llm_engines,
+                "by_cortex": by_cortex,
+            },
             "llm": {
-                "active": active_llm,
-                "available": available_llms,
+                "active": active_engine,
+                "available": list_available_cortex_engines('llm'),
                 "engines": llm_engines,
             },
             "interfaces": interfaces_data,
@@ -4949,8 +4982,8 @@ class SynthWebUIInterface:
             raise HTTPException(status_code=400, detail="Missing 'name'")
 
         try:
-            from core.llm_registry import get_llm_registry
-            registry = get_llm_registry()
+            from core.cortex_registry import get_cortex_registry
+            registry = get_cortex_registry()
             engine = registry.get_engine(name)
         except Exception as exc:
             log_error(f"{LOG_PREFIX} unable to access LLM registry: {exc}")
@@ -5062,7 +5095,7 @@ class SynthWebUIInterface:
 
         try:
             from core.core_initializer import PLUGIN_REGISTRY, INTERFACE_REGISTRY
-            from core.llm_registry import get_llm_registry
+            from core.cortex_registry import get_cortex_registry
         except Exception as exc:
             log_error(f"{LOG_PREFIX} unable to import registries: {exc}")
             raise HTTPException(status_code=500, detail="Unable to access component registries") from exc
@@ -5103,21 +5136,21 @@ class SynthWebUIInterface:
                 return JSONResponse({"status": "ok", "message": f"Plugin '{component_name}' configuration updated"})
             
             elif component_type == "llm":
-                # Reload LLM engine
-                llm_registry = get_llm_registry()
-                
+                # Reload cortex engine (legacy term 'llm' accepted)
+                cortex_registry = get_cortex_registry()
+
                 # Check if engine exists
-                if component_name not in llm_registry.get_available_engines():
-                    raise HTTPException(status_code=404, detail=f"LLM engine '{component_name}' not found")
-                
+                if component_name not in cortex_registry.get_available_engines():
+                    raise HTTPException(status_code=404, detail=f"Engine '{component_name}' not found")
+
                 # Unload current instance if exists
-                current_instance = llm_registry.get_engine(component_name)
+                current_instance = cortex_registry.get_engine(component_name)
                 if current_instance:
-                    log_info(f"{LOG_PREFIX} Unloading LLM engine '{component_name}'...")
-                    llm_registry.unload_engine(component_name)
-                
+                    log_info(f"{LOG_PREFIX} Unloading engine '{component_name}'...")
+                    cortex_registry.unload_engine(component_name)
+
                 # Reload the engine
-                log_info(f"{LOG_PREFIX} Reloading LLM engine '{component_name}'...")
+                log_info(f"{LOG_PREFIX} Reloading engine '{component_name}'...")
                 try:
                     new_instance = llm_registry.load_engine(component_name)
                     log_info(f"{LOG_PREFIX} LLM engine '{component_name}' reloaded successfully")

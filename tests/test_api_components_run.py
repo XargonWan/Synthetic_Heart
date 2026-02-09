@@ -77,8 +77,8 @@ async def test_run_grillo_compactor_dry_run(monkeypatch):
             return FakeEngine()
 
     # Patch llm registry
-    monkeypatch.setattr('core.llm_registry.get_llm_registry', lambda: FakeRegistry())
-    monkeypatch.setattr('core.config.get_active_llm', lambda: asyncio.sleep(0, result='dummy'))
+    monkeypatch.setattr('core.cortex_registry.get_cortex_registry', lambda: FakeRegistry())
+    monkeypatch.setattr('core.config.get_active_cortex_engine', lambda: asyncio.sleep(0, result='dummy'))
 
     try:
         result = await plugin_instance.run_action("compact_now", {"cycles":1, "dry_run": True})

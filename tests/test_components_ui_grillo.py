@@ -75,8 +75,8 @@ async def test_run_grillo_via_webui_api(monkeypatch):
         def get_engine(self, name):
             return FakeEngine()
 
-    monkeypatch.setattr('core.llm_registry.get_llm_registry', lambda: FakeRegistry())
-    monkeypatch.setattr('core.config.get_active_llm', lambda: asyncio.sleep(0, result='dummy'))
+    monkeypatch.setattr('core.cortex_registry.get_cortex_registry', lambda: FakeRegistry())
+    monkeypatch.setattr('core.config.get_active_cortex_engine', lambda: asyncio.sleep(0, result='dummy'))
 
     # Call run_action directly (same as webui API would)
     try:
@@ -137,8 +137,8 @@ async def test_run_action_emits_logs(monkeypatch):
         def get_engine(self, name):
             return FakeEngine()
 
-    monkeypatch.setattr('core.llm_registry.get_llm_registry', lambda: FakeRegistry())
-    monkeypatch.setattr('core.config.get_active_llm', lambda: asyncio.sleep(0, result='dummy'))
+    monkeypatch.setattr('core.cortex_registry.get_cortex_registry', lambda: FakeRegistry())
+    monkeypatch.setattr('core.config.get_active_cortex_engine', lambda: asyncio.sleep(0, result='dummy'))
 
     try:
         await plugin_instance.run_action('compact_now', {'cycles':1, 'dry_run': True, 'marker': 'log-marker-99'})

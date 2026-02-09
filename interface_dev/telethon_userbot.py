@@ -13,7 +13,7 @@ import time
 import core.plugin_instance as plugin_instance
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.message_sender import detect_media_type, extract_response_target
-from core.config import set_active_llm, list_available_llms, get_active_llm
+from core.config import set_active_cortex_engine, list_available_cortex_engines, get_active_cortex_engine
 from telethon import TelegramClient, events, Button
 from telethon.tl.types import PeerUser, PeerChat, PeerChannel
 try:
@@ -28,7 +28,7 @@ from collections import deque
 import core.plugin_instance as plugin_instance
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.message_sender import detect_media_type, extract_response_target
-from core.config import set_active_llm, list_available_llms, get_active_llm
+from core.config import set_active_cortex_engine, list_available_cortex_engines, get_active_cortex_engine
 from core.interfaces_registry import get_interface_registry
 # from core import blocklist, response_proxy, say_proxy, recent_chats  # Moved to plugins
 from plugins.blocklist import block_user, unblock_user, get_blocked_users
@@ -114,7 +114,7 @@ def escape_markdown(text):
 async def ensure_plugin_loaded(event):
     if plugin_instance.plugin is None:
         try:
-            current = await get_active_llm()
+            current = await get_active_cortex_engine()
             if current:
                 await plugin_instance.load_plugin(current)
         except Exception as e:
@@ -190,7 +190,7 @@ async def help_command(event):
         return
     from core.context import get_context_state
     context_status = "active ✅" if get_context_state() else "inactive ❌"
-    llm_mode = "LLM managed centrally in initialize_core_components"
+    engine_mode = "Engine managed centrally in initialize_core_components"
     help_text = (
         f"🧞‍♀️ *synth – Available Commands*\n\n"
         "*🧠 Context Mode*\n"
@@ -205,8 +205,8 @@ async def help_command(event):
         "`.block <user_id>` – Block a user\n"
         "`.unblock <user_id>` – Unblock a user\n"
         "`.block_list` – List blocked users\n\n"
-        "*⚙️ LLM Mode*\n"
-        f"`.llm` – Show and select current engine (active: `{llm_mode}`)\n"
+        "*⚙️ Cortex Engine*\n"
+        f"`.llm` – Show and select cortex engine (active: `{engine_mode}`)\n"
         "\n*📋 Miscellaneous*\n"
         "`.last_chats` – Recent active chats\n"
     )
@@ -217,23 +217,23 @@ async def llm_command(event):
     if not is_trainer(event.sender_id):
         return
     args = event.pattern_match.group(1)
-    current = await get_active_llm()
-    available = list_available_llms()
+    current = await get_active_cortex_engine()
+    available = list_available_cortex_engines(None)
     if not args:
-        msg = f"*Active LLM:* `{current}`\n\n*Available:*"
+        msg = f"*Active engine:* `{current}`\n\n*Available:*"
         msg += "\n" + "\n".join(f"• `{name}`" for name in available)
         msg += "\n\nTo change: `.llm <name>`"
         await event.reply(msg, parse_mode="md")
         return
     choice = args.strip()
     if choice not in available:
-        await event.reply(f"❌ LLM `{choice}` not found.")
+        await event.reply(f"❌ Engine `{choice}` not found.")
         return
     try:
-        await set_active_llm(choice)
+        await set_active_cortex_engine(choice)
         
         # We don't load plugins here - that's the core's job
-        # The system will restart with the new LLM on next restart
+        # The system will restart with the new engine on next restart
         
         await event.reply(f"✅ LLM mode updated to `{choice}`. Restart to apply changes.")
     except Exception as e:

@@ -235,6 +235,156 @@ async def switch_active_llm(name: str, use_hot_swap: bool = True):
         finally:
             log_debug(f"[config] 🔓 Released LLM switch lock for '{name}'")
 
+
+# === Cortex Configuration (new) ===
+ACTIVE_CORTEX = config_registry.get_var(
+    "ACTIVE_CORTEX",
+    "llm",
+    label="Active Cortex",
+    description="The currently active cortex kind (llm, live, agent). Managed via Components tab.",
+    group="core",
+    component="core",
+)
+
+ACTIVE_CORTEX_ENGINE = config_registry.get_var(
+    "ACTIVE_CORTEX_ENGINE",
+    "manual",
+    label="Active Cortex Engine",
+    description="The currently active engine for the selected cortex. Managed via Components tab.",
+    group="core",
+    component="core",
+)
+
+async def get_active_cortex() -> str:
+    """Return the configured active cortex kind (llm, live, agent)."""
+    try:
+        current_value = config_registry.get_value("ACTIVE_CORTEX", "llm")
+        if current_value and current_value != "" and current_value != "None":
+            log_debug(f"[config] 🧠 Active Cortex: {current_value}")
+            return current_value
+    except Exception as e:
+        log_error(f"[config] ❌ Error reading ACTIVE_CORTEX: {repr(e)}")
+    return "llm"
+
+async def set_active_cortex(name: str):
+    """Persist the active cortex choice."""
+    try:
+        await config_registry.set_value("ACTIVE_CORTEX", name)
+        log_info(f"[config] 💾 Saved active cortex to database: {name}")
+    except Exception as e:
+        log_error(f"[config] ❌ Error saving ACTIVE_CORTEX: {repr(e)}")
+        raise
+
+async def get_active_cortex_engine() -> str:
+    """Return the configured active engine for the active cortex."""
+    try:
+        current_value = config_registry.get_value("ACTIVE_CORTEX_ENGINE", "manual")
+        if current_value and current_value != "" and current_value != "None":
+            log_debug(f"[config] 🧠 Active Cortex Engine: {current_value}")
+            return current_value
+    except Exception as e:
+        log_error(f"[config] ❌ Error reading ACTIVE_CORTEX_ENGINE: {repr(e)}")
+    return "manual"
+
+async def set_active_cortex_engine(name: str):
+    """Persist the active engine for the selected cortex."""
+    try:
+        await config_registry.set_value("ACTIVE_CORTEX_ENGINE", name)
+        log_info(f"[config] 💾 Saved active cortex engine to database: {name}")
+    except Exception as e:
+        log_error(f"[config] ❌ Error saving ACTIVE_CORTEX_ENGINE: {repr(e)}")
+        raise
+
+def list_available_cortexs() -> list[str]:
+    """Return known cortex kinds (derived from registered engines)."""
+    try:
+        from core.cortex_registry import get_cortex_registry
+        reg = get_cortex_registry()
+        kinds = set()
+        # inspect internal meta to discover cortex values
+        for name, meta in getattr(reg, "_engine_meta", {}).items():
+            c = meta.get("cortex")
+            if c:
+                kinds.add(c)
+        if not kinds:
+            return ["llm", "live", "agent"]
+        return sorted(list(kinds))
+    except Exception:
+        return ["llm", "live", "agent"]
+
+def list_available_cortex_engines(cortex: str | None = None) -> list[str]:
+    """Return engine names registered for a cortex (or all engines if cortex is None)."""
+    try:
+        from core.cortex_registry import get_cortex_registry
+        reg = get_cortex_registry()
+        return reg.get_available_engines(cortex)
+    except Exception:
+        return []
+
+async def switch_active_cortex_engine(name: str, use_hot_swap: bool = True):
+    """Switch the active engine for the current cortex.
+
+    Persists the choice and optionally hot-swaps the plugin. Mirrors the previous
+    `switch_active_llm` semantics but is cortex-aware.
+    """
+    from core.config import list_available_cortex_engines, get_active_cortex
+
+    available = list_available_cortex_engines(await get_active_cortex())
+    if name not in available:
+        raise ValueError(f"Engine '{name}' is not available for the active cortex. Available: {', '.join(available)}")
+
+    current = await get_active_cortex_engine()
+
+    def _get_loaded_plugin_name() -> str | None:
+        try:
+            from core import plugin_instance
+            loaded = getattr(plugin_instance, "plugin", None)
+            if loaded is None:
+                return None
+            return loaded.__class__.__module__.split(".")[-1]
+        except Exception:
+            return None
+
+    loaded_name = _get_loaded_plugin_name()
+    if name == current and loaded_name == name:
+        log_debug(f"[config] 🔄 Cortex Engine already active and loaded: {name}, no switch needed.")
+        return
+
+    # Simple lock reuse: use the same LLM switch lock to serialize modifications
+    async with _llm_switch_lock:
+        current = await get_active_cortex_engine()
+        loaded_name = _get_loaded_plugin_name()
+        if name == current and loaded_name == name:
+            log_debug(f"[config] 🔄 Cortex Engine already active and loaded under lock: {name}, no switch needed.")
+            return
+
+        try:
+            if name != current:
+                await set_active_cortex_engine(name)
+                log_info(f"[config] 🔄 Cortex engine switched from {current} to {name}")
+        except Exception as e:
+            log_error(f"[config] ❌ Error persisting active cortex engine '{name}': {e}", exc=e)
+            raise
+
+        try:
+            if use_hot_swap:
+                from core.plugin_instance import load_plugin
+                await load_plugin(name, ensure_started=True, start_timeout=30.0)
+                log_info(f"[config] ✅ Cortex engine hot-swapped to {name}")
+            else:
+                from core.core_initializer import core_initializer
+                await core_initializer.initialize_all()
+                log_info(f"[config] ✅ Cortex engine switched to {name} (full reinit)")
+        except Exception as e:
+            log_error(f"[config] ❌ Failed to switch cortex engine to {name}: {e}", exc=e)
+            try:
+                from core.notifier import notify_trainer
+                notify_trainer(f"❌ Failed to switch cortex engine to `{name}`: {e}")
+            except Exception:
+                pass
+            raise
+
+
 _log_chat_id: int | None = None  # cached log chat ID
 _log_chat_thread_id: int | None = None  # cached log chat thread ID
 _log_chat_interface: str | None = None  # cached log chat interface
@@ -405,12 +555,22 @@ def get_log_chat_thread_id_sync() -> int | None:
     return asyncio.run(get_log_chat_thread_id())
 
 def list_available_llms():
-    engines_dir = os.path.join(os.path.dirname(__file__), "../llm_engines")
-    return sorted(
-        fname.removesuffix(".py")
-        for fname in os.listdir(engines_dir)
-        if fname.endswith(".py") and not fname.startswith("__")
-    )
+    """Compatibility helper: return available LLM engine names from cortex registry (llm cortex)."""
+    try:
+        from core.cortex_registry import get_cortex_registry
+        reg = get_cortex_registry()
+        return sorted(reg.get_available_engines(cortex='llm'))
+    except Exception:
+        # Fallback for legacy layouts: inspect old llm_engines folder
+        engines_dir = os.path.join(os.path.dirname(__file__), "../llm_engines")
+        try:
+            return sorted(
+                fname.removesuffix(".py")
+                for fname in os.listdir(engines_dir)
+                if fname.endswith(".py") and not fname.startswith("__")
+            )
+        except Exception:
+            return []
 
 # Make ACTIVE_LLM visible in the Settings UI as a choice/combo, synced with available engines
 # We cannot re-register the key (it already exists), so update the internal definition if present.

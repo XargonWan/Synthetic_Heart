@@ -13,7 +13,7 @@ print("Testing core imports after refactoring...")
 
 try:
     print("1. Testing core.config...")
-    from core.config import get_active_llm
+    from core.config import get_active_cortex_engine
     print("   ✅ core.config imported successfully")
 except Exception as e:
     print(f"   ❌ core.config failed: {e}")
@@ -40,8 +40,8 @@ except Exception as e:
 
 try:
     print("4. Testing llm_engines.manual...")
-    from llm_engines.manual import ManualAIPlugin
-    print("   ✅ llm_engines.manual imported successfully")
+    from cortex.llm_engine.manual import ManualAIPlugin
+    print("   ✅ cortex.llm_engine.manual imported successfully")
 except Exception as e:
     print(f"   ❌ llm_engines.manual failed: {e}")
     import traceback

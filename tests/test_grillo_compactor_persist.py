@@ -57,8 +57,8 @@ async def test_persist_compaction_moves_to_archive_and_inserts_memory(monkeypatc
         def get_engine(self, name):
             return FakeEngine()
 
-    monkeypatch.setattr('core.llm_registry.get_llm_registry', lambda: FakeRegistry())
-    monkeypatch.setattr('core.config.get_active_llm', lambda: asyncio.sleep(0, result='selenium_chatgpt'))
+    monkeypatch.setattr('core.cortex_registry.get_cortex_registry', lambda: FakeRegistry())
+    monkeypatch.setattr('core.config.get_active_cortex_engine', lambda: asyncio.sleep(0, result='selenium_chatgpt'))
 
     # Capture insert_memory calls
     called = {}

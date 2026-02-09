@@ -31,7 +31,7 @@ from telegram.ext import (
     filters,
 )
 from dotenv import load_dotenv  # type: ignore
-from llm_engines.manual import ManualAIPlugin
+from cortex.llm_engine.manual import ManualAIPlugin
 from plugins.blocklist import block_user, unblock_user, get_blocked_users
 from plugins.message_map import init_message_map_table, cleanup_old_mappings
 from core import response_proxy
@@ -53,9 +53,9 @@ from core.message_sender import (
     extract_response_target,
 )
 from core.config import (
-    get_active_llm,
-    set_active_llm,
-    list_available_llms,
+    get_active_cortex_engine,
+    set_active_cortex_engine,
+    list_available_cortex_engines,
     get_log_chat_id,
     set_log_chat_id_and_thread,
     get_log_chat_id_sync,
@@ -169,7 +169,7 @@ async def ensure_plugin_loaded(update: Update):
     if plugin_instance.plugin is None:
         log_warning("[telegram_bot] No plugin loaded, attempting to load...")
         try:
-            current = await get_active_llm()
+            current = await get_active_cortex_engine()
             log_debug(f"[telegram_bot] Active LLM from config: {current}")
             if current:
                 log_debug(f"[telegram_bot] Loading plugin: {current}")
@@ -915,7 +915,7 @@ async def llm_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     log_info(f"[telegram_bot] LLM command args: {args}")
     
-    current = await get_active_llm()
+    current = await get_active_cortex_engine()
     available = list_available_llms()
 
     if not args:

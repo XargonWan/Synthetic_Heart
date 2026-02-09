@@ -5,7 +5,7 @@ import inspect
 from core.logging_utils import log_debug
 import core.plugin_instance as plugin_instance
 from core.context import get_context_state
-from core.config import get_active_llm
+from core.config import get_active_cortex_engine
 
 CommandHandler = Callable[..., Awaitable[str]]
 
@@ -88,7 +88,7 @@ async def handle_command_message(command_text: str, user_id: int = None, interfa
 async def help_command() -> str:
     """Generate help text shared across interfaces."""
     context_status = "active ✅" if get_context_state() else "inactive ❌"
-    llm_mode = await get_active_llm()
+    engine_mode = await get_active_cortex_engine()
 
     help_text = (
         "🧞‍♀️ *synth – Available Commands*\n\n"
@@ -104,8 +104,8 @@ async def help_command() -> str:
         "`/block <user_id>` – Block a user\n"
         "`/unblock <user_id>` – Unblock a user\n"
         "`/block_list` – List blocked users\n\n"
-        "*⚙️ LLM Mode*\n"
-        f"`/llm` – Show and select current engine (active: `{llm_mode}`)\n"
+        "*⚙️ Cortex Engine*\n"
+        f"`/components` – Show and select Cortex kind and engine (active engine: `{engine_mode}`)\n"
     )
 
     try:
@@ -257,28 +257,28 @@ register_command("status", status_command)
 
 
 async def llm_command(*args) -> str:
-    """Handle LLM switching command."""
-    from core.config import get_active_llm, set_active_llm, list_available_llms
-    
-    current = await get_active_llm()
-    available = list_available_llms()
+    """Handle cortex engine switching command (legacy LLM command)."""
+    from core.config import get_active_cortex_engine, list_available_cortex_engines
+
+    current = await get_active_cortex_engine()
+    available = list_available_cortex_engines(None)
 
     if not args:
-        msg = f"*Active LLM:* `{current}`\n\n*Available:*"
+        msg = f"*Active engine:* `{current}`\n\n*Available:*"
         msg += "\n" + "\n".join(f"• `{name}`" for name in available)
-        msg += "\n\nTo change: `/llm <name>`"
+        msg += "\n\nTo change: `/components set_active_cortex_engine <name>`"
         return msg
 
     choice = args[0]
     if choice not in available:
-        return f"❌ LLM `{choice}` not found."
+        return f"❌ Engine `{choice}` not found."
 
     try:
         # Use centralized switching helper to ensure consistent behavior and notifications
-        from core.config import switch_active_llm
-        await switch_active_llm(choice, use_hot_swap=False)
+        from core.config import switch_active_cortex_engine
+        await switch_active_cortex_engine(choice, use_hot_swap=False)
         
-        return f"✅ LLM mode dynamically updated to `{choice}`."
+        return f"✅ Cortex engine dynamically updated to `{choice}`."
     except Exception as e:
         return f"❌ Error loading plugin: {e}"
 

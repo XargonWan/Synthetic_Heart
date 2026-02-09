@@ -98,8 +98,8 @@ The project ships with an **Ollama-compatible interface** (`interface/ollama_com
 4. Connect to the WebUI via https (default port is 8000)
 
 Note: The default compose configuration is now turnkey — the image ships with built-in skins and uses Docker-managed volumes for logs and skins so a fresh clone should work with a single `docker compose up -d` command. The WebUI is served over HTTPS at `https://localhost:8000` by default (a self-signed certificate is generated automatically if none is provided). If the database is initializing the first run, give it a few seconds; the service will retry until the DB is ready.
-5. Once in the WebUI navigate to components and select the desired LLM Engine.
-6. If using the Selenium engine (such as ChatGPT or Gemini), don't forget to press the Login button and log into the web interface.
+5. Once in the WebUI navigate to the Components tab. First select the *Cortex* kind (e.g., `llm`, `live`, `agent`), then choose the specific engine for that cortex (e.g., `selenium_chatgpt` for an LLM, `gemini_live` for live mode).
+6. If using a Selenium-based engine (such as ChatGPT or a Selenium connector for Gemini), don't forget to press the Login button and sign into the provider's web interface.
 From there you can login.
 
 **NOTE:** skins folder is optional if the user is not interested in edit them. In this case, however, the mount point for the skins folder on the docker compose should be commented out, else an empty skin folder will be mounted overriding the included one.

@@ -1,8 +1,8 @@
 # core/plugin_instance.py
 
-from core.config import get_active_llm, set_active_llm
+from core.config import get_active_cortex_engine, set_active_cortex_engine
 from core.prompt_engine import build_json_prompt
-from core.llm_registry import get_llm_registry
+from core.cortex_registry import get_cortex_registry
 import asyncio
 from types import SimpleNamespace
 from datetime import datetime
@@ -74,16 +74,25 @@ async def load_plugin(name: str, notify_fn=None, *, ensure_started: bool = False
             return
 
     try:
-        registry = get_llm_registry()
+        registry = get_cortex_registry()
         plugin_instance = registry.load_engine(name, notify_fn)
     except Exception as e:
-        # Fallback: try to load the plugin directly from llm_engines module
+        # Fallback: try to load the plugin directly from conventional cortex paths
         # This allows plugins to work even if they weren't registered during auto-discovery
         log_warning(f"[plugin] Registry load failed ({e}), attempting direct module load for {name}")
         try:
             import importlib
-            module_path = f"llm_engines.{name}"
-            module = importlib.import_module(module_path)
+            # Attempt cortex engine conventions (llm or live)
+            module = None
+            for candidate in (f"cortex.llm_engine.{name}", f"cortex.live.{name}"):
+                try:
+                    module = importlib.import_module(candidate)
+                    module_path = candidate
+                    break
+                except ModuleNotFoundError:
+                    continue
+            if module is None:
+                raise ModuleNotFoundError(f"Could not import any cortex module for {name}")
             
             if not hasattr(module, "PLUGIN_CLASS"):
                 log_error(f"[plugin] ❌ Module {module_path} does not define PLUGIN_CLASS")

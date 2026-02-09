@@ -352,10 +352,10 @@ class AgentCore:
 
     async def attach_to_active_engine(self) -> None:
         try:
-            from core.config import get_active_llm
-            from core.llm_registry import get_llm_registry
-            name = await get_active_llm()
-            reg = get_llm_registry()
+            from core.config import get_active_cortex_engine
+            from core.cortex_registry import get_cortex_registry
+            name = await get_active_cortex_engine()
+            reg = get_cortex_registry()
             engine = None
             if hasattr(reg, 'get_engine'):
                 engine = reg.get_engine(name)

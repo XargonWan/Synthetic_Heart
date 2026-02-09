@@ -146,8 +146,8 @@ async def test_preflight_corrector_invoked_on_malformed_json(monkeypatch):
             return FakeEngine()
 
     # Patch get_active_llm and registry
-    monkeypatch.setattr('core.config.get_active_llm', lambda: 'fake')
-    monkeypatch.setattr('core.llm_registry.get_llm_registry', lambda: FakeRegistry())
+    monkeypatch.setattr('core.config.get_active_cortex_engine', lambda: 'fake')
+    monkeypatch.setattr('core.cortex_registry.get_cortex_registry', lambda: FakeRegistry())
 
     # Corrector will fix the malformed JSON into valid one
     async def fake_corrector(text, bot=None, context=None, chat_id=None, thread_id=None):

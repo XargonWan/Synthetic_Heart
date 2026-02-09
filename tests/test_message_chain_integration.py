@@ -25,7 +25,7 @@ class TestMessageChainIntegration(unittest.TestCase):
         self.db_patcher = patch('core.db.get_conn', new_callable=AsyncMock)
         self.db_patcher.start()
 
-        self.llm_patcher = patch('core.config.get_active_llm', return_value={'engine': 'manual'})
+        self.llm_patcher = patch('core.config.get_active_cortex_engine', return_value='manual')
         self.llm_patcher.start()
 
         self.interface_patcher = patch('core.transport_layer.llm_to_interface', new_callable=AsyncMock)

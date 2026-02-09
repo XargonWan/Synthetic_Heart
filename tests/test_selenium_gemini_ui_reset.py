@@ -1,4 +1,4 @@
-from llm_engines.selenium_gemini import SeleniumGeminiPlugin
+from cortex.llm_engine.selenium_gemini import SeleniumGeminiPlugin
 
 
 class DummyButton:

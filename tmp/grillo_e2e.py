@@ -56,9 +56,9 @@ async def run_compactor(dry_run=True, marker=None):
     # Force the active LLM to 'manual' for E2E testing so we use the bundled manual engine
     try:
         import core.config as _conf
-        async def _fake_get_active_llm():
+        async def _fake_get_active_cortex_engine():
             return 'manual'
-        _conf.get_active_llm = _fake_get_active_llm
+        _conf.get_active_cortex_engine = _fake_get_active_cortex_engine
     except Exception:
         pass
     GrilloCompactorPlugin = getattr(mod, 'GrilloCompactorPlugin')
@@ -66,12 +66,12 @@ async def run_compactor(dry_run=True, marker=None):
     # Ensure registry has a usable engine for 'selenium_chatgpt' by loading 'manual' and mapping it
     try:
         import importlib
-        m = importlib.import_module('llm_engines.manual')
+        m = importlib.import_module('cortex.llm_engine.manual')
         engine = getattr(m, 'PLUGIN_CLASS')()
-        from core.llm_registry import get_llm_registry
-        reg = get_llm_registry()
+        from core.cortex_registry import get_cortex_registry
+        reg = get_cortex_registry()
         reg._engines['selenium_chatgpt'] = engine
-        reg._engine_modules['selenium_chatgpt'] = 'llm_engines.manual'
+        reg._engine_modules['selenium_chatgpt'] = 'cortex.llm_engine.manual'
     except Exception as e:
         print('Failed to map selenium_chatgpt -> manual:', e)
         pass
@@ -123,15 +123,15 @@ async def run_compactor(dry_run=True, marker=None):
     except Exception as e:
         print('Failed binding fake clusterer:', e)
         pass
-    # Patch get_active_llm to return 'manual' at runtime to ensure the plugin loads a usable engine
+    # Patch get_active_cortex_engine to return 'manual' at runtime to ensure the plugin loads a usable engine
     try:
         import core.config as _conf
-        async def _fake_get_active_llm2():
+        async def _fake_get_active_engine2():
             return 'manual'
-        _conf.get_active_llm = _fake_get_active_llm2
-        print('Patched core.config.get_active_llm to return manual')
+        _conf.get_active_cortex_engine = _fake_get_active_engine2
+        print('Patched core.config.get_active_cortex_engine to return manual')
     except Exception as e:
-        print('Failed patch get_active_llm:', e)
+        print('Failed patch get_active_cortex_engine:', e)
         pass
     res = await p.run_action('compact_now', payload={'cycles':1, 'dry_run': dry_run, 'marker': marker})
     print('run_action result:', res)

@@ -28,7 +28,7 @@ class TestComponentLoading(unittest.TestCase):
         self.db_patcher = patch('core.db.get_conn', new_callable=AsyncMock)
         self.db_patcher.start()
 
-        self.llm_patcher = patch('core.config.get_active_llm', return_value={'engine': 'manual'})
+        self.llm_patcher = patch('core.config.get_active_cortex_engine', return_value='manual')
         self.llm_patcher.start()
 
     def tearDown(self):
@@ -134,7 +134,7 @@ class TestComponentLoading(unittest.TestCase):
             mock_file = MagicMock()
             mock_file.name = 'test_engine.py'
             mock_file.relative_to.return_value = 'llm_engines/test_engine'
-            mock_file.with_suffix.return_value = 'llm_engines.test_engine'
+            mock_file.with_suffix.return_value = 'cortex.llm_engine.test_engine'
             mock_rglob.return_value = [mock_file]
 
             # Mock module with PLUGIN_CLASS

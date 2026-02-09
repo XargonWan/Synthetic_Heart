@@ -160,25 +160,25 @@ async def llm_memory_search_preflight(
         return []
 
     # Do not run LLM preflight for manual mode (it would spam the trainer)
-    active_llm = None
+    active_engine = None
     engine = None
     try:
-        from core.config import get_active_llm
-        from core.llm_registry import get_llm_registry
+        from core.config import get_active_cortex_engine
+        from core.cortex_registry import get_cortex_registry
 
-        active_llm = await get_active_llm()
-        if active_llm and str(active_llm).lower() == "manual":
+        active_engine = await get_active_cortex_engine()
+        if active_engine and str(active_engine).lower() == "manual":
             return []
 
-        registry = get_llm_registry()
-        engine = registry.get_engine(active_llm)
+        registry = get_cortex_registry()
+        engine = registry.get_engine(active_engine)
         if not engine:
-            engine = registry.load_engine(active_llm)
+            engine = registry.load_engine(active_engine)
 
         if not engine or not hasattr(engine, "generate_response"):
             return []
     except Exception as e:
-        log_debug(f"[json_prompt] LLM preflight: unable to load active engine ({active_llm}): {e}")
+        log_debug(f"[json_prompt] LLM preflight: unable to load active engine ({active_engine}): {e}")
         return []
 
     # Try to include only the memory_search schema so the model stays on-rails
@@ -947,15 +947,15 @@ async def build_json_prompt(message, context_memory, interface_name: str | None 
         if max_chars is None:
             try:
                 # Local imports to avoid module-level cycles
-                from core.config import get_active_llm
-                from core.llm_registry import get_llm_registry
+                from core.config import get_active_cortex_engine
+                from core.cortex_registry import get_cortex_registry
 
-                active_llm = await get_active_llm()
-                registry = get_llm_registry()
-                engine = registry.get_engine(active_llm)
+                active_engine = await get_active_cortex_engine()
+                registry = get_cortex_registry()
+                engine = registry.get_engine(active_engine)
 
                 if not engine:
-                    engine = registry.load_engine(active_llm)
+                    engine = registry.load_engine(active_engine)
 
                 if engine and hasattr(engine, 'get_interface_limits'):
                     limits = engine.get_interface_limits()

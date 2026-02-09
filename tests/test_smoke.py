@@ -63,17 +63,18 @@ class TestSmoke(unittest.TestCase):
     def test_llm_engine_imports(self):
         """Test that LLM engine modules can be imported."""
         try:
-            import llm_engines.manual
+            import cortex.llm_engine.manual
         except Exception as e:
             self.skipTest(f"LLM engine import failed: {e}")
 
     def test_config_loading(self):
         """Test that configuration can be loaded."""
         try:
-            from core.config import get_active_llm
+            from core.config import get_active_cortex_engine
             # Should not crash
-            llm = get_active_llm()
-            self.assertIsInstance(llm, dict)
+            engine = get_active_cortex_engine()
+            # Engine should be a string name or None
+            self.assertTrue(isinstance(engine, str) or engine is None)
         except Exception as e:
             self.skipTest(f"Config loading failed: {e}")
 
@@ -81,13 +82,13 @@ class TestSmoke(unittest.TestCase):
         """Test that registries can be initialized."""
         try:
             from core.interfaces_registry import get_interface_registry
-            from core.llm_registry import get_llm_registry
+            from core.cortex_registry import get_cortex_registry
 
             interface_registry = get_interface_registry()
-            llm_registry = get_llm_registry()
+            cortex_registry = get_cortex_registry()
 
             self.assertIsNotNone(interface_registry)
-            self.assertIsNotNone(llm_registry)
+            self.assertIsNotNone(cortex_registry)
         except Exception as e:
             self.skipTest(f"Registry initialization failed: {e}")
 

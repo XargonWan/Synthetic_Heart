@@ -74,10 +74,10 @@ async def test_run_one_compaction_cycle_basic(monkeypatch):
         def get_engine(self, name):
             return FakeEngine()
 
-    monkeypatch.setattr('core.llm_registry.get_llm_registry', lambda: FakeRegistry())
+    monkeypatch.setattr('core.cortex_registry.get_cortex_registry', lambda: FakeRegistry())
 
-    # Ensure active LLM name resolves without DB access
-    monkeypatch.setattr('core.config.get_active_llm', lambda: asyncio.sleep(0, result='selenium_chatgpt'))
+    # Ensure active engine name resolves without DB access
+    monkeypatch.setattr('core.config.get_active_cortex_engine', lambda: asyncio.sleep(0, result='selenium_chatgpt'))
 
     # Run one cycle
     res = await p._run_one_compaction_cycle()
@@ -138,8 +138,8 @@ async def test_tag_selection_fallback(monkeypatch):
         def get_engine(self, name):
             return FakeEngine2()
 
-    monkeypatch.setattr('core.llm_registry.get_llm_registry', lambda: FakeRegistry2())
-    monkeypatch.setattr('core.config.get_active_llm', lambda: asyncio.sleep(0, result='selenium_chatgpt'))
+    monkeypatch.setattr('core.cortex_registry.get_cortex_registry', lambda: FakeRegistry2())
+    monkeypatch.setattr('core.config.get_active_cortex_engine', lambda: asyncio.sleep(0, result='selenium_chatgpt'))
 
     res = await p._run_one_compaction_cycle()
     assert res is True
