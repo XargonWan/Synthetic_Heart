@@ -2373,6 +2373,36 @@ class SynthWebUIInterface:
             safe = "avatar"
         return f"{safe}_{uuid.uuid4().hex[:8]}.vrm"
 
+    def _detect_vrm_version(self, vrm_path: Path) -> str:
+        """Detect VRM version (0.x or 1.0) by sniffing GLB extensions."""
+        try:
+            with open(vrm_path, 'rb') as f:
+                header = f.read(12)
+                if header[:4] != b'glTF':
+                    return "Unknown"
+                
+                # GLB format: header(12), then chunks.
+                # First chunk is always JSON.
+                chunk_length = int.from_bytes(f.read(4), 'little')
+                chunk_type = f.read(4)
+                if chunk_type != b'JSON':
+                    return "Unknown"
+                
+                # Read JSON chunk and parse extensions
+                import json
+                json_data = f.read(chunk_length)
+                data = json.loads(json_data.decode('utf-8', errors='ignore'))
+                extensions = data.get('extensionsUsed', [])
+                if 'VRMC_vrm' in extensions:
+                    return "1.0"
+                if 'VRM' in extensions:
+                    return "0.x"
+                return "Unknown"
+        except Exception as e:
+            from core.logging_utils import log_debug
+            log_debug(f"[webui] VRM version detection failed for {vrm_path}: {e}")
+            return "Unknown"
+
     def _models_payload(self) -> dict:
         models: List[dict] = []
         for path in sorted(self.vrm_dir.glob("*.vrm")):
@@ -5693,6 +5723,7 @@ class SynthWebUIInterface:
             version = None
             author = None
             description = None
+            vrm_version = None
             
             try:
                 # Check for preview image
@@ -5700,6 +5731,16 @@ class SynthWebUIInterface:
                 if preview_path.exists():
                     preview = f"/skins/{name}/preview.png"
                 
+                # check for vrm - only check in direct directory, not recursive, for speed
+                vrm_file_path = None
+                for v in entry.glob('*.vrm'):
+                    vrm_present = True
+                    vrm_file_path = v
+                    break
+                
+                if vrm_file_path:
+                    vrm_version = self._detect_vrm_version(vrm_file_path)
+
                 # Try to load metadata from persona.json
                 persona_json_path = entry / 'persona.json'
                 if persona_json_path.exists():
@@ -5710,16 +5751,14 @@ class SynthWebUIInterface:
                         version = persona_data.get("version")
                         author = persona_data.get("author")
                         description = persona_data.get("description")
+                        # Override vrm_version if explicitly set in JSON
+                        if "vrm_version" in persona_data:
+                            vrm_version = persona_data["vrm_version"]
                         # Use name from JSON if available
                         if not name or name == entry.name:
                             name = persona_data.get("name", entry.name)
                     except Exception as e:
                         log_debug(f"[webui] Error reading persona.json for skin '{entry.name}': {e}")
-                
-                # check for vrm - only check in direct directory, not recursive, for speed
-                for v in entry.glob('*.vrm'):
-                    vrm_present = True
-                    break
             except Exception as e:
                 log_warning(f"[webui] Error scanning skin '{name}': {e}")
             
@@ -5727,6 +5766,7 @@ class SynthWebUIInterface:
                 'name': name,
                 'folder': entry.name,  # Keep original folder name for reference
                 'version': version,
+                'vrm_version': vrm_version,
                 'author': author,
                 'description': description,
                 'preview_url': preview,

@@ -644,7 +644,9 @@ import * as THREE from 'three';
                                             if (!st.timing) st.timing = {};
                                             if (!st.timing.started_at) st.timing.started_at = new Date().toISOString();
                                             if (!st.clip) st.clip = { fps: 30 };
-                                            try { this.applyExpressionsForFrame(st, 0.033); } catch (e) { /* ignore */ }
+                                            // Use a large dt for the one-shot apply so debug overrides feel instant 
+                                            // if the main loop is not already running.
+                                            try { this.applyExpressionsForFrame(st, 0.5); } catch (e) { /* ignore */ }
                                             try { this._flushFaceNow(); } catch (e) { /* ignore */ }
                                         } catch (e) { /* ignore */ }
                                     });
@@ -654,6 +656,11 @@ import * as THREE from 'three';
                         }
                         const v = Math.max(0, Math.min(1, Number(intensity) || 0));
                         this._debugEmotionOverrides[k] = v;
+
+                        // Start expression ticking loop if not already running (ensures smooth transition and updates)
+                        if (!this._expressionsTicking) {
+                            try { this.applyAnimationState(this._lastAnimationState || { action: 'idle' }); } catch (e) { /* ignore */ }
+                        }
 
                         // Apply immediately (useful during pause or before any animation_state arrives).
                         try {
@@ -666,7 +673,8 @@ import * as THREE from 'three';
                                         if (!st.timing) st.timing = {};
                                         if (!st.timing.started_at) st.timing.started_at = new Date().toISOString();
                                         if (!st.clip) st.clip = { fps: 30 };
-                                        try { this.applyExpressionsForFrame(st, 0.033); } catch (e) { /* ignore */ }
+                                        // Use a large dt for the one-shot apply so debug overrides feel instant
+                                        try { this.applyExpressionsForFrame(st, 0.5); } catch (e) { /* ignore */ }
                                         try { this._flushFaceNow(); } catch (e) { /* ignore */ }
                                     } catch (e) { /* ignore */ }
                                 });

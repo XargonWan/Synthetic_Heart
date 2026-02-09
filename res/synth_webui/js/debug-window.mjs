@@ -94,7 +94,17 @@ export function createDebugWindow() {
                     <div style="margin-top:8px;font-size:11px;color:var(--text-soft);">Loaded: <span id="synth-debug-loop-loaded">0</span></div>
                 </div>
 
-                <!-- Feelings panel removed -->
+                <div class="card" style="margin:0;">
+                    <h2 style="margin:0 0 8px 0;">Feelings</h2>
+                    <div id="synth-debug-feelings-warning" style="display:none;margin-bottom:8px;padding:6px 10px;background:rgba(255,165,0,0.1);border:1px solid rgba(255,165,0,0.3);border-radius:8px;font-size:11px;color:#ffa500;line-height:1.3;">
+                        ⚠️ VRM 0.x detected. Feeling overrides support is not yet stable for this model version.
+                    </div>
+                    <div id="synth-debug-feelings-list" style="max-height:240px;overflow:auto;display:flex;flex-direction:column;gap:8px;"></div>
+                    <div style="display:flex;gap:8px;margin-top:8px;">
+                        <button id="synth-debug-feelings-reset-upstream" class="pill" type="button" style="flex:1;">Reset Upstream</button>
+                        <button id="synth-debug-feelings-reset-zero" class="pill secondary" type="button" style="flex:1;">Reset All 0</button>
+                    </div>
+                </div>
 
                 <div class="card" style="margin:0;">
                     <h2 style="margin:0 0 8px 0;">Facial Morphs</h2>
@@ -794,7 +804,131 @@ export function createDebugWindow() {
             } catch (e) { /* ignore */ }
         };
 
-        // Feelings UI removed — debug window no longer exposes emotion override controls
+        // Feelings UI
+        const extractEmotionValues = () => {
+            try {
+                if (window.animationHandler && window.animationHandler._lastFeelings) return window.animationHandler._lastFeelings;
+                return window.__synth_debug_cached_emotions || {};
+            } catch (e) { return {}; }
+        };
+
+        const getFeelingKeys = () => {
+            try {
+                const personaEmotionKeys = (window.__synth_persona_emotions_list && Array.isArray(window.__synth_persona_emotions_list)) ? window.__synth_persona_emotions_list : [];
+                const canonical = [
+                    'valence', 'arousal', 'stress', 'calm',
+                    'happy', 'sad', 'angry', 'surprised', 'relaxed', 'neutral',
+                    'scared', 'fear', 'disgust', 'curiosity', 'gratitude', 'empathy', 'trust'
+                ];
+                return Array.from(new Set([...personaEmotionKeys, ...canonical]))
+                    .map(String)
+                    .filter(k => k && !/^\d+$/.test(k))
+                    .sort();
+            } catch (e) {
+                return [];
+            }
+        };
+
+        let feelingRows = [];
+        const renderFeelingsList = () => {
+            try {
+                const feelingsList = win.querySelector('#synth-debug-feelings-list');
+                const feelingsWarning = win.querySelector('#synth-debug-feelings-warning');
+                if (!feelingsList) return;
+
+                // Handle VRM 0.x warning
+                try {
+                    const caps = window.__synth_vrm_capabilities || null;
+                    const isVrm0 = caps && (caps.metaVersion === '0' || caps.version === '0.0' || !caps.hasExpressionManager);
+                    if (feelingsWarning) {
+                        feelingsWarning.style.display = isVrm0 ? 'block' : 'none';
+                    }
+                } catch (e) { /* ignore */ }
+
+                const keys = getFeelingKeys();
+                const overrides = (window.animationHandler && typeof window.animationHandler.getDebugEmotionOverrides === 'function') ? window.animationHandler.getDebugEmotionOverrides() : {};
+
+                feelingsList.innerHTML = '';
+                feelingRows = [];
+
+                keys.forEach((k) => {
+                    const row = document.createElement('div');
+                    row.style.display = 'grid';
+                    row.style.gridTemplateColumns = '1fr 140px 56px 48px';
+                    row.style.alignItems = 'center';
+                    row.style.gap = '8px';
+
+                    const label = document.createElement('div');
+                    label.style.fontSize = '12px';
+                    label.style.color = 'var(--text)';
+                    label.style.overflow = 'hidden';
+                    label.style.textOverflow = 'ellipsis';
+                    label.style.whiteSpace = 'nowrap';
+                    label.title = k;
+                    label.textContent = k;
+
+                    const slider = document.createElement('input');
+                    slider.type = 'range';
+                    slider.min = '0';
+                    slider.max = '1';
+                    slider.step = '0.01';
+                    
+                    // Current value from overrides OR from animationHandler's base state
+                    let startVal = 0;
+                    if (overrides[k] !== undefined) {
+                        startVal = overrides[k];
+                    } else if (window.animationHandler && window.animationHandler._lastFeelings && window.animationHandler._lastFeelings[k] !== undefined) {
+                        const raw = window.animationHandler._lastFeelings[k];
+                        startVal = (raw > 1) ? raw / 10.0 : raw;
+                    }
+
+                    slider.value = String(clamp01(startVal));
+
+                    const num = document.createElement('input');
+                    num.type = 'number';
+                    num.min = '0';
+                    num.max = '1';
+                    num.step = '0.01';
+                    num.value = slider.value;
+                    num.style.padding = '6px';
+                    num.style.borderRadius = '8px';
+                    num.style.background = 'rgba(255,255,255,0.02)';
+                    num.style.border = '1px solid var(--border)';
+                    num.style.color = 'var(--text)';
+
+                    const cur = document.createElement('div');
+                    cur.style.fontSize = '11px';
+                    cur.style.color = 'var(--text-soft)';
+                    cur.textContent = '—';
+
+                    const apply = (v) => {
+                        const vv = clamp01(v);
+                        slider.value = String(vv);
+                        num.value = String(vv);
+                        try {
+                            if (window.animationHandler && window.animationHandler.setDebugEmotionOverride) {
+                                window.animationHandler.setDebugEmotionOverride(k, vv);
+                                console.debug('[debug-window] applied emotion override', k, vv);
+                            } else {
+                                window.__synth_pending_debug_actions = window.__synth_pending_debug_actions || [];
+                                window.__synth_pending_debug_actions.push({ type: 'setDebugEmotionOverride', key: k, value: vv });
+                            }
+                        } catch (e) { console.warn('[debug-window] apply feeling failed', e); }
+                    };
+
+                    slider.addEventListener('input', () => apply(slider.value));
+                    num.addEventListener('change', () => apply(num.value));
+
+                    row.appendChild(label);
+                    row.appendChild(slider);
+                    row.appendChild(num);
+                    row.appendChild(cur);
+                    feelingsList.appendChild(row);
+
+                    feelingRows.push({ key: k, curEl: cur, sliderEl: slider, numEl: num });
+                });
+            } catch (e) { console.warn('[debug-window] renderFeelingsList failed', e); }
+        };
 
         // Facial morph UI (full impl)
         const getFaceKeys = () => {
@@ -941,6 +1075,45 @@ export function createDebugWindow() {
             } catch (e) { /* ignore */ }
         };
 
+        // Bind feelings controls
+        try {
+            const feelingsResetUpstream = win.querySelector('#synth-debug-feelings-reset-upstream');
+            const feelingsResetZero = win.querySelector('#synth-debug-feelings-reset-zero');
+            
+            if (feelingsResetUpstream) {
+                feelingsResetUpstream.addEventListener('click', () => {
+                    try {
+                        if (window.animationHandler && window.animationHandler.clearDebugEmotionOverrides) {
+                            window.animationHandler.clearDebugEmotionOverrides();
+                        } else {
+                            window.__synth_pending_debug_actions = window.__synth_pending_debug_actions || [];
+                            window.__synth_pending_debug_actions.push({ type: 'clearDebugEmotionOverrides' });
+                        }
+                        console.debug('[debug-window] feelings reset to upstream');
+                    } catch (e) { /* ignore */ }
+                    try { renderFeelingsList(); } catch (e) {}
+                });
+            }
+            
+            if (feelingsResetZero) {
+                feelingsResetZero.addEventListener('click', () => {
+                    try {
+                        const keys = getFeelingKeys();
+                        keys.forEach(k => {
+                            if (window.animationHandler && window.animationHandler.setDebugEmotionOverride) {
+                                window.animationHandler.setDebugEmotionOverride(k, 0);
+                            } else {
+                                window.__synth_pending_debug_actions = window.__synth_pending_debug_actions || [];
+                                window.__synth_pending_debug_actions.push({ type: 'setDebugEmotionOverride', key: k, value: 0 });
+                            }
+                        });
+                        console.debug('[debug-window] feelings reset to zero locally');
+                    } catch (e) { /* ignore */ }
+                    try { renderFeelingsList(); } catch (e) {}
+                });
+            }
+        } catch (e) { /* ignore */ }
+
         // Bind face controls (feelings UI removed)
         try {
             const faceFilter = win.querySelector('#synth-debug-face-filter');
@@ -970,6 +1143,7 @@ export function createDebugWindow() {
                         console.debug('[debug-window] queued clearDebugFaceOverrides');
                     } catch (e) { /* ignore */ }
                     try { renderFaceList(); } catch (e) {}
+                    try { renderFeelingsList(); } catch (e) {}
                 });
             }
         } catch (e) { /* ignore */ }
@@ -1034,6 +1208,20 @@ export function createDebugWindow() {
                             } catch (e) { /* ignore */ }
                         });
                     }
+
+                    // refresh feelings current values
+                    if (window.animationHandler && feelingRows && feelingRows.length) {
+                        feelingRows.forEach((r) => {
+                            try {
+                                let vv = 0;
+                                if (window.animationHandler._lastFeelings && window.animationHandler._lastFeelings[r.key] !== undefined) {
+                                    const raw = window.animationHandler._lastFeelings[r.key];
+                                    vv = (raw > 1) ? raw / 10.0 : raw;
+                                }
+                                if (r.curEl) r.curEl.textContent = Number.isFinite(vv) ? vv.toFixed(2) : '—';
+                            } catch (e) { /* ignore */ }
+                        });
+                    }
                 } catch (e) { /* ignore */ }
             }, 300);
 
@@ -1056,6 +1244,7 @@ export function createDebugWindow() {
 
             // Initial render
             renderFaceList();
+            renderFeelingsList();
             try {
                 if (pauseBtn) {
                     pauseBtn.textContent = isPaused() ? '▶️' : '⏸️';
@@ -1078,7 +1267,11 @@ export function createDebugWindow() {
                                     try {
                                         if (persona && persona.emotions && typeof persona.emotions === 'object') {
                                             window.__synth_persona_emotions_list = Object.keys(persona.emotions);
-                                            /* feelings panel removed */
+                                            // Crucial: populate the shared presets used by AnimationHandler for resolution
+                                            if (!window.__synth_emotion_face_presets) {
+                                                window.__synth_emotion_face_presets = persona.emotions;
+                                            }
+                                            try { renderFeelingsList(); } catch (e) {}
                                         }
                                     } catch (e) { /* ignore */ }
                                 }).catch(() => {});
@@ -1096,7 +1289,10 @@ export function createDebugWindow() {
                                             const j = await r.json();
                                             if (j && j.emotions && typeof j.emotions === 'object') {
                                                 window.__synth_persona_emotions_list = Object.keys(j.emotions);
-                                                /* feelings panel removed */
+                                                if (!window.__synth_emotion_face_presets) {
+                                                    window.__synth_emotion_face_presets = j.emotions;
+                                                }
+                                                try { renderFeelingsList(); } catch (e) {}
                                             }
                                         }
                                     } catch (e) { /* ignore */ }
@@ -1109,7 +1305,7 @@ export function createDebugWindow() {
                 if (!window.__synth_debug_on_vrm_loaded) {
                     window.__synth_debug_on_vrm_loaded = () => {
                         try { renderFaceList(); } catch (e) { /* ignore */ }
-                        try { /* feelings panel removed */ } catch (e) { /* ignore */ }
+                        try { renderFeelingsList(); } catch (e) { /* ignore */ }
                         try { autofillLoopInputs(); } catch (e) { /* ignore */ }
                         // Try to refresh loop files now that VRM and animations are likely available
                         try {
@@ -1215,6 +1411,13 @@ export function createDebugWindow() {
                                             }
                                         }
 
+                                        // Apply emotion override actions
+                                        else if (act.type === 'setDebugEmotionOverride') {
+                                            if (window.animationHandler && typeof window.animationHandler.setDebugEmotionOverride === 'function') {
+                                                try { window.animationHandler.setDebugEmotionOverride(act.key, act.value); applied = true; } catch (e) { applied = false; }
+                                            }
+                                        }
+
                                         // Handle clear action
                                         else if (act.type === 'clearDebugFaceOverrides') {
                                             try {
@@ -1232,6 +1435,12 @@ export function createDebugWindow() {
                                                     } catch (e) { /* ignore */ }
                                                 }
                                             } catch (e) { /* ignore */ }
+                                        }
+
+                                        else if (act.type === 'clearDebugEmotionOverrides') {
+                                            if (window.animationHandler && typeof window.animationHandler.clearDebugEmotionOverrides === 'function') {
+                                                try { window.animationHandler.clearDebugEmotionOverrides(); applied = true; } catch (e) { applied = false; }
+                                            }
                                         }
 
                                         if (!applied) newQ.push(act);
@@ -1255,7 +1464,7 @@ export function createDebugWindow() {
                                                     window.__synth_debug_cached_emotions = j.emotions;
                                                     try { console.debug('[debug-window] fetched /api/emotion_state keys=', Object.keys(j.emotions).slice(0,20)); } catch (e) {}
                                                     // trigger immediate re-render
-                                                    /* feelings removed */
+                                                    try { renderFeelingsList(); } catch (e) {}
                                                 }
                                             }
                                         } catch (e) { /* ignore */ }

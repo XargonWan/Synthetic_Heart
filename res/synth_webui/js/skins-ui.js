@@ -37,7 +37,8 @@
 
             // Build metadata section with version, author, description
             let metaHtml = '';
-            if(s.version) metaHtml += `<div class="skin-version"><small>v${s.version}</small></div>`;
+            if(s.vrm_version) metaHtml += `<div class="skin-vrm-version"><small>VRM ${s.vrm_version}</small></div>`;
+            if(s.version) metaHtml += `<div class="skin-version"><small>Skin v${s.version}</small></div>`;
             if(s.author) metaHtml += `<div class="skin-author"><small>by ${s.author}</small></div>`;
             if(s.description) metaHtml += `<div class="skin-description"><small>${s.description}</small></div>`;
             const meta = document.createElement('div'); meta.className='skin-meta'; meta.innerHTML = metaHtml;
