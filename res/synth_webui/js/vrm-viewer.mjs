@@ -466,9 +466,9 @@ import * as THREE from 'three';
                                                 try {
                                                     const vv = dirty[kk];
                                                     // Resolve persona mapping if available
-                                                    const skin = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
-                                                    const persona = (this._personaCache && this._personaCache[skin]) ? this._personaCache[skin] : null;
-                                                    const blendMap = (persona && persona.blendshape_map) ? persona.blendshape_map : {};
+                                                    // Resolve effective persona with fallback to Rei
+                                                    const effectivePersona = this._getEffectivePersona();
+                                                    const blendMap = effectivePersona.blendshape_map;
                                                     const nkey = String(kk || '');
 
                                                     if (vv === null || vv === undefined) {
@@ -540,9 +540,9 @@ import * as THREE from 'three';
                                             try {
                                                 const vv = dirty[kk];
                                                 // persona mapping helper
-                                                const skin = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
-                                                const persona = (this._personaCache && this._personaCache[skin]) ? this._personaCache[skin] : null;
-                                                const blendMap = (persona && persona.blendshape_map) ? persona.blendshape_map : {};
+                                                // Resolve effective persona with fallback to Rei
+                                                const effectivePersona = this._getEffectivePersona();
+                                                const blendMap = effectivePersona.blendshape_map;
                                                 const nkey = String(kk || '');
 
                                                 if (vv === null || vv === undefined) {
@@ -809,20 +809,21 @@ import * as THREE from 'three';
                             this._loadPersonaForSkin(window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei')
                                 .then(persona => {
                                     console.debug('[AnimationHandler] persona loaded', persona && persona.name ? persona.name : '(unknown)');
-                                    const pdefaults = (persona && persona.defaults) ? persona.defaults : {};
+                                    const effectivePersona = this._getEffectivePersona();
+                                    const pdefaults = (effectivePersona && effectivePersona.defaults) ? effectivePersona.defaults : {};
 
                                     // Expose per-persona emotion presets and derive emotions list from mapping
                                     try {
-                                        // New canonical format: persona.emotions is an object mapping
-                                        if (persona && persona.emotions && typeof persona.emotions === 'object' && !Array.isArray(persona.emotions)) {
-                                            window.__synth_emotion_face_presets = persona.emotions;
-                                            try { window.__synth_persona_emotions_list = Object.keys(persona.emotions); } catch (e) { window.__synth_persona_emotions_list = null; }
+                                        // New canonical format: effectivePersona.emotions is an object mapping
+                                        if (effectivePersona && effectivePersona.emotions && typeof effectivePersona.emotions === 'object' && !Array.isArray(effectivePersona.emotions)) {
+                                            window.__synth_emotion_face_presets = effectivePersona.emotions;
+                                            try { window.__synth_persona_emotions_list = Object.keys(effectivePersona.emotions); } catch (e) { window.__synth_persona_emotions_list = null; }
                                         }
                                     } catch (e) { /* ignore */ }
 
                                     // Apply persona per-animation overrides on the client (hybrid design).
                                     try {
-                                        const overrides = (persona && persona.animation_overrides && typeof persona.animation_overrides === 'object') ? persona.animation_overrides : null;
+                                        const overrides = (effectivePersona && effectivePersona.animation_overrides && typeof effectivePersona.animation_overrides === 'object') ? effectivePersona.animation_overrides : null;
                                         if (overrides) {
                                             const actionKey = (state && state.action) ? String(state.action).toLowerCase() : '';
                                             let animStem = '';
@@ -921,6 +922,10 @@ import * as THREE from 'three';
                             const skin = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
                             if (!this._personaCache) this._personaCache = {};
                             if (!this._personaCache[skin]) this._loadPersonaForSkin(skin).catch(() => {});
+                            // Always pre-load Rei persona as a fallback source if we are on a different skin
+                            if (skin !== 'Rei' && !this._personaCache['Rei']) {
+                                this._loadPersonaForSkin('Rei').catch(() => {});
+                            }
                         } catch (e) {}
 
                         // start ticking expressions if needed
@@ -976,10 +981,11 @@ import * as THREE from 'three';
                         // Ensure expression state bookkeeping
                         if (!this._expressionState) this._expressionState = {};
 
-                        // Resolve persona mapping for current skin (fallback to Rei)
-                        const skin = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
-                        const persona = (this._personaCache && this._personaCache[skin]) || null;
-                        const blendMap = (persona && persona.blendshape_map) ? persona.blendshape_map : {};
+                        // Resolve effective persona with fallback to Rei
+                        const effectivePersona = this._getEffectivePersona();
+                        const blendMap = effectivePersona.blendshape_map;
+                        const emotions = effectivePersona.emotions;
+                        const emotionSpeed = effectivePersona.emotion_speed;
 
                         // Determine current time_in_clip (seconds) or frame.
                         // The server typically sends started_at + fps; the client derives a moving frame/time.
@@ -1067,106 +1073,116 @@ import * as THREE from 'three';
                         // The client will map these names to blendshape targets using the per-persona
                         // `persona.emotions` mapping exposed by the backend (no legacy fallback required).
                         try {
-                            const emObj = (state && state.emotions && typeof state.emotions === 'object') ? state.emotions : null;
-                            const valuesObj = (emObj && emObj.values && typeof emObj.values === 'object') ? emObj.values
-                                            : ((emObj && typeof emObj === 'object') ? emObj : null);
-                            const t = {};
-                            if (Array.isArray(valuesObj)) {
-                                valuesObj.forEach((it) => {
-                                    try {
-                                        const name = it && (it.type || it.name) ? String(it.type || it.name) : '';
-                                        if (!name) return;
-                                        const raw = Number(it.intensity !== undefined ? it.intensity : it.value);
+                            const collectValues = (srcObj) => {
+                                if (!srcObj) return null;
+                                const valuesObj = (srcObj.values && typeof srcObj.values === 'object') ? srcObj.values
+                                                : ((typeof srcObj === 'object') ? srcObj : null);
+                                const t = {};
+                                if (Array.isArray(valuesObj)) {
+                                    valuesObj.forEach((it) => {
+                                        try {
+                                            const name = it && (it.type || it.name) ? String(it.type || it.name) : '';
+                                            if (!name) return;
+                                            const raw = Number(it.intensity !== undefined ? it.intensity : it.value);
+                                            if (!Number.isFinite(raw)) return;
+                                            const v01 = (raw > 1) ? (raw / 10.0) : raw;
+                                            t[name] = Math.max(t[name] || 0, Math.max(0, Math.min(1, v01)));
+                                        } catch (e) { /* ignore */ }
+                                    });
+                                } else if (valuesObj && typeof valuesObj === 'object') {
+                                    Object.keys(valuesObj).forEach((k) => {
+                                        if (!k || /^\d+$/.test(String(k))) return;
+                                        const raw = Number(valuesObj[k]);
                                         if (!Number.isFinite(raw)) return;
                                         const v01 = (raw > 1) ? (raw / 10.0) : raw;
-                                        t[name] = Math.max(t[name] || 0, Math.max(0, Math.min(1, v01)));
-                                    } catch (e) { /* ignore */ }
-                                });
-                            } else if (valuesObj && typeof valuesObj === 'object') {
-                                Object.keys(valuesObj).forEach((k) => {
-                                    if (!k) return;
-                                    if (/^\d+$/.test(String(k))) return;
-                                    const raw = Number(valuesObj[k]);
-                                    if (!Number.isFinite(raw)) return;
-                                    const v01 = (raw > 1) ? (raw / 10.0) : raw;
-                                    t[String(k)] = Math.max(0, Math.min(1, v01));
-                                });
+                                        t[String(k)] = Math.max(0, Math.min(1, v01));
+                                    });
+                                }
+                                return Object.keys(t).length > 0 ? t : null;
+                            };
+
+                            const emTargets = collectValues(state && state.emotions);
+                            if (emTargets) {
+                                exprs.push({ targets: emTargets, priority: 15, source: 'emotions_state' });
                             }
-                            if (Object.keys(t).length > 0) {
-                                exprs.push({ targets: t, priority: 15, source: 'emotions_state' });
+
+                            const fTargets = collectValues(state && state.feelings);
+                            if (fTargets) {
+                                exprs.push({ targets: fTargets, priority: 14, source: 'feelings_state' });
                             }
                         } catch (e) { /* ignore */ }
 
+                        // WEB_DEBUG feelings override: inject persistent targets keyed by emotion name.
+                        // Persona can map these emotion keys to actual blendshape presets.
                         try {
-                            const fObj = (state && state.feelings && typeof state.feelings === 'object') ? state.feelings : null;
-                            const valuesObj = (fObj && fObj.values && typeof fObj.values === 'object') ? fObj.values
-                                            : ((fObj && typeof fObj === 'object') ? fObj : null);
-                            const t = {};
-                            if (Array.isArray(valuesObj)) {
-                                valuesObj.forEach((it) => {
-                                    try {
-                                        const name = it && (it.type || it.name) ? String(it.type || it.name) : '';
-                                        if (!name) return;
-                                        const raw = Number(it.intensity !== undefined ? it.intensity : it.value);
-                                        if (!Number.isFinite(raw)) return;
-                                        const v01 = (raw > 1) ? (raw / 10.0) : raw;
-                                        t[name] = Math.max(t[name] || 0, Math.max(0, Math.min(1, v01)));
-                                    } catch (e) { /* ignore */ }
+                            const dbg = (this._debugEmotionOverrides && typeof this._debugEmotionOverrides === 'object') ? this._debugEmotionOverrides : null;
+                            if (dbg) {
+                                const t = {};
+                                Object.keys(dbg).forEach((k) => {
+                                    const v = Number(dbg[k]);
+                                    if (!k || !Number.isFinite(v)) return;
+                                    t[String(k)] = Math.max(0, Math.min(1, v));
                                 });
-                            } else if (valuesObj && typeof valuesObj === 'object') {
-                                Object.keys(valuesObj).forEach((k) => {
-                                    if (!k) return;
-                                    if (/^\d+$/.test(String(k))) return;
-                                    const raw = Number(valuesObj[k]);
-                                    if (!Number.isFinite(raw)) return;
-                                    const v01 = (raw > 1) ? (raw / 10.0) : raw;
-                                    t[String(k)] = Math.max(0, Math.min(1, v01));
-                                });
-                            }
-                            if (Object.keys(t).length > 0) {
-                                exprs.push({ targets: t, priority: 14, source: 'feelings_state' });
-
-                                // Derive a few basic emotions from common feeling dimensions so the
-                                // built-in emotion->face presets can kick in even without persona mapping.
-                                const derived = {};
-                                const get = (k) => (t[k] !== undefined) ? Number(t[k]) : null;
-                                const valence = get('valence');
-                                const arousal = get('arousal');
-                                const stress = get('stress');
-                                const calm = get('calm');
-
-                                // If valence is 0..1 (0=neg, 1=pos), split around 0.5.
-                                if (Number.isFinite(valence)) {
-                                    const v = Math.max(0, Math.min(1, valence));
-                                    const pos = Math.max(0, (v - 0.5) * 2);
-                                    const neg = Math.max(0, (0.5 - v) * 2);
-                                    if (pos > 0.02) derived['happy'] = Math.max(derived['happy'] || 0, pos);
-                                    if (neg > 0.02) derived['sad'] = Math.max(derived['sad'] || 0, neg);
-                                }
-                                if (Number.isFinite(arousal)) {
-                                    const a = Math.max(0, Math.min(1, arousal));
-                                    // Prefer the common facial morph key name used by many VRM rigs.
-                                    if (a > 0.25) derived['surprised'] = Math.max(derived['surprised'] || 0, (a - 0.25) / 0.75);
-                                }
-                                if (Number.isFinite(stress)) {
-                                    const s = Math.max(0, Math.min(1, stress));
-                                    if (s > 0.05) {
-                                        derived['scared'] = Math.max(derived['scared'] || 0, s);
-                                        // Many rigs expose the facial morph as "angry" rather than "anger".
-                                        derived['angry'] = Math.max(derived['angry'] || 0, s * 0.6);
-                                    }
-                                }
-                                if (Number.isFinite(calm)) {
-                                    const c = Math.max(0, Math.min(1, calm));
-                                    // "relaxed" is a common VRM preset; keep "neutral" too as a fallback.
-                                    if (c > 0.65) derived['relaxed'] = Math.max(derived['relaxed'] || 0, (c - 0.65) / 0.35);
-                                }
-
-                                if (Object.keys(derived).length) {
-                                    exprs.push({ targets: derived, priority: 14.5, source: 'feelings_derived' });
+                                if (Object.keys(t).length > 0) {
+                                    exprs.push({ targets: t, priority: 100, source: 'debug_emotion_override' });
                                 }
                             }
                         } catch (e) { /* ignore */ }
+
+                        // Derive expressions from high-level dimensions (valence/arousal/stress/calm/etc)
+                        // consolidated across all active expressions (respecting priorities).
+                        try {
+                            const consolidatedFeelings = {};
+                            const sortedExprs = exprs.slice().sort((a,b) => (a.priority || 0) - (b.priority || 0));
+                            sortedExprs.forEach(ex => {
+                                if (!evaluateFrame(ex)) return;
+                                if (ex.targets) Object.keys(ex.targets).forEach(k => {
+                                    consolidatedFeelings[k] = Math.max(0, Math.min(1, Number(ex.targets[k]) || 0));
+                                });
+                            });
+
+                            const derived = {};
+                            const get = (k) => (consolidatedFeelings[k] !== undefined) ? Number(consolidatedFeelings[k]) : null;
+                            
+                            // 1. Valence-based (happy/sad)
+                            const valence = get('valence');
+                            if (Number.isFinite(valence)) {
+                                const v = Math.max(0, Math.min(1, valence));
+                                const pos = Math.max(0, (v - 0.5) * 2);
+                                const neg = Math.max(0, (0.5 - v) * 2);
+                                if (pos > 0.02) derived['happy'] = Math.max(derived['happy'] || 0, pos);
+                                if (neg > 0.02) derived['sad'] = Math.max(derived['sad'] || 0, neg);
+                            }
+                            
+                            // 2. Arousal-based (surprised)
+                            const arousal = get('arousal');
+                            if (Number.isFinite(arousal)) {
+                                const a = Math.max(0, Math.min(1, arousal));
+                                if (a > 0.25) derived['surprised'] = Math.max(derived['surprised'] || 0, (a - 0.25) / 0.75);
+                            }
+                            
+                            // 3. Stress/Anger-based
+                            const stress = get('stress');
+                            const angryF = get('angry'); // 'angry' as feeling dimension
+                            const sVal = Math.max(Number.isFinite(stress) ? stress : 0, Number.isFinite(angryF) ? angryF : 0);
+                            if (sVal > 0.05) {
+                                derived['scared'] = Math.max(derived['scared'] || 0, sVal * 0.4);
+                                derived['angry'] = Math.max(derived['angry'] || 0, sVal);
+                            }
+
+                            // 4. Calmness/Relaxed
+                            const calm = get('calm');
+                            if (Number.isFinite(calm)) {
+                                const c = Math.max(0, Math.min(1, calm));
+                                if (c > 0.65) derived['relaxed'] = Math.max(derived['relaxed'] || 0, (c - 0.65) / 0.35);
+                            }
+
+                            if (Object.keys(derived).length) {
+                                // Derived expressions have slightly higher priority than base feelings
+                                // so they can override lower-priority presets if needed.
+                                exprs.push({ targets: derived, priority: 14.5, source: 'feelings_derived' });
+                            }
+                        } catch (e) { console.warn('[AnimationHandler] derivation failed', e); }
 
                         // Emotion overlay injection (client-side): during the scheduled window,
                         // inject a synthetic expression keyed by emotion name; the client will map
@@ -1597,6 +1613,31 @@ import * as THREE from 'three';
                     } catch (e) { /* ignore */ }
                 }
 
+
+                _getEffectivePersona() {
+                    const skin = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
+                    const persona = (this._personaCache && this._personaCache[skin]) || null;
+                    const reiPersona = (this._personaCache && this._personaCache['Rei']) || null;
+
+                    // Return a merged object where current persona takes precedence, but falls back to Rei for top-level keys
+                    return {
+                        ...(reiPersona || {}),
+                        ...(persona || {}),
+                        blendshape_map: {
+                            ...(reiPersona && reiPersona.blendshape_map ? reiPersona.blendshape_map : {}),
+                            ...(persona && persona.blendshape_map ? persona.blendshape_map : {})
+                        },
+                        emotions: {
+                            ...(reiPersona && reiPersona.emotions ? reiPersona.emotions : {}),
+                            ...(persona && persona.emotions ? persona.emotions : {})
+                        },
+                        emotion_speed: {
+                            ...(reiPersona && reiPersona.emotion_speed ? reiPersona.emotion_speed : {}),
+                            ...(persona && persona.emotion_speed ? persona.emotion_speed : {})
+                        }
+                    };
+                }
+
                 // Load persona.json for a skin and cache it
                 async _loadPersonaForSkin(skin) {
                     try {
@@ -1663,9 +1704,8 @@ import * as THREE from 'three';
 
                         // Ensure all candidate blink blendshapes are set to 0 and removed from expressionState
                         try {
-                            const skin = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
-                            const persona = (this._personaCache && this._personaCache[skin]) || null;
-                            const blendMap = (persona && persona.blendshape_map) ? persona.blendshape_map : {};
+                            const effectivePersona = this._getEffectivePersona();
+                            const blendMap = effectivePersona.blendshape_map;
                             const candidates = [];
                             ['blink','eyes_closed','eyes.close'].forEach(k => { if (blendMap && blendMap[k]) candidates.push(blendMap[k]); });
                             candidates.push(
@@ -1696,9 +1736,8 @@ import * as THREE from 'three';
                     try {
                         const candidates = [];
                         try {
-                            const skin = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
-                            const persona = (this._personaCache && this._personaCache[skin]) || null;
-                            const blendMap = (persona && persona.blendshape_map) ? persona.blendshape_map : {};
+                            const effectivePersona = this._getEffectivePersona();
+                            const blendMap = effectivePersona.blendshape_map;
                             ['blink','eyes_closed','eyes.close'].forEach(k => { if (blendMap && blendMap[k]) candidates.push(blendMap[k]); });
                         } catch (e) { /* ignore */ }
 
@@ -1769,9 +1808,8 @@ import * as THREE from 'three';
                         this._blinkToken = token;
 
                         // resolve blink blendshape keys from persona or fallback heuristics
-                        const skin = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
-                        const persona = (this._personaCache && this._personaCache[skin]) || null;
-                        const blendMap = (persona && persona.blendshape_map) ? persona.blendshape_map : {};
+                        const effectivePersona = this._getEffectivePersona();
+                        const blendMap = effectivePersona.blendshape_map;
 
                         // Candidate keys (try mapped names first)
                         const candidates = [];
@@ -1909,10 +1947,10 @@ import * as THREE from 'three';
                         try { window.dispatchEvent(new CustomEvent('synth_animation_saccade', { detail: { x, y } })); } catch (e) {}
 
                         // Optionally nudge blendshapes if mapped
-                        // Resolve persona for current skin (use cached version if available)
-                        const skin = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
-                        const persona = (this._personaCache && this._personaCache[skin]) || null;
-                        const lookMap = (persona && persona.blendshape_map && persona.blendshape_map.expressions && persona.blendshape_map.expressions['look']) ? persona.blendshape_map.expressions['look'] : null;
+                        // Resolve effective persona with fallback to Rei
+                        const effectivePersona = this._getEffectivePersona();
+                        const blendMap = effectivePersona.blendshape_map;
+                        const lookMap = (blendMap && blendMap.expressions && blendMap.expressions['look']) ? blendMap.expressions['look'] : null;
                         // try to set tiny values to candidate look blendshapes (if any)
                         if (this.vrm && this._getFaceController() && lookMap && lookMap.targets) {
                             Object.keys(lookMap.targets).forEach(k => {

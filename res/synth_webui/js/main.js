@@ -626,20 +626,11 @@ try {
                 const entry = windows.get(id);
                 if (!entry || !entry.winbox) return;
                 try {
-                    // If currently maximized, restore to previous size; otherwise maximize and apply constraints
-                    if (entry.winbox.max || entry.winbox.maximized) {
-                        try { entry.winbox.restore(); } catch (e) { /* ignore */ }
-                        // After restore, ensure we return to the captured normal rectangle
-                        if (entry.lastNormalRect) {
-                            try {
-                                entry.winbox.move(entry.lastNormalRect.x, entry.lastNormalRect.y);
-                                entry.winbox.resize(entry.lastNormalRect.width, entry.lastNormalRect.height);
-                            } catch (e) { /* ignore */ }
-                        }
+                    // Use native WinBox toggle if available, otherwise check state
+                    if (entry.winbox.max) {
+                        entry.winbox.restore();
                     } else {
-                        try { captureNormalRect(entry); } catch (e) { /* ignore */ }
-                        try { entry.winbox.maximize(); } catch (e) { /* ignore */ }
-                        try { applyMaximizeConstraints(entry); } catch (e) { /* ignore */ }
+                        entry.winbox.maximize();
                     }
                 } catch (e) { /* ignore */ }
                 try { saveState(id); } catch (e) { /* ignore */ }
@@ -779,7 +770,20 @@ try {
                     width: opts.width || 420,
                     height: opts.height || '70%',
                     overflow: opts.overflow,
-                    class: className
+                    class: className,
+                    onmaximize: function() {
+                        try { applyMaximizeConstraints(entry); } catch (e) { /* ignore */ }
+                        try { saveState(opts.id); } catch (e) { /* ignore */ }
+                    },
+                    onrestore: function() {
+                        try { saveState(opts.id); } catch (e) { /* ignore */ }
+                    },
+                    onmove: function() {
+                        if (!this.max && !this.min) try { captureNormalRect(entry); } catch (e) { /* ignore */ }
+                    },
+                    onresize: function() {
+                        if (!this.max && !this.min) try { captureNormalRect(entry); } catch (e) { /* ignore */ }
+                    }
                 });
                 try { console.debug('[SynthWindowManager] created winbox for', opts.id, 'instance=', winbox); } catch (e) { /* ignore */ }
                 entry.winbox = winbox;
@@ -795,22 +799,6 @@ try {
                             if (winbox && winbox.g && winbox.g.winbox) winbox.g.winbox = null;
                         } catch (e) { /* ignore */ }
                     };
-                } catch (e) { /* ignore */ }
-
-                // Override the native maximize button behavior to use our toggleMaximize
-                try {
-                    const winEl = winbox.window || winbox.dom || winbox.g || null;
-                    if (winEl) {
-                        const maxBtn = winEl.querySelector('.wb-max');
-                        if (maxBtn) {
-                            maxBtn.addEventListener('click', (e) => {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                toggleMaximize(opts.id);
-                                return false;
-                            }, true); // Use capture phase
-                        }
-                    }
                 } catch (e) { /* ignore */ }
 
                 // When WinBox toggles classes (e.g., via programmatic calls),
