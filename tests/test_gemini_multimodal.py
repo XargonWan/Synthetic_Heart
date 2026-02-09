@@ -181,3 +181,177 @@ class TestGeminiMultimodal:
         assert len(parts) == 2
         assert parts[0]["inline_data"]["mime_type"] == "image/jpeg"
         assert parts[1]["inline_data"]["mime_type"] == "audio/mpeg"
+
+    def test_copy_and_redact_data_attachments(self):
+        """Test that attachment data is properly redacted."""
+        from llm_engines.gemini_api import GeminiAPIPlugin
+
+        plugin = GeminiAPIPlugin()
+
+        fake_data = "a" * 10000  # Large base64 string
+        prompt = {
+            "input": {
+                "message": "What's in this?",
+                "attachments": [
+                    {
+                        "mime_type": "image/jpeg",
+                        "data": fake_data,
+                        "filename": "test.jpg",
+                    },
+                    {
+                        "mime_type": "video/mp4",
+                        "base64": fake_data,
+                        "filename": "video.mp4",
+                    },
+                ],
+            }
+        }
+
+        redacted = plugin._copy_and_redact_data(prompt)
+
+        # Original should be unchanged
+        assert prompt["input"]["attachments"][0]["data"] == fake_data
+        assert prompt["input"]["attachments"][1]["base64"] == fake_data
+
+        # Redacted should have placeholders
+        assert redacted["input"]["attachments"][0]["data"] == "<redacted: 10000 chars>"
+        assert (
+            redacted["input"]["attachments"][1]["base64"] == "<redacted: 10000 chars>"
+        )
+
+    def test_copy_and_redact_data_nested(self):
+        """Test that nested attachment data is properly redacted."""
+        from llm_engines.gemini_api import GeminiAPIPlugin
+
+        plugin = GeminiAPIPlugin()
+
+        fake_data = "b" * 50000
+        prompt = {
+            "context": {
+                "nested": {
+                    "deeply": {
+                        "attachments": [
+                            {"mime_type": "application/pdf", "data": fake_data}
+                        ]
+                    }
+                }
+            }
+        }
+
+        redacted = plugin._copy_and_redact_data(prompt)
+
+        # Redacted should have placeholder even for deeply nested
+        assert (
+            redacted["context"]["nested"]["deeply"]["attachments"][0]["data"]
+            == "<redacted: 50000 chars>"
+        )
+
+    def test_copy_and_redact_data_legacy_keys(self):
+        """Test that legacy keys (images, audio, videos, documents) are redacted."""
+        from llm_engines.gemini_api import GeminiAPIPlugin
+
+        plugin = GeminiAPIPlugin()
+
+        fake_data = "c" * 20000
+        prompt = {
+            "images": [{"data": fake_data}],
+            "audio": [{"base64": fake_data}],
+            "videos": [{"data": fake_data}],
+            "documents": [{"data": fake_data}],
+        }
+
+        redacted = plugin._copy_and_redact_data(prompt)
+
+        assert redacted["images"][0]["data"] == "<redacted: 20000 chars>"
+        assert redacted["audio"][0]["base64"] == "<redacted: 20000 chars>"
+        assert redacted["videos"][0]["data"] == "<redacted: 20000 chars>"
+        assert redacted["documents"][0]["data"] == "<redacted: 20000 chars>"
+
+    def test_extract_multimodal_parts_nested(self):
+        """Test extracting multimodal parts from deeply nested prompt."""
+        from llm_engines.gemini_api import GeminiAPIPlugin
+
+        plugin = GeminiAPIPlugin()
+
+        fake_base64 = base64.b64encode(b"deep_nested_data").decode("utf-8")
+        prompt = {
+            "context": {
+                "payload": {
+                    "attachments": [{"mime_type": "audio/mpeg", "data": fake_base64}]
+                }
+            }
+        }
+
+        parts = plugin._extract_multimodal_parts(prompt)
+
+        assert len(parts) == 1
+        assert parts[0]["inline_data"]["mime_type"] == "audio/mpeg"
+        assert parts[0]["inline_data"]["data"] == fake_base64
+
+    def test_extract_multimodal_parts_legacy_videos(self):
+        """Test extracting video attachments from legacy 'videos' key."""
+        from llm_engines.gemini_api import GeminiAPIPlugin
+
+        plugin = GeminiAPIPlugin()
+
+        fake_base64 = base64.b64encode(b"video_data").decode("utf-8")
+        prompt = {"videos": [{"mime_type": "video/mp4", "data": fake_base64}]}
+
+        parts = plugin._extract_multimodal_parts(prompt)
+
+        assert len(parts) == 1
+        assert parts[0]["inline_data"]["mime_type"] == "video/mp4"
+
+    def test_extract_multimodal_parts_ignores_schema(self):
+        """Test that schema definitions with multimodal keys are ignored."""
+        from llm_engines.gemini_api import GeminiAPIPlugin
+
+        plugin = GeminiAPIPlugin()
+
+        # Schema-like structure that shouldn't be treated as an attachment
+        prompt = {
+            "actions": {
+                "audio_telegram_bot": {
+                    "schema": {
+                        "properties": {
+                            "audio": {"type": "string", "description": "Field: audio"}
+                        }
+                    }
+                }
+            }
+        }
+
+        parts = plugin._extract_multimodal_parts(prompt)
+
+        # Should extract nothing
+        assert len(parts) == 0
+
+    def test_copy_and_redact_data_ignores_schema(self):
+        """Test that schema definitions are not redacted even if they have 'data' key."""
+        from llm_engines.gemini_api import GeminiAPIPlugin
+
+        plugin = GeminiAPIPlugin()
+
+        prompt = {
+            "actions": {
+                "some_action": {
+                    "schema": {
+                        "properties": {
+                            "data": {
+                                "type": "string",
+                                "description": "some data description",
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        redacted = plugin._copy_and_redact_data(prompt)
+
+        # The description should NOT be redacted because it doesn't look like an attachment
+        description = redacted["actions"]["some_action"]["schema"]["properties"][
+            "data"
+        ]["description"]
+        assert description == "some data description"
+        assert "<redacted" not in description

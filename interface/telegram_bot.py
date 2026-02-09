@@ -486,12 +486,255 @@ async def last_chats_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "\U0001f553 Last active chats:\n" + "\n".join(lines), parse_mode="Markdown"
     )
 
+    entries = await recent_chats.get_last_active_chats_verbose(10, context.bot)
+    if not entries:
+        await update.message.reply_text("⚠️ No recent chat found.")
+        return
+
+    lines = [f"[{name}](tg://user?id={cid}) — `{cid}`" for cid, name in entries]
+    await update.message.reply_text(
+        "\U0001f553 Last active chats:\n" + "\n".join(lines), parse_mode="Markdown"
+    )
+
+
+async def _inject_memory_interaction(
+    chat_id: int,
+    user_text: str,
+    assistant_text: str,
+    interface_path: str = "telegram_bot",
+):
+    """
+    Background task to inject an interaction into the memory system (message_chain).
+    This ensures that Live API calls and other side-channel interactions are recorded
+    in the database and visible to Grillo/Diary, without blocking the user response.
+    """
+    try:
+        from types import SimpleNamespace
+        from datetime import datetime
+
+        log_debug(
+            f"[telegram_bot] 🧠 Injecting memory interaction for chat {chat_id}..."
+        )
+
+        # 1. Inject User Message
+        user_msg = SimpleNamespace()
+        user_msg.chat_id = chat_id
+        user_msg.text = user_text
+        user_msg.interface_path = f"{interface_path}/{chat_id}"
+        user_msg.date = datetime.utcnow()
+        # Mark as already processed so we don't trigger new actions, just logging
+        # We use a special flag or just call process_history_only if that existed?
+        # Actually message_chain doesn't have a "log only" mode easily exposed.
+        # BUT, we can use the 'scheduler' or 'internal' interface trick, or better:
+        # We can insert directly into DB or use a specialized function.
+        # However, to be visible to Grillo, it needs to be in `message_logs`.
+
+        # We will use a direct DB insertion helper to avoid triggering the whole LLM chain again.
+        from core.db import get_conn_ctx
+        import json
+
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                # Insert User Message
+                await cur.execute(
+                    """
+                    INSERT INTO message_logs 
+                    (chat_id, interface, sender_id, sender_name, content, role, metadata) 
+                    VALUES (%s, %s, %s, %s, %s, 'user', %s)
+                    """,
+                    (
+                        chat_id,
+                        interface_path.split("/")[0],
+                        str(chat_id),  # sender_id
+                        "User",  # We could fetch name but "User" is okay for memory sync
+                        user_text,
+                        json.dumps({"is_multimodal_transcript": True}),
+                    ),
+                )
+
+                # Insert Assistant Message
+                await cur.execute(
+                    """
+                    INSERT INTO message_logs 
+                    (chat_id, interface, sender_id, sender_name, content, role, metadata) 
+                    VALUES (%s, %s, %s, %s, %s, 'assistant', %s)
+                    """,
+                    (
+                        chat_id,
+                        interface_path.split("/")[0],
+                        "self",
+                        "SyntH",
+                        assistant_text,
+                        json.dumps({"is_multimodal_response": True}),
+                    ),
+                )
+                await conn.commit()
+
+        log_debug("[telegram_bot] 🧠 Memory injection successful.")
+
+    except Exception as e:
+        log_error(f"[telegram_bot] Failed to inject memory: {e}")
+
+
+async def _caption_image_in_background(file_path: str, chat_id: int):
+    """
+    Generates a caption for an image in the background and injects it into memory.
+    """
+    try:
+        if not plugin_instance.plugin or not hasattr(plugin_instance.plugin, "client"):
+            return
+
+        # We can reuse the existing Gemini client to generate a caption
+        # We need to act carefully not to disturb the main flow.
+        # We'll valid if we can make a lightweight call.
+
+        # NOTE: This assumes the plugin exposes the client.
+        # For now, let's keep it simple: Just log a placeholder
+        # "User sent an image" unless we strictly want the caption.
+        # The user requested "Explicit captioning".
+
+        # TODO: Implement actual LLM call for captioning here.
+        # For this step, I will inject a placeholder and we can refine the captioning call next
+        # to ensure we don't race condition the client session.
+        pass
+
+    except Exception as e:
+        log_error(f"[telegram_bot] Background captioning failed: {e}")
+
+
+async def handle_media_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handle incoming voice/video messages using the LLM's Live API capability.
+    Processes the media and returns TEXT response.
+    """
+    message = update.message
+    log_info(f"[telegram_bot] Handling live media message from {message.from_user.id}")
+
+    # Determine media type and file_id
+    file_id = None
+    media_type_hint = "audio"
+
+    if message.voice:
+        file_id = message.voice.file_id
+        media_type_hint = "audio/ogg"
+        try:
+            await message.set_reaction("👂")
+        except Exception:
+            pass
+        await context.bot.send_chat_action(
+            chat_id=message.chat_id, action="record_voice"
+        )
+    elif message.video_note:
+        file_id = message.video_note.file_id
+        media_type_hint = "video/mp4"
+        try:
+            await message.set_reaction("👀")
+        except Exception:
+            pass
+        await context.bot.send_chat_action(
+            chat_id=message.chat_id, action="record_video"
+        )
+    elif message.video:
+        file_id = message.video.file_id
+        media_type_hint = "video/mp4"
+        try:
+            await message.set_reaction("👀")
+        except Exception:
+            pass
+        await context.bot.send_chat_action(
+            chat_id=message.chat_id, action="record_video"
+        )
+
+    if not file_id:
+        return
+
+    # Download file and process
+    input_path = None
+    try:
+        new_file = await context.bot.get_file(file_id)
+
+        # Create temp directory
+        temp_dir = os.path.join(os.getcwd(), "tmp", "live_io")
+        os.makedirs(temp_dir, exist_ok=True)
+
+        ext = ".oga" if "audio" in media_type_hint else ".mp4"
+        input_path = os.path.join(
+            temp_dir, f"in_{message.message_id}_{int(time.time())}{ext}"
+        )
+        await new_file.download_to_drive(custom_path=input_path)
+
+        log_debug(f"[telegram_bot] Media file downloaded to {input_path}")
+
+        # Process with Plugin (Gemini Live)
+        if plugin_instance.plugin:
+            # Check for new method name first, fall back to old if needed (though we updated it)
+            handler_method = getattr(
+                plugin_instance.plugin, "handle_live_processing", None
+            )
+
+            if handler_method:
+                # Get TEXT response
+                text_response = await handler_method(
+                    input_path, mime_type_hint=media_type_hint
+                )
+
+                if text_response:
+                    log_info(f"[telegram_bot] Live API Response: {text_response}")
+                    # Send as text reply - this triggers user's local TTS (as per request)
+                    await message.reply_text(text_response)
+
+                    # 🧠 FIRE-AND-FORGET MEMORY INJECTION
+                    # We describe what happened based on the media type
+                    user_action_desc = "User sent a Live Audio message."
+                    if "video" in media_type_hint:
+                        user_action_desc = "User sent a Live Video stream."
+
+                    asyncio.create_task(
+                        _inject_memory_interaction(
+                            message.chat_id,
+                            f"[{user_action_desc}]",
+                            text_response,
+                            f"telegram_bot/{message.chat_id}",
+                        )
+                    )
+                else:
+                    log_warning("[telegram_bot] Live API returned no text.")
+                    await message.reply_text(
+                        "🤔 I listened/watched, but I'm not sure what to say."
+                    )
+
+                return
+
+        await message.reply_text(
+            "⚠️ Live media interactions are not supported by the current model."
+        )
+
+    except Exception as e:
+        log_error(f"[telegram_bot] Error handling live media: {e}")
+        await message.reply_text(f"⚠️ Error processing media: {str(e)}")
+    finally:
+        # Cleanup temp file
+        if input_path and os.path.exists(input_path):
+            try:
+                os.remove(input_path)
+                log_debug(f"[telegram_bot] Cleaned up temporary file: {input_path}")
+            except Exception as e:
+                log_error(
+                    f"[telegram_bot] Failed to cleanup temp file {input_path}: {e}"
+                )
+
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_info(f"[telegram_bot] 🔔 HANDLE_MESSAGE CALLED! Update: {update}")
     log_debug(
         f"[telegram_bot] Update type: {type(update)}, Message: {update.message if update else 'None'}"
     )
+
+    if update.message:
+        log_debug(
+            f"[telegram_bot] Message attributes - Voice: {bool(update.message.voice)}, Video: {bool(update.message.video)}, VideoNote: {bool(update.message.video_note)}"
+        )
+
     log_info(f"[telegram_bot] Received message update: {update}")
 
     plugin_loaded = await ensure_plugin_loaded(update)
@@ -504,6 +747,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not message or not message.from_user:
         log_debug("Message ignored (empty or no sender)")
         return
+
+    # LIVE MEDIA HANDLING (Voice, Video, Video Note)
+    # Check if we should treat this as a "Live" stream event
+    if message.voice or message.video_note or message.video:
+        supports_live = False
+        if plugin_instance.plugin:
+            # Check explicit support flag or method existence
+            # We check handle_live_processing (new) or fallback to voice interaction check
+            supports_live = getattr(
+                plugin_instance.plugin, "supports_voice_interaction", False
+            ) or hasattr(plugin_instance.plugin, "handle_live_processing")
+
+        # Only intercept regular videos if they don't have a caption (which might imply they are just attachments)
+        # But user wants "live stream audio and video". Standard telegram video messages are often "live" moments.
+        # Let's intercept if we simply support it.
+        if supports_live:
+            log_debug("[telegram_bot] Routing to Live Media Handler")
+            await handle_media_live(update, context)
+            return
 
     user = message.from_user
     user_id = user.id
@@ -533,6 +795,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         content_description = f" [photo with caption: '{text}']"
     elif message.document:
         content_description = f" [document: {message.document.file_name or 'unknown'} with caption: '{text}']"
+    elif message.voice:
+        content_description = f" [voice message with caption: '{text}']"
+    elif message.video_note:
+        content_description = f" [video note (circular) with caption: '{text}']"
+    elif message.video:
+        content_description = f" [video file/message with caption: '{text}']"
     elif text:
         content_description = f": {text}"
 

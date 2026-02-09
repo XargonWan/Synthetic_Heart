@@ -190,7 +190,7 @@ async def get_pool():
                             "DB_POOL_MAXSIZE",
                             config_registry.get_value(
                                 "DB_POOL_MAXSIZE",
-                                150,
+                                20,
                                 label="DB Pool Max Size",
                                 group="database",
                                 component="core",
@@ -199,7 +199,7 @@ async def get_pool():
                         )
                     )
                 except Exception:
-                    DB_POOL_MAXSIZE = 150
+                    DB_POOL_MAXSIZE = 20
 
                 try:
                     host, port, user, passwd, dbname = _read_db_config()

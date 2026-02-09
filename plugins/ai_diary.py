@@ -566,18 +566,25 @@ def add_diary_entry(
         if grillo_activity_log_id and diary_entry_id:
             try:
                 import asyncio
-                from plugins.grillo_plugin import GrilloPlugin
+                try:
+                    from plugins.grillo.grillo_impl import GrilloPlugin
+                except ImportError:
+                    # Fallback if direct import fails (e.g. structure change)
+                    from plugins.grillo_plugin import GrilloPlugin
 
-                asyncio.create_task(
-                    GrilloPlugin.link_diary_entry_to_activity(
-                        grillo_activity_log_id,
-                        diary_entry_id,
-                        response_text=content,
+                if GrilloPlugin:
+                    asyncio.create_task(
+                        GrilloPlugin.link_diary_entry_to_activity(
+                            grillo_activity_log_id,
+                            diary_entry_id,
+                            response_text=content,
+                        )
                     )
-                )
-                log_debug(
-                    f"[ai_diary] Scheduled grillo activity link: activity_log={grillo_activity_log_id}, diary={diary_entry_id}"
-                )
+                    log_debug(
+                        f"[ai_diary] Scheduled grillo activity link: activity_log={grillo_activity_log_id}, diary={diary_entry_id}"
+                    )
+                else:
+                    log_warning("[ai_diary] GrilloPlugin not available for linking")
             except Exception as link_error:
                 log_warning(f"[ai_diary] Failed to link grillo activity: {link_error}")
     except Exception as e:

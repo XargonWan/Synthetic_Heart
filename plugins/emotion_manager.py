@@ -12,6 +12,7 @@ This core plugin manages the digital persona's emotional state with:
 
 import json
 import math
+import asyncio
 from datetime import datetime
 from typing import Dict, Optional, Tuple
 from dataclasses import dataclass
@@ -32,6 +33,9 @@ CANONICAL_EMOTIONS = {
     "surprised",  # surprise
     "neutral",
     "relaxed",
+    "love",
+    "arousal",
+    "devotion",
 }
 
 # VALID_EMOTIONS now equals the canonical set used for LLM prompting and validation.
@@ -59,6 +63,14 @@ EMOTION_SYNONYMS = {
     "relaxed": "relaxed",
     "neutral": "neutral",
     "engaged": "neutral",
+    "affection": "love",
+    "adoaration": "love",
+    "infatuation": "love",
+    "lust": "arousal",
+    "horny": "arousal",
+    "desire": "arousal",
+    "worship": "devotion",
+    "dedication": "devotion",
 }
 
 
@@ -101,6 +113,10 @@ PLUTCHIK_OPPOSITES = {
     "neutral": "disgust",
     "surprised": "relaxed",
     "relaxed": "surprised",
+    "love": "disgust",
+    "arousal": "disgust",
+    # Disgust reduces Love/Arousal
+    "disgust": "love",  # Primary opposite mapping
 }
 
 
@@ -219,6 +235,25 @@ class EmotionManager(PluginBase):
         except Exception as e:
             log_error(f"[emotion_manager] Failed to initialize: {e}")
 
+        # Sync once at startup
+        await self.sync_emotions_from_all_sources()
+
+        # Start background decay loop
+        asyncio.create_task(self._decay_loop())
+
+    async def _decay_loop(self):
+        """Background loop to decay emotions periodically."""
+        log_info("[emotion_manager] Starting decay loop")
+        while True:
+            try:
+                await asyncio.sleep(60)  # Decay every minute
+                await self.decay_emotions()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                log_error(f"[emotion_manager] Error in decay loop: {e}")
+                await asyncio.sleep(60)
+
     async def _ensure_table_exists(self):
         """Create emotion_state table if it doesn't exist."""
         async with get_conn_ctx() as conn:
@@ -238,6 +273,23 @@ class EmotionManager(PluginBase):
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
                 """)
                 log_debug("[emotion_manager] emotion_state table ensured")
+
+                await cur.execute("""
+                    CREATE TABLE IF NOT EXISTS emotion_diary (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        source VARCHAR(100),
+                        event VARCHAR(100),
+                        emotion VARCHAR(100),
+                        intensity FLOAT,
+                        state VARCHAR(100),
+                        trigger_condition VARCHAR(255),
+                        decision_logic TEXT,
+                        next_check DATETIME,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        INDEX idx_timestamp (timestamp)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """)
+                log_debug("[emotion_manager] emotion_diary table ensured")
 
     async def get_emotion_state(self, include_raw: bool = False) -> Dict[str, float]:
         """Get current emotional state with decay applied.
@@ -357,16 +409,33 @@ class EmotionManager(PluginBase):
                             (emotion, intensity),
                         )
 
+                    # Log to diary within the same transaction
+                    await cur.execute(
+                        """
+                        INSERT INTO emotion_diary 
+                        (source, event, emotion, intensity, state, trigger_condition, timestamp)
+                        VALUES (%s, %s, %s, %s, %s, %s, NOW())
+                        """,
+                        (
+                            "emotion_manager",
+                            "set_emotion",
+                            emotion,
+                            intensity,
+                            "active",
+                            "manual_or_tag",
+                        ),
+                    )
+
                     await conn.commit()
 
             log_debug(f"[emotion_manager] Set {emotion} = {intensity}")
-            # Notify animation handler so clients can show transient overlay for this emotion
+            
+            # Notify animation handler
             try:
                 from core.animation_handler import get_animation_handler
 
                 handler = get_animation_handler()
                 if handler:
-                    # best-effort notify (non-blocking)
                     try:
                         await handler._notify_animation_state_changed(
                             handler.current_state,
@@ -382,6 +451,7 @@ class EmotionManager(PluginBase):
         except Exception as e:
             log_error(f"[emotion_manager] Error setting emotion: {e}")
             return False
+
 
     async def update_emotion_from_tags(
         self, text: str, apply_balancing: bool = True
@@ -530,42 +600,89 @@ class EmotionManager(PluginBase):
                     )
                     rows = await cur.fetchall()
 
-                now = datetime.now()
-                to_remove = []
+                    now = datetime.now()
+                    to_remove = []
+                    to_update = []
 
-                for emotion_name, intensity, timestamp in rows:
-                    state = EmotionState(emotion_name, intensity, timestamp)
-                    decayed = state.get_decayed_intensity(now)
+                    for emotion_name, intensity, timestamp in rows:
+                        state = EmotionState(emotion_name, intensity, timestamp)
+                        decayed = state.get_decayed_intensity(now)
 
-                    if decayed < threshold:
-                        to_remove.append(emotion_name)
-                        log_debug(
-                            f"[emotion_manager] Marking for removal: {emotion_name} ({decayed:.2f})"
+                        if decayed < threshold:
+                            to_remove.append(emotion_name)
+                            log_debug(
+                                f"[emotion_manager] Marking for removal: {emotion_name} ({decayed:.2f})"
+                            )
+                        else:
+                            # Only update if changed significantly to save writes
+                            if abs(decayed - intensity) > 0.01:
+                                to_update.append((decayed, emotion_name))
+
+                    # Perform updates using the SAME connection
+                    if to_update:
+                        await cur.executemany(
+                            "UPDATE emotion_state SET intensity = %s WHERE emotion_name = %s",
+                            to_update,
                         )
-                    else:
-                        # Update with decayed intensity
-                        async with get_conn_ctx() as conn2:
-                            async with conn2.cursor() as cur2:
-                                await cur2.execute(
-                                    "UPDATE emotion_state SET intensity = %s WHERE emotion_name = %s",
-                                    (decayed, emotion_name),
-                                )
-                                await conn2.commit()
-
-                # Remove low-intensity emotions
-                if to_remove:
-                    async with get_conn_ctx() as conn3:
-                        async with conn3.cursor() as cur3:
-                            for emotion_name in to_remove:
-                                await cur3.execute(
-                                    "DELETE FROM emotion_state WHERE emotion_name = %s",
-                                    (emotion_name,),
-                                )
-                            await conn3.commit()
-
-                    log_info(
-                        f"[emotion_manager] Removed {len(to_remove)} decayed emotions"
-                    )
+                        # Log decay events to emotion_diary
+                        decay_logs = [
+                            (
+                                "emotion_manager",
+                                "decay",
+                                name,
+                                val,
+                                "active",
+                                "decay_cycle",
+                            )
+                            for val, name in to_update
+                        ]
+                        await cur.executemany(
+                            """
+                            INSERT INTO emotion_diary 
+                            (source, event, emotion, intensity, state, trigger_condition, timestamp)
+                            VALUES (%s, %s, %s, %s, %s, %s, NOW())
+                            """,
+                            decay_logs,
+                        )
+                    
+                    if to_remove:
+                        await cur.executemany(
+                            "DELETE FROM emotion_state WHERE emotion_name = %s",
+                            [(name,) for name in to_remove],
+                        )
+                        # Log removal events
+                        removal_logs = [
+                            (
+                                "emotion_manager",
+                                "decay_remove",
+                                name,
+                                0.0,
+                                "removed",
+                                "decay_cycle",
+                            )
+                            for name in to_remove
+                        ]
+                        await cur.executemany(
+                            """
+                            INSERT INTO emotion_diary 
+                            (source, event, emotion, intensity, state, trigger_condition, timestamp)
+                            VALUES (%s, %s, %s, %s, %s, %s, NOW())
+                            """,
+                            removal_logs,
+                        )
+                    
+                    if to_update or to_remove:
+                        await conn.commit()
+                        log_info(f"[emotion_manager] Decayed emotions: updated {len(to_update)}, removed {len(to_remove)}")
+                    
+                    # Prevent "decay into the void": if table is empty (all removed), re-seed default
+                    if len(to_remove) == len(rows) and len(rows) > 0:
+                        log_info("[emotion_manager] 🌌 All emotions decayed to void. Re-seeding start state: neutral=5.0")
+                        await cur.execute(
+                             "INSERT INTO emotion_state (emotion_name, intensity, timestamp) VALUES (%s, %s, %s)",
+                             ("neutral", 5.0, now)
+                        )
+                        await conn.commit()
 
         except Exception as e:
             log_error(f"[emotion_manager] Error decaying emotions: {e}")
@@ -659,7 +776,13 @@ class EmotionManager(PluginBase):
             except Exception as e:
                 log_warning(f"[emotion_manager] Error fetching from emotion_state: {e}")
 
+            # If no emotions found anywhere, initialize default state
+            if not merged_emotions:
+                log_info("[emotion_manager] ⚠️ No emotions found in diary or DB. Seeding default state: neutral=5.0")
+                merged_emotions["neutral"] = 5.0
+            
             # Save merged emotions back to DB
+            # This effectively "re-syncs" the DB to match the diary + decay state
             for emotion_type, intensity in merged_emotions.items():
                 await self.set_emotion(emotion_type, intensity)
 
@@ -686,8 +809,9 @@ class EmotionManager(PluginBase):
         Returns:
             Dict with 'emotion_state' key containing formatted emotion string
         """
-        # CRITICAL: Sync emotions from all sources (ai_diary, DB, etc) before reading
-        await self.sync_emotions_from_all_sources()
+        # CRITICAL: Do NOT sync on every read, as it reverts decay by pulling old diary entries.
+        # Only read existing state.
+        # await self.sync_emotions_from_all_sources()
 
         emotions = await self.get_emotion_state()
 

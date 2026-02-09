@@ -5,8 +5,10 @@ from typing import List, Any
 
 try:  # pragma: no cover - import may fail if dependency missing
     import discord  # type: ignore
+    from discord import FFmpegPCMAudio
 except Exception:  # pragma: no cover - graceful fallback for tests without install
     discord = None
+    FFmpegPCMAudio = None
 
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.mention_utils import is_message_for_bot
@@ -182,7 +184,7 @@ class DiscordInterface:
     @staticmethod
     def get_action_types() -> list[str]:
         """Return action types supported by this interface."""
-        return ["message_discord_bot"]
+        return ["message_discord_bot", "join_voice_discord", "leave_voice_discord", "audio_discord_bot"]
 
     @staticmethod
     def get_supported_actions() -> dict:
@@ -193,7 +195,22 @@ class DiscordInterface:
                 # Prefer interface_path but accept legacy 'target' (validation handles either)
                 "required_fields": ["text"],
                 "optional_fields": ["interface_path", "target", "reply_to_message_id"],
-            }
+            },
+            "join_voice_discord": {
+                "description": "Join a Discord voice channel.",
+                "required_fields": ["channel_id"],
+                "optional_fields": ["interface_path"],
+            },
+            "leave_voice_discord": {
+                "description": "Leave the current Discord voice channel.",
+                "required_fields": ["guild_id"],
+                "optional_fields": ["interface_path"],
+            },
+            "audio_discord_bot": {
+                "description": "Send audio to Discord. Streams if in voice, otherwise sends as file.",
+                "required_fields": ["audio"],
+                "optional_fields": ["interface_path", "channel_id", "caption"],
+            },
         }
 
     @staticmethod
@@ -224,12 +241,89 @@ class DiscordInterface:
                     "Never construct interface_path manually - use the exact value from input.payload.source.interface_path",
                 ],
             }
+        if action_name == "join_voice_discord":
+            return {
+                "description": "Join a Discord voice channel.",
+                "payload": {
+                    "channel_id": {
+                        "type": "string",
+                        "example": "123456789",
+                        "description": "The ID of the voice channel to join.",
+                    },
+                    "interface_path": {
+                        "type": "string",
+                        "example": "discord_bot/1234567890/9876543210",
+                        "description": "Optional interface path to derive guild/channel.",
+                        "optional": True,
+                    },
+                },
+            }
+        if action_name == "leave_voice_discord":
+            return {
+                "description": "Leave the current Discord voice channel in a guild.",
+                "payload": {
+                    "guild_id": {
+                        "type": "string",
+                        "example": "1234567890",
+                        "description": "The ID of the guild to leave voice in.",
+                    },
+                    "interface_path": {
+                        "type": "string",
+                        "example": "discord_bot/1234567890/9876543210",
+                        "description": "Optional interface path to derive guild.",
+                        "optional": True,
+                    },
+                },
+            }
+        if action_name == "audio_discord_bot":
+            return {
+                "description": "Send audio to Discord. auto-streams if in Voice Channel, else sends file.",
+                "payload": {
+                    "audio": {
+                        "type": "string",
+                        "example": "/path/to/voice.ogg",
+                        "description": "Path to the audio file.",
+                    },
+                    "interface_path": {
+                        "type": "string",
+                        "example": "discord_bot/1234567890/9876543210",
+                        "description": "REQUIRED. Interface path to target.",
+                    },
+                    "caption": {
+                        "type": "string",
+                        "example": "Listen to this!",
+                        "description": "Optional caption (for file messages only).",
+                        "optional": True,
+                    },
+                },
+            }
         return {}
 
     @staticmethod
     def validate_payload(action_type: str, payload: dict) -> list:
         """Validate payload for discord actions."""
         errors: list[str] = []
+
+        if action_type == "join_voice_discord":
+            channel_id = payload.get("channel_id")
+            interface_path = payload.get("interface_path")
+            if not channel_id and not interface_path:
+                errors.append("payload.channel_id or payload.interface_path is required")
+            return errors
+
+        if action_type == "leave_voice_discord":
+            guild_id = payload.get("guild_id")
+            interface_path = payload.get("interface_path")
+            if not guild_id and not interface_path:
+                errors.append("payload.guild_id or payload.interface_path is required")
+            return errors
+
+        if action_type == "audio_discord_bot":
+            if not payload.get("audio"):
+                errors.append("payload.audio is required")
+            if not payload.get("interface_path") and not payload.get("channel_id"):
+                errors.append("payload.interface_path or payload.channel_id is required")
+            return errors
 
         if action_type != "message_discord_bot":
             return errors
@@ -358,6 +452,169 @@ class DiscordInterface:
             log_error(
                 f"[discord_interface] Failed to send message to {channel_id}: {repr(e)}"
             )
+
+    async def execute_action(self, action: dict, context: dict, bot, original_message):
+        """Execute non-message actions."""
+        action_type = action.get("type")
+        payload = action.get("payload", {})
+
+        if action_type == "join_voice_discord":
+            channel_id = payload.get("channel_id")
+            interface_path = payload.get("interface_path")
+
+            if not channel_id and interface_path:
+                # Try to extract channel ID from interface path if not explicitly provided
+                try:
+                    from core.interface_path_utils import parse_interface_path
+
+                    _, levels = parse_interface_path(interface_path)
+                    # discord_bot/guild_id/channel_id
+                    if len(levels) >= 2:
+                        channel_id = levels[1]
+                except Exception:
+                    pass
+
+            if not channel_id:
+                return {"status": "failed", "message": "Missing channel_id"}
+
+            return await self._join_voice(channel_id)
+
+        elif action_type == "leave_voice_discord":
+            guild_id = payload.get("guild_id")
+            interface_path = payload.get("interface_path")
+
+            if not guild_id and interface_path:
+                try:
+                    from core.interface_path_utils import parse_interface_path
+
+                    _, levels = parse_interface_path(interface_path)
+                    if len(levels) >= 1:
+                        guild_id = levels[0]
+                except Exception:
+                    pass
+
+            if not guild_id:
+                return {"status": "failed", "message": "Missing guild_id"}
+
+            return await self._leave_voice(guild_id)
+
+        elif action_type == "audio_discord_bot":
+            audio_path = payload.get("audio")
+            channel_id = payload.get("channel_id")
+            interface_path = payload.get("interface_path")
+            caption = payload.get("caption")
+
+            if not channel_id and interface_path:
+                try:
+                    from core.interface_path_utils import parse_interface_path
+
+                    _, levels = parse_interface_path(interface_path)
+                    # discord_bot/guild_id/channel_id
+                    if len(levels) >= 2:
+                        channel_id = levels[1]
+                except Exception:
+                    pass
+
+            # Check if we are in a voice channel in this guild
+            streaming = False
+            if channel_id and self.client:
+                try:
+                    channel = self.client.get_channel(int(channel_id))
+                    if not channel:
+                        channel = await self.client.fetch_channel(int(channel_id))
+                    
+                    if channel and channel.guild and channel.guild.voice_client:
+                        # We are connected to voice in this guild
+                        # Verify if we are in the requested channel OR if the request was just for the guild context
+                        # Actually, if we are in ANY voice channel in this guild, we can stream.
+                        # But typically we want to stream to the channel we are in.
+                        vc = channel.guild.voice_client
+                        if vc.is_connected():
+                            return await self._stream_audio(vc, audio_path)
+                except Exception as e:
+                    log_debug(f"[discord_interface] Voice check failed: {e}")
+
+            # Fallback to sending as file
+            log_debug("[discord_interface] Not in voice or lookup failed, sending as file attachment")
+            await self.send_message(
+                channel_id=channel_id,
+                text=caption,
+                audio=audio_path,
+                interface_path=interface_path
+            )
+            return {"status": "success", "message": "Sent as file"}
+
+        return {"status": "failed", "message": f"Unknown action {action_type}"}
+
+    async def _stream_audio(self, voice_client, audio_path):
+        """Stream audio to voice client."""
+        if not os.path.exists(audio_path):
+            return {"status": "failed", "message": "Audio file not found"}
+        
+        if voice_client.is_playing():
+            voice_client.stop()
+
+        try:
+            # Requires FFmpeg installed
+            source = FFmpegPCMAudio(audio_path)
+            voice_client.play(source)
+            log_info(f"[discord_interface] Streaming audio to voice: {audio_path}")
+            return {"status": "success", "message": "Streaming started"}
+        except Exception as e:
+            log_error(f"[discord_interface] Streaming failed: {e}")
+            return {"status": "failed", "message": str(e)}
+
+    async def _join_voice(self, channel_id):
+        """Join a voice channel."""
+        if not self.client:
+            return {"status": "failed", "message": "Discord client not initialized"}
+
+        try:
+            channel = self.client.get_channel(int(channel_id))
+            if not channel:
+                channel = await self.client.fetch_channel(int(channel_id))
+
+            if not channel:
+                return {"status": "failed", "message": "Channel not found"}
+
+            guild = channel.guild
+            voice_client = guild.voice_client
+
+            if voice_client:
+                if voice_client.channel.id == channel.id:
+                    return {"status": "success", "message": "Already in channel"}
+                await voice_client.move_to(channel)
+                return {"status": "success", "message": f"Moved to {channel.name}"}
+            else:
+                await channel.connect()
+                return {"status": "success", "message": f"Connected to {channel.name}"}
+
+        except Exception as e:
+            log_error(f"[discord_interface] Failed to join voice: {e}")
+            return {"status": "failed", "message": str(e)}
+
+    async def _leave_voice(self, guild_id):
+        """Leave voice channel in a guild."""
+        if not self.client:
+            return {"status": "failed", "message": "Discord client not initialized"}
+
+        try:
+            guild = self.client.get_guild(int(guild_id))
+            if not guild:
+                guild = await self.client.fetch_guild(int(guild_id))
+
+            if not guild:
+                return {"status": "failed", "message": "Guild not found"}
+
+            voice_client = guild.voice_client
+            if voice_client:
+                await voice_client.disconnect()
+                return {"status": "success", "message": "Disconnected from voice"}
+            else:
+                return {"status": "success", "message": "Not in a voice channel"}
+        except Exception as e:
+            log_error(f"[discord_interface] Failed to leave voice: {e}")
+            return {"status": "failed", "message": str(e)}
 
     async def _discord_send(
         self, channel_id, text, reply_to_message_id=None, audio_path=None

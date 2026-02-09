@@ -572,6 +572,18 @@ async def handle_incoming_message(
             _log_llm_traffic(prompt, result, interface)
         except Exception as e:
             log_error(f"[plugin_instance] Failed to log LLM traffic: {e}")
+
+        # Update Grillo activity log if this was a Grillo beat
+        # This ensures the raw LLM response is persisted even if actions fail or don't write back
+        try:
+            activity_log_id = None
+            if isinstance(context_memory_or_prompt, dict):
+                activity_log_id = context_memory_or_prompt.get("activity_log_id")
+            
+            if activity_log_id and result:
+                await _update_grillo_response(activity_log_id, result)
+        except Exception as e:
+             log_warning(f"[plugin_instance] Failed to update Grillo log: {e}")
         # Log that plugin finished processing
         try:
             log_info(
@@ -937,3 +949,31 @@ async def _extract_multimodal_attachments(
     except Exception as e:
         log_warning(f"[plugin_instance] Failed to extract multimodal attachments: {e}")
         return []
+
+
+async def _update_grillo_response(activity_log_id, response_text):
+    """Update the grillo_activity_log with the raw response text."""
+    if not activity_log_id or not response_text:
+        return
+    
+    try:
+        from core.db import get_conn_ctx
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                # Logic similar to GrilloPlugin.set_activity_response_text: append if exists
+                # We use append because sometimes multiple messages/chunks might be associated
+                await cur.execute(
+                    """
+                    UPDATE grillo_activity_log
+                    SET response_text = CASE
+                        WHEN response_text IS NULL OR response_text = '' THEN %s
+                        ELSE CONCAT(response_text, '\n\n', %s)
+                    END
+                    WHERE id=%s
+                    """,
+                    (response_text, response_text, activity_log_id),
+                )
+                await conn.commit()
+        log_debug(f"[plugin_instance] Updated grillo_activity_log {activity_log_id} with response ({len(response_text)} chars)")
+    except Exception as e:
+        log_error(f"[plugin_instance] Failed to update Grillo log: {e}")

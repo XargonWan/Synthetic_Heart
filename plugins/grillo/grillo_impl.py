@@ -157,8 +157,8 @@ class GrilloPlugin(AIPluginBase):
         return (
             "[G.R.I.L.L.O. Tag Elaboration]\n\n"
             "Reflect on your recent conversations and consider themes, patterns and insights.\n"
-            "IMPORTANT: end with a JSON action to write a diary entry.\n"
-            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content":"your reflection"}}]}'
+            "IMPORTANT: end with a JSON action to write a diary entry. 'interaction_summary' is required.\n"
+            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"interaction_summary": "Reflection on [topic]", "content":"your reflection"}}]}'
         )
 
     async def _is_public_active_chat(self, chat_path: str) -> bool:
@@ -262,8 +262,8 @@ class GrilloPlugin(AIPluginBase):
             'Example: "We talked about Power Rangers — Jay asked what Super Sentai is, and I explained Super Sentai is the original Japanese series with different stories than Power Rangers."\n\n'
             'Also provide 2-4 short tags (as a JSON array) describing the memory (e.g., ["power_rangers", "sentai"]).\n'
             "Return ONLY valid JSON that creates a diary entry using the `create_personal_diary_entry` action. The JSON must look like: \n"
-            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content": "<your concise summary>", "context_tags": ["tag1","tag2"]}}]}\n'
-            "Do NOT include any extra text outside the JSON."
+            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"interaction_summary": "Memory consolidation on [topic]", "content": "<your concise summary>", "context_tags": ["tag1","tag2"]}}]}\n'
+            "interaction_summary is REQUIRED. Do NOT include any extra text outside the JSON."
         )
         return base
 
@@ -330,7 +330,7 @@ class GrilloPlugin(AIPluginBase):
         return (
             "[G.R.I.L.L.O. Relationship Reflection]\n\n"
             "Reflect on interactions with people; end with JSON action.\n"
-            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content":"relationship insight"}}]}'
+            '{"actions": [{"type": "create_personal_diary_entry", "payload": {"interaction_summary": "Relationship reflection", "content":"relationship insight"}}]}'
         )
 
     async def _enqueue_with_low_priority(self, prompt: str, beat_type: str):

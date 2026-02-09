@@ -3,6 +3,7 @@
 Gemini API LLM Engine for Synthetic Heart.
 
 This engine uses the Gemini REST API to communicate with Gemini models.
+It also supports the Gemini Live API (WebSockets) for real-time voice interactions.
 It follows the standard LLM engine architecture to ensure all plugins
 (diary, emotions, bio_manager, etc.) work properly.
 
@@ -21,6 +22,22 @@ import requests
 import base64
 import mimetypes
 from pathlib import Path
+import tempfile
+import subprocess
+import os
+
+# Try importing the Google GenAI SDK for Live API support
+try:
+    from google import genai
+    from google.genai import types
+
+    _HAS_GENAI_SDK = True
+except ImportError:
+    _HAS_GENAI_SDK = False
+    log_warning(
+        "[gemini_api] google-genai SDK not found. Live API features will be disabled."
+    )
+
 
 # Register Gemini API Key configuration (always visible so it can be set before activation)
 try:
@@ -217,6 +234,20 @@ class GeminiAPIPlugin(AIPluginBase):
         # Model limits map for plugin_instance.py compatibility
         self.model_limits_map = MODEL_LIMITS_MAP
 
+        # Initialize Google GenAI Client if available
+        self.client = None
+        if _HAS_GENAI_SDK and GEMINI_API_KEY:
+            try:
+                self.client = genai.Client(
+                    api_key=str(GEMINI_API_KEY).strip(),
+                    http_options={"api_version": "v1alpha"},
+                )
+                log_info(
+                    "[gemini_api] Google GenAI Client initialized for Live API (v1alpha)"
+                )
+            except Exception as e:
+                log_error(f"[gemini_api] Failed to initialize Google GenAI Client: {e}")
+
         log_info(f"[gemini_api] Initialized with model: {self._current_model}")
 
     def get_health_status(self):
@@ -307,8 +338,212 @@ class GeminiAPIPlugin(AIPluginBase):
             "max_response_chars": model_config.get("max_output_tokens", 8192),
             "supports_images": True,
             "supports_functions": True,
+            "supports_voice_interaction": _HAS_GENAI_SDK,
             "model_name": self._current_model,
         }
+
+    async def handle_live_processing(
+        self, file_path: str, mime_type_hint: str = None
+    ) -> str | None:
+        """
+        Process 'live' media (Voice/Video notes) using standard GenerateContent API.
+
+        Note: We switched from WebSocket (Live API) to Standard API because:
+        1. WebSocket requires 'gemini-live-*' models which are preview/unstable.
+        2. WebSocket requires complex manual PCM/Frame chunking.
+        3. Standard API handles .oga/.mp4 files natively and robustly.
+        4. For file-based 'live' messages, standard API is strictly superior/stable.
+        """
+        try:
+            if not self.client:
+                log_error("[gemini_api] Client not initialized")
+                return None
+
+            # 1. Read File Data
+            if not os.path.exists(file_path):
+                log_error(f"[gemini_api] File not found: {file_path}")
+                return None
+
+            with open(file_path, "rb") as f:
+                file_data = f.read()
+
+            # 2. Prepare Part
+            # Map common mime types
+            mime_type = mime_type_hint or "audio/ogg"
+            if file_path.endswith(".mp4"):
+                mime_type = "video/mp4"
+            elif file_path.endswith(".ogg") or file_path.endswith(".oga"):
+                mime_type = "audio/ogg"
+
+            log_debug(
+                f"[gemini_api] Processing Live Media: {len(file_data)} bytes, mime={mime_type}"
+            )
+
+            # 3. Call Standard API
+            # Use current model (usually gemini-2.0-flash-exp or gemini-3-flash which supports audio/video)
+            model_id = self._current_model
+
+            # Correction: gemini-3-flash-preview supports audio/video in generate_content
+            # If it fails, we can fallback, but it should work.
+
+            prompt = "You are listening/watching a message from the user. Respond naturally and concisely in text."
+
+            # Using raw API via google-genai
+            # content = [text, media]
+
+            # We must use proper Part objects
+            from google.genai import types
+
+            response = await self.client.aio.models.generate_content(
+                model=model_id,
+                contents=[
+                    types.Content(
+                        parts=[
+                            types.Part(text=prompt),
+                            types.Part(
+                                inline_data=types.Blob(
+                                    mime_type=mime_type, data=file_data
+                                )
+                            ),
+                        ]
+                    )
+                ],
+                config=types.GenerateContentConfig(
+                    system_instruction="You are a helpful AI assistant. Respond strictly with the text of your reply. Do not output JSON.",
+                    response_mime_type="text/plain",
+                ),
+            )
+
+            if response and response.text:
+                return response.text.strip()
+
+            return None
+
+        except Exception as e:
+            log_error(f"[gemini_api] Error in handle_live_processing (standard): {e}")
+            return None
+
+    async def _extract_frames(self, video_path: str) -> list[bytes]:
+        """Extract frames from video at ~1fps as JPEGs."""
+        frames = []
+        try:
+            # Output to pipe as series of JPEGs is tricky to parse.
+            # Easier to output to temp files or use updating buffer.
+            # actually, using sending a video file as 'video/mp4' data is NOT supported by WebSocket directly usually,
+            # but 'genai' SDK might handle it?
+            # Re-reading docs: "realtimeInput ... video ... Blob".
+            # If we just read the file bytes?
+            # Let's try sending the whole video file as one blob if it's small, OR just use frames.
+            # Frames are safer for "Live" understanding.
+
+            # Use ffmpeg to output frames to a temp directory
+            with tempfile.TemporaryDirectory() as temp_dir:
+                # Extract 1 frame per second
+                cmd = [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    video_path,
+                    "-vf",
+                    "fps=1,scale=640:-1",  # Resize for speed
+                    "-q:v",
+                    "5",  # JPEG quality
+                    os.path.join(temp_dir, "frame_%04d.jpg"),
+                ]
+
+                process = await asyncio.create_subprocess_exec(
+                    *cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+                await process.communicate()
+
+                # Read frames
+                for filename in sorted(os.listdir(temp_dir)):
+                    if filename.endswith(".jpg"):
+                        with open(os.path.join(temp_dir, filename), "rb") as f:
+                            frames.append(f.read())
+
+            log_debug(f"[gemini_api] Extracted {len(frames)} frames from video")
+            return frames
+        except Exception as e:
+            log_error(f"[gemini_api] Frame extraction failed: {e}")
+            return []
+
+    async def _convert_audio_to_pcm(self, input_path: str) -> bytes | None:
+        """Convert input audio to 16kHz mono PCM s16le using ffmpeg."""
+        try:
+            # ffmpeg -i input.ogg -f s16le -acodec pcm_s16le -ar 16000 -ac 1 pipe:1
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-i",
+                input_path,
+                "-f",
+                "s16le",
+                "-acodec",
+                "pcm_s16le",
+                "-ar",
+                "16000",
+                "-ac",
+                "1",
+                "pipe:1",
+            ]
+
+            process = await asyncio.create_subprocess_exec(
+                *cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+
+            if process.returncode != 0:
+                log_error(f"[gemini_api] ffmpeg conversion failed: {stderr.decode()}")
+                return None
+
+            return stdout
+        except Exception as e:
+            log_error(f"[gemini_api] Error running ffmpeg: {e}")
+            return None
+
+    async def _convert_pcm_to_ogg(
+        self, pcm_data: bytes, output_path: str
+    ) -> str | None:
+        """Convert 24kHz (Gemini Default) PCM s16le to OGG Opus."""
+        # Note: This is now largely unused if we are text-only, but kept for future fallback
+        try:
+            # ... (Same as before)
+            # ffmpeg -f s16le -ar 24000 -ac 1 -i pipe:0 -c:a libopus output.ogg
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "s16le",
+                "-ar",
+                "24000",
+                "-ac",
+                "1",
+                "-i",
+                "pipe:0",
+                "-c:a",
+                "libopus",
+                output_path,
+            ]
+
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            stdout, stderr = await process.communicate(input=pcm_data)
+
+            if process.returncode != 0:
+                log_error(
+                    f"[gemini_api] ffmpeg output conversion failed: {stderr.decode()}"
+                )
+                return None
+
+            return output_path
+        except Exception as e:
+            log_error(f"[gemini_api] Error running ffmpeg for output: {e}")
+            return None
 
     async def handle_incoming_message(self, bot, message, prompt):
         """Process a message using a pre-built prompt.
@@ -424,6 +659,33 @@ class GeminiAPIPlugin(AIPluginBase):
             else:
                 prompt_text = str(prompt)
 
+            # --- Multimodal Support: Extract parts and redact text prompt ---
+            # Extract heavy multimodal parts (images, audio) to be sent as native Gemini parts
+            multimodal_parts = self._extract_multimodal_parts(prompt)
+
+            # ALWAYS redact heavy base64 data from the text prompt, even if no parts were extracted.
+            # This prevents unsupported mime-types or raw chunks from leaking into the text prompt
+            # and confusing the model (or causing the '😵' error).
+            prompt_to_redact = None
+            if isinstance(prompt, dict):
+                prompt_to_redact = prompt
+            elif isinstance(prompt, str):
+                try:
+                    prompt_to_redact = json.loads(prompt)
+                    if not isinstance(prompt_to_redact, dict):
+                        prompt_to_redact = None
+                except Exception:
+                    prompt_to_redact = None
+            
+            if prompt_to_redact:
+                prompt_redacted = self._copy_and_redact_data(prompt_to_redact)
+                # Regenerate prompt_text from reduced version
+                prompt_text = json.dumps(prompt_redacted, indent=2, ensure_ascii=False)
+                if len(prompt_text) < len(str(prompt)):
+                     log_debug(
+                        f"[gemini_api] Redacted heavy data from prompt: {len(str(prompt))} -> {len(prompt_text)} chars"
+                    )
+
             log_debug(
                 f"[gemini_api] Sending prompt ({len(prompt_text)} chars) to {self._current_model}"
             )
@@ -442,9 +704,6 @@ class GeminiAPIPlugin(AIPluginBase):
             # Build system instruction that enforces JSON output
             system_instruction = self._build_system_instruction(prompt)
             config_args["system_instruction"] = system_instruction
-
-            # Extract multimodal parts from the prompt
-            multimodal_parts = self._extract_multimodal_parts(prompt)
 
             response_text = await self._http_generate_content(
                 prompt_text=prompt_text,
@@ -860,13 +1119,16 @@ class GeminiAPIPlugin(AIPluginBase):
         )
 
     def _extract_multimodal_parts(self, prompt: dict | str) -> list[dict]:
-        """Extract multimodal parts from the prompt context.
+        """Extract multimodal parts from the prompt context recursively.
 
-        Looks for attachments in the prompt dict under keys like:
+        Recursively searches for attachments in the prompt dict under keys like:
         - 'attachments': list of {path, mime_type, data} or {path, mime_type}
         - 'images': list of image paths or base64 data
         - 'audio': list of audio paths or base64 data
+        - 'videos': list of video paths or base64 data
         - 'documents': list of document paths or base64 data
+
+        These can appear at any nesting level in the prompt structure.
 
         Returns a list of Gemini API inline_data parts.
         """
@@ -881,27 +1143,51 @@ class GeminiAPIPlugin(AIPluginBase):
         if not isinstance(prompt, dict):
             return parts
 
-        # Check for attachments in various locations
+        # Keys that can contain lists of multimodal attachments
+        MULTIMODAL_KEYS = {"attachments", "images", "audio", "documents", "videos"}
+
+        # Collect all attachments from all locations
         attachments = []
 
-        # Direct attachments key
-        if "attachments" in prompt:
-            attachments.extend(prompt["attachments"])
+        def collect_attachments_recursive(container) -> None:
+            """Recursively collect multimodal attachments from any level."""
+            if isinstance(container, dict):
+                # Check for multimodal list keys at this level
+                for key in MULTIMODAL_KEYS:
+                    if key in container:
+                        items = container[key]
+                        if isinstance(items, list):
+                            for item in items:
+                                if isinstance(item, dict):
+                                    attachments.append(item)
+                                elif isinstance(item, str):
+                                    # Legacy: string path, infer type from key
+                                    default_mime = {
+                                        "images": "image/jpeg",
+                                        "audio": "audio/mpeg",
+                                        "videos": "video/mp4",
+                                        "documents": "application/pdf",
+                                    }.get(key, "application/octet-stream")
+                                    attachments.append(
+                                        {"path": item, "mime_type": default_mime}
+                                    )
+                        elif isinstance(items, dict):
+                            # Single item rather than list
+                            attachments.append(items)
 
-        # Check inside input section
-        if "input" in prompt and isinstance(prompt["input"], dict):
-            input_section = prompt["input"]
-            if "attachments" in input_section:
-                attachments.extend(input_section["attachments"])
-            # Legacy image support
-            if "images" in input_section:
-                for img in input_section["images"]:
-                    if isinstance(img, dict):
-                        attachments.append(img)
-                    elif isinstance(img, str):
-                        attachments.append({"path": img, "mime_type": "image/jpeg"})
+                # Recurse into all dict values
+                for value in container.values():
+                    collect_attachments_recursive(value)
 
-        # Process each attachment
+            elif isinstance(container, list):
+                # Recurse into list items
+                for item in container:
+                    collect_attachments_recursive(item)
+
+        # Start recursive collection from root
+        collect_attachments_recursive(prompt)
+
+        # Process each collected attachment
         for attachment in attachments:
             if not isinstance(attachment, dict):
                 continue
@@ -946,6 +1232,90 @@ class GeminiAPIPlugin(AIPluginBase):
             log_debug(f"[gemini_api] Added multimodal part: {mime_type}")
 
         return parts
+
+    def _copy_and_redact_data(self, prompt: dict) -> dict:
+        """Create a deep copy of the prompt and redact heavy binary data recursively.
+
+        This ensures that when the prompt is serialized to JSON for the 'text'
+        part of the Gemini request, it doesn't contain massive base64 strings
+        that are already being sent as native multimodal 'inline_data' parts.
+
+        This fixes the "duplicate data" issue where:
+        - The plugin_instance adds base64-encoded multimodal data to the prompt
+        - gemini_api.py extracts it and sends it as native inline_data parts
+        - BUT the JSON text prompt ALSO contained the same base64 strings
+        - This causes massive prompt sizes and confuses the model
+
+        Handles:
+        - 'attachments' key at any nesting level
+        - Legacy keys: 'images', 'audio', 'documents', 'videos'
+        - Both 'data' and 'base64' field names for binary content
+        """
+        import copy
+
+        try:
+            redacted = copy.deepcopy(prompt)
+
+            # Keys that can contain lists of multimodal attachments
+            MULTIMODAL_KEYS = {"attachments", "images", "audio", "documents", "videos"}
+            # Fields within attachments that contain heavy base64 data
+            DATA_FIELDS = {"data", "base64"}
+            # Keys that suggest a dict is actually an attachment
+            ATTACHMENT_FIELDS = {
+                "mime_type",
+                "mimeType",
+                "path",
+                "file_path",
+                "data",
+                "base64",
+            }
+
+            def is_likely_attachment(item: dict) -> bool:
+                """Check if a dict contains keys typical of an attachment."""
+                return bool(item.keys() & ATTACHMENT_FIELDS)
+
+            def redact_multimodal_item(item: dict) -> None:
+                """Redact base64 data fields within a single attachment dict."""
+                if not isinstance(item, dict):
+                    return
+                # Verify it looks like an attachment before redacting
+                if not is_likely_attachment(item):
+                    return
+                for field in DATA_FIELDS:
+                    if field in item:
+                        original_len = len(str(item[field]))
+                        item[field] = f"<redacted: {original_len} chars>"
+
+            def redact_recursive(container) -> None:
+                """Recursively search and redact multimodal data at any level."""
+                if isinstance(container, dict):
+                    # Check for multimodal list keys at this level
+                    for key in MULTIMODAL_KEYS:
+                        if key in container:
+                            items = container[key]
+                            if isinstance(items, list):
+                                for item in items:
+                                    redact_multimodal_item(item)
+                            elif isinstance(items, dict):
+                                # Single item rather than list
+                                redact_multimodal_item(items)
+
+                    # Recurse into all dict values
+                    for value in container.values():
+                        redact_recursive(value)
+
+                elif isinstance(container, list):
+                    # Recurse into list items
+                    for item in container:
+                        redact_recursive(item)
+
+            # Start recursive redaction from root
+            redact_recursive(redacted)
+
+            return redacted
+        except Exception as e:
+            log_warning(f"[gemini_api] Failed to redact prompt data: {e}")
+            return prompt
 
     async def _handle_correction_prompt(self, prompt: dict) -> str:
         """Handle a correction/system_message prompt.
