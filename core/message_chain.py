@@ -216,7 +216,7 @@ async def handle_incoming_message(bot, message: Optional[SimpleNamespace], text:
     # Retry/tried set to avoid loops
     tried_texts = set()
     attempt = 0
-    max_retries = ctx.get('max_retries', CORRECTOR_RETRIES)
+    max_retries = ctx.get('max_retries', int(CORRECTOR_RETRIES))
 
     while True:
         log_info(
@@ -270,6 +270,26 @@ async def handle_incoming_message(bot, message: Optional[SimpleNamespace], text:
                 # Don't return here - let corrector fix it
                 parsed = None  # Force correction path
 
+            # Synthera Emotion Forwarding: copy dominant feeling into tts_speak payload
+            if parsed is not None and isinstance(parsed, dict) and "feelings" in parsed and actions:
+                try:
+                    feelings = parsed.get("feelings")
+                    if isinstance(feelings, dict) and feelings:
+                        valid_feelings = {k: float(v) for k, v in feelings.items() if isinstance(v, (int, float))}
+                        if valid_feelings:
+                            dominant_emotion = max(valid_feelings, key=valid_feelings.get)
+                            if valid_feelings[dominant_emotion] > 0:
+                                log_debug(f"[message_chain] 🎭 Found dominant emotion in metadata: {dominant_emotion} ({valid_feelings[dominant_emotion]})")
+                                for action in actions:
+                                    atype = action.get("type") or action.get("action")
+                                    if atype == "tts_speak":
+                                        payload = action.get("payload")
+                                        if isinstance(payload, dict) and not payload.get("emotion"):
+                                            payload["emotion"] = dominant_emotion
+                                            log_info(f"[message_chain] 💉 Auto-injected emotion '{dominant_emotion}' into tts_speak payload")
+                except Exception as e:
+                    log_warning(f"[message_chain] Failed to auto-forward emotions: {e}")
+
             # Only execute actions if we have valid ones
             if parsed is not None:
                 # Note: LLM decides freely whether to respond to user or not
@@ -277,13 +297,66 @@ async def handle_incoming_message(bot, message: Optional[SimpleNamespace], text:
                 # Log for debugging purposes
                 if source == "llm" or getattr(message, "from_llm", False):
                     has_user_response = False
+                    has_tts = False
+                    user_message_action = None
+                    # Determine current set of message action types from config (dynamic)
+                    current_message_action_types = []
+                    try:
+                        from core.config_manager import config_registry
+                        MESSAGE_ACTION_TYPES = config_registry.get_var(
+                            "MESSAGE_ACTION_TYPES",
+                            [],
+                            label="Message action types",
+                            description="List of action types considered as outbound user messages.",
+                            group="core",
+                            component="message_chain",
+                        )
+                        current_message_action_types = list(MESSAGE_ACTION_TYPES.value) if hasattr(MESSAGE_ACTION_TYPES, 'value') else list(MESSAGE_ACTION_TYPES)
+                    except Exception:
+                        current_message_action_types = []
+
+                    # If not configured, infer from available action schemas
+                    if not current_message_action_types:
+                        try:
+                            from core.core_initializer import core_initializer
+                            available_actions = core_initializer.actions_block.get("available_actions", {})
+                            current_message_action_types = [
+                                action_type
+                                for action_type in available_actions.keys()
+                                if isinstance(action_type, str) and action_type.startswith("message_")
+                            ]
+                        except Exception:
+                            current_message_action_types = []
+
                     if isinstance(actions, list):
                         for action in actions:
-                            action_name = action.get('action') if isinstance(action, dict) else None
-                            if action_name in ['message_telegram_bot', 'message_discord_bot', 'message_ollama_serve']:
+                            # Support both 'action' and 'type' keys
+                            action_name = None
+                            if isinstance(action, dict):
+                                action_name = action.get('action') or action.get('type')
+                            if action_name == "tts_speak":
+                                has_tts = True
+                            if action_name in current_message_action_types:
                                 has_user_response = True
+                                if not user_message_action:
+                                    user_message_action = action
                                 break
-                    
+
+                    # Auto-inject TTS if there's a user response but no tts_speak
+                    if has_user_response and not has_tts and user_message_action:
+                        payload = user_message_action.get('payload', {}) if isinstance(user_message_action, dict) else {}
+                        text_to_speak = payload.get('text') or payload.get('content') or payload.get('message')
+                        if text_to_speak and isinstance(text_to_speak, str) and len(text_to_speak.strip()) > 0:
+                            log_info(f"[message_chain] 🗣️ Auto-injecting 'tts_speak' action for message: {text_to_speak[:30]}...")
+                            tts_action = {
+                                "type": "tts_speak",
+                                "payload": {
+                                    "text": text_to_speak,
+                                    "emotion": payload.get('emotion') if isinstance(payload, dict) else None,
+                                },
+                            }
+                            actions.append(tts_action)
+
                     if not has_user_response:
                         log_debug('[message_chain] LLM chose not to send user message (diary/internal only)')
                     else:
@@ -302,6 +375,20 @@ async def handle_incoming_message(bot, message: Optional[SimpleNamespace], text:
                         # If we had corruption recovery or validation failures, check if correction is needed
                         needs_correction = len(failed) > 0 or metadata.get('recovered', False)
                         
+                        # Attach last action result to message/context so downstream hooks
+                        # (e.g. Grillo action checker) can inspect what happened.
+                        last_action_result = {
+                            'processed': processed,
+                            'failed': failed,
+                            'errors': errors
+                        }
+                        try:
+                            ctx['last_action_result'] = last_action_result
+                            if hasattr(message, '__dict__'):
+                                message.last_action_result = last_action_result
+                        except Exception:
+                            pass
+
                         if needs_correction and (source == "llm" or getattr(message, "from_llm", False)):
                             # Some actions failed or JSON was corrupted - request selective correction
                             log_warning(f'[message_chain] {len(failed)} actions failed, requesting correction for missing/invalid actions')

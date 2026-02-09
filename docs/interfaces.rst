@@ -72,6 +72,11 @@ The Telegram bot interface offers comprehensive Telegram integration:
 - Inline keyboard and callback support
 - Group and private chat handling
 - Trainer ID security validation
+- Wake/Sleep attention mode (commands ``/wake`` ``/sleep`` ``/status``)
+    - **Default**: awake (listens to all messages in the chat)
+    - ``/sleep``: switches to mention/reply-only handling for that chat
+    - ``/wake``: restores awake behavior
+    - ``/status``: shows the current mode
 
 Reddit Interface
 ----------------
@@ -104,8 +109,11 @@ The web interface provides browser-based access:
 
 .. code-block:: bash
 
-   SYNTH_WEBUI_HOST=0.0.0.0
-   SYNTH_WEBUI_PORT=5006
+    SYNTH_WEBUI_HOST=0.0.0.0
+    SYNTH_WEBUI_HTTP_PORT=8001
+    SYNTH_WEBUI_HTTPS_PORT=8000
+
+See also: :doc:`compose_env_vars` for a complete list of Compose variables, defaults and recommendations.
 
 **Features:**
 
@@ -113,6 +121,37 @@ The web interface provides browser-based access:
 - Real-time chat updates
 - File upload support
 - Responsive design
+
+**Extended API Endpoints**
+
+The Web UI exposes additional endpoints used by external integrations such as
+Mate-Engine:
+
+- ``GET /api/animation_state`` – Current centralized animation state
+- ``POST /api/animation_state`` – Request a centralized animation state change. Body: ``{state, session_id?, loop?, context_id?, source?}``
+- ``POST /api/animations/upload`` – Temporary animation upload (FBX/VRMA)
+- ``GET /api/animations/uploads`` – List temporary animation uploads
+- ``DELETE /api/animations/uploads/{upload_id}`` – Remove a temporary upload
+- ``POST /api/animations/promote`` – Promote a temporary upload into a skin
+- ``GET /api/prompt_override`` – Interface prompt injection/override hints
+- ``POST /api/integrations/messages`` – Generic integration message endpoint. Body: ``{source, type, payload, metadata}``. ``type=chat`` is forwarded to the message chain; other types are stored for retrieval.
+- ``GET /api/integrations/outbox?source=<source>`` – Retrieve queued messages for a given integration source (clears the queue on read). Use ``source=mate`` for Mate Engine clients.
+
+Plugins
+-------
+
+A convenience plugin, ``plugins/mate_engine.py``, is provided as an optional integration helper. It exposes actions that LLMs can call and implements policy-sensitive behaviour such as promotion of temporary uploads:
+
+- ``send_mate_message`` – Enqueue a message to the Mate outbox (source="mate").
+- ``promote_upload`` – Promote a temporary upload into a skin (requires ``SYNTH_MATEENGINE_PROMOTE_ENABLED=1`` to permit promotion).
+
+Set ``SYNTH_MATEENGINE_PROMOTE_ENABLED=1`` to enable promotion from uploads into person skins (default: disabled).
+
+**Mate Engine Flags**
+
+- ``SYNTH_MATEENGINE_UPLOAD_TTL_DAYS`` – Days before temporary uploads are removed (default: 7)
+- ``SYNTH_MATEENGINE_UPLOAD_CLEANUP_INTERVAL_S`` – Cleanup interval in seconds (default: 3600)
+- ``SYNTH_MATEENGINE_PROMOTE_ENABLED`` – Set to ``1`` to allow promotion of uploads
 
 Ollama-Compatible Server
 ------------------------

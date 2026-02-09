@@ -1,6 +1,10 @@
 from typing import Optional
 import asyncio
-from telegram.error import TimedOut
+try:
+    from telegram.error import TimedOut
+except Exception:
+    class TimedOut(Exception):
+        pass
 from core.logging_utils import (
     log_debug,
     log_info,
@@ -10,7 +14,14 @@ from core.logging_utils import (
 )
 import traceback
 import time
-from telegram.error import RetryAfter, NetworkError
+try:
+    from telegram.error import RetryAfter, NetworkError
+except Exception:
+    class RetryAfter(Exception):
+        pass
+
+    class NetworkError(Exception):
+        pass
 
 # Track whether we've already warned about None bot to avoid log spam
 _BOT_NONE_WARNED = False
@@ -520,8 +531,18 @@ async def llm_response_send(bot, chat_id: int, text: str, chunk_size: int = 4000
     except Exception:
         log_debug(f"[llm_response_send] Called with chat_id={chat_id}, kwargs_keys={list(kwargs.keys())}")
 
-    # Log text content for debugging
+    # Log text content for debugging, and detect potential encoding issues (mojibake)
     if text:
+        try:
+            from core.text_utils import looks_like_mojibake, try_recover_mojibake
+            log_debug(f"[llm_response_send] Text repr: {text!r}")
+            if looks_like_mojibake(text):
+                log_warning("[llm_response_send] Potential mojibake detected in LLM output (will forward as-is).")
+                recovered = try_recover_mojibake(text)
+                log_debug(f"[llm_response_send] Mojibake recovery attempt: recovered={recovered!r}")
+        except Exception:
+            log_debug("[llm_response_send] mojibake detection unavailable")
+
         # For JSON content, always log fully without truncation for debugging
         if text.strip().startswith(('{', '[')):
             log_debug(f"[llm_response_send] JSON content ({len(text)} chars, full dump below):\n{text}")
@@ -660,10 +681,16 @@ async def llm_response_send(bot, chat_id: int, text: str, chunk_size: int = 4000
     # Send as normal text with chunking
     log_debug(f"[telegram_safe_send] Sending as normal text with chunking")
     try:
+        last_sent = None
         for i in range(0, len(text), chunk_size):
             chunk = text[i : i + chunk_size]
             log_debug(f"[llm_response_send] Sending chunk {i//chunk_size + 1} (len={len(chunk)}) to chat_id={chat_id}")
-            await _send_with_retry(bot, chat_id, chunk, retries, delay, **kwargs)
+            sent = await _send_with_retry(bot, chat_id, chunk, retries, delay, **kwargs)
+            # _send_with_retry may return a telegram Message object or None; keep last non-None
+            if sent is not None:
+                last_sent = sent
+        # Return the last sent message (if any) to allow callers to track trainer-side message ids
+        return last_sent
     except Exception as e:
         # Log as WARNING if it's a thread error (will be handled by fallback), ERROR otherwise
         error_msg = str(e).lower()

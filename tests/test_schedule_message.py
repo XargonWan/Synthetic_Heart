@@ -4,6 +4,12 @@ Test scheduled message delivery.
 Creates an event that should trigger a scheduled_message action.
 """
 
+import pytest
+
+# This file is an integration helper script that requires a live DB and a running scheduler.
+# It is not intended to run as part of the unit test suite.
+pytest.skip("integration helper script (requires live DB/scheduler)", allow_module_level=True)
+
 import asyncio
 import json
 from datetime import datetime, timedelta

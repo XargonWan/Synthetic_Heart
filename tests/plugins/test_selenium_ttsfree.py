@@ -12,7 +12,10 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from plugins.selenium_ttsfree import SeleniumTTSFreePlugin
+try:
+    from plugins.selenium_ttsfree import SeleniumTTSFreePlugin
+except ModuleNotFoundError:
+    from plugins_dev.selenium_ttsfree import SeleniumTTSFreePlugin
 
 
 def test_validate_payload_success():

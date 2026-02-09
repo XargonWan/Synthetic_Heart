@@ -101,6 +101,11 @@ async def test_persona_manager():
             final_emotions = len(final_persona.emotive_state)
             print(f"   Emotions before: {initial_emotions}, after: {final_emotions}")
             print(f"   Current emotional state: {[(es.type, es.intensity) for es in final_persona.emotive_state]}")
+
+        # Test 5b: Invalid emotions should create a corrector message
+        persona_manager.process_llm_message_for_emotions("I feel weird {unknown_emotion 5}")
+        corrector = persona_manager.get_emotion_validation_corrector()
+        assert corrector is not None and 'Invalid emotions detected' in corrector
         
         # Test 6: Test trigger system
         print("\n6. Testing trigger system...")

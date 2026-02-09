@@ -16,6 +16,8 @@ ENV PIXELFLUX_USE_XSHM=0 \
     QT_X11_NO_MITSHM=1 \
     DISABLE_XSHM=1 \
     BROWSER=/usr/local/bin/chromium-browser
+ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
 # Block snap completely
 RUN echo 'Package: snapd' > /etc/apt/preferences.d/no-snap && \
@@ -31,8 +33,9 @@ RUN echo 'Package: snapd' > /etc/apt/preferences.d/no-snap && \
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       python3 python3-venv python3-pip \
-      git curl wget unzip nano vim \
+    git curl wget unzip nano vim \
       lsb-release ca-certificates \
+    openssl \
       htop net-tools iputils-ping \
       ffmpeg mariadb-client libmariadb3 libmariadb-dev && \
     # Force update of CA certificates bundle
@@ -177,3 +180,5 @@ COPY webtop/root /
 # Set permissions for abc user
 # Note: abc user home is /config
 RUN chown -R abc:abc /app
+# Ensure logs folder exists in image and is owned by the runtime user
+RUN mkdir -p /app/logs && chown -R abc:abc /app/logs

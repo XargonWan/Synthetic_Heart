@@ -106,6 +106,18 @@ def test_card_content_wrapper_and_collapser_exists():
     assert 'function addCardCollapsers' in content
 
 
+def test_chat_resizable_default_true():
+    """The chat should be resizable by default (regression guard).
+
+    This verifies that when no explicit exposed variable is set, the
+    WebUI defaults to a resizable chat (historical behaviour).
+    """
+    from core.webui import WebUI
+
+    w = WebUI(autostart=False)
+    assert w._get_chat_resizable() is True
+
+
 def test_no_decorative_diary_carets():
     path = (pathlib.Path(__file__).resolve().parents[1] / "core" / "webui_templates" / "synth_webui_index.html")
     content = path.read_text(encoding='utf-8')
@@ -119,3 +131,15 @@ def test_config_control_buttons_are_textual():
     # The expand/collapse controls should use explicit labels (no decorative caret glyphs)
     assert 'id="config-expand-all"' in content and 'Expand' in content
     assert 'id="config-collapse-all"' in content and 'Collapse' in content
+
+
+def test_chat_resize_js_exposes_toggle_and_creator():
+    # The client-side template should declare CHAT_RESIZABLE as a mutable
+    # variable and provide a globally callable creator function so runtime
+    # toggles can enable/disable handles.
+    path = ROOT / "core" / "webui_templates" / "synth_webui_index.html"
+    content = path.read_text(encoding='utf-8')
+    assert 'let CHAT_RESIZABLE' in content
+    assert 'function createChatResizeHandles' in content
+    # Ensure we attempt to restore native resize when enabled so borders/corners work
+    assert "chatElement.style.resize = 'both'" in content or 'chatElement.style.resize = "both"' in content

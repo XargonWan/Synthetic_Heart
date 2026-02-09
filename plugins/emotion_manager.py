@@ -15,75 +15,80 @@ import math
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, asdict
+import inspect
 
 from core.plugin_base import PluginBase
 from core.db import get_conn_ctx
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.config_manager import config_registry
 
-# Canonical whitelist of valid emotions - moved from persona_manager
-VALID_EMOTIONS = {
-    # Basic emotions (Ekman)
-    'anger', 'disgust', 'fear', 'happiness', 'sadness', 'surprise',
-    
-    # Complex emotions (Plutchik & extensions)
-    'joy', 'trust', 'anticipation', 'acceptance', 'serenity', 'interest',
-    'boredom', 'annoyance', 'apprehension', 'pensiveness', 'fatigue', 'vigilance',
-    'rage', 'loathing', 'terror', 'amazement', 'grief', 'optimism', 'love',
-    'submission', 'awe', 'disapproval', 'remorse', 'contempt', 'aggressiveness', 'ecstasy',
-    
-    # Common emotional states
-    'anxiety', 'calm', 'confusion', 'contentment', 'curiosity', 'despair',
-    'determination', 'disappointment', 'doubt', 'embarrassment', 'enthusiasm', 'envy',
-    'excitement', 'frustration', 'gratitude', 'guilt', 'hope', 'humiliation',
-    'impatience', 'indifference', 'jealousy', 'loneliness', 'nervousness',
-    'outrage', 'panic', 'patience', 'pride', 'regret', 'relief', 'resentment',
-    'satisfaction', 'shame', 'shock', 'sympathy', 'tenderness', 'triumph', 'worry',
-    
-    # Social/relational emotions
-    'admiration', 'affection', 'arrogance', 'compassion', 'empathy', 'hatred',
-    'kindness', 'pity', 'respect', 'scorn',
-    
-    # Moods
-    'amused', 'apathetic', 'bitter', 'cheerful', 'depressed', 'eager',
-    'gloomy', 'irritated', 'melancholy', 'miserable', 'playful', 'restless',
-    'silly', 'sombre', 'tense', 'thoughtful', 'weary',
-    
-    # Intensive emotions
-    'agony', 'bliss', 'delight', 'desire', 'horror', 'lust', 'passion', 'pleasure', 'rapture'
+# Canonical emotion set used for LLM prompting and validation (Ekman6 + neutral + relaxed)
+CANONICAL_EMOTIONS = {
+    'happy',    # happiness
+    'sad',      # sadness
+    'angry',    # anger
+    'fear',     # fear
+    'disgust',  # disgust
+    'surprised',# surprise
+    'neutral',
+    'relaxed'
 }
+
+# VALID_EMOTIONS now equals the canonical set used for LLM prompting and validation.
+# We intentionally **do not** maintain a large legacy compatibility list in dev.
+VALID_EMOTIONS = set(CANONICAL_EMOTIONS)
+
+# Basic synonym map to normalize LLM-provided emotion names to canonical ones
+EMOTION_SYNONYMS = {
+    'happiness': 'happy', 'joy': 'happy', 'joyful': 'happy', 'smiling': 'happy',
+    'sadness': 'sad',
+    'anger': 'angry', 'furious': 'angry', 'rage': 'angry',
+    'scared': 'fear', 'frightened': 'fear', 'terror': 'fear',
+    'disgusted': 'disgust',
+    'surprise': 'surprised', 'surprisedness': 'surprised',
+    'calm': 'relaxed', 'serenity': 'relaxed', 'relaxed': 'relaxed',
+    'neutral': 'neutral',
+    'engaged': 'neutral'
+}
+
+def normalize_emotion_name(name: str) -> str | None:
+    """Normalize a possibly-nonstandard emotion name to a canonical emotion.
+
+    Returns canonical emotion string (from CANONICAL_EMOTIONS) or None if it
+    cannot be normalized.
+    """
+    if not name or not isinstance(name, str):
+        return None
+    n = name.strip().lower()
+    if not n:
+        return None
+    # direct canonical match
+    if n in CANONICAL_EMOTIONS:
+        return n
+    # synonyms
+    if n in EMOTION_SYNONYMS:
+        mapped = EMOTION_SYNONYMS[n]
+        return mapped if mapped in CANONICAL_EMOTIONS else None
+    # plural/simple heuristics: trailing 'ness' -> remove
+    if n.endswith('ness'):
+        cand = n[:-4]
+        if cand in EMOTION_SYNONYMS:
+            mapped = EMOTION_SYNONYMS[cand]
+            return mapped if mapped in CANONICAL_EMOTIONS else None
+    return None
 
 # Plutchik's wheel - opposite emotions for balancing
 # When a new emotion is triggered, opposites are reduced
 PLUTCHIK_OPPOSITES = {
-    # Primary opposites
-    'joy': 'sadness',
-    'sadness': 'joy',
-    'trust': 'disgust',
-    'disgust': 'trust',
-    'fear': 'anger',
-    'anger': 'fear',
-    'anticipation': 'surprise',
-    'surprise': 'anticipation',
-    
-    # Extended opposites
-    'happiness': 'sadness',
-    'excitement': 'calm',
-    'calm': 'excitement',
-    'anxiety': 'contentment',
-    'contentment': 'anxiety',
-    'hope': 'despair',
-    'despair': 'hope',
-    'optimism': 'pessimism',
-    'pessimism': 'optimism',
-    'love': 'hatred',
-    'hatred': 'love',
-    'acceptance': 'disapproval',
-    'disapproval': 'acceptance',
-    'confidence': 'doubt',
-    'doubt': 'confidence',
-    'serenity': 'apprehension',
-    'apprehension': 'serenity',
+    # Opposites expressed within the canonical emotion vocabulary
+    'happy': 'sad',
+    'sad': 'happy',
+    'angry': 'fear',
+    'fear': 'angry',
+    'disgust': 'neutral',
+    'neutral': 'disgust',
+    'surprised': 'relaxed',
+    'relaxed': 'surprised',
 }
 
 
@@ -204,7 +209,10 @@ class EmotionManager(PluginBase):
     async def _ensure_table_exists(self):
         """Create emotion_state table if it doesn't exist."""
         async with get_conn_ctx() as conn:
-            async with conn.cursor() as cur:
+            cm = conn.cursor()
+            if inspect.iscoroutine(cm):
+                cm = await cm
+            async with cm as cur:
                 await cur.execute("""
                     CREATE TABLE IF NOT EXISTS emotion_state (
                         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -229,7 +237,10 @@ class EmotionManager(PluginBase):
         """
         try:
             async with get_conn_ctx() as conn:
-                async with conn.cursor() as cur:
+                cm = conn.cursor()
+                if inspect.iscoroutine(cm):
+                    cm = await cm
+                async with cm as cur:
                     await cur.execute(
                         "SELECT emotion_name, intensity, timestamp FROM emotion_state ORDER BY timestamp DESC"
                     )
@@ -264,7 +275,10 @@ class EmotionManager(PluginBase):
         """
         try:
             async with get_conn_ctx() as conn:
-                async with conn.cursor() as cur:
+                cm = conn.cursor()
+                if inspect.iscoroutine(cm):
+                    cm = await cm
+                async with cm as cur:
                     await cur.execute(
                         "SELECT emotion_name, intensity, timestamp FROM emotion_state"
                     )
@@ -291,10 +305,16 @@ class EmotionManager(PluginBase):
         Returns:
             True if successful, False otherwise
         """
-        emotion = emotion.lower().strip()
-        
-        # Validate emotion
-        if emotion not in VALID_EMOTIONS:
+        raw = (emotion or '').lower().strip()
+        # Normalize if possible (accept synonyms / variants)
+        normalized = normalize_emotion_name(raw)
+        if normalized:
+            emotion = normalized
+        else:
+            emotion = raw
+
+        # Validate emotion: accept either the legacy VALID_EMOTIONS or canonical set
+        if (emotion not in VALID_EMOTIONS) and (emotion not in CANONICAL_EMOTIONS):
             log_warning(f"[emotion_manager] Invalid emotion: {emotion}")
             return False
         
@@ -327,6 +347,18 @@ class EmotionManager(PluginBase):
                     await conn.commit()
             
             log_debug(f"[emotion_manager] Set {emotion} = {intensity}")
+            # Notify animation handler so clients can show transient overlay for this emotion
+            try:
+                from core.animation_handler import get_animation_handler
+                handler = get_animation_handler()
+                if handler:
+                    # best-effort notify (non-blocking)
+                    try:
+                        await handler._notify_animation_state_changed(handler.current_state, handler._current_animation_file, handler._current_animation_descriptor)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             return True
             
         except Exception as e:
@@ -377,7 +409,21 @@ class EmotionManager(PluginBase):
                     await self.set_emotion(opposite, reduced)
                     log_debug(f"[emotion_manager] Reduced opposite {opposite}: {old_intensity} -> {reduced}")
         
-        return await self.get_emotion_state()
+        # Get final merged state to return
+        state = await self.get_emotion_state()
+        # After bulk update, try to nudge clients so overlay appears
+        try:
+            from core.animation_handler import get_animation_handler
+            handler = get_animation_handler()
+            if handler:
+                try:
+                    await handler._notify_animation_state_changed(handler.current_state, handler._current_animation_file, handler._current_animation_descriptor)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        return state
     
     def _extract_emotion_tags(self, text: str) -> Dict[str, float]:
         """Extract emotion tags from text.
@@ -403,25 +449,32 @@ class EmotionManager(PluginBase):
             
             for part in parts:
                 # Match "emotion_name intensity"
-                emotion_match = re.match(r'(\w+)\s+(\d+(?:\.\d+)?)', part)
+                # Allow negative intensities (clamped later) with optional leading '-'
+                emotion_match = re.match(r'(\w+)\s+(-?\d+(?:\.\d+)?)', part)
                 if emotion_match:
-                    emotion_type = emotion_match.group(1).lower().strip()
+                    raw_emotion = emotion_match.group(1).lower().strip()
+                    # Normalize to canonical emotion name (Ekman6+neutral+relaxed)
+                    emotion_type = normalize_emotion_name(raw_emotion)
                     try:
                         intensity = float(emotion_match.group(2))
                         intensity = max(0.0, min(10.0, intensity))
-                        
-                        if emotion_type in VALID_EMOTIONS:
+                        if emotion_type:
                             emotion_tags[emotion_type] = intensity
-                            log_debug(f"[emotion_manager] ✅ Extracted: {emotion_type} = {intensity}")
+                            log_debug(f"[emotion_manager] ✅ Extracted (normalized): {raw_emotion} -> {emotion_type} = {intensity}")
                         else:
-                            invalid_emotions[emotion_type] = intensity
-                            log_warning(f"[emotion_manager] ❌ Invalid emotion: {emotion_type}")
+                            invalid_emotions[raw_emotion] = intensity
+                            log_warning(f"[emotion_manager] ❌ Invalid/unrecognized emotion: {raw_emotion}")
                             
                     except ValueError:
                         log_warning(f"[emotion_manager] Invalid intensity: {emotion_match.group(2)}")
         
         if invalid_emotions:
             log_warning(f"[emotion_manager] Invalid emotions detected: {invalid_emotions}")
+            # persist for potential corrector/orchestration
+            try:
+                self._last_invalid_emotions = invalid_emotions
+            except Exception:
+                pass
         
         return emotion_tags
     
@@ -495,7 +548,10 @@ class EmotionManager(PluginBase):
             log_debug("[emotion_manager] Fetching emotions from ai_diary...")
             try:
                 async with get_conn_ctx() as conn:
-                    async with conn.cursor() as cur:
+                    cm = conn.cursor()
+                    if inspect.iscoroutine(cm):
+                        cm = await cm
+                    async with cm as cur:
                         # Get latest 10 diary entries with emotions
                         await cur.execute(
                             """SELECT emotions FROM ai_diary 
@@ -585,9 +641,20 @@ class EmotionManager(PluginBase):
             emotion_str = ", ".join(emotion_lines)
         
         log_debug(f"[emotion_manager] Providing static injection: {emotion_str}")
-        
+        # Provide canonical available emotions for the LLM to use (helpful to avoid made-up labels)
+        avail = sorted(list(CANONICAL_EMOTIONS))
+        avail_str = ", ".join(avail)
+
+        instruction = (
+            f"Current emotional state: {emotion_str}\n\n"
+            f"You can use the following emotions: {avail_str}.\n"
+            "If you wish to indicate one or more emotions in your response, include them using the exact names above with a numeric intensity between 0.0 and 10.0 (for example: {happy 7, surprised 3}). "
+            "You do not have to list all emotions — include only those that are relevant. Do NOT invent other emotion names; use only the provided set."
+        )
+
         return {
-            'emotion_state': f"Current emotional state: {emotion_str}\n\nConsider this emotional state when generating your response. Your emotions influence how you perceive situations and respond to messages.",
+            'emotion_state': instruction,
+            'available_emotions': avail,
         }
 
 
@@ -597,6 +664,9 @@ __all__ = [
     'EmotionState',
     'VALID_EMOTIONS',
     'PLUTCHIK_OPPOSITES',
+    'CANONICAL_EMOTIONS',
+    'EMOTION_SYNONYMS',
+    'normalize_emotion_name',
 ]
 
 # Export plugin class for auto-discovery by core_initializer

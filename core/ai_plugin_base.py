@@ -1,6 +1,14 @@
 # core/ai_plugin_base.py
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, List
+
 from core.prompt_engine import build_prompt
+
+if TYPE_CHECKING:  # pragma: no cover
+    from core.history_types import HistoryContribution
+
 
 class AIPluginBase:
     """
@@ -43,6 +51,15 @@ class AIPluginBase:
         """Handle a plugin-defined custom action."""
         raise NotImplementedError("handle_custom_action not implemented")
 
+    async def execute_action(self, action: dict, context: dict, bot, original_message):
+        """Bridge method to call handle_custom_action from action_parser.
+
+        Default implementation extracts action type and payload.
+        """
+        action_type = action.get("type")
+        payload = action.get("payload", {})
+        return await self.handle_custom_action(action_type, payload)
+
     @staticmethod
     def get_supported_actions() -> dict:
         """Return schema information for supported actions."""
@@ -51,3 +68,12 @@ class AIPluginBase:
     def get_prompt_instructions(self, action_name: str) -> dict:
         """Return prompt instructions for the given action."""
         return {}
+
+    def get_history_contributions(self, **kwargs) -> List['HistoryContribution']:
+        """Optional: provide history contributions for prompt context.
+
+        Engines may choose to contribute context (e.g., model notes). The core
+        `HistoryEngine` will handle toggles, ordering, limiting, and dedup.
+        """
+
+        return []

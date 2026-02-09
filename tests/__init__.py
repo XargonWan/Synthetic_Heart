@@ -48,4 +48,4 @@ _ensure_module("dotenv", {"load_dotenv": lambda *args, **kwargs: False})
 # aiomysql stub ------------------------------------------------------------
 async def _missing_connect(*args, **kwargs):
     raise RuntimeError("aiomysql is not installed")
-_ensure_module("aiomysql", {"connect": _missing_connect, "Connection": type("Connection", (), {})})
+_ensure_module("aiomysql", {"connect": _missing_connect, "create_pool": _missing_connect, "Connection": type("Connection", (), {})})

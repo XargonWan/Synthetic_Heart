@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Three.js Loop Test</title>
+    <style>
+        body { margin: 0; overflow: hidden; }
+        canvas { display: block; }
+        #debug { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.7); color: #0f0; padding: 10px; font-family: monospace; width: 400px; max-height: 80vh; overflow-y: auto; }
+    </style>
+</head>
+<body>
+    <div id="debug"></div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three-utils@1.0.6/packages/loaders/FBXLoader.js"></script>
+
+    <script>
+        const debug = document.getElementById('debug');
+        function log(msg) {
+            console.log(msg);
+            debug.innerHTML += msg + '<br>';
+            debug.scrollTop = debug.scrollHeight;
+        }
+
+        // Setup THREE scene
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.z = 5;
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        let mixer;
+        let model;
+        const clock = new THREE.Clock();
+
+        // Load FBX
+        log('Loading FBX...');
+        const loader = new THREE.FBXLoader();
+        loader.load('/skins/Rei/animations/think/Thinking.fbx', function(fbx) {
+            log('✓ FBX loaded');
+            model = fbx;
+            scene.add(model);
+            mixer = new THREE.AnimationMixer(model);
+            
+            const clip = THREE.AnimationClip.findByName(fbx.animations, 'mixamo.com');
+            if (!clip) {
+                log('✗ No mixamo.com clip found');
+                log('Available clips: ' + fbx.animations.map(c => c.name).join(', '));
+                return;
+            }
+            
+            log(`✓ Clip found: ${clip.name}, duration: ${clip.duration.toFixed(3)}s`);
+            
+            // Create subclip for loop (frames 36-77 at 30fps = 1.2s-2.566s)
+            const loopClip = THREE.AnimationUtils.subclip(clip, 'loop_test', 1.2, 2.566, 30);
+            log(`✓ Loop subclip created: duration=${loopClip.duration.toFixed(3)}s`);
+            
+            const action = mixer.clipAction(loopClip);
+            action.setLoop(THREE.LoopRepeat);
+            action.clampWhenFinished = false;
+            
+            log(`✓ Action configured: loop=${action.getClip().loop} (should be ${THREE.LoopRepeat})`);
+            log(`Action.looping=${action.looping}`);
+            
+            // Bind finished listener
+            mixer.addEventListener('finished', (evt) => {
+                log(`⚠️ FINISHED event! clip=${evt.action.getClip().name}, looping=${evt.action.looping}`);
+            });
+            
+            action.play();
+            log('✓ Action started');
+        });
+
+        // Render loop
+        let frameCount = 0;
+        function render() {
+            requestAnimationFrame(render);
+            const delta = clock.getDelta();
+            if (mixer) {
+                mixer.update(delta);
+                
+                frameCount++;
+                if (frameCount % 120 === 0 && mixer._actions.length > 0) {
+                    const action = mixer._actions[0];
+                    const clip = action.getClip();
+                    log(`Frame ${frameCount}: time=${action.time.toFixed(3)}s, duration=${clip.duration.toFixed(3)}s, paused=${action.paused}, looping=${action.looping}`);
+                }
+            }
+            renderer.render(scene, camera);
+        }
+        render();
+
+        // Resize handler
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>

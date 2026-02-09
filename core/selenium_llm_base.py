@@ -5,7 +5,10 @@ Base library for Selenium-based LLM engines.
 Provides common functionality for ChatGPT, Gemini, Grok and other browser-based LLMs.
 """
 
-import undetected_chromedriver as uc
+try:  # pragma: no cover - import guard for test environments/containers
+    import undetected_chromedriver as uc  # type: ignore
+except Exception:  # pragma: no cover
+    uc = None
 from selenium import webdriver
 import os
 import re
@@ -48,6 +51,7 @@ from selenium.common.exceptions import (
     NoSuchElementException,
     TimeoutException,
     ElementNotInteractableException,
+    ElementClickInterceptedException,
     SessionNotCreatedException,
     WebDriverException,
     StaleElementReferenceException,
@@ -56,6 +60,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from urllib3.exceptions import ReadTimeoutError
 from core.transport_layer import llm_to_interface
+from core.variables_engine import exposed_vars
 
 # Local functions and classes
 from core.logging_utils import log_debug, log_error, log_warning, log_info, _LOG_DIR
@@ -129,6 +134,102 @@ register_exposed_var(
     tags=["llm_engine"],
 )
 
+register_exposed_var(
+    "SELENIUM_POST_SEND_CONFIRM_TIMEOUT",
+    label="Selenium Post-Send Confirm Timeout (sec)",
+    default=4.0,
+    value_type=float,
+    ui_type="number",
+    description="Seconds to wait for UI confirmation after sending a prompt (textarea cleared or sending indicator).",
+    scope="llm",
+    component="selenium_llm_base",
+    tags=["llm_engine"],
+    advanced=True,
+)
+
+register_exposed_var(
+    "SELENIUM_RESPONSE_POLL_INTERVAL",
+    label="Selenium Response Poll Interval (sec)",
+    default=0.5,
+    value_type=float,
+    ui_type="number",
+    description="Polling interval while waiting for the response to stabilize.",
+    scope="llm",
+    component="selenium_llm_base",
+    tags=["llm_engine"],
+    advanced=True,
+)
+
+register_exposed_var(
+    "SELENIUM_RESPONSE_STABLE_GRACE",
+    label="Selenium Response Stable Grace (sec)",
+    default=3.5,
+    value_type=float,
+    ui_type="number",
+    description="How many seconds the response length must remain unchanged before we consider it complete.",
+    scope="llm",
+    component="selenium_llm_base",
+    tags=["llm_engine"],
+    advanced=True,
+)
+
+register_exposed_var(
+    "SELENIUM_PART1_RESPONSE_STABLE_GRACE",
+    label="Selenium PART1 Stable Grace (sec)",
+    default=0.4,
+    value_type=float,
+    ui_type="number",
+    description="Shorter stable-grace for PART1 (context-only) to reduce latency.",
+    scope="llm",
+    component="selenium_llm_base",
+    tags=["llm_engine"],
+    advanced=True,
+)
+
+# Driver recovery defaults must be defined BEFORE the config variables are registered
+DEFAULT_DRIVER_RESPONSIVE_TIMEOUT = 10  # seconds to wait for a trivial driver operation
+DEFAULT_DRIVER_RECOVERY_RETRIES = 2  # how many times to try restarting the driver and retrying the workflow
+
+register_exposed_var(
+    "SELENIUM_DRIVER_RESPONSIVE_TIMEOUT",
+    label="Selenium Driver Responsiveness Timeout (sec)",
+    default=DEFAULT_DRIVER_RESPONSIVE_TIMEOUT,
+    value_type=int,
+    ui_type="number",
+    description="Seconds to wait for a trivial driver operation (window handles / current_url) before considering it frozen and attempting a restart.",
+    scope="llm",
+    component="selenium_llm_base",
+    advanced=True,
+)
+
+register_exposed_var(
+    "SELENIUM_DRIVER_RECOVERY_RETRIES",
+    label="Selenium Driver Recovery Retries",
+    default=DEFAULT_DRIVER_RECOVERY_RETRIES,
+    value_type=int,
+    ui_type="number",
+    description="Number of attempts to restart the browser and retry the workflow when the driver appears frozen.",
+    scope="llm",
+    component="selenium_llm_base",
+    advanced=True,
+)
+
+register_exposed_var(
+    "SELENIUM_SPLIT_PROMPT_PARTS",
+    label="Selenium Split Prompt Parts",
+    default=3,
+    value_type=int,
+    ui_type="number",
+    description=(
+        "Maximum number of parts when splitting oversized prompts (before any minification/reduction). "
+        "If set to 3 but everything fits in 2, only 2 parts are used."
+    ),
+    scope="llm",
+    component="selenium_llm_base",
+    tags=["llm_engine"],
+    advanced=True,
+)
+
 # Use global timeout
 AWAIT_RESPONSE_TIMEOUT = RESPONSE_TIMEOUT
 
@@ -138,6 +239,17 @@ load_dotenv()
 # Constants
 GRACE_PERIOD_SECONDS = 3
 MAX_WAIT_TIMEOUT_SECONDS = 5 * 60  # hard ceiling
+
+# Faster intermediate prompt handling (e.g., PART1 of double-prompt)
+DEFAULT_RESPONSE_POLL_INTERVAL = 0.5
+DEFAULT_RESPONSE_STABLE_GRACE = 3.5
+DEFAULT_PART1_RESPONSE_STABLE_GRACE = 0.4
+
+DEFAULT_SPLIT_PROMPT_PARTS = 3
+
+class FrozenDriverError(Exception):
+    """Raised when the Selenium driver appears unresponsive or frozen."""
+    pass
 
 # Cache the last response per chat to avoid duplicates
 previous_responses: Dict[str, str] = {}
@@ -189,6 +301,14 @@ def get_active_selenium_limits() -> dict:
     }
 
 
+def _llm_name_for_logs() -> str:
+    """Return a human-friendly name for the active Selenium LLM to use in logs.
+
+    Falls back to a generic label when the active name is not set.
+    """
+    return _active_selenium_llm_name or "LLM"
+
+
 class SeleniumLLMBase(AIPluginBase):
     """
     Base class for Selenium-based LLM engines.
@@ -199,6 +319,25 @@ class SeleniumLLMBase(AIPluginBase):
     _global_shared_driver: Optional[webdriver.Remote] = None
     _global_driver_lock = asyncio.Lock()
     _global_ref_count = 0
+
+    @classmethod
+    def _driver_is_usable(cls, driver: Optional[webdriver.Remote]) -> bool:
+        """Best-effort check to detect when the user closed the visible browser.
+
+        In webtop setups the Chromium window can be closed manually; Selenium will then
+        often keep a stale driver object that raises on access or reports no windows.
+        """
+        if driver is None:
+            return False
+        try:
+            handles = driver.window_handles
+            if not handles:
+                return False
+            # Touch a cheap property to detect invalid session
+            _ = driver.current_url
+            return True
+        except Exception:
+            return False
 
     @classmethod
     async def _get_global_shared_driver(cls) -> webdriver.Remote:
@@ -224,8 +363,30 @@ class SeleniumLLMBase(AIPluginBase):
                 cls._global_ref_count += 1
                 log_debug(f"[selenium] 🌍 Reusing global driver (ref count: {cls._global_ref_count})")
 
-                # Always ensure single window for global driver
-                await asyncio.to_thread(cls._ensure_single_window, cls._global_shared_driver)
+                # If the user closed the visible browser window, the driver becomes stale.
+                # Detect it and recreate automatically so the system can recover.
+                usable = await asyncio.to_thread(cls._driver_is_usable, cls._global_shared_driver)
+                if not usable:
+                    log_warning("[selenium] 🪟 Global driver is not usable (window closed / invalid session). Recreating...")
+                    try:
+                        cls._global_shared_driver.quit()
+                    except Exception as e:
+                        log_warning(f"[selenium] Error quitting stale global driver: {e}")
+                    cls._global_shared_driver = None
+
+                    try:
+                        cls._global_shared_driver = await asyncio.wait_for(
+                            asyncio.to_thread(cls._create_shared_driver),
+                            timeout=120,
+                        )
+                        cls._global_ref_count = 1
+                        log_info(f"[selenium] 🌍 Global driver recreated with {len(cls._global_shared_driver.window_handles)} window(s)")
+                    except asyncio.TimeoutError:
+                        log_error("[selenium] 🔴 Driver recreation timed out after 120s")
+                        raise Exception("Selenium driver recreation timeout - browser failed to initialize")
+                else:
+                    # Always ensure single window for global driver
+                    await asyncio.to_thread(cls._ensure_single_window, cls._global_shared_driver)
 
             return cls._global_shared_driver
 
@@ -294,6 +455,120 @@ class SeleniumLLMBase(AIPluginBase):
         """Release reference to shared driver (now uses global driver)."""
         await cls._release_global_shared_driver()
 
+    async def _ensure_driver_responsive_or_restart(self, allow_recreate: bool = True) -> None:
+        """Ensure the current driver responds to a trivial check, otherwise restart it.
+
+        Tries a quick window_handles/current_url check with a short timeout. If the check
+        times out or raises, attempts to quit the existing shared driver and recreate a fresh one.
+        Raises FrozenDriverError if recovery fails.
+        """
+        try:
+            timeout = int(config_registry.get_value("SELENIUM_DRIVER_RESPONSIVE_TIMEOUT", DEFAULT_DRIVER_RESPONSIVE_TIMEOUT))
+        except Exception:
+            timeout = DEFAULT_DRIVER_RESPONSIVE_TIMEOUT
+
+        # Do the check in a separate thread and enforce timeout
+        try:
+            def _health_check():
+                if self.driver is None:
+                    raise FrozenDriverError("No driver assigned")
+                # Access two cheap properties to detect frozen/stale sessions
+                _ = len(self.driver.window_handles)
+                _ = self.driver.current_url
+                return True
+
+            await asyncio.wait_for(asyncio.to_thread(_health_check), timeout=timeout)
+            # If success, return quietly
+            return
+        except asyncio.TimeoutError:
+            log_warning(f"[selenium] 🔴 Driver did not respond within {timeout}s - considered frozen")
+        except Exception as e:
+            log_warning(f"[selenium] 🔴 Driver health check failed: {e}")
+
+        # Attempt to recover by killing and recreating the shared driver
+        if not allow_recreate:
+            raise FrozenDriverError("Driver unresponsive and recreation is disabled")
+
+        try:
+            log_info("[selenium] 🛠️ Attempting to recover the frozen driver: quitting and recreating shared driver")
+            # Quit current driver if possible
+            try:
+                await asyncio.to_thread(lambda: self.driver.quit() if self.driver is not None else None)
+            except Exception as e:
+                log_warning(f"[selenium] Error quitting frozen driver: {e}")
+
+            # Reset global shared driver state so next _get_shared_driver() will recreate
+            SeleniumLLMBase._global_shared_driver = None
+            SeleniumLLMBase._global_ref_count = 0
+
+            # Try to get a fresh shared driver (this can raise)
+            new_driver = await self._get_shared_driver()
+            self.driver = new_driver
+            log_info("[selenium] ✅ Recovered and replaced frozen driver successfully")
+            return
+        except Exception as e:
+            log_error(f"[selenium] ❌ Driver recovery attempt failed: {e}")
+            raise FrozenDriverError(f"Driver recovery failed: {e}")
+
+    def _ensure_driver_responsive_or_restart_sync(self, allow_recreate: bool = True) -> None:
+        """Synchronous wrapper used by sync workflows to ensure driver is responsive or recreate it.
+
+        Uses a blocking thread pool health check with timeout and falls back to synchronous recreation
+        using the class-level _create_shared_driver method.
+        """
+        try:
+            timeout = int(config_registry.get_value("SELENIUM_DRIVER_RESPONSIVE_TIMEOUT", DEFAULT_DRIVER_RESPONSIVE_TIMEOUT))
+        except Exception:
+            timeout = DEFAULT_DRIVER_RESPONSIVE_TIMEOUT
+
+        def _health_check():
+            if self.driver is None:
+                raise FrozenDriverError("No driver assigned")
+            _ = len(self.driver.window_handles)
+            _ = self.driver.current_url
+            return True
+
+        try:
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                fut = ex.submit(_health_check)
+                fut.result(timeout=timeout)
+            return
+        except concurrent.futures.TimeoutError:
+            log_warning(f"[selenium] 🔴 (sync) Driver did not respond within {timeout}s - considered frozen")
+        except Exception as e:
+            log_warning(f"[selenium] 🔴 (sync) Driver health check failed: {e}")
+
+        if not allow_recreate:
+            raise FrozenDriverError("Driver unresponsive and recreation is disabled")
+
+        try:
+            log_info("[selenium] 🛠️ (sync) Attempting to recover the frozen driver: quitting and recreating shared driver")
+            try:
+                if self.driver is not None:
+                    try:
+                        self.driver.quit()
+                    except Exception as e:
+                        log_warning(f"[selenium] Error quitting driver during sync recovery: {e}")
+            except Exception:
+                pass
+
+            try:
+                self._cleanup_chromium_remnants()
+            except Exception:
+                pass
+
+            # Create a new driver synchronously
+            new_driver = type(self)._create_shared_driver()
+            SeleniumLLMBase._global_shared_driver = new_driver
+            SeleniumLLMBase._global_ref_count = 1
+            self.driver = new_driver
+            log_info("[selenium] ✅ (sync) Recovered and replaced frozen driver successfully")
+            return
+        except Exception as e:
+            log_error(f"[selenium] ❌ (sync) Driver recovery attempt failed: {e}")
+            raise FrozenDriverError(f"Sync driver recovery failed: {e}")
+
     @classmethod
     def _create_shared_driver(cls) -> webdriver.Remote:
         """Create a new shared driver instance."""
@@ -336,8 +611,9 @@ class SeleniumLLMBase(AIPluginBase):
             "--disable-backgrounding-occluded-windows",
         ]
 
-        # Add headless if configured
-        if os.getenv("CHROMIUM_HEADLESS", "0") == "1":
+        # Add headless if configured (use class attribute when creating a shared driver)
+        # Note: this method is a @classmethod, so use 'cls' rather than 'self'.
+        if getattr(cls, 'CHROMIUM_HEADLESS', False):
             essential_args.append("--headless")
 
         for arg in essential_args:
@@ -428,7 +704,7 @@ class SeleniumLLMBase(AIPluginBase):
 
         # Model management - to be set by subclasses
         # model_limits_map: Dict[model_name] -> max_chars
-        # Example: {"gpt-4o": 128000, "gpt-4": 8000, "default": 128000}
+        # Example: {"gpt-4o": 128001, "gpt-4": 8001, "default": 128001}
         self.model_limits_map: dict = {}
         
         # model_config_var: name of the config variable that holds the current model name
@@ -508,15 +784,12 @@ class SeleniumLLMBase(AIPluginBase):
 
     def _init_components(self):
         """Initialize common components."""
-        # Import CHROMIUM_HEADLESS from environment variable directly
-        import os
-        self.CHROMIUM_HEADLESS = os.getenv("CHROMIUM_HEADLESS", "0") == "1"
-
-        # Also register with config registry for UI visibility
+        # Read CHROMIUM_HEADLESS from the config registry (supports ENV override)
         from core.config_manager import config_registry
+        # Use 0 as default; config_registry will populate from ENV if present
         self.CHROMIUM_HEADLESS_VAR = config_registry.get_var(
             "CHROMIUM_HEADLESS",
-            int(os.getenv("CHROMIUM_HEADLESS", "0")),
+            0,
             label="Chromium Headless Mode",
             description="Set to 1 for headless mode (no browser window), 0 for non-headless mode (visible browser window)",
             value_type=int,
@@ -525,10 +798,50 @@ class SeleniumLLMBase(AIPluginBase):
             advanced=True,
         )
 
+        # Local boolean flag (kept in sync via listener)
+        try:
+            self.CHROMIUM_HEADLESS = bool(int(self.CHROMIUM_HEADLESS_VAR))
+        except Exception:
+            self.CHROMIUM_HEADLESS = False
+
+        # Keep the instance flag in sync when the config changes at runtime
+        def _on_chromium_headless_change(new_value):
+            try:
+                self.CHROMIUM_HEADLESS = bool(int(new_value))
+            except Exception:
+                # Ignore misformatted values; keep previous state
+                pass
+
+        config_registry.add_listener("CHROMIUM_HEADLESS", _on_chromium_headless_change)
+
+        # AWAIT_RESPONSE_TIMEOUT as a dynamic instance-backed config var
+        self.AWAIT_RESPONSE_TIMEOUT_VAR = config_registry.get_var(
+            "AWAIT_RESPONSE_TIMEOUT",
+            RESPONSE_TIMEOUT,
+            label="Response Timeout (Selenium)",
+            description="Seconds to wait for ChatGPT response before timing out",
+            value_type=int,
+            group="llm",
+            component="selenium",
+        )
+
+        try:
+            self.AWAIT_RESPONSE_TIMEOUT = int(self.AWAIT_RESPONSE_TIMEOUT_VAR)
+        except Exception:
+            self.AWAIT_RESPONSE_TIMEOUT = RESPONSE_TIMEOUT
+
+        def _on_await_response_timeout_change(new_value):
+            try:
+                self.AWAIT_RESPONSE_TIMEOUT = int(new_value)
+            except Exception:
+                pass
+
+        config_registry.add_listener("AWAIT_RESPONSE_TIMEOUT", _on_await_response_timeout_change)
+
         # Max retries for driver initialization
         self.MAX_RETRIES_VAR = config_registry.get_var(
             "SELENIUM_MAX_RETRIES",
-            int(os.getenv("SELENIUM_MAX_RETRIES", "3")),
+            3,
             label="Selenium Max Retries",
             description="Maximum number of retries for Selenium driver initialization",
             value_type=int,
@@ -541,23 +854,6 @@ class SeleniumLLMBase(AIPluginBase):
         self._prompt_queue: asyncio.Queue = asyncio.Queue()
         self._queue_lock = asyncio.Lock()
         self._queue_worker: asyncio.Task | None = None
-
-        # Double-prompt toggle (exposed configuration)
-        # Default: enabled (True)
-        try:
-            self.SPLIT_PROMPT_VAR = config_registry.get_var(
-                "SELENIUM_DOUBLE_PROMPT",
-                True,
-                label="Enable Double Prompt (PART1/PART2)",
-                description="When enabled, oversized prompts are split: PART1 (context/memories) and PART2 (actual message).",
-                value_type=bool,
-                group="llm",
-                component="selenium",
-                advanced=False,
-            )
-        except Exception:
-            # Fallback property if config registry not available
-            self.SPLIT_PROMPT_VAR = True
 
         # Internal flag to avoid re-splitting or recursive behaviour for PART2
         self._skip_double_prompt_for_this_send: bool = False
@@ -628,12 +924,21 @@ class SeleniumLLMBase(AIPluginBase):
         try:
             log_info("[selenium] Initializing Chrome driver...")
 
+            if uc is None:
+                raise RuntimeError(
+                    "undetected_chromedriver is unavailable in this environment (import failed). "
+                    "Selenium LLM engines cannot start here."
+                )
+
             # Clean up any existing remnants
             self._cleanup_chromium_remnants()
 
             # Initialize undetected-chromedriver with retry logic
             log_debug("[selenium] Creating undetected Chrome driver...")
-            log_debug(f"[selenium] undetected-chromedriver version: {uc.__version__}")
+            try:
+                log_debug(f"[selenium] undetected-chromedriver version: {uc.__version__}")
+            except Exception:
+                pass
             
             max_retries = self.MAX_RETRIES_VAR.value
             retry_delay = 2
@@ -788,9 +1093,9 @@ class SeleniumLLMBase(AIPluginBase):
         try:
             # Note: command_executor.set_timeout() is not supported by undetected-chromedriver
             # Only apply timeouts that are supported by local WebDriver instances
-            driver.set_page_load_timeout(AWAIT_RESPONSE_TIMEOUT)
-            driver.set_script_timeout(AWAIT_RESPONSE_TIMEOUT)
-            log_debug(f"[selenium] Driver timeouts set to {AWAIT_RESPONSE_TIMEOUT}s")
+            driver.set_page_load_timeout(self.AWAIT_RESPONSE_TIMEOUT)
+            driver.set_script_timeout(self.AWAIT_RESPONSE_TIMEOUT)
+            log_debug(f"[selenium] Driver timeouts set to {self.AWAIT_RESPONSE_TIMEOUT}s")
         except Exception as e:
             log_warning(f"[selenium] Could not apply driver timeouts: {e}")
 
@@ -1211,16 +1516,32 @@ class SeleniumLLMBase(AIPluginBase):
 
     # === RESPONSE WAITING ===
 
-    def wait_until_response_stabilizes(self, driver, max_total_wait: int = AWAIT_RESPONSE_TIMEOUT,
-                                      no_change_grace: float = 3.5) -> str:
+    def wait_until_response_stabilizes(
+        self,
+        driver,
+        max_total_wait: int | None = None,
+        no_change_grace: float = DEFAULT_RESPONSE_STABLE_GRACE,
+        poll_interval: float | None = None,
+    ) -> str:
         """Return the last response text once its length stops growing."""
-        # Convert max_total_wait to int in case it's a ConfigVar
+        # Use instance default if not provided and convert to int in case it's a ConfigVar
+        if max_total_wait is None:
+            max_total_wait = self.AWAIT_RESPONSE_TIMEOUT
         max_total_wait = int(max_total_wait)
+
+        try:
+            if poll_interval is None:
+                poll_interval = float(config_registry.get_value("SELENIUM_RESPONSE_POLL_INTERVAL", DEFAULT_RESPONSE_POLL_INTERVAL))
+        except Exception:
+            poll_interval = DEFAULT_RESPONSE_POLL_INTERVAL
         
         start = time.time()
         last_len = -1
         last_change = start
         final_text = ""
+
+        consecutive_errors = 0
+        max_consecutive_errors = 2
 
         while True:
             if time.time() - start >= max_total_wait:
@@ -1231,9 +1552,67 @@ class SeleniumLLMBase(AIPluginBase):
             # Uses the engine-specific selectors set in selectors["modal_dismissal"]
             modal_selectors = self.selectors.get("modal_dismissal", [])
             if modal_selectors:
-                self._dismiss_modal_with_selectors(driver, modal_selectors)
+                try:
+                    self._dismiss_modal_with_selectors(driver, modal_selectors)
+                except Exception:
+                    # Non-fatal
+                    pass
 
-            text = self._extract_response_text(driver)
+            try:
+                text = self._extract_response_text(driver)
+                # If extraction succeeded, reset consecutive error counter
+                consecutive_errors = 0
+            except Exception as e:
+                consecutive_errors += 1
+                log_warning(f"[selenium] Error extracting response text (attempt {consecutive_errors}): {e}")
+                # If we hit several consecutive extraction errors, consider driver frozen and attempt recovery
+                if consecutive_errors >= max_consecutive_errors:
+                    log_warning("[selenium] 🔴 Multiple consecutive errors extracting response - driver may be frozen")
+                    # Best-effort synchronous recovery: try to quit and recreate the shared driver
+                    try:
+                        try:
+                            if self.driver is not None:
+                                try:
+                                    self.driver.quit()
+                                except Exception as e:
+                                    log_warning(f"[selenium] Error quitting driver during recovery: {e}")
+                        except Exception:
+                            pass
+
+                        # Cleanup remnants before recreating
+                        try:
+                            self._cleanup_chromium_remnants()
+                        except Exception:
+                            pass
+
+                        # Recreate driver synchronously (this may block for a while)
+                        try:
+                            new_driver = type(self)._create_shared_driver()
+                            SeleniumLLMBase._global_shared_driver = new_driver
+                            SeleniumLLMBase._global_ref_count = 1
+                            self.driver = new_driver
+                            log_info("[selenium] ✅ Synchronous recovery: replaced frozen driver; request should be retried")
+                            # Signal to caller that the driver state changed so they can retry
+                            raise FrozenDriverError("Driver recovered synchronously; please retry the workflow")
+                        except Exception as e2:
+                            log_error(f"[selenium] ❌ Synchronous driver recreation failed: {e2}")
+                            # If recreation fails, bubble up a FrozenDriverError
+                            raise FrozenDriverError(f"Driver recreation failed: {e2}")
+
+                    except FrozenDriverError:
+                        # Propagate FrozenDriverError up to caller for retry handling
+                        raise
+                    except Exception as e3:
+                        log_error(f"[selenium] Unexpected error during driver recovery: {e3}")
+                        raise FrozenDriverError(f"Unexpected recovery error: {e3}")
+
+                # Sleep a short bit before trying again
+                try:
+                    time.sleep(max(0.05, float(poll_interval)))
+                except Exception:
+                    time.sleep(DEFAULT_RESPONSE_POLL_INTERVAL)
+                continue
+
             current_len = len(text)
             changed = current_len != last_len
 
@@ -1253,8 +1632,10 @@ class SeleniumLLMBase(AIPluginBase):
                 )
                 return text
 
-            time.sleep(0.5)
-
+            try:
+                time.sleep(max(0.05, float(poll_interval)))
+            except Exception:
+                time.sleep(DEFAULT_RESPONSE_POLL_INTERVAL)
     def _dismiss_modal_with_selectors(self, driver, modal_selectors: list) -> bool:
         """Dismiss any modal/dialog overlay using provided selectors.
         
@@ -1293,6 +1674,91 @@ class SeleniumLLMBase(AIPluginBase):
             log_debug(f"[selenium] Modal dismissal check failed: {e}")
             return False
 
+    def _resolve_click_interception(self, driver, target_element) -> bool:
+        """Try to resolve common causes of ElementClickInterceptedException.
+
+        Strategies:
+        - Use plugin-provided modal dismissal selectors
+        - Locate common overlay elements and try to close them or remove them via JS
+        - Send ESC key to dismiss dialogs
+        - As last resort, remove overlay nodes via JS
+        - If any strategy succeeds and the target becomes clickable, return True
+        """
+        try:
+            # 1) Try plugin-provided modal dismissal
+            try:
+                modal_selectors = self.selectors.get('modal_dismissal', []) or []
+                if modal_selectors:
+                    dismissed = self._dismiss_modal_with_selectors(driver, modal_selectors)
+                    if dismissed:
+                        time.sleep(0.2)
+                        return True
+            except Exception:
+                pass
+
+            # 2) Look for common overlay/modal elements and attempt close
+            overlay_selectors = ["[role='dialog']", ".modal", ".overlay", ".modal-backdrop", ".backdrop", "[data-testid='modal']"]
+            for sel in overlay_selectors:
+                try:
+                    overlays = driver.find_elements(By.CSS_SELECTOR, sel)
+                    for overlay in overlays:
+                        try:
+                            if not overlay.is_displayed():
+                                continue
+                            # Try finding a close button inside
+                            try:
+                                close_btns = overlay.find_elements(By.CSS_SELECTOR, "button[aria-label*='Close'], button.close, .close, button[aria-label*='Chiudi']")
+                                for cb in close_btns:
+                                    try:
+                                        driver.execute_script("arguments[0].click();", cb)
+                                        time.sleep(0.2)
+                                        log_debug(f"[selenium] Clicked overlay close button for selector {sel}")
+                                        return True
+                                    except Exception:
+                                        continue
+                            except Exception:
+                                pass
+
+                            # Send ESC key to body
+                            try:
+                                body = driver.find_element(By.TAG_NAME, 'body')
+                                body.send_keys(Keys.ESCAPE)
+                                time.sleep(0.2)
+                                log_debug("[selenium] Sent ESC key to dismiss overlay")
+                                # If overlay is gone, return True
+                                if not overlay.is_displayed():
+                                    return True
+                            except Exception:
+                                pass
+
+                            # As a last resort try to remove the node via JS
+                            try:
+                                driver.execute_script("arguments[0].parentNode.removeChild(arguments[0]);", overlay)
+                                time.sleep(0.2)
+                                log_debug(f"[selenium] Removed overlay element via JS for selector {sel}")
+                                return True
+                            except Exception:
+                                pass
+
+                        except Exception:
+                            continue
+                except Exception:
+                    continue
+
+            # 3) If still blocked, try clicking via ActionChains at element center
+            try:
+                actions = ActionChains(driver)
+                actions.move_to_element(target_element).click().perform()
+                time.sleep(0.1)
+                log_debug("[selenium] Clicked target element via ActionChains as last resort")
+                return True
+            except Exception:
+                log_debug("[selenium] ActionChains click failed")
+
+            return False
+        except Exception as e:
+            log_debug(f"[selenium] resolve_click_interception failed: {e}")
+            return False
     
     def _get_response_selectors(self) -> list:
         """Get the CSS selectors for extracting response text.
@@ -1322,6 +1788,11 @@ class SeleniumLLMBase(AIPluginBase):
         _get_response_selectors() in subclass to provide the right selectors.
         """
         try:
+            # Defensive: ensure driver is available before attempting selectors
+            if driver is None:
+                log_warning("[selenium] _extract_response_text called with driver=None - skipping selectors and returning empty response")
+                return ""
+
             selectors = self._get_response_selectors()
             
             for selector in selectors:
@@ -1358,9 +1829,11 @@ class SeleniumLLMBase(AIPluginBase):
             log_warning(f"[selenium] Error extracting response text: {e}")
             return ""
 
-    def wait_for_response_completion(self, driver, timeout: int = AWAIT_RESPONSE_TIMEOUT) -> bool:
+    def wait_for_response_completion(self, driver, timeout: int | None = None) -> bool:
         """Wait until the current response finishes streaming."""
-        # Convert timeout to int in case it's a ConfigVar
+        # Use instance default if not provided and convert to int in case it's a ConfigVar
+        if timeout is None:
+            timeout = self.AWAIT_RESPONSE_TIMEOUT
         timeout = int(timeout)
         
         start_time = time.time()
@@ -1639,7 +2112,13 @@ class SeleniumLLMBase(AIPluginBase):
             log_error(f"[selenium] Failed to navigate to {service_url}: {e}")
             raise
 
-    def _send_prompt_with_confirmation(self, textarea, prompt_text: str, processing_max_wait: int | None = None) -> bool:
+    def _send_prompt_with_confirmation(
+        self,
+        textarea,
+        prompt_text: str,
+        processing_max_wait: int | None = None,
+        post_send_confirm_timeout: float | None = None,
+    ) -> bool:
         """Send the prompt to the LLM service and wait for confirmation.
         
         This generic implementation:
@@ -1656,6 +2135,12 @@ class SeleniumLLMBase(AIPluginBase):
                 return int(config_registry.get_value("SELENIUM_PART1_PROCESSING_TIMEOUT", 8))
             except Exception:
                 return 8
+
+        def _get_post_send_confirm_timeout() -> float:
+            try:
+                return float(config_registry.get_value("SELENIUM_POST_SEND_CONFIRM_TIMEOUT", 4.0))
+            except Exception:
+                return 4.0
 
         try:
             if not textarea:
@@ -1833,7 +2318,10 @@ class SeleniumLLMBase(AIPluginBase):
             # Ensure the textarea still has focus before sending
             log_debug("[selenium] Ensuring textarea has focus before send...")
             self.driver.execute_script("arguments[0].focus();", textarea)
-            time.sleep(0.5)  # Small delay to ensure focus is set
+            try:
+                time.sleep(0.1)
+            except Exception:
+                pass
             
             log_debug(f"[selenium] Prompt pasted, now trying to send")
             
@@ -1851,13 +2339,40 @@ class SeleniumLLMBase(AIPluginBase):
                     try:
                         # Scroll button into view to ensure it's clickable
                         self.driver.execute_script("arguments[0].scrollIntoView(true);", send_button)
-                        time.sleep(0.5)  # Wait for scroll animation
+                        try:
+                            time.sleep(0.1)
+                        except Exception:
+                            pass
                         
                         # Try direct click first
                         send_button.click()
                         log_debug("[selenium] Send button clicked successfully")
                     except Exception as click_error:
                         log_debug(f"[selenium] Send button click failed: {click_error}")
+                        # If the click was intercepted, try to resolve common overlay/modal issues
+                        intercepted = False
+                        try:
+                            if isinstance(click_error, ElementClickInterceptedException) or 'element click intercepted' in str(click_error).lower():
+                                intercepted = True
+                        except Exception:
+                            pass
+
+                        if intercepted:
+                            log_warning("[selenium] Click intercepted - attempting to resolve overlays and retry")
+                            try:
+                                resolved = self._resolve_click_interception(self.driver, send_button)
+                                if resolved:
+                                    log_info("[selenium] Overlay resolution succeeded, retrying click")
+                                    try:
+                                        send_button.click()
+                                        log_debug("[selenium] Send button clicked after overlay resolution")
+                                    except Exception as final_click_error:
+                                        log_debug(f"[selenium] Final click after resolution failed: {final_click_error}")
+                                else:
+                                    log_warning("[selenium] Overlay resolution did not succeed")
+                            except Exception as resolve_err:
+                                log_debug(f"[selenium] Overlay resolution raised an error: {resolve_err}")
+
                         log_debug("[selenium] Attempting fallback: JavaScript click on button")
                         try:
                             # Try JavaScript click
@@ -1865,10 +2380,18 @@ class SeleniumLLMBase(AIPluginBase):
                             log_debug("[selenium] Send button clicked via JavaScript")
                         except Exception as js_click_error:
                             log_debug(f"[selenium] JavaScript click also failed: {js_click_error}")
-                            # Final fallback to keyboard shortcut (Ctrl+Return or Cmd+Return)
-                            log_debug("[selenium] Final fallback: using Ctrl+Return keyboard shortcut")
+                            # Final fallback to keyboard shortcut (Ctrl+Return or Cmd+Return) and Enter
+                            log_debug("[selenium] Final fallback: using Ctrl+Return keyboard shortcut and Enter")
                             textarea.click()
-                            textarea.send_keys(Keys.CONTROL, Keys.RETURN)
+                            try:
+                                textarea.send_keys(Keys.CONTROL, Keys.RETURN)
+                                log_debug("[selenium] Sent Ctrl+Return")
+                            except Exception:
+                                try:
+                                    textarea.send_keys(Keys.RETURN)
+                                    log_debug("[selenium] Sent Enter")
+                                except Exception as e:
+                                    log_debug(f"[selenium] Keyboard send also failed: {e}")
                 else:
                     log_debug("[selenium] Send button is disabled, trying keyboard shortcut (Ctrl+Return)")
                     from selenium.webdriver.common.keys import Keys
@@ -1879,18 +2402,25 @@ class SeleniumLLMBase(AIPluginBase):
                 log_debug("[selenium] No send button found, using Ctrl+Return keyboard shortcut")
                 from selenium.webdriver.common.keys import Keys
                 textarea.click()
-                textarea.send_keys(Keys.CONTROL, Keys.RETURN)
+                try:
+                    textarea.send_keys(Keys.CONTROL, Keys.RETURN)
+                    log_debug("[selenium] Sent Ctrl+Return as fallback")
+                except Exception:
+                    try:
+                        textarea.send_keys(Keys.RETURN)
+                        log_debug("[selenium] Sent Enter as fallback")
+                    except Exception as e:
+                        log_debug(f"[selenium] Keyboard fallback also failed: {e}")
             
             log_debug(f"[selenium] Send action completed, waiting for confirmation")
-            
-            # CRITICAL: Add delay to ensure the send action (button click or keyboard) is processed by browser
-            log_debug("[selenium] Waiting 3 seconds for browser to process send action...")
-            time.sleep(3)
+
+            if post_send_confirm_timeout is None:
+                post_send_confirm_timeout = _get_post_send_confirm_timeout()
             
             # Wait for confirmation that the prompt was sent (textarea should clear or sending indicator appears)
             try:
                 log_debug("[selenium] Checking if textarea cleared after send...")
-                WebDriverWait(self.driver, 10).until(
+                WebDriverWait(self.driver, max(0.5, float(post_send_confirm_timeout))).until(
                     lambda d: (
                         textarea.get_attribute("value") == "" or
                         textarea.text == "" or
@@ -1908,9 +2438,9 @@ class SeleniumLLMBase(AIPluginBase):
                     log_debug("[selenium] Textarea is empty, send likely succeeded")
                 # Continue anyway - the message might have been sent
             
-            # CRITICAL: Verify ChatGPT has started processing the request
-            # Wait for signs that ChatGPT is actually responding (streaming indicator, response area changes, etc.)
-            log_debug("[selenium] Verifying ChatGPT has started processing...")
+            # CRITICAL: Verify the active Selenium LLM has started processing the request
+            # Wait for signs that the active LLM is actually responding (streaming indicator, response area changes, etc.)
+            log_debug(f"[selenium] Verifying {_llm_name_for_logs()} has started processing...")
             processing_started = False
             start_time = time.time()
             # Default waiting time for ChatGPT to start processing; can be overridden
@@ -1930,7 +2460,7 @@ class SeleniumLLMBase(AIPluginBase):
                                 # Check if element has any text content (ChatGPT started writing)
                                 if elem.text and len(elem.text.strip()) > 0:
                                     processing_started = True
-                                    log_debug(f"[selenium] ChatGPT has started processing - found response text ({len(elem.text)} chars)")
+                                    log_debug(f"[selenium] {_llm_name_for_logs()} has started processing - found response text ({len(elem.text)} chars)")
                                     break
                         except:
                             pass
@@ -1943,7 +2473,7 @@ class SeleniumLLMBase(AIPluginBase):
                         stop_buttons = self.driver.find_elements(By.CSS_SELECTOR, "[aria-label*='Stop'], button:has-text('Stop')")
                         if len(stop_buttons) > 0:
                             processing_started = True
-                            log_debug("[selenium] ChatGPT has started processing - found stop button")
+                            log_debug(f"[selenium] {_llm_name_for_logs()} has started processing - found stop button")
                             break
                     except:
                         pass
@@ -1954,20 +2484,128 @@ class SeleniumLLMBase(AIPluginBase):
                     break
             
             if not processing_started:
-                log_warning(f"[selenium] ChatGPT did not start processing within {max_wait}s - prompt may not have been sent successfully")
+                log_warning(f"[selenium] {_llm_name_for_logs()} did not start processing within {max_wait}s - prompt may not have been sent successfully")
                 # Don't fail here - let wait_until_response_stabilizes handle the timeout
             else:
-                log_debug(f"[selenium] ChatGPT processing confirmed after {time.time() - start_time:.1f}s")
+                log_debug(f"[selenium] {_llm_name_for_logs()} processing confirmed after {time.time() - start_time:.1f}s")
             
             return True  # Prompt was sent successfully
         
         except Exception as e:
+            # Capture a screenshot for post-mortem analysis
+            try:
+                ts = int(time.time())
+                path = f"/tmp/selenium_send_failure_{ts}.png"
+                try:
+                    self.driver.save_screenshot(path)
+                    log_info(f"[selenium] Screenshot of failure saved: {path}")
+                except Exception as sc_err:
+                    log_debug(f"[selenium] Could not save screenshot: {sc_err}")
+            except Exception:
+                path = None
+
             log_error(f"[selenium] Failed to send prompt: {e}")
+
+            # Notify user/monitoring that a send failure happened
+            try:
+                # Use configured fallback message (exposed variable) if available
+                try:
+                    failed_text = exposed_vars.get_value('FAILED_MESSAGE_TEXT') or "😵"
+                except Exception:
+                    failed_text = "😵"
+
+                log_warning(f"[selenium][send_failure] Sending fallback message to originating interface: url={getattr(self.driver, 'current_url', 'unknown')} screenshot={path}")
+
+                # Attempt to deliver the fallback message to the originating interface/chat (preferred)
+                try:
+                    meta = getattr(self, '_current_request_meta', None)
+                    if meta and (meta.get('bot') or meta.get('chat_id') or meta.get('interface_path')):
+                        bot = meta.get('bot')
+                        chat_id = meta.get('chat_id')
+                        interface = meta.get('interface')
+
+                        # Schedule llm_to_interface asynchronously on the main loop
+                        try:
+                            loop = asyncio.get_event_loop()
+                            if loop.is_running():
+                                loop.create_task(llm_to_interface(bot, chat_id, text=failed_text, interface=interface, interface_path=meta.get('interface_path')))
+                                log_debug("[selenium][send_failure] Scheduled fallback message via llm_to_interface (create_task)")
+                            else:
+                                asyncio.run_coroutine_threadsafe(llm_to_interface(bot, chat_id, text=failed_text, interface=interface, interface_path=meta.get('interface_path')), loop)
+                                log_debug("[selenium][send_failure] Scheduled fallback message via run_coroutine_threadsafe")
+                        except Exception as e_schedule:
+                            log_debug(f"[selenium][send_failure] Could not schedule llm_to_interface: {e_schedule}")
+                            # Fallback to trainer notification if scheduling fails
+                            if getattr(self, '_notify_fn', None):
+                                try:
+                                    self._notify_fn(failed_text)
+                                except Exception:
+                                    pass
+                    else:
+                        # No originating interface metadata available - fall back to trainer notification
+                        if getattr(self, '_notify_fn', None):
+                            try:
+                                self._notify_fn(failed_text)
+                            except Exception:
+                                pass
+                except Exception as e_deliver:
+                    log_debug(f"[selenium][send_failure] Error delivering fallback message: {e_deliver}")
+                    if getattr(self, '_notify_fn', None):
+                        try:
+                            self._notify_fn(failed_text)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            # Try engine-specific UI reset hook to allow the engine to recover (e.g., open new chat)
+            try:
+                hook = getattr(self, '_engine_ui_reset_hook', None)
+                if callable(hook):
+                    try:
+                        hook_res = hook(None)
+                        if isinstance(hook_res, str) and hook_res.startswith('❌'):
+                            # Propagate the hook's retry indicator up the chain
+                            return hook_res
+                    except Exception as hook_err:
+                        log_debug(f"[selenium] _engine_ui_reset_hook call failed: {hook_err}")
+            except Exception:
+                pass
+
+            # Re-raise to let upper layers handle retries/logic
             raise
 
     def get_supported_models(self):
         """Get supported models (to be overridden by subclasses)."""
         return []
+
+    async def _send_error_message(self, bot, message):
+        """Send a friendly fallback message to the originating interface/chat when the engine fails.
+
+        This is called by the transport layer corrector when the LLM fails to produce
+        a valid response after repeated attempts. It will use the `FAILED_MESSAGE_TEXT`
+        exposed variable as the message content and route it to the originating interface
+        or fall back to trainer notification if no interface info is available.
+        """
+        try:
+            try:
+                failed_text = exposed_vars.get_value('FAILED_MESSAGE_TEXT') or "😵"
+            except Exception:
+                failed_text = "😵"
+
+            chat_id = getattr(message, 'chat_id', None)
+            interface = getattr(message, 'interface', None) or getattr(message, 'interface_path', None)
+
+            await llm_to_interface(bot, chat_id, text=failed_text, interface=interface, interface_path=getattr(message, 'interface_path', None))
+            log_debug("[selenium] _send_error_message delivered fallback message to interface")
+        except Exception as e:
+            log_debug(f"[selenium] _send_error_message failed to deliver to interface: {e}")
+            # Fallback to trainer notification
+            try:
+                if getattr(self, '_notify_fn', None):
+                    self._notify_fn(failed_text)
+            except Exception:
+                pass
 
     def _get_model_char_limit(self, model_name: str) -> int:
         """Get character limit for a specific model.
@@ -2081,6 +2719,108 @@ class SeleniumLLMBase(AIPluginBase):
             log_warning(f"[{self.component_name}] Error checking login status: {e}, assuming not logged in")
             return False
 
+    # === NEW: LOGIN FLOW HELPERS ===
+
+    async def ensure_selkies_running(self) -> bool:
+        """Check if Selkies CLI is available in PATH.
+
+        This is a lightweight check used before attempting to orchestrate
+        the login flow. It does not attempt to start Selkies services.
+        """
+        try:
+            import shutil
+            path = shutil.which("selkies")
+            if path:
+                log_debug(f"[selenium] Selkies binary found at: {path}")
+                return True
+            else:
+                log_debug("[selenium] Selkies binary not found in PATH")
+                return False
+        except Exception as e:
+            log_warning(f"[selenium] Error while checking Selkies availability: {e}")
+            return False
+
+    async def check_login_state(self) -> dict:
+        """Check and return the current login state for this engine.
+
+        Returns a dict: { 'logged_in': bool, 'login_state': 'logged'|'unlogged'|'unknown' }
+        If the state changes, notifies via the notify function if set.
+        """
+        try:
+            if self.driver is None:
+                state = {"logged_in": False, "login_state": "unknown"}
+            else:
+                try:
+                    logged = bool(self.is_user_logged_in())
+                    state = {"logged_in": logged, "login_state": ("logged" if logged else "unlogged")}
+                except Exception as e:
+                    log_warning(f"[selenium] Error while evaluating login state: {e}")
+                    state = {"logged_in": False, "login_state": "unknown"}
+
+            # Notify if changed from previous known state
+            prev = getattr(self, "_last_login_state", None)
+            if prev != state:
+                self._last_login_state = state
+                msg = f"🔐 Login state for {getattr(self, 'component_name', 'selenium')} changed: {state['login_state']}"
+                log_info(f"[selenium] {msg}")
+                if getattr(self, "notify_fn", None):
+                    try:
+                        self.notify_fn(msg)
+                    except Exception:
+                        # Fallback: ignore notifier exceptions
+                        pass
+
+            return state
+        except Exception as e:
+            log_warning(f"[selenium] Unexpected error checking login state: {e}")
+            return {"logged_in": False, "login_state": "unknown"}
+
+    async def start_login_flow(self, timeout: int = 30) -> dict:
+        """Start a non-blocking login flow for the engine.
+
+        - Optionally ensures Selkies availability (best-effort).
+        - Creates/obtains the shared driver and navigates to the service homepage.
+        - Returns an initial state dict (see check_login_state()).
+        """
+        try:
+            # Check Selkies availability but don't fail hard if missing
+            selkies_ok = await self.ensure_selkies_running()
+            if not selkies_ok:
+                log_debug("[selenium] Selkies not available - continuing without it (Chromium may still be opened)")
+
+            # Ensure driver is created (shared driver helper handles locking)
+            try:
+                driver = await asyncio.wait_for(self._get_shared_driver(), timeout=min(timeout, 60))
+                self.driver = driver
+            except Exception as e:
+                log_error(f"[selenium] Failed to create/open browser for login flow: {e}")
+                return {"logged_in": False, "login_state": "unknown", "error": str(e)}
+
+            # Navigate to service URL if present
+            try:
+                if self.service_url:
+                    log_debug(f"[selenium] Navigating to service URL for login: {self.service_url}")
+                    try:
+                        driver.get(self.service_url)
+                    except Exception as e:
+                        log_warning(f"[selenium] Navigation to {self.service_url} failed: {e}")
+            except Exception:
+                pass
+
+            # Small delay to allow page to load
+            try:
+                await asyncio.sleep(1)
+            except Exception:
+                pass
+
+            # Evaluate login state and return
+            state = await self.check_login_state()
+            return state
+
+        except Exception as e:
+            log_error(f"[selenium] start_login_flow failed: {e}")
+            return {"logged_in": False, "login_state": "unknown", "error": str(e)}
+
     # === COMMON LIFECYCLE METHODS ===
 
     async def start(self):
@@ -2190,8 +2930,23 @@ class SeleniumLLMBase(AIPluginBase):
         The response will then be passed to message_chain.handle_incoming_message()
         for validation, correction, and action execution. This ensures all LLM responses
         are properly validated through the central message chain, not sent directly to interfaces.
+
+        We also populate `_current_request_meta` for the duration of this request so
+        lower-level error handlers (e.g., send failures) can deliver fallback
+        messages to the originating interface/chat instead of notifying the trainer.
         """
         try:
+            # Populate current request meta for error reporting / fallback messaging
+            try:
+                self._current_request_meta = {
+                    'bot': bot,
+                    'message': message,
+                    'interface': getattr(message, 'interface', None) or getattr(message, 'interface_path', None),
+                    'chat_id': getattr(message, 'chat_id', None),
+                    'interface_path': getattr(message, 'interface_path', None),
+                }
+            except Exception:
+                self._current_request_meta = None
             # Check if prompt contains a system_message (correction scenario)
             system_message_dict = None
             prompt_for_llm = prompt
@@ -2315,25 +3070,40 @@ class SeleniumLLMBase(AIPluginBase):
 
 
             # The response will be returned to plugin_instance which passes it to message_chain
-            response = await self.generate_response(messages, pre_reduction_size=pre_reduction_size)
-            
-            # Simply return the response - don't send it directly!
-            # plugin_instance will handle passing it to message_chain for proper validation
-            log_debug(f"[selenium] Response generated ({len(response) if response else 0} chars), returning to plugin_instance for message chain processing")
-            return response
-
+            try:
+                response = await self.generate_response(messages, pre_reduction_size=pre_reduction_size)
+                log_debug(f"[selenium] Response generated ({len(response) if response else 0} chars), returning to plugin_instance for message chain processing")
+                return response
+            except Exception as e:
+                log_error(f"[selenium] Failed to handle incoming message: {e}", e)
+                # Return error message instead of sending directly
+                error_msg = f"❌ Error processing message: {e}"
+                return error_msg
+            finally:
+                # Clear request meta to avoid accidental reuse by unrelated operations
+                try:
+                    self._current_request_meta = None
+                except Exception:
+                    pass
         except Exception as e:
-            log_error(f"[selenium] Failed to handle incoming message: {e}", e)
+            log_error(f"[selenium] Unexpected error in handle_incoming_message: {e}", e)
             # Return error message instead of sending directly
             error_msg = f"❌ Error processing message: {e}"
             return error_msg
-
     async def generate_response(self, messages, pre_reduction_size: int | None = None):
         """Send messages to the LLM engine and receive the response."""
         try:
             # Check if engine was properly initialized
             if not getattr(self, '_initialized', False):
                 return "❌ LLM engine not properly initialized"
+
+            # Record metadata about the current incoming request so failure handlers
+            # can send a fallback message back to the originating interface instead
+            # of notifying the trainer. This is set by the plugin instance via
+            # handle_incoming_message prior to calling generate_response.
+            # Example keys: 'bot', 'message', 'interface', 'chat_id', 'interface_path'
+            if not hasattr(self, '_current_request_meta'):
+                self._current_request_meta = None
 
             log_debug(f"[selenium] generate_response called with {len(messages) if isinstance(messages, list) else 1} message(s)")
             
@@ -2374,9 +3144,23 @@ class SeleniumLLMBase(AIPluginBase):
             # Lazy driver initialization - create only when first actual request comes in
             if self.driver is None:
                 log_info(f"[selenium] 🚀 First use of {self.component_name} - creating shared driver")
-                shared_driver = await self._get_shared_driver()
-                self.driver = shared_driver  # Assign to instance for compatibility
-                log_info(f"[selenium] ✅ Driver ready for {self.component_name}")
+                try:
+                    shared_driver = await self._get_shared_driver()
+                    self.driver = shared_driver  # Assign to instance for compatibility
+                    log_info(f"[selenium] ✅ Driver ready for {self.component_name}")
+                except Exception as driver_err:
+                    # Notify user/admin and return an error early
+                    try:
+                        notify_msg = "Impossibile avviare il browser per il motore LLM (errore Selenium). Controlla i log e riprova."
+                        log_warning(f"[selenium][driver_error] {notify_msg} err={driver_err}")
+                        if getattr(self, '_notify_fn', None):
+                            try:
+                                self._notify_fn(notify_msg)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                    raise driver_err
 
             # Health check: verify driver is still alive
             driver_is_dead = False
@@ -2394,11 +3178,16 @@ class SeleniumLLMBase(AIPluginBase):
                 SeleniumLLMBase._global_shared_driver = None
                 SeleniumLLMBase._global_ref_count = 0
                 # Get a fresh driver
-                shared_driver = await self._get_shared_driver()
-                self.driver = shared_driver
-                log_info(f"[selenium] ✅ Fresh driver ready for {self.component_name}")
-                window_count = len(self.driver.window_handles)
-                log_info(f"[selenium] Using fresh shared driver with {window_count} window(s)")
+                try:
+                    # Use the async recovery helper inside async context
+                    await self._ensure_driver_responsive_or_restart()
+                except Exception:
+                    # Fallback to direct recreate if helper failed
+                    shared_driver = await self._get_shared_driver()
+                    self.driver = shared_driver
+                    log_info(f"[selenium] ✅ Fresh driver ready for {self.component_name}")
+                    window_count = len(self.driver.window_handles)
+                    log_info(f"[selenium] Using fresh shared driver with {window_count} window(s)")
 
 
             # Check for double-prompt split condition (only when not explicitly skipping)
@@ -2430,16 +3219,16 @@ class SeleniumLLMBase(AIPluginBase):
         """Return True if we should split this prompt into PART1/PART2.
 
         Conditions:
-        - Split feature enabled via config
+        - Split feature enabled via `SELENIUM_SPLIT_PROMPT_PARTS` (> 1)
         - Not currently sending PART2 (internal flag)
         - prompt_text length > model limit (character limit)
         """
         try:
-            enabled = bool(self.SPLIT_PROMPT_VAR.value) if hasattr(self, 'SPLIT_PROMPT_VAR') else bool(self.SPLIT_PROMPT_VAR)
+            max_parts = int(config_registry.get_value("SELENIUM_SPLIT_PROMPT_PARTS", DEFAULT_SPLIT_PROMPT_PARTS))
         except Exception:
-            enabled = bool(getattr(self, 'SPLIT_PROMPT_VAR', True))
+            max_parts = DEFAULT_SPLIT_PROMPT_PARTS
 
-        if not enabled:
+        if max_parts <= 1:
             return False
 
         # If we're explicitly skipping (we are in PART2) do not split again
@@ -2491,9 +3280,14 @@ class SeleniumLLMBase(AIPluginBase):
                 if json_candidate:
                     parsed = json.loads(json_candidate)
                     # Only enable double-prompt when we find explicit context keys
+                    split_keys = (
+                        'history_current_chat', 'history_recent', 'memories', 'thoughts', 'tags_placeholder',
+                        # legacy keys (backward compatible)
+                        'current_chat_history', 'chat_history', 'ai_diary', 'diary', 'diary_entries', 'recent_entries',
+                    )
                     if isinstance(parsed, dict) and (
                         'context' in parsed or
-                        any(k in parsed for k in ('chat_history', 'memories', 'diary', 'diary_entries', 'ai_diary', 'recent_entries'))
+                        any(k in parsed for k in split_keys)
                     ):
                         log_debug(f"[selenium] prompt length {size} exceeds model limit {lim} and contains context keys, enabling double-prompt")
                         return True
@@ -2563,12 +3357,9 @@ class SeleniumLLMBase(AIPluginBase):
             # If parsed JSON with context
             # parsed JSON may include context in different shapes. We detect:
             # - a 'context' key (preferred)
-            # - or top-level keys like 'chat_history', 'memories', 'diary', 'diary_entries'
+            # - or top-level keys like history/memories
             if isinstance(parsed, dict):
-                # Simplified behavior requested by the user: extract ONLY `chat_history` and `ai_diary`
-                # (and common alias 'diary' / 'diary_entries') from the parsed JSON. Do not
-                # perform aggressive deep extraction. The prompt JSON format normally places
-                # these keys either at top-level or under a 'context' key.
+                # Extract only the known, safe-to-externalize context lists.
                 context_obj = {}
 
                 # Prefer the 'context' dict if present
@@ -2579,26 +3370,24 @@ class SeleniumLLMBase(AIPluginBase):
                     if key in src:
                         dst[key] = src[key]
 
-                # Copy only the keys requested for PART1: chat_history, ai_diary, memories
-                copy_if_present(context_obj, source, 'chat_history')
-                copy_if_present(context_obj, source, 'ai_diary')
-                copy_if_present(context_obj, source, 'memories')
+                # Canonical keys
+                for k in ('history_current_chat', 'history_recent', 'memories', 'thoughts', 'tags_placeholder'):
+                    copy_if_present(context_obj, source, k)
+                # Legacy keys (backward compatible)
+                for k in ('current_chat_history', 'chat_history', 'ai_diary', 'diary_entries', 'diary'):
+                    copy_if_present(context_obj, source, k)
 
                 # Only create PART1 if we actually found memory/chat keys
                 if context_obj:
                     # Build PART1 header and payload
                     part1_header = (
-                    "[INTERNAL-PART1] This message contains CONTEXT for memory persistence. "
-                    "Read it carefully and keep it available for subsequent messages. "
-                    "Do NOT act on this message. Reply ONLY with an empty JSON object: {}"
-                )
+                        "[INTERNAL-PART1] This message contains CONTEXT for memory persistence. "
+                        "Read it carefully and keep it available for subsequent messages. "
+                        "Do NOT act on this message. Reply ONLY with an empty JSON object: {}"
+                    )
 
-                    # Build PART1 payload containing ONLY ai_diary, chat_history, memories
-                    part1_payload = {
-                        "ai_diary": context_obj.get('ai_diary', []),
-                        "chat_history": context_obj.get('chat_history', []),
-                        "memories": context_obj.get('memories', []),
-                    }
+                    # Build PART1 payload containing ONLY extracted context lists
+                    part1_payload = dict(context_obj)
 
                     part1_text = part1_header + "\n\n" + json.dumps(part1_payload)
 
@@ -2607,13 +3396,12 @@ class SeleniumLLMBase(AIPluginBase):
 
                     # If the original had a 'context' dict, only remove the keys we moved to PART1
                     if 'context' in parsed_part2 and isinstance(parsed_part2['context'], dict):
-                        for k in ('chat_history', 'memories', 'ai_diary'):
+                        for k in context_obj.keys():
                             if k in parsed_part2['context']:
-                                # Empty lists for removed context
                                 parsed_part2['context'][k] = []
 
                     # Also remove top-level occurrences of these keys if present
-                    for k in ('chat_history', 'memories', 'ai_diary'):
+                    for k in context_obj.keys():
                         if k in parsed_part2:
                             parsed_part2[k] = []
 
@@ -2645,13 +3433,162 @@ class SeleniumLLMBase(AIPluginBase):
             # Return an empty context PART1 and the full prompt as PART2
             empty_header = (
                 "[INTERNAL-PART1] This message is intended for CONTEXT only. "
-                "If present, read/store chat_history/diary/memories. Reply ONLY with {}."
+                "If present, read/store history/memories. Reply ONLY with {}."
             )
             # Empty context payload
             return empty_header + "\n\n{}", prompt_text
         except Exception:
             # As a last resort, return original as part2 and empty part1
             return "{}", prompt_text
+
+    def _split_prompt_text_into_n_parts(self, prompt_text: str, max_parts: int) -> list[str]:
+        """Split prompt into up to N parts.
+
+        - 1..(N-1): context-only parts (expecting `{}`), used to persist memory/context
+        - N: final prompt with context keys emptied
+
+        `max_parts` is a hard cap; if everything fits in fewer parts, fewer parts are returned.
+        """
+        try:
+            max_parts_int = int(max_parts)
+        except Exception:
+            max_parts_int = DEFAULT_SPLIT_PROMPT_PARTS
+
+        if max_parts_int <= 1:
+            return [prompt_text]
+
+        # Keep compatibility for the classic 2-part behavior
+        if max_parts_int == 2:
+            p1, p2 = self._split_prompt_text_into_parts(prompt_text)
+            return [p1, p2]
+
+        try:
+            # Parse prompt JSON body (same approach as _split_prompt_text_into_parts)
+            if "\n---\n" in prompt_text:
+                idx = prompt_text.find("\n---\n")
+                remainder = prompt_text[idx + len("\n---\n"):].strip()
+                brace_idx = remainder.find("{")
+                json_candidate = remainder[brace_idx:] if brace_idx != -1 else remainder
+            else:
+                first_brace = prompt_text.find("{")
+                json_candidate = prompt_text[first_brace:] if first_brace != -1 else None
+
+            parsed = None
+            if json_candidate:
+                try:
+                    parsed = json.loads(json_candidate)
+                except Exception:
+                    try:
+                        first = json_candidate.find('{')
+                        last = json_candidate.rfind('}')
+                        if first != -1 and last != -1 and last > first:
+                            parsed = json.loads(json_candidate[first:last + 1])
+                        else:
+                            wrapped = '{' + json_candidate.strip().strip('{}') + '}'
+                            parsed = json.loads(wrapped)
+                    except Exception:
+                        parsed = None
+
+            if not isinstance(parsed, dict):
+                p1, p2 = self._split_prompt_text_into_parts(prompt_text)
+                return [p1, p2]
+
+            source = parsed.get('context') if isinstance(parsed.get('context'), dict) else parsed
+
+            extracted: dict[str, list] = {}
+            for k in (
+                "history_current_chat", "history_recent", "memories", "thoughts", "tags_placeholder",
+                # legacy
+                "current_chat_history", "chat_history", "ai_diary", "diary_entries", "diary",
+            ):
+                v = source.get(k)
+                if isinstance(v, list) and v:
+                    extracted[k] = v
+
+            if not extracted:
+                p1, p2 = self._split_prompt_text_into_parts(prompt_text)
+                return [p1, p2]
+
+            # Build final prompt by clearing extracted keys (no minification here)
+            parsed_final = dict(parsed)
+            if 'context' in parsed_final and isinstance(parsed_final['context'], dict):
+                for k in extracted.keys():
+                    if k in parsed_final['context']:
+                        parsed_final['context'][k] = []
+            for k in extracted.keys():
+                if k in parsed_final:
+                    parsed_final[k] = []
+            final_text = json.dumps(parsed_final)
+
+            # Determine packing target based on model limit (before any reduction)
+            try:
+                model_limit = int(self._get_model_char_limit(self._get_current_model_name()))
+            except Exception:
+                model_limit = int(_active_selenium_max_prompt_chars)
+
+            per_part_limit = max(2000, int(model_limit * 0.9))
+
+            keys_order = [
+                "history_current_chat", "history_recent", "memories", "thoughts", "tags_placeholder",
+                # legacy
+                "current_chat_history", "chat_history", "ai_diary", "diary_entries", "diary",
+            ]
+            stream: list[tuple[str, object]] = []
+            for k in keys_order:
+                for item in (extracted.get(k) or []):
+                    stream.append((k, item))
+
+            def payload_size(payload: dict[str, list]) -> int:
+                try:
+                    return len(json.dumps(payload))
+                except Exception:
+                    return 10**9
+
+            context_payloads: list[dict[str, list]] = []
+            current_payload: dict[str, list] = {}
+            for k, item in stream:
+                current_payload.setdefault(k, []).append(item)
+
+                if payload_size(current_payload) > per_part_limit:
+                    # If we have more than one item in this payload, move the last item into a new payload.
+                    if len(current_payload.get(k, [])) > 1:
+                        last = current_payload[k].pop()
+                        context_payloads.append(current_payload)
+                        current_payload = {k: [last]}
+                    else:
+                        # Single huge item; accept it as-is to avoid infinite splitting.
+                        context_payloads.append(current_payload)
+                        current_payload = {}
+
+            if current_payload:
+                context_payloads.append(current_payload)
+
+            # Cap to max_parts-1 by merging overflow into the last payload
+            max_context_parts = max_parts_int - 1
+            if len(context_payloads) > max_context_parts:
+                kept = context_payloads[:max_context_parts]
+                for payload in context_payloads[max_context_parts:]:
+                    for k, items in payload.items():
+                        kept[-1].setdefault(k, []).extend(items)
+                context_payloads = kept
+
+            total_parts = len(context_payloads) + 1
+            parts: list[str] = []
+            for idx, payload in enumerate(context_payloads, start=1):
+                header = (
+                    f"[INTERNAL-PART{idx}/{total_parts}] This message contains CONTEXT for memory persistence. "
+                    "Read it carefully and keep it available for subsequent messages. "
+                    "Do NOT act on this message. Reply ONLY with an empty JSON object: {}"
+                )
+                parts.append(header + "\n\n" + json.dumps(payload))
+
+            parts.append(final_text)
+            return parts
+
+        except Exception as e:
+            log_debug(f"[selenium] _split_prompt_text_into_n_parts fallback: {e}")
+            p1, p2 = self._split_prompt_text_into_parts(prompt_text)
+            return [p1, p2]
 
     def _execute_double_prompt_workflow(self, prompt_text: str) -> str:
         """Execute PART1 then PART2 sequentially, ignoring PART1's content for actions.
@@ -2661,7 +3598,18 @@ class SeleniumLLMBase(AIPluginBase):
 
         The internal flag _skip_double_prompt_for_this_send is used to avoid re-splitting PART2.
         """
-        part1_text, part2_text = self._split_prompt_text_into_parts(prompt_text)
+        try:
+            max_parts = int(config_registry.get_value("SELENIUM_SPLIT_PROMPT_PARTS", DEFAULT_SPLIT_PROMPT_PARTS))
+        except Exception:
+            max_parts = DEFAULT_SPLIT_PROMPT_PARTS
+
+        parts = self._split_prompt_text_into_n_parts(prompt_text, max_parts=max_parts)
+        if len(parts) < 2:
+            p1, p2 = self._split_prompt_text_into_parts(prompt_text)
+            parts = [p1, p2]
+
+        context_parts = parts[:-1]
+        final_part_text = parts[-1]
 
         # Send PART1 and wait for a response (we ignore content, but we log parsing/results)
         # Use a shorter processing wait for PART1 to avoid long delays before sending PART2
@@ -2669,79 +3617,135 @@ class SeleniumLLMBase(AIPluginBase):
             part1_processing_timeout = int(config_registry.get_value("SELENIUM_PART1_PROCESSING_TIMEOUT", 8))
         except Exception:
             part1_processing_timeout = 8
+        # Retry each context PART up to CORRECTOR_RETRIES; any response is enough to proceed.
+        # CORRECTOR_RETRIES may be a ConfigVar; ensure int semantics
+        max_retries = int(CORRECTOR_RETRIES) if 'CORRECTOR_RETRIES' in globals() else 3
         try:
-            part1_len = len(part1_text) if isinstance(part1_text, str) else None
+            part1_stable_grace = float(config_registry.get_value("SELENIUM_PART1_RESPONSE_STABLE_GRACE", DEFAULT_PART1_RESPONSE_STABLE_GRACE))
         except Exception:
-            part1_len = None
-        log_info(f"[selenium] PART1 -> sending context part to LLM (expecting JSON {{}}) size={part1_len}")
-        # Retry PART1 up to CORRECTOR_RETRIES (if defined); if engine returns any response we proceed
-        max_retries = CORRECTOR_RETRIES if 'CORRECTOR_RETRIES' in globals() else 3
-        part1_resp = None
-        for attempt in range(1, max_retries + 1):
-            log_info(f"[selenium] PART1 attempt {attempt}/{max_retries}")
+            part1_stable_grace = DEFAULT_PART1_RESPONSE_STABLE_GRACE
+
+        for part_index, context_text in enumerate(context_parts, start=1):
             try:
-                attempt_start = time.time()
-                part1_resp = self._execute_complete_workflow(
-                    part1_text,
-                    processing_max_wait=part1_processing_timeout,
-                    stabilize_max_wait=part1_processing_timeout,
-                )
-                attempt_elapsed = time.time() - attempt_start
-                log_debug(f"[selenium] PART1 attempt {attempt} completed in {attempt_elapsed:.1f}s")
-            except Exception as e:
-                log_warning(f"[selenium] PART1 attempt {attempt} failed with error: {e}")
-                # If this was the last attempt, we'll continue to PART2 anyway
+                part_len = len(context_text) if isinstance(context_text, str) else None
+            except Exception:
+                part_len = None
+
+            log_info(f"[selenium] PART{part_index}/{len(parts)} -> sending context part to LLM (expecting JSON {{}}) size={part_len}")
+            part_resp = None
+
+            for attempt in range(1, max_retries + 1):
+                log_info(f"[selenium] PART{part_index} attempt {attempt}/{max_retries}")
+                try:
+                    # Pre-check and attempt sync recovery before each PART attempt
+                    try:
+                        self._ensure_driver_responsive_or_restart_sync()
+                    except FrozenDriverError as e:
+                        log_warning(f"[selenium] PART{part_index} pre-check recovery raised: {e}")
+
+                    attempt_start = time.time()
+                    part_resp = self._execute_complete_workflow(
+                        context_text,
+                        processing_max_wait=part1_processing_timeout,
+                        stabilize_max_wait=part1_processing_timeout,
+                        stabilize_no_change_grace=part1_stable_grace,
+                        post_send_confirm_timeout=1.5,
+                    )
+                    attempt_elapsed = time.time() - attempt_start
+                    log_debug(f"[selenium] PART{part_index} attempt {attempt} completed in {attempt_elapsed:.1f}s")
+                except Exception as e:
+                    log_warning(f"[selenium] PART{part_index} attempt {attempt} failed with error: {e}")
+                    if attempt < max_retries:
+                        time.sleep(1)
+                        continue
+                    part_resp = None
+                    break
+
+                if isinstance(part_resp, str) and part_resp.strip() != "":
+                    try:
+                        parsed = json.loads(part_resp)
+                    except Exception:
+                        parsed = None
+
+                    if parsed == {}:
+                        log_info(f"[selenium] PART{part_index} attempt {attempt} parsed as {{}} (OK)")
+                    else:
+                        log_warning(f"[selenium] PART{part_index} attempt {attempt} response did not strictly parse as {{}} - proceeding anyway")
+                    break
+
+                log_warning(f"[selenium] PART{part_index} attempt {attempt} returned empty response; retrying...")
                 if attempt < max_retries:
                     time.sleep(1)
                     continue
-                else:
-                    part1_resp = None
-                    break
-
-            # We received a response -> try to parse and log result
-            if isinstance(part1_resp, str) and part1_resp.strip() != "":
-                try:
-                    parsed = json.loads(part1_resp)
-                except Exception:
-                    parsed = None
-
-                if parsed == {}:
-                    log_info(f"[selenium] PART1 attempt {attempt} parsed as {{}} (OK)")
-                else:
-                    log_warning(f"[selenium] PART1 attempt {attempt} response did not strictly parse as {{}} - proceeding anyway")
-
-                # PART1 considered received as soon as LLM returns any response
-                break
-
-            # Empty or no response, retry unless out of attempts
-            log_warning(f"[selenium] PART1 attempt {attempt} returned empty response; retrying...")
-            if attempt < max_retries:
-                time.sleep(1)
-                continue
-            else:
-                log_warning("[selenium] PART1 exhausted retries without valid response; proceeding to PART2")
+                log_warning(f"[selenium] PART{part_index} exhausted retries without valid response; proceeding")
 
         # Send PART2 - ensure we do not re-split
         try:
-            part2_len = len(part2_text) if isinstance(part2_text, str) else None
+            part2_len = len(final_part_text) if isinstance(final_part_text, str) else None
         except Exception:
             part2_len = None
-        log_info(f"[selenium] PART2 -> sending main prompt (is_part2=True) size_before_minify={part2_len}")
+        log_info(f"[selenium] PART{len(parts)}/{len(parts)} -> sending main prompt (is_part2=True) size_before_minify={part2_len}")
         self._skip_double_prompt_for_this_send = True
         # Give the browser a very short grace to process previous message before sending PART2
         try:
             time.sleep(0.1)
         except Exception:
             pass
+
+        # Execute workflow with driver recovery retries
         try:
-            resp = self._execute_complete_workflow(part2_text)
-            log_info("[selenium] PART2 response received — treating as final response for action parsing/corrector flow")
-            return resp
+            try:
+                recovery_retries = int(config_registry.get_value("SELENIUM_DRIVER_RECOVERY_RETRIES", DEFAULT_DRIVER_RECOVERY_RETRIES))
+            except Exception:
+                recovery_retries = DEFAULT_DRIVER_RECOVERY_RETRIES
+
+            last_exception = None
+            for attempt in range(recovery_retries + 1):
+                try:
+                    # Quick health-check and optional recovery before attempting the workflow
+                    try:
+                        self._ensure_driver_responsive_or_restart_sync()
+                    except FrozenDriverError as e:
+                        log_warning(f"[selenium] Pre-workflow driver recovery raised: {e}")
+                        # continue to attempt workflow with fresh driver
+
+                    resp = self._execute_complete_workflow(final_part_text)
+                    log_info("[selenium] PART2 response received — treating as final response for action parsing/corrector flow")
+                    return resp
+                except (FrozenDriverError, WebDriverException, ReadTimeoutError, TimeoutError) as e:
+                    last_exception = e
+                    log_warning(f"[selenium] Workflow attempt {attempt + 1} failed due to driver issue: {e}")
+                    # Try to recover and then retry
+                    try:
+                        self._ensure_driver_responsive_or_restart_sync()
+                    except Exception as rec_e:
+                        log_error(f"[selenium] Failed to recover driver after workflow failure: {rec_e}")
+                        # If we cannot recover, break and propagate
+                        break
+                    # small pause before retry
+                    try:
+                        time.sleep(0.2)
+                    except Exception:
+                        pass
+                    continue
+
+            # If we get here, all attempts failed
+            if last_exception is not None:
+                log_error(f"[selenium] All {recovery_retries + 1} workflow attempts failed: {last_exception}")
+                raise last_exception
+
         finally:
             # Always reset the flag to avoid residual state
             self._skip_double_prompt_for_this_send = False
 
-    def _execute_complete_workflow(self, prompt_text: str, processing_max_wait: int | None = None, stabilize_max_wait: int | None = None) -> str:
+    def _execute_complete_workflow(
+        self,
+        prompt_text: str,
+        processing_max_wait: int | None = None,
+        stabilize_max_wait: int | None = None,
+        stabilize_no_change_grace: float | None = None,
+        post_send_confirm_timeout: float | None = None,
+    ) -> str:
         """Execute the complete workflow (interaction only) in a single thread."""
         try:
             log_debug(f"[selenium] _execute_complete_workflow called with driver: {self.driver is not None}")
@@ -2764,8 +3768,16 @@ class SeleniumLLMBase(AIPluginBase):
             textarea = self._locate_prompt_area(self.driver)
 
             # Send prompt and wait for response
-            if not self._send_prompt_with_confirmation(textarea, prompt_text, processing_max_wait=processing_max_wait):
+            send_result = self._send_prompt_with_confirmation(
+                textarea,
+                prompt_text,
+                processing_max_wait=processing_max_wait,
+                post_send_confirm_timeout=post_send_confirm_timeout,
+            )
+            if send_result is False:
                 return "❌ Failed to send prompt"
+            if isinstance(send_result, str) and send_result.startswith('❌'):
+                return send_result
 
             # Handle response choice if applicable (e.g., ChatGPT offers two responses)
             self._handle_response_choice(self.driver)
@@ -2773,15 +3785,42 @@ class SeleniumLLMBase(AIPluginBase):
             # Wait for response to stabilize (text stops growing for N seconds)
             # Use a shorter stabilization timeout for PART1 when requested
             if stabilize_max_wait is not None:
-                response = self.wait_until_response_stabilizes(self.driver, max_total_wait=stabilize_max_wait)
+                grace = stabilize_no_change_grace if stabilize_no_change_grace is not None else DEFAULT_RESPONSE_STABLE_GRACE
+                response = self.wait_until_response_stabilizes(
+                    self.driver,
+                    max_total_wait=stabilize_max_wait,
+                    no_change_grace=grace,
+                )
             else:
-                response = self.wait_until_response_stabilizes(self.driver)
+                try:
+                    default_grace = float(config_registry.get_value("SELENIUM_RESPONSE_STABLE_GRACE", DEFAULT_RESPONSE_STABLE_GRACE))
+                except Exception:
+                    default_grace = DEFAULT_RESPONSE_STABLE_GRACE
+                response = self.wait_until_response_stabilizes(self.driver, no_change_grace=default_grace)
 
             # Log the full response for debugging
             if response:
                 log_debug(f"[selenium] 📨 FULL LLM RESPONSE ({len(response)} chars):\n{response}")
             else:
                 log_warning("[selenium] Received empty response from LLM")
+
+            # Engine-specific UI reset hook: allow engines to implement a UI-level reset
+            # (e.g., opening a new chat in Gemini) when appropriate. The hook should return
+            # a string starting with '❌' to indicate a retry and cause upper layers to consume
+            # one retry attempt.
+            try:
+                hook_res = None
+                try:
+                    hook = getattr(self, '_engine_ui_reset_hook', None)
+                    if callable(hook):
+                        hook_res = hook(response)
+                except Exception as e:
+                    log_debug(f"[selenium] _engine_ui_reset_hook failed: {e}")
+
+                if isinstance(hook_res, str) and hook_res.startswith('❌'):
+                    return hook_res
+            except Exception:
+                pass
 
             return response
 

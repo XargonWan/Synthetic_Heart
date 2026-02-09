@@ -42,22 +42,28 @@ from core.core_initializer import register_interface, core_initializer
 load_dotenv()
 _interface_registry = get_interface_registry()
 
-# Read Telegram userbot configuration
-TELEGRAM_TRAINER_ID_STR = os.getenv('TRAINER_IDS', '').split(',') if os.getenv('TRAINER_IDS') else []
+from core.config_manager import config_registry
+
+# Read TRAINER_IDS from the central config registry so runtime changes are respected
+TELEGRAM_TRAINER_ID_STR = []
 TELEGRAM_TRAINER_ID = None
 
-# Extract trainer ID for telegram_userbot from TRAINER_IDS
-for trainer_config in TELEGRAM_TRAINER_ID_STR:
-    if trainer_config.startswith('telegram_userbot:'):
-        try:
-            TELEGRAM_TRAINER_ID = int(trainer_config.split(':')[1])
-            break
-        except (ValueError, IndexError):
-            log_warning(f"[telethon_userbot] Invalid trainer ID format in TRAINER_IDS: {trainer_config}")
-
-if not TELEGRAM_TRAINER_ID:
-    log_warning("[telethon_userbot] TELEGRAM_TRAINER_ID not found in TRAINER_IDS environment variable - Telethon userbot disabled")
+def _update_trainer_ids(raw_value: str | None):
+    global TELEGRAM_TRAINER_ID_STR, TELEGRAM_TRAINER_ID
+    s = str(raw_value) if raw_value is not None else ""
+    TELEGRAM_TRAINER_ID_STR = s.split(',') if s else []
     TELEGRAM_TRAINER_ID = None
+    for trainer_config in TELEGRAM_TRAINER_ID_STR:
+        if trainer_config.startswith('telegram_userbot:'):
+            try:
+                TELEGRAM_TRAINER_ID = int(trainer_config.split(':')[1])
+                break
+            except (ValueError, IndexError):
+                log_warning(f"[telethon_userbot] Invalid trainer ID format in TRAINER_IDS: {trainer_config}")
+
+# Initialize from current config and watch for updates
+_update_trainer_ids(config_registry.get_value('TRAINER_IDS', ''))
+config_registry.add_listener('TRAINER_IDS', _update_trainer_ids)
 
 def is_trainer(user_id: int) -> bool:
     """Check if user is the trainer for this Telegram interface."""

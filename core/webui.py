@@ -1,6 +1,6 @@
-"""FastAPI-based web interface branded as the SyntH Web UI.
+"""FastAPI-based web interface branded as the Synthetic Heart Web UI.
 
-This is a core component of SyntH that provides a functional chat front-end
+This is a core component of Synthetic Heart that provides a functional chat front-end
 integrating with the existing synth core infrastructure. It offers a refined
 layout, VRM avatar management, and notification helpers so the Docker container
 can serve the application directly.
@@ -17,8 +17,9 @@ import os
 import re
 import threading
 import uuid
+import platform
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Deque, Dict, Optional, List, Any
 
@@ -28,6 +29,7 @@ from fastapi import (
     WebSocketDisconnect,
     UploadFile,
     File,
+    Form,
     Request,
     HTTPException,
 )
@@ -43,13 +45,18 @@ import core.plugin_instance as plugin_instance
 from core import db as core_db
 from core.action_state_manager import get_action_state_manager, AnimationPhase
 from core.animation_handler import AnimationState
+from core import animation_uploads
 import mimetypes
 
 
-BRAND_NAME = "SyntH Web UI"
+BRAND_NAME = "Synthetic Heart"
 INTERFACE_NAME = "synth_webui"
 LOG_PREFIX = "[synth_webui]"
 WEBUI_LOG = "webui"  # Log file name for WebUI (logs/webui.log)
+# Internal chat/component identifier used when interacting with the LLM and
+# action state manager. This must remain "webui" for compatibility with
+# engines and tests which expect the internal component name to be "webui".
+INTERNAL_CHAT_NAME = "webui"
 _LEGACY_AUTOSTART_ENV = "WEBWAIFU_AUTOSTART"
 _AUTOSTART_ENV = "SYNTH_WEBUI_AUTOSTART"
 _LEGACY_VRM_DIR_ENV = "WEBWAIFU_VRM_DIR"
@@ -68,30 +75,86 @@ class SynthWebUIInterface:
     
     display_name = "Web UI"
 
-    def __init__(self) -> None:
+    def __init__(self, autostart: bool = True) -> None:
         self.app = FastAPI(title=BRAND_NAME, version="1.0")
         self.start_time = datetime.utcnow()
         self.connections: Dict[str, WebSocket] = {}
         self.message_history: Dict[str, Deque[dict]] = {}
         self.max_history = 100
+        # Mate Engine outbox (messages sent from SyntH to Mate)
+        self._mate_outbox: Deque[dict] = deque(maxlen=500)
+        import asyncio as _asyncio
+        self._mate_outbox_lock = _asyncio.Lock()
+        # Generic integration outboxes keyed by source (e.g., 'mate', 'other')
+        self._integration_outboxes: Dict[str, Deque[dict]] = {}
+        self._integration_outbox_locks: Dict[str, asyncio.Lock] = {}
+        # Helper to create per-source outbox (see ensure_integration_outbox method)
+        # Track pending THINKING actions per session so we can deterministically
+        # switch THINK -> WRITE -> IDLE when the async response is actually sent.
+        self._pending_thinking_actions: Dict[str, Deque[str]] = {}
+        # Track active WRITING actions per session so we can stop them immediately
+        # after sending, and avoid starting WRITING too late.
+        self._active_writing_actions: Dict[str, Deque[str]] = {}
+        # Track when THINKING started per session so we can ensure it's visible
+        # before switching to WRITING at generation_start.
+        self._thinking_started_at_ms: Dict[str, int] = {}
         # Runtime/configurable attributes with sensible defaults
-        # The Web UI must always autostart; do not allow runtime toggle.
-        self.autostart = True
+        # Autostart can be disabled for tests/dev harnesses.
+        self.autostart = bool(autostart)
         self.host = os.getenv('SYNTH_WEBUI_HOST', '0.0.0.0')
-        try:
-            self.port = int(os.getenv('SYNTH_WEBUI_PORT', os.getenv('PORT', '8080')))
-        except Exception:
-            self.port = 8080
         self.log_level = os.getenv('SYNTH_WEBUI_LOG_LEVEL', 'info')
+        # TLS / HTTPS configuration
+        # By default expose the WebUI over HTTPS unless explicitly disabled.
+        # This makes the default developer experience minimal and secure.
+        self.tls_enabled = os.getenv('SYNTH_WEBUI_TLS', os.getenv('SECURE_CONNECTION', '1')) == '1'
+        self.tls_certfile = os.getenv('SYNTH_WEBUI_CERTFILE', None)
+        self.tls_keyfile = os.getenv('SYNTH_WEBUI_KEYFILE', None)
+        # Port configuration
+        # - SYNTH_WEBUI_HTTP_PORT: plain HTTP port
+        # - SYNTH_WEBUI_HTTPS_PORT: HTTPS/TLS port (only used when TLS is enabled)
+        # Backward compatible fallbacks:
+        # - SYNTH_WEBUI_PORT / PORT
+        raw_http_port = os.getenv('SYNTH_WEBUI_HTTP_PORT', os.getenv('SYNTH_WEBUI_PORT', os.getenv('PORT', '8080')))
+        try:
+            http_port = int(raw_http_port)
+        except Exception:
+            http_port = 8080
+
+        https_port = None
+        if self.tls_enabled:
+            raw_https_port = os.getenv('SYNTH_WEBUI_HTTPS_PORT', None)
+            if raw_https_port:
+                try:
+                    https_port = int(raw_https_port)
+                except Exception:
+                    https_port = http_port
+            else:
+                # If no explicit HTTPS port is provided, keep historical behavior
+                # (serve HTTPS on the HTTP port).
+                https_port = http_port
+
+        # Main server port
+        self.port = https_port if self.tls_enabled else http_port
+
+        # Optional HTTP port to serve plain HTTP alongside HTTPS (useful for dev/testing)
+        self.http_port = http_port if (self.tls_enabled and http_port != self.port) else None
         # Selkies desktop ports used for UI hints
+        # Selkies: prefer HTTPS; HTTP port is optional and will only be set
+        # if the environment explicitly defines SELKIES_HTTP_PORT.
         try:
             self.selkies_https_port = int(os.getenv('SELKIES_HTTPS_PORT', '3000'))
         except Exception:
             self.selkies_https_port = 3000
-        try:
-            self.selkies_http_port = int(os.getenv('SELKIES_HTTP_PORT', '3001'))
-        except Exception:
-            self.selkies_http_port = 3001
+
+        if 'SELKIES_HTTP_PORT' in os.environ:
+            try:
+                self.selkies_http_port = int(os.getenv('SELKIES_HTTP_PORT'))
+            except Exception:
+                self.selkies_http_port = None
+        else:
+            self.selkies_http_port = None
+        # Selkies host (allow overriding via env)
+        self.selkies_host = os.getenv('SELKIES_HOST', '127.0.0.1')
         # Log streaming options
         self.log_source_path = None
         self.log_wait_seconds = 20
@@ -100,6 +163,24 @@ class SynthWebUIInterface:
         self._server = None
         self._server_thread = None
         self._server_task = None
+        # Persistent session id file (single session per deploy)
+        self.session_id_file = Path('backups') / 'webui_session_id.txt'
+        self.session_id = None
+        try:
+            self._ensure_persistent_session_id()
+        except Exception:
+            log_warning(f"{LOG_PREFIX} Unable to initialize persistent session id")
+
+        # Temporary animation upload cleanup settings
+        try:
+            self.mate_upload_ttl_days = int(os.getenv("SYNTH_MATEENGINE_UPLOAD_TTL_DAYS", "7"))
+        except Exception:
+            self.mate_upload_ttl_days = 7
+        try:
+            self.mate_upload_cleanup_interval_s = int(os.getenv("SYNTH_MATEENGINE_UPLOAD_CLEANUP_INTERVAL_S", "3600"))
+        except Exception:
+            self.mate_upload_cleanup_interval_s = 3600
+        self._uploads_cleanup_task: Optional[asyncio.Task] = None
 
         # Static and VRM directories used by the Web UI. These are calculated
         # relative to the repository layout and can be overridden using the
@@ -130,6 +211,31 @@ class SynthWebUIInterface:
             self.app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
         else:
             log_warning(f"{LOG_PREFIX} static directory not found: {static_dir}", log_file=WEBUI_LOG)
+
+        # Ensure the root path always returns the rendered HTML directly.
+        # In some deployment or hot-reload scenarios a previous handler may
+        # end up returning None (serialized as JSON null). Add a lightweight
+        # middleware that intercepts '/' and returns the rendered index to
+        # guarantee consistent behaviour.
+        try:
+            from starlette.middleware.base import BaseHTTPMiddleware
+
+            class _IndexMiddleware(BaseHTTPMiddleware):
+                async def dispatch(inner_self, request, call_next):
+                    if request.url.path == "/":
+                        log_info(f"{LOG_PREFIX} Index middleware intercepting root request")
+                        try:
+                            content = self._render_index()
+                            log_info(f"{LOG_PREFIX} Index middleware rendered length {len(content)}")
+                            return HTMLResponse(content=content, media_type="text/html")
+                        except Exception as e:
+                            log_error(f"{LOG_PREFIX} Index middleware failed to render index: {e}")
+                            raise
+                    return await call_next(request)
+
+            self.app.add_middleware(_IndexMiddleware)
+        except Exception as e:
+            log_warning(f"{LOG_PREFIX} Failed to add Index middleware: {e}")
         
         # Mount JS directory for Mixamo animations (separate mount to avoid path conflicts)
         js_dir = Path(__file__).resolve().parent.parent / "res" / "synth_webui" / "js"
@@ -204,47 +310,152 @@ class SynthWebUIInterface:
         self.app.get("/api/debug/db_pool")(self.db_pool_debug)
         self.app.post("/api/config")(self.update_config_entry)
         self.app.post("/api/components/llm")(self.set_llm_engine)
+        # Login control for Selenium-based LLM engines
+        self.app.post("/api/components/llm/login")(self.llm_login)
+        # Run component actions on demand (e.g., Run Now button)
+        self.app.post("/api/components/run")(self.run_component)
         self.app.get("/api/logchat/info")(self.get_logchat_info)
         self.app.get("/api/diary")(self.diary_summary)
         self.app.post("/api/diary/archive")(self.archive_diary_entries)
         self.app.post("/api/diary/unarchive")(self.unarchive_diary_entries)
         self.app.delete("/api/diary/archive")(self.delete_archived_entries)
+        # Chat archive API (filesystem-backed)
+        self.app.post("/api/chat/archive")(self.archive_chat)
+        self.app.get("/api/chat/archives")(self.list_chat_archives)
+        self.app.get("/api/chat/archives/{archive_id}")(self.get_chat_archive)
+        self.app.post("/api/chat/restore")(self.restore_chat_archive)
+        self.app.delete("/api/chat/archives/{archive_id}")(self.delete_chat_archive)
+        self.app.post("/api/chat/archives/{archive_id}/rename")(self.rename_chat_archive)
+        self.app.post("/api/chat/session_meta")(self.set_session_meta)
+        self.app.get("/api/chat/session_meta")(self.get_session_meta)
         # History API endpoints (unified diary, grillo, chat history)
         self.app.get("/api/history/diary")(self.history_diary)
         self.app.get("/api/history/grillo")(self.history_grillo)
         self.app.get("/api/history/chat")(self.history_chat)
         self.app.get("/api/selkies")(self.get_selkies_config)
+        self.app.get("/api/selkies/health")(self.get_selkies_health)
         self.app.get("/api/animations/{skin}/{animation_type}")(self.get_animations_for_type)
+        self.app.post("/api/animations/upload")(self.upload_animation)
+        self.app.get("/api/animations/uploads")(self.list_animation_uploads)
+        self.app.delete("/api/animations/uploads/{upload_id}")(self.delete_animation_upload)
+        self.app.post("/api/animations/promote")(self.promote_animation_upload)
+        self.app.get("/api/prompt_override")(self.get_prompt_override)
+        # Generic integrations endpoints (source-agnostic)
+        self.app.post("/api/integrations/messages")(self.post_integration_message)
+        self.app.get("/api/integrations/outbox")(self.get_integration_outbox)
+        # Provide an internal endpoint implementation that doesn't rely on a
+        # bound `get_animation_state` method at init time. This avoids
+        # AttributeError in environments with dynamic reloads.
+        async def _animation_state_endpoint(request: Request = None):
+            try:
+                if not getattr(self, 'animation_handler', None):
+                    return JSONResponse({"state": "idle", "animation": None, "descriptor": None})
+
+                current = self.animation_handler.get_current_animation_state()
+                animation_file = current.get("animation_file")
+                resolved = None
+                if animation_file:
+                    try:
+                        resolved, _ = self.animation_handler._resolve_animation_descriptor(animation_file)
+                    except Exception:
+                        resolved = animation_file
+
+                payload = {
+                    "state": current.get("state"),
+                    "animation": resolved,
+                    "descriptor": current.get("descriptor"),
+                }
+                return JSONResponse(payload)
+            except Exception as exc:
+                log_error(f"{LOG_PREFIX} animation_state endpoint failed: {exc}")
+                raise HTTPException(status_code=500, detail=f"Failed to retrieve animation state: {exc}") from exc
+
+        self.app.get("/api/animation_state")(_animation_state_endpoint)
+        # Allow authorized clients to request a centralized state change
+        self.app.post("/api/animation_state")(self.set_animation_state)
         self.app.get("/api/locations")(self.get_suggested_locations)
 
         # Template sections route for modular loading
         self.app.get("/templates/{section}.html")(self.serve_template_section)
 
-        register_interface(INTERFACE_NAME, self)
-        log_info(f"{LOG_PREFIX} Interface registered", log_file=WEBUI_LOG)
+        # Register as an interface only when autostart is enabled.
+        # Tests/dev harnesses may instantiate the WebUI with autostart disabled
+        # and without a fully initialized core initializer.
+        if self.autostart:
+            try:
+                register_interface(INTERFACE_NAME, self)
+                log_info(f"{LOG_PREFIX} Interface registered", log_file=WEBUI_LOG)
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Interface registration failed (non-fatal): {exc}", log_file=WEBUI_LOG)
         
         # Initialize animation handler
         from core.animation_handler import get_animation_handler
         self.animation_handler = get_animation_handler()
         self.animation_handler.set_webui(self)
-        # Register callback to broadcast animation state changes to all WebSocket clients
-        self.animation_handler.register_animation_state_changed_callback(self._broadcast_animation_state)
-        log_info(f"{LOG_PREFIX} Animation handler initialized with WebSocket broadcast", log_file=WEBUI_LOG)
-        
+        # Register a broadcast summary endpoint to help clients sync state
+        log_info(f"{LOG_PREFIX} Animation handler initialized (single websocket sender)", log_file=WEBUI_LOG)
+        # AnimationHandler already sends websocket animation commands via set_webui(); avoid
+        # double-sending by not also broadcasting from a callback.
+        log_info(f"{LOG_PREFIX} Animation handler initialized (single websocket sender)", log_file=WEBUI_LOG)
+
         # Initialize global action state manager
         self.action_state_manager = get_action_state_manager()
         # Register callback to broadcast state changes to all WebSocket clients
         self.action_state_manager.register_state_changed_callback(self._broadcast_action_state)
         log_info(f"{LOG_PREFIX} Action state manager initialized with WebSocket broadcast", log_file=WEBUI_LOG)
-        
+
         # Persona manager will be initialized in start() method after core initialization
         self.persona_manager = None
-        
+
         if self.autostart:
             log_info(f"{LOG_PREFIX} Autostart enabled - will start server when event loop is available", log_file=WEBUI_LOG)
             # Don't start server here - it will be started by the main application
         else:
             log_info(f"{LOG_PREFIX} Autostart disabled - {BRAND_NAME} will not start automatically", log_file=WEBUI_LOG)
+
+        # Attempt to initialize the chat_archives DB table in background (best-effort)
+        try:
+            import asyncio
+            from core.chat_archives_db import init_chat_archives_table
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(init_chat_archives_table())
+                else:
+                    loop.run_until_complete(init_chat_archives_table())
+            except Exception:
+                # Fallback: ignore - the endpoints will try initializing on demand
+                pass
+        except Exception:
+            pass
+
+        if self.autostart:
+            self._schedule_uploads_cleanup()
+
+    async def set_animation_state(self, request: Request):
+        """Set the centralized animation state. Expected JSON:
+        {"state": "think|write|idle|talk", "session_id": "...", "loop": true}
+        """
+        data = await request.json()
+        state_str = data.get("state") if isinstance(data, dict) else None
+        if not state_str or not isinstance(state_str, str):
+            raise HTTPException(status_code=400, detail="'state' is required and must be a string")
+        try:
+            state_enum = AnimationState[state_str.upper()]
+        except Exception:
+            raise HTTPException(status_code=400, detail=f"Unknown animation state: {state_str}")
+
+        session_id = data.get("session_id")
+        loop = bool(data.get("loop", True))
+        context_id = data.get("context_id")
+        source = data.get("source")
+
+        try:
+            await self.animation_handler.play_animation(state_enum, session_id=session_id, loop=loop, context_id=context_id, source=source)
+            return JSONResponse({"status": "ok", "state": state_str, "session_id": session_id})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} set_animation_state failed: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     # ------------------------------------------------------------------
     # Interface metadata
@@ -257,9 +468,20 @@ class SynthWebUIInterface:
     def get_supported_actions() -> dict:
         return {
             "message_synth_webui": {
-                "required_fields": ["text", "interface_path"],
-                "optional_fields": [],
+                "required_fields": ["text"],
+                "optional_fields": ["interface_path"],
                 "description": f"Send a text message to a {BRAND_NAME} session.",
+            }
+            ,
+            "message_mate_engine": {
+                "required_fields": ["text"],
+                "optional_fields": ["target"],
+                "description": "(Deprecated) Send a text message to an integration outbox (source: mate).",
+            },
+            "message_integration": {
+                "required_fields": ["source", "text"],
+                "optional_fields": ["target"],
+                "description": "Send a text message to a named integration outbox (generic).",
             }
         }
 
@@ -279,6 +501,23 @@ class SynthWebUIInterface:
                         "example": "session-id",
                         "description": "Session identifier returned by the websocket",
                     },
+                },
+            }
+        if action_name == "message_mate_engine":
+            return {
+                "description": "(Deprecated) Send a message to an integration outbox (legacy mate alias).",
+                "payload": {
+                    "text": {"type": "string", "example": "Hello from SyntH!", "description": "Message content to deliver"},
+                    "target": {"type": "string", "example": "mate-session-id", "description": "Optional target/session identifier", "optional": True},
+                },
+            }
+        if action_name == "message_integration":
+            return {
+                "description": "Send a message to a named integration outbox.",
+                "payload": {
+                    "source": {"type": "string", "description": "Integration source name (e.g., 'mate')"},
+                    "text": {"type": "string", "example": "Hello from SyntH!"},
+                    "target": {"type": "string", "example": "session-id", "optional": True},
                 },
             }
         return {}
@@ -312,6 +551,8 @@ class SynthWebUIInterface:
                 '%%FAILED_MESSAGE_TEXT%%': str(get_failed_message_text()),
                 # Expose WEB_DEBUG flag to the template (default false)
                 '%%WEB_DEBUG%%': '1' if os.getenv('WEB_DEBUG', '0') in ('1', 'true', 'True') else '0',
+                # Chat resizable flag (configurable via exposed variable)
+                '%%CHAT_RESIZABLE%%': 'true' if str(self._get_chat_resizable()).lower() in ('1', 'true', 'yes') else 'false',
             }
             
             # Apply replacements
@@ -328,7 +569,7 @@ class SynthWebUIInterface:
 <html>
 <head><title>Error</title></head>
 <body>
-<h1>SyntH Web UI Error</h1>
+<h1>Synthetic Heart Error</h1>
 <p>Failed to load the web interface: {exc}</p>
 </body>
 </html>
@@ -339,13 +580,95 @@ class SynthWebUIInterface:
         try:
             html = self._render_index()
             log_info(f"{LOG_PREFIX} Rendered HTML length: {len(html)}")
+            # Return the rendered HTML as an HTMLResponse. Keep this inside
+            # the try-block so exceptions during rendering lead to a 500 and
+            # we never fall through returning None.
+            return HTMLResponse(content=html, media_type="text/html")
         except Exception as exc:
             log_error(f"{LOG_PREFIX} failed to render index: {exc}")
-            raise HTTPException(status_code=500, detail="Unable to render SyntH Web UI") from exc
-        return HTMLResponse(content=html)
+            raise HTTPException(status_code=500, detail="Unable to render Synthetic Heart") from exc
+
+    async def _probe_selkies_protocol(self) -> dict:
+        """Probe local Selkies ports to determine if HTTPS or HTTP is reachable.
+
+        Returns a dict: { 'protocol': 'https'|'http'|'none', 'details': str }
+        This is a best-effort check intended to improve UI hints; it must not
+        block for long (uses short timeouts).
+        """
+        import ssl
+        import socket
+
+        host = getattr(self, 'selkies_host', '127.0.0.1') or '127.0.0.1'
+        # The container exposes Selkies on container port 3000; prefer that.
+        container_port = 3000
+
+        # Try HTTPS first (TLS handshake)
+        try:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            with socket.create_connection((host, container_port), timeout=1) as sock:
+                with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+                    # If handshake succeeds, we assume HTTPS
+                    return { 'protocol': 'https', 'details': 'TLS handshake succeeded' }
+        except Exception as e:
+            https_err = str(e)
+
+        # Fallback: try plain HTTP
+        try:
+            with socket.create_connection((host, container_port), timeout=1) as sock:
+                # If we connect and receive no TLS error, assume HTTP
+                return { 'protocol': 'http', 'details': 'Plain TCP connect succeeded' }
+        except Exception as e:
+            http_err = str(e)
+
+        return { 'protocol': 'none', 'details': f'https_err={https_err}; http_err={http_err}' }
+
+    def _get_chat_resizable(self) -> bool:
+        """Return whether chat should be resizable (from config/DB)."""
+        try:
+            from core.config_manager import config_registry
+            # Historically the chat was resizable by default; keep backward
+            # compatible behavior by defaulting to True so upgrades don't
+            # unexpectedly disable the UX. The variable is still configurable
+            # via exposed variables and the config API.
+            val = config_registry.get_var('WEBUI_CHAT_RESIZABLE', True, component='synth_webui')
+            return bool(val)
+        except Exception:
+            return False
+
+    def _dt_to_utc_iso(self, dt: "datetime | None") -> "str | None":
+        """Serialize a datetime as an explicit UTC ISO string.
+
+        By default we treat timezone-naive datetimes coming from the DB as UTC
+        (attach timezone.utc) to avoid double-shifting when the DB already
+        stores UTC timestamps. If you run in an environment where naive
+        datetimes are local (e.g. DB session timezone is JST), set the
+        environment variable `WEBUI_DB_NAIVE_IS_UTC=0` to revert to the
+        legacy behaviour (assume naive == local timezone).
+        """
+        if not dt:
+            return None
+
+        from datetime import timezone
+        import os
+
+        # If the datetime is naive, decide whether to treat it as UTC or local
+        if dt.tzinfo is None:
+            naive_is_utc = os.getenv('WEBUI_DB_NAIVE_IS_UTC', '1').lower() in ('1', 'true', 'yes')
+            if naive_is_utc:
+                # Attach UTC tzinfo (do not convert) to preserve the original instant
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                # Legacy behaviour: assume naive datetimes are in the local timezone
+                from core.time_zone_utils import get_local_timezone
+                dt = dt.replace(tzinfo=get_local_timezone())
+
+        return dt.astimezone(timezone.utc).isoformat()
 
     async def health(self):
-        return JSONResponse({"status": "ok", "time": datetime.utcnow().isoformat()})
+        from datetime import timezone
+        return JSONResponse({"status": "ok", "time": datetime.now(timezone.utc).isoformat()})
 
     async def get_action_state_endpoint(self):
         """Get the current global action state."""
@@ -392,7 +715,7 @@ class SynthWebUIInterface:
             return JSONResponse({
                 "emotions": emotions,
                 "dominant_emotion": dominant,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
             })
             
         except Exception as e:
@@ -401,7 +724,7 @@ class SynthWebUIInterface:
             return JSONResponse({
                 "emotions": {},
                 "dominant_emotion": None,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "error": str(e),
             })
 
@@ -498,10 +821,23 @@ class SynthWebUIInterface:
     # ------------------------------------------------------------------
     async def websocket_endpoint(self, websocket: WebSocket):
         await websocket.accept()
-        session_id = str(uuid.uuid4())
+        # Use persistent session id when available (single session per deploy)
+        session_id = self.session_id or str(uuid.uuid4())
+        # Ensure session id is persisted if it was generated now
+        if not self.session_id:
+            self.session_id = session_id
+            try:
+                self._ensure_persistent_session_id(force_write=True)
+            except Exception:
+                pass
         self.connections[session_id] = websocket
         self.message_history.setdefault(session_id, deque(maxlen=self.max_history))
         await websocket.send_json({"type": "session", "session_id": session_id})
+        # Ensure persisted history is loaded into memory and replayed
+        try:
+            await self._ensure_session_history_loaded(session_id)
+        except Exception as e:
+            log_debug(f"{LOG_PREFIX} Failed to load persisted history for {session_id}: {e}")
         await self._replay_history(session_id)
         
         # Send current centralized animation state to new client
@@ -523,6 +859,18 @@ class SynthWebUIInterface:
                     }
                     await websocket.send_json(message)
                     log_debug(f"{LOG_PREFIX} Sent current animation state to new session {session_id}: {current_anim_state['state']}")
+                    # Also send a lightweight 'animation_state' summary so clients can
+                    # deduce the current state without needing a full animation command.
+                    try:
+                        state_msg = {
+                            "type": "animation_state",
+                            "state": current_anim_state["state"],
+                            "animation": resolved_path,
+                            "descriptor": current_anim_state["descriptor"]
+                        }
+                        await websocket.send_json(state_msg)
+                    except Exception:
+                        pass
         except Exception as anim_exc:
             log_warning(f"{LOG_PREFIX} Failed to send animation state to new session {session_id}: {anim_exc}")
         
@@ -690,6 +1038,27 @@ class SynthWebUIInterface:
             }
         
         log_info(f"{LOG_PREFIX} Broadcasting action state to {len(self.connections)} clients: {message['phase']}")
+
+        # Backend-authoritative animation playback:
+        # whenever the global action phase changes, trigger the AnimationHandler to
+        # play the corresponding logical state. Plugins can override per-state
+        # animations via AnimationHandler registration, but the backend remains the
+        # source of truth for *when* a state starts/ends.
+        try:
+            phase = message.get("phase") or AnimationPhase.IDLE.value
+            phase_to_state = {
+                AnimationPhase.THINKING.value: AnimationState.THINK,
+                AnimationPhase.WRITING.value: AnimationState.WRITE,
+                AnimationPhase.CORRECTING.value: AnimationState.THINK,
+                AnimationPhase.TALKING.value: AnimationState.TALK,
+                AnimationPhase.IDLE.value: AnimationState.IDLE,
+            }
+            anim_state = phase_to_state.get(str(phase), AnimationState.IDLE)
+            if self.animation_handler:
+                # session_id=None broadcasts to all connected WebUI sessions.
+                await self.animation_handler.play_animation(anim_state, session_id=None, loop=True)
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} Failed to trigger animation for action phase change: {exc}")
         
         # Send to all connected clients
         for session_id, websocket in self.connections.items():
@@ -698,6 +1067,19 @@ class SynthWebUIInterface:
                 log_info(f"{LOG_PREFIX} ✓ Sent action_state to session {session_id}: {message['phase']}")
             except Exception as exc:
                 log_warning(f"{LOG_PREFIX} Failed to broadcast action state to session {session_id}: {exc}")
+
+    async def broadcast_event(self, event: str, payload: Dict[str, Any]) -> None:
+        """Broadcast a custom event to all connected WebUI clients."""
+        message = {
+            "type": event,
+            **(payload or {})
+        }
+        log_debug(f"{LOG_PREFIX} Broadcasting event '{event}' to {len(self.connections)} clients")
+        for session_id, websocket in list(self.connections.items()):
+            try:
+                await websocket.send_json(message)
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to broadcast event '{event}' to {session_id}: {exc}")
 
     async def _broadcast_animation_state(
         self,
@@ -731,6 +1113,18 @@ class SynthWebUIInterface:
             "loop": descriptor.get("play_once", False) is False if descriptor else True,
             "descriptor": descriptor
         }
+        # Attach rich animation_state when available from animation handler
+        try:
+            if self.animation_handler:
+                try:
+                    current = self.animation_handler.get_current_animation_state()
+                    anim_state = current.get('animation_state') if isinstance(current, dict) else None
+                    if anim_state:
+                        message['animation_state'] = anim_state
+                except Exception:
+                    pass
+        except Exception:
+            pass
         
         client_count = len(self.connections)
         log_info(f"{LOG_PREFIX} Broadcasting animation state to {client_count} clients: {state.value}/{animation_file}", log_file=WEBUI_LOG)
@@ -742,6 +1136,109 @@ class SynthWebUIInterface:
                 log_debug(f"{LOG_PREFIX} ✓ Sent animation state to session {session_id}: {state.value}")
             except Exception as exc:
                 log_warning(f"{LOG_PREFIX} Failed to broadcast animation state to session {session_id}: {exc}")
+
+    async def _broadcast_animation_state_summary(self, state: AnimationState, animation_file: str, descriptor: Optional[Dict[str, Any]]) -> None:
+        """Broadcast a lightweight animation state summary to all connected clients.
+
+        This is intended for clients that want to observe the canonical animation
+        state without treating it as an authoritative playback command.
+        """
+        try:
+            resolved_path, _ = (None, None)
+            if self.animation_handler:
+                try:
+                    resolved_path, _ = self.animation_handler._resolve_animation_descriptor(animation_file)
+                except Exception:
+                    resolved_path = f"/{self.animation_handler.ANIMATIONS_BASE_PATH}/{animation_file}"
+
+            payload = {
+                "type": "animation_state",
+                "state": state.value,
+                "animation": resolved_path,
+                "descriptor": descriptor
+            }
+
+            # Attach rich animation_state structure when possible (best-effort)
+            try:
+                current = None
+                if self.animation_handler:
+                    try:
+                        current = self.animation_handler.get_current_animation_state()
+                    except Exception:
+                        current = None
+
+                if current and isinstance(current, dict) and current.get('animation_state'):
+                    payload['animation_state'] = current.get('animation_state')
+
+                    # If emotions are missing, attempt to fetch runtime emotions (best-effort)
+                    try:
+                        anim_state = payload.get('animation_state') or {}
+                        if anim_state.get('emotions') is None:
+                            mgr = None
+                            try:
+                                from core.core_initializer import PLUGIN_REGISTRY
+                                mgr = PLUGIN_REGISTRY.get('emotion_manager') if isinstance(PLUGIN_REGISTRY, dict) else None
+                            except Exception:
+                                mgr = None
+
+                            if mgr is None:
+                                try:
+                                    from plugins.emotion_manager import EmotionManager
+                                    mgr = EmotionManager()
+                                except Exception:
+                                    mgr = None
+
+                            if mgr is not None:
+                                emotions_raw_maybe = mgr.get_emotion_state()
+                                emotions_raw = await emotions_raw_maybe if asyncio.iscoroutine(emotions_raw_maybe) else emotions_raw_maybe
+                                if isinstance(emotions_raw, dict) and emotions_raw:
+                                    emotions_filtered = {k: v for k, v in emotions_raw.items() if isinstance(v, (int, float)) and v >= 0.1}
+                                    if emotions_filtered:
+                                        dominant = max(emotions_filtered.items(), key=lambda x: x[1])[0]
+                                        anim_state['emotions'] = {"dominant": dominant, "values": emotions_filtered}
+                    except Exception:
+                        # best-effort; don't break the summary broadcast
+                        pass
+
+            except Exception:
+                pass
+
+            for sid, websocket in list(self.connections.items()):
+                try:
+                    await websocket.send_json(payload)
+                except Exception as exc:
+                    log_warning(f"{LOG_PREFIX} Failed to send animation_state to {sid}: {exc}")
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} _broadcast_animation_state_summary failed: {exc}")
+
+    async def get_animation_state(self):
+        """HTTP endpoint that returns a lightweight animation state summary.
+
+        This endpoint is used by clients to query the current canonical
+        animation state (state name, resolved animation path and descriptor).
+        """
+        try:
+            if not self.animation_handler:
+                return JSONResponse({"state": "idle", "animation": None, "descriptor": None})
+
+            current = self.animation_handler.get_current_animation_state()
+            animation_file = current.get("animation_file")
+            resolved = None
+            if animation_file:
+                try:
+                    resolved, _ = self.animation_handler._resolve_animation_descriptor(animation_file)
+                except Exception:
+                    resolved = animation_file
+
+            payload = {
+                "state": current.get("state"),
+                "animation": resolved,
+                "descriptor": current.get("descriptor"),
+            }
+            return JSONResponse(payload)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} get_animation_state failed: {exc}")
+            raise HTTPException(status_code=500, detail=f"Failed to retrieve animation state: {exc}") from exc
 
     async def _handle_user_message(self, session_id: str, text: str) -> None:
         from types import SimpleNamespace
@@ -776,6 +1273,9 @@ class SynthWebUIInterface:
         )
 
         log_debug(f"{LOG_PREFIX} message from {session_id}: {text}")
+
+        # NOTE: WebUI history is tracked via `_append_history()` which is wired
+        # to the centralized context manager deque in `_ensure_session_history_loaded()`.
         
         # Global action ID for this message
         action_id = f"webui_msg_{session_id}_{message.message_id}"
@@ -785,10 +1285,10 @@ class SynthWebUIInterface:
             # Push THINKING action to global state
             log_info(f"{LOG_PREFIX} Pushing THINKING action: {action_id}")
             thinking_pushed = await self.action_state_manager.push_action(
-                action_id=action_id,
-                phase=AnimationPhase.THINKING,
-                component="webui"
-            )
+                    action_id=action_id,
+                    phase=AnimationPhase.THINKING,
+                    component=INTERNAL_CHAT_NAME
+                )
             if not thinking_pushed:
                 log_warning(f"{LOG_PREFIX} THINKING action was rejected (lower priority than current action)")
             
@@ -801,6 +1301,14 @@ class SynthWebUIInterface:
                     log_warning(f"{LOG_PREFIX} Failed to set 'think' animation: {anim_exc}")
         except Exception as exc:
             log_warning(f"{LOG_PREFIX} Failed to push action state: {exc}")
+
+        # If THINKING was pushed, keep it pending until the async response is sent.
+        if thinking_pushed:
+            self._pending_thinking_actions.setdefault(session_id, deque()).append(action_id)
+            try:
+                self._thinking_started_at_ms[session_id] = int(datetime.utcnow().timestamp() * 1000)
+            except Exception:
+                pass
         
         # Get the configured response timeout from message_chain
         from core.message_chain import RESPONSE_TIMEOUT
@@ -826,10 +1334,20 @@ class SynthWebUIInterface:
             except Exception as ack_exc:
                 log_warning(f"{LOG_PREFIX} Failed to send ACK message: {ack_exc}")
             
+            # Mark session as processing in session_meta so clients can persist typing across views
+            try:
+                from core.session_meta import get_session_meta as get_meta_fn, set_session_meta as set_meta_fn
+                interface_path = f"{INTERFACE_NAME}/{session_id}"
+                existing_meta = await get_meta_fn(interface_path) or {}
+                existing_meta['processing'] = True
+                await set_meta_fn(interface_path, existing_meta)
+            except Exception as e:
+                log_debug(f"{LOG_PREFIX} Failed to set session processing meta before enqueue: {e}")
+
             await message_queue.enqueue(
                 bot=self,
                 message=message,
-                context_memory={},
+                context_memory=None,
                 priority=False,  # Normal priority for user messages
                 interface_id=INTERFACE_NAME,
                 skip_mention_check=True,  # WebUI is 1:1 interface, skip mention check
@@ -855,67 +1373,164 @@ class SynthWebUIInterface:
         if response == "LLM_FAILED":
             response = str(get_failed_message_text())
 
-        # Ensure we keep the THINKING action active until we've delivered the response
+        # For the normal WebUI async flow, response is None and the message_queue
+        # will later call send_message/execute_action to deliver the response.
+        # In that case we keep THINKING active and let send_message transition to
+        # WRITE and then IDLE when the response is actually sent.
         if response:
-            # Push WRITING so clients can display write animation while we deliver the message
-            writing_action_id = f"webui_write_{session_id}_{int(datetime.utcnow().timestamp() * 1000) % 1_000_000}"
-            writing_pushed = False
-            try:
-                writing_pushed = await self.action_state_manager.push_action(
-                    action_id=writing_action_id,
-                    phase=AnimationPhase.WRITING,
-                    component="webui"
-                )
-                if not writing_pushed:
-                    log_debug(f"{LOG_PREFIX} WRITING action was rejected (lower priority than THINKING)")
-            except Exception as exc:
-                log_warning(f"{LOG_PREFIX} Failed to push WRITING action state: {exc}")
-
             try:
                 await self.send_message(session_id, text=response)
             except Exception as send_exc:
                 log_warning(f"{LOG_PREFIX} Failed to send response to session {session_id}: {send_exc}")
-            finally:
-                # Pop WRITING first (if it was pushed), then THINKING. Do not force any
-                # artificial timing here; the client will handle smoothing and priority.
-                if writing_pushed:
-                    try:
-                        await self.action_state_manager.pop_action(writing_action_id)
-                    except Exception as exc:
-                        log_warning(f"{LOG_PREFIX} Failed to pop WRITING action state: {exc}")
-                if thinking_pushed:
-                    try:
-                        await self.action_state_manager.pop_action(action_id)
-                        log_info(f"{LOG_PREFIX} Popped action: {action_id} - returning to IDLE")
-                    except Exception as exc:
-                        log_warning(f"{LOG_PREFIX} Failed to pop THINKING action state: {exc}")
-        else:
-            # Some LLM engines return None but process asynchronously; keep THINKING for a short grace period
-            # If no immediate response (response is falsy), just pop THINKING without
-            # introducing a forced artificial delay; let the client decide how to
-            # visually smooth very-short transitions.
-            try:
-                if thinking_pushed:
-                    await self.action_state_manager.pop_action(action_id)
-                    log_info(f"{LOG_PREFIX} Popped action: {action_id} after no-response branch")
-            except Exception as exc:
-                log_warning(f"{LOG_PREFIX} Failed to pop action state in no-response branch: {exc}")
 
     async def _replay_history(self, session_id: str) -> None:
         history = self.message_history.get(session_id)
         if not history:
+            log_debug(f"{LOG_PREFIX} _replay_history: no history for session {session_id}")
             return
         websocket = self.connections.get(session_id)
         if not websocket:
+            log_debug(f"{LOG_PREFIX} _replay_history: no websocket for session {session_id}")
             return
         for item in history:
-            await websocket.send_json({"type": "message", **item})
+            # Normalize history item to expected format: {type:'message', sender:'synth'|'user', text: '...'}
+            try:
+                sender = item.get('sender') if isinstance(item, dict) else None
+            except Exception:
+                sender = None
+            if not sender:
+                # Try common keys from chat_history_cache / context_manager
+                if isinstance(item, dict):
+                    sname = item.get('sender_name') or item.get('username') or None
+                    # Normalize commonly used names for the SyntH agent to 'synth'
+                    if sname and str(sname).lower() in ('self', 'synth', 'bot', 'system', 'synth_webui'):
+                        sender = 'synth'
+                    else:
+                        sender = 'user'
+                else:
+                    sender = 'synth'
+            text = item.get('text') if isinstance(item, dict) else str(item)
+            await websocket.send_json({"type": "message", "sender": sender, "text": text})
+        log_info(f"{LOG_PREFIX} _replay_history: sent {len(history)} messages to session {session_id}")
 
     async def _append_history(self, session_id: str, sender: str, text: str) -> None:
-        history = self.message_history.setdefault(
-            session_id, deque(maxlen=self.max_history)
+        history = self.message_history.setdefault(session_id, deque(maxlen=self.max_history))
+
+        # Store in the same schema used by the centralized context manager so
+        # HistoryEngine can format `history_current_chat` consistently.
+        from datetime import datetime
+        interface_path = f"{INTERFACE_NAME}/{session_id}"
+
+        canonical_sender = sender
+        try:
+            if isinstance(sender, str) and sender.lower() in ("synth", "bot", "synth_webui"):
+                canonical_sender = "self"
+        except Exception:
+            canonical_sender = sender
+
+        from datetime import timezone
+        history.append(
+            {
+                "message_id": None,
+                "user_id": "self" if canonical_sender == "self" else str(session_id),
+                "username": canonical_sender,
+                "text": text,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "interface_path": interface_path,
+            }
         )
-        history.append({"sender": sender, "text": text})
+
+        # Persist to chat_history_cache for long-term storage
+        try:
+            from core.chat_history_cache import save_chat_message
+            # Normalize sender_name for DB storage: we want to store "self" as the
+            # canonical name for the SyntH agent so that restore/replay can map
+            # it back to "synth" for WS payloads. This avoids misattribution
+            # where stored value "synth" would be considered a user on replay.
+            db_sender_name = sender
+            try:
+                if isinstance(sender, str) and sender.lower() in ("synth", "bot", "synth_webui"):
+                    db_sender_name = "self"
+            except Exception:
+                db_sender_name = sender
+
+            await save_chat_message(
+                interface_path,
+                text,
+                sender_name=db_sender_name,
+                sender_id=session_id,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            )
+        except Exception as e:
+            log_debug(f"{LOG_PREFIX} Failed to persist chat message for {session_id}: {e}")
+
+    def _ensure_persistent_session_id(self, force_write: bool = False) -> None:
+        """Ensure there's a persistent session id on disk for WebUI single-session deployments.
+
+        If a session id file exists, read it; otherwise generate one and persist it.
+        """
+        try:
+            if not self.session_id_file.parent.exists():
+                self.session_id_file.parent.mkdir(parents=True, exist_ok=True)
+            if self.session_id_file.exists() and not force_write:
+                try:
+                    sid = self.session_id_file.read_text(encoding='utf-8').strip()
+                    if sid:
+                        self.session_id = sid
+                        log_debug(f"{LOG_PREFIX} Loaded persistent session id: {sid}")
+                        return
+                except Exception:
+                    log_debug(f"{LOG_PREFIX} Failed to read session id file: {self.session_id_file}")
+            # Write a new session id
+            sid = str(uuid.uuid4())
+            self.session_id_file.write_text(sid, encoding='utf-8')
+            self.session_id = sid
+            log_info(f"{LOG_PREFIX} Created persistent session id: {sid}")
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} Failed to ensure persistent session id: {exc}")
+
+    def _schedule_uploads_cleanup(self) -> None:
+        """Schedule the temporary animation uploads cleanup loop."""
+        if self._uploads_cleanup_task and not self._uploads_cleanup_task.done():
+            return
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                self._uploads_cleanup_task = loop.create_task(self._cleanup_animation_uploads_loop())
+            else:
+                self._uploads_cleanup_task = asyncio.create_task(self._cleanup_animation_uploads_loop())
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} Failed to schedule uploads cleanup loop: {exc}")
+
+    async def _cleanup_animation_uploads_loop(self) -> None:
+        """Periodically remove expired temporary animation uploads."""
+        while True:
+            try:
+                removed = animation_uploads.cleanup_expired_uploads(self.mate_upload_ttl_days)
+                if removed and getattr(self, "animation_handler", None):
+                    for upload_id in removed:
+                        animations_root = animation_uploads.get_upload_root(upload_id) / "animations"
+                        self.animation_handler.remove_temporary_search_path(animations_root)
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Uploads cleanup loop failed: {exc}")
+            await asyncio.sleep(max(self.mate_upload_cleanup_interval_s, 60))
+
+    async def _ensure_session_history_loaded(self, session_id: str) -> None:
+        """Load persisted chat history for the given session into self.message_history.
+
+        This uses core.chat_context_manager.load_chat_history to rehydrate memory
+        and then makes sure self.message_history references the same deque.
+        """
+        try:
+            from core.chat_context_manager import load_chat_history, get_or_create_chat_context
+            interface_path = f"{INTERFACE_NAME}/{session_id}"
+            await load_chat_history(interface_path)
+            ctx = get_or_create_chat_context(interface_path)
+            # Ensure local message_history points to the same deque
+            self.message_history[session_id] = ctx
+            log_debug(f"{LOG_PREFIX} Session history for {session_id} loaded, {len(ctx)} messages")
+        except Exception as e:
+            log_debug(f"{LOG_PREFIX} Unable to load session history for {session_id}: {e}")
 
     # ------------------------------------------------------------------
     # Methods used by actions / plugins
@@ -947,7 +1562,31 @@ class SynthWebUIInterface:
                 log_debug(f"{LOG_PREFIX} Extracted session {session_id} from interface_path {chat_id}")
                 chat_id = session_id
 
-        websocket = self.connections.get(str(chat_id))
+        session_id = str(chat_id)
+        websocket = self.connections.get(session_id)
+        if not websocket:
+            try:
+                from core.config_manager import config_registry
+
+                alias_map = config_registry.get_value("CONTEXT_LINK_MAP", {}, value_type="json")
+                if isinstance(alias_map, dict):
+                    sources = [k for k, v in alias_map.items() if v == session_id]
+                    for source in sources:
+                        candidate = None
+                        if source in self.connections:
+                            candidate = source
+                        elif "/" in source and source.startswith(f"{INTERFACE_NAME}/"):
+                            extracted = source.split("/")[1]
+                            if extracted in self.connections:
+                                candidate = extracted
+
+                        if candidate:
+                            log_debug(f"{LOG_PREFIX} 🔀 Alias redirect: {session_id} -> {candidate}")
+                            websocket = self.connections[candidate]
+                            session_id = candidate
+                            break
+            except Exception as e:
+                log_debug(f"{LOG_PREFIX} Alias resolution check failed: {e}")
         if not websocket:
             # Improved debug information: list active sessions to help debug target mismatches
             active_sessions = list(self.connections.keys())
@@ -955,8 +1594,39 @@ class SynthWebUIInterface:
             log_debug(f"{LOG_PREFIX} send_message payload target: {chat_id}, text length: {len(text) if text else 0}")
             return
 
+        # Ensure any pending THINKING is cleared before delivery (fallback).
+        await self._webui_clear_pending_thinking(session_id)
+
+        # Ensure WRITING is active while delivering the message, but avoid starting it late
+        # if it was already started at generation-time.
+        writing_action_id = None
+        writing_pushed = False
+        existing_writing = self._active_writing_actions.get(session_id)
+        if existing_writing and len(existing_writing) > 0:
+            writing_action_id = existing_writing[-1]
+            writing_pushed = True
+        else:
+            writing_action_id = f"webui_write_{session_id}_{int(datetime.utcnow().timestamp() * 1000) % 1_000_000}"
+            try:
+                writing_pushed = await self.action_state_manager.push_action(
+                    action_id=writing_action_id,
+                    phase=AnimationPhase.WRITING,
+                    component=INTERNAL_CHAT_NAME,
+                )
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to push WRITING action state: {exc}")
+                writing_pushed = False
+
+            if writing_pushed:
+                self._active_writing_actions.setdefault(session_id, deque()).append(writing_action_id)
+                if self.persona_manager:
+                    try:
+                        await self.persona_manager.set_animation_state("write", session_id=session_id)
+                    except Exception as anim_exc:
+                        log_debug(f"{LOG_PREFIX} Failed to set 'write' animation: {anim_exc}")
+
         await websocket.send_json({"type": "message", "sender": "synth", "text": text})
-        await self._append_history(str(chat_id), "synth", text)
+        await self._append_history(session_id, "synth", text)
         
         # Save SyntH's response via core chat_context_manager
         try:
@@ -966,7 +1636,187 @@ class SynthWebUIInterface:
         except Exception as e:
             log_debug(f"{LOG_PREFIX} Failed to save response via context_manager: {e}")
         
-        log_info(f"{LOG_PREFIX} Sent message to session {chat_id}: {text[:80]}{'...' if len(text)>80 else ''}")
+        log_info(f"{LOG_PREFIX} Sent message to session {session_id}: {text[:80]}{'...' if len(text)>80 else ''}")
+
+        # Transition: WRITE -> IDLE (always, once message is sent)
+        if writing_pushed and writing_action_id:
+            try:
+                await self.action_state_manager.pop_action(writing_action_id)
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to pop WRITING action state: {exc}")
+            # Remove from per-session registry
+            try:
+                dq = self._active_writing_actions.get(session_id)
+                if dq and writing_action_id in dq:
+                    try:
+                        dq.remove(writing_action_id)
+                    except Exception:
+                        # Fallback: rebuild without the id
+                        self._active_writing_actions[session_id] = deque([x for x in dq if x != writing_action_id])
+                if dq is not None and len(dq) == 0:
+                    self._active_writing_actions.pop(session_id, None)
+            except Exception:
+                pass
+            
+            # Always return to IDLE after WRITING is popped (don't conditionally check phase)
+            if self.persona_manager:
+                try:
+                    await self.persona_manager.set_animation_state("idle", session_id=session_id)
+                except Exception as anim_exc:
+                    log_debug(f"{LOG_PREFIX} Failed to set 'idle' animation after send: {anim_exc}")
+
+        # Clear processing meta now that we've delivered a response
+        try:
+            from core.session_meta import get_session_meta as get_meta_fn, set_session_meta as set_meta_fn
+            interface_path = f"{INTERFACE_NAME}/{session_id}"
+            existing_meta = await get_meta_fn(interface_path) or {}
+            existing_meta['processing'] = False
+            await set_meta_fn(interface_path, existing_meta)
+        except Exception as e:
+            log_debug(f"{LOG_PREFIX} Failed to clear session processing meta after send: {e}")
+
+    async def _webui_clear_pending_thinking(self, session_id: str) -> None:
+        pending = self._pending_thinking_actions.get(session_id)
+        if not pending:
+            return
+        while pending:
+            pending_action_id = pending.popleft()
+            try:
+                await self.action_state_manager.pop_action(pending_action_id)
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to pop pending THINKING action {pending_action_id}: {exc}")
+        self._pending_thinking_actions.pop(session_id, None)
+
+    async def _pop_latest_pending_thinking_action(self, session_id: str) -> Optional[str]:
+        pending = self._pending_thinking_actions.get(session_id)
+        if not pending:
+            return None
+        while len(pending) > 1:
+            stale_action = pending.popleft()
+            try:
+                await self.action_state_manager.pop_action(stale_action)
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to pop stale THINKING action {stale_action}: {exc}")
+        action_id = pending.pop() if pending else None
+        self._pending_thinking_actions.pop(session_id, None)
+        return action_id
+
+    async def on_generation_start(self, interface_path: str, **kwargs) -> None:
+        """Optional hook called by the queue when processing starts.
+
+        For WebUI this approximates 'LLM started responding', so we switch THINK->WRITE
+        as early as possible (before the final message is sent).
+        """
+        # Switch THINK -> WRITE when generation actually starts, but ensure THINK
+        # remains visible for a short minimum window to avoid being skipped.
+        try:
+            session_id = None
+            if interface_path and "/" in str(interface_path):
+                parts = str(interface_path).split("/")
+                if len(parts) >= 2 and parts[0] == INTERFACE_NAME:
+                    session_id = parts[1]
+            if not session_id:
+                return
+
+            # Ensure THINK is visible for at least this long before switching.
+            min_think_ms = 450
+            started_ms = self._thinking_started_at_ms.get(session_id)
+            if isinstance(started_ms, int) and started_ms > 0:
+                now_ms = int(datetime.utcnow().timestamp() * 1000)
+                remaining = max(0, (started_ms + min_think_ms) - now_ms)
+                if remaining > 0:
+                    await asyncio.sleep(remaining / 1000)
+
+            # Start WRITING if not already active for this session.
+            existing_writing = self._active_writing_actions.get(session_id)
+            writing_action_id = None
+            writing_pushed = False
+            if existing_writing and len(existing_writing) > 0:
+                writing_action_id = existing_writing[-1]
+                writing_pushed = True
+            else:
+                pending_action_id = await self._pop_latest_pending_thinking_action(session_id)
+                if pending_action_id:
+                    try:
+                        writing_pushed = await self.action_state_manager.update_phase(
+                            pending_action_id,
+                            AnimationPhase.WRITING,
+                        )
+                    except Exception as exc:
+                        log_warning(f"{LOG_PREFIX} Failed to promote THINKING to WRITING: {exc}")
+                        writing_pushed = False
+                    if writing_pushed:
+                        writing_action_id = pending_action_id
+                        self._active_writing_actions.setdefault(session_id, deque()).append(writing_action_id)
+                    else:
+                        try:
+                            await self.action_state_manager.pop_action(pending_action_id)
+                        except Exception:
+                            pass
+            if not writing_pushed:
+                writing_action_id = f"webui_write_{session_id}_{int(datetime.utcnow().timestamp() * 1000) % 1_000_000}"
+                try:
+                    writing_pushed = await self.action_state_manager.push_action(
+                        action_id=writing_action_id,
+                        phase=AnimationPhase.WRITING,
+                        component=INTERNAL_CHAT_NAME,
+                    )
+                except Exception as exc:
+                    log_warning(f"{LOG_PREFIX} Failed to push WRITING action state (generation_start): {exc}")
+                    writing_pushed = False
+
+                if writing_pushed:
+                    self._active_writing_actions.setdefault(session_id, deque()).append(writing_action_id)
+
+            if writing_pushed and self.persona_manager:
+                try:
+                    await self.persona_manager.set_animation_state("write", session_id=session_id)
+                except Exception as anim_exc:
+                    log_debug(f"{LOG_PREFIX} Failed to set 'write' animation (generation_start): {anim_exc}")
+        except Exception as exc:
+            log_debug(f"{LOG_PREFIX} on_generation_start failed: {exc}")
+        return
+
+    async def on_generation_end(self, interface_path: str, success: bool = True, **kwargs) -> None:
+        """Optional hook called by the queue when processing ends.
+
+        For WebUI this is the earliest reliable signal that generation is finished.
+        If the response path didn't go through send_message (errors/plugins), we still
+        want to stop WRITING and return to IDLE when appropriate.
+        """
+        try:
+            session_id = None
+            if interface_path and "/" in str(interface_path):
+                parts = str(interface_path).split("/")
+                if len(parts) >= 2 and parts[0] == INTERFACE_NAME:
+                    session_id = parts[1]
+            if not session_id:
+                return
+
+            # Pop any active WRITING actions for this session.
+            try:
+                dq = self._active_writing_actions.get(session_id)
+            except Exception:
+                dq = None
+
+            if dq:
+                for action_id in list(dq):
+                    try:
+                        await self.action_state_manager.pop_action(action_id)
+                    except Exception:
+                        pass
+                self._active_writing_actions.pop(session_id, None)
+
+            # Only set idle if nothing higher-priority is active.
+            if self.persona_manager:
+                try:
+                    current_phase = await self.action_state_manager.get_current_phase()
+                    if current_phase == AnimationPhase.IDLE:
+                        await self.persona_manager.set_animation_state("idle", session_id=session_id)
+                except Exception as anim_exc:
+                    log_debug(f"{LOG_PREFIX} Failed to set 'idle' animation (generation_end): {anim_exc}")
+        except Exception as exc:
+            log_debug(f"{LOG_PREFIX} on_generation_end failed: {exc}")
 
     async def execute_action(self, action: dict, context: dict, bot, original_message):
         if action.get("type") == "message_synth_webui":
@@ -981,18 +1831,18 @@ class SynthWebUIInterface:
                     if len(parts) >= 2:
                         session_id = parts[1]
             
-            # Set animation to 'write' before sending message
-            if self.persona_manager and session_id:
-                try:
-                    await self.persona_manager.set_animation_state("write", session_id=session_id)
-                    log_debug(f"{LOG_PREFIX} Set avatar animation to 'write' for session {session_id}")
-                except Exception as anim_exc:
-                    log_debug(f"{LOG_PREFIX} Failed to set 'write' animation: {anim_exc}")
-            
             # Ensure the payload has the correct interface_path for sending
             if session_id:
                 payload["interface_path"] = f"{INTERFACE_NAME}/{session_id}"
             await self.send_message(payload, original_message=original_message)
+        elif action.get("type") in ("message_mate_engine", "message_integration"):
+            payload = action.get("payload", {})
+            text = payload.get("text")
+            target = payload.get("target")
+            source = payload.get("source") if action.get("type") == "message_integration" else "mate"
+            if text:
+                # Use the generic enqueue_outbox API for integration messages
+                await self.enqueue_outbox(source, text=text, target=target)
 
     # ------------------------------------------------------------------
     # VRM management API
@@ -1056,7 +1906,7 @@ class SynthWebUIInterface:
         
         # Last resort: try common persona folders
         skins_dir = Path(__file__).resolve().parent.parent / "skins"
-        for persona_folder in ["Rei", "Rekku", "Zero"]:
+        for persona_folder in ["Rei", "Zero"]:
             persona_vrm = skins_dir / persona_folder / "model.vrm"
             if persona_vrm.exists():
                 log_info(f"{LOG_PREFIX} Using fallback VRM from {persona_folder}: {persona_vrm}")
@@ -1174,9 +2024,81 @@ class SynthWebUIInterface:
     async def config_summary(self):
         definitions = config_registry.export_definitions()
         items = []
+
+        # Precompute all actions flagged as unsafe by registered components so
+        # AUTONOMY_ALLOWED_ACTIONS can be presented as a choices list.
+        unsafe_actions = set()
+        try:
+            from core.core_initializer import PLUGIN_REGISTRY, INTERFACE_REGISTRY
+            from core.llm_registry import get_llm_registry
+            # Plugins
+            for plugin in PLUGIN_REGISTRY.values():
+                try:
+                    if hasattr(plugin, 'get_supported_actions'):
+                        sup = plugin.get_supported_actions() or {}
+                        for k, v in sup.items():
+                            if isinstance(v, dict) and v.get('safe') is False:
+                                unsafe_actions.add(k)
+                except Exception:
+                    pass
+            # Interfaces
+            for interface in INTERFACE_REGISTRY.values():
+                try:
+                    if hasattr(interface, 'get_supported_actions'):
+                        sup = interface.get_supported_actions() or {}
+                        for k, v in sup.items():
+                            if isinstance(v, dict) and v.get('safe') is False:
+                                unsafe_actions.add(k)
+                except Exception:
+                    pass
+            # LLM engines
+            try:
+                llmreg = get_llm_registry()
+                for name in llmreg.get_available_engines():
+                    try:
+                        inst = llmreg.get_engine(name)
+                        if inst and hasattr(inst, 'get_supported_actions'):
+                            sup = inst.get_supported_actions() or {}
+                            for k, v in sup.items():
+                                if isinstance(v, dict) and v.get('safe') is False:
+                                    unsafe_actions.add(k)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        except Exception:
+            unsafe_actions = set()
+
+        loaded_llm_engines = set()
+        try:
+            from core.llm_registry import get_llm_registry
+
+            llmreg = get_llm_registry()
+            for name in llmreg.get_available_engines():
+                try:
+                    if llmreg.get_engine(name) is not None:
+                        loaded_llm_engines.add(name)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        try:
+            from core.plugin_instance import plugin as active_plugin
+
+            if active_plugin is not None:
+                module_name = active_plugin.__class__.__module__.split(".")[-1]
+                loaded_llm_engines.add(module_name)
+        except Exception:
+            pass
+
         for entry in definitions:
             # Skip bootstrap-tagged items (not meant for UI)
             if "bootstrap" in entry.get("tags", []):
+                continue
+
+            # Hide LLM-engine-specific variables unless their engine is loaded
+            if "llm_engine" in entry.get("tags", []) and entry.get("component") not in loaded_llm_engines:
                 continue
             component_label = self._get_display_name(entry["component"], None)
             
@@ -1185,7 +2107,28 @@ class SynthWebUIInterface:
             exposed_def = exposed_vars.get_definition(entry["key"])
             ui_type = exposed_def.ui_type if exposed_def else entry.get("ui_type", "string")
             options = exposed_def.options if exposed_def else []
+
+            # If this is the autonomy whitelist, present unsafe actions as choices
+            if entry.get('key') == 'AUTONOMY_ALLOWED_ACTIONS':
+                options = sorted(list(unsafe_actions))
+                log_info(f"{LOG_PREFIX} AUTONOMY_ALLOWED_ACTIONS options populated: {len(options)} actions found. {options}")
             
+            # Derive optional subgroup labels for nicer grouping in the UI (e.g. GRILLO_DREAM_* → 'Grillo Dream')
+            subgroup = None
+            key = entry["key"]
+            # Simple prefix-based mapping for known plugin subgroups
+            subgroup_map = {
+                "GRILLO_DREAM_": "Grillo Dream",
+                "GRILLO_OBSERVER_": "Grillo Observer",
+                "HISTORY_EVALUATOR_": "History Evaluator",
+                "GRILLO_": "Grillo",
+                "SYNTH_": "Persona",
+            }
+            for prefix, label in subgroup_map.items():
+                if key.startswith(prefix):
+                    subgroup = label
+                    break
+
             items.append(
                 {
                     "key": entry["key"],
@@ -1196,6 +2139,7 @@ class SynthWebUIInterface:
                     "group": entry["group"],
                     "component": entry["component"],
                     "component_label": component_label,
+                    "subgroup": subgroup,
                     "advanced": entry["advanced"],
                     "sensitive": entry["sensitive"],
                     "env_override": entry["env_override"],
@@ -1220,10 +2164,27 @@ class SynthWebUIInterface:
 
     async def get_selkies_config(self):
         """Return Selkies configuration for dynamic URL construction."""
-        return JSONResponse({
-            "https_port": self.selkies_https_port,
-            "http_port": self.selkies_http_port
-        })
+        payload = {"https_port": self.selkies_https_port, "host": self.selkies_host}
+        if getattr(self, 'selkies_http_port', None):
+            payload["http_port"] = self.selkies_http_port
+
+        # Best-effort probe to detect which protocol is actually reachable
+        try:
+            probe = await asyncio.get_event_loop().run_in_executor(None, self._probe_selkies_protocol)
+            payload["detected_protocol"] = probe.get('protocol')
+            payload["detected_details"] = probe.get('details')
+        except Exception:
+            payload["detected_protocol"] = 'unknown'
+
+        return JSONResponse(payload)
+
+    async def get_selkies_health(self):
+        """Return a health probe result for Selkies (reachable protocol and details)."""
+        try:
+            probe = await asyncio.get_event_loop().run_in_executor(None, self._probe_selkies_protocol)
+            return JSONResponse({"ok": probe.get('protocol') in ('https', 'http'), **probe})
+        except Exception as exc:
+            return JSONResponse({"ok": False, "protocol": 'none', "details": str(exc)})
 
     async def get_animations_for_type(self, skin: str, animation_type: str):
         """Return list of animation files for a specific skin and animation type.
@@ -1253,6 +2214,283 @@ class SynthWebUIInterface:
         except Exception as e:
             log_error(f"{LOG_PREFIX} Error listing animations for {skin}/{animation_type}: {e}")
             return JSONResponse({"animations": []}, status_code=500)
+
+    async def upload_animation(
+        self,
+        file: UploadFile = File(...),
+        state: str = Form(...),
+        descriptor: Optional[str] = Form(None),
+        tags: Optional[str] = Form(None),
+        upload_id: Optional[str] = Form(None),
+    ):
+        """Upload a temporary animation file and register it for playback."""
+        if not file or not file.filename:
+            raise HTTPException(status_code=400, detail="No file uploaded")
+
+        filename = animation_uploads.sanitize_filename(file.filename)
+        ext = Path(filename).suffix.lower()
+        if ext not in {".fbx", ".vrma"}:
+            raise HTTPException(status_code=400, detail="Only .fbx or .vrma files are accepted")
+
+        try:
+            upload_id = animation_uploads.sanitize_upload_id(upload_id)
+            normalized_state = animation_uploads.normalize_state(state)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        target_dir = animation_uploads.get_state_dir(upload_id, normalized_state)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_path = target_dir / filename
+
+        bytes_written = 0
+        try:
+            with target_path.open("wb") as buffer:
+                while True:
+                    chunk = await file.read(1 << 20)
+                    if not chunk:
+                        break
+                    buffer.write(chunk)
+                    bytes_written += len(chunk)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to store animation upload: {exc}")
+            if target_path.exists():
+                try:
+                    target_path.unlink()
+                except Exception:
+                    pass
+            raise HTTPException(status_code=500, detail="Failed to store animation file") from exc
+        finally:
+            await file.close()
+
+        descriptor_path = None
+        if descriptor:
+            try:
+                descriptor_payload = json.loads(descriptor)
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail="descriptor must be valid JSON") from exc
+
+            descriptor_path = target_path.with_suffix(target_path.suffix + ".json")
+            try:
+                with descriptor_path.open("w", encoding="utf-8") as handle:
+                    json.dump(descriptor_payload, handle, indent=2, sort_keys=True)
+            except Exception as exc:
+                log_warning(f"{LOG_PREFIX} Failed to store descriptor: {exc}")
+
+        tag_list: Optional[List[str]] = None
+        if tags:
+            try:
+                parsed = json.loads(tags)
+                if isinstance(parsed, list):
+                    tag_list = [str(tag) for tag in parsed]
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail="tags must be a JSON array") from exc
+
+        meta = animation_uploads.record_upload(
+            upload_id,
+            normalized_state,
+            filename,
+            size_bytes=bytes_written,
+            tags=tag_list,
+            descriptor_path=descriptor_path,
+            original_filename=file.filename,
+        )
+
+        try:
+            animations_root = animation_uploads.get_upload_root(upload_id) / "animations"
+            if getattr(self, "animation_handler", None):
+                self.animation_handler.add_temporary_search_path(animations_root)
+                self.animation_handler.register_temporary_state_override(
+                    upload_id=upload_id,
+                    state=normalized_state,
+                    animations=[filename],
+                )
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} Failed to register temporary animation search path: {exc}")
+
+        url = f"/skins/temp/{upload_id}/animations/{normalized_state}/{filename}"
+        return JSONResponse(
+            {
+                "status": "ok",
+                "upload_id": upload_id,
+                "state": normalized_state,
+                "filename": filename,
+                "url": url,
+                "meta": meta,
+            },
+            status_code=201,
+        )
+
+    async def list_animation_uploads(self):
+        """List temporary animation uploads and their metadata."""
+        uploads = animation_uploads.list_uploads()
+        payload: List[Dict[str, Any]] = []
+        for meta in uploads:
+            upload_id = meta.get("upload_id")
+            states = meta.get("states", {})
+            for state, files in states.items():
+                payload.append(
+                    {
+                        "upload_id": upload_id,
+                        "state": state,
+                        "files": files,
+                        "url_prefix": f"/skins/temp/{upload_id}/animations/{state}",
+                        "created_at": meta.get("created_at"),
+                        "tags": meta.get("tags", []),
+                    }
+                )
+        return JSONResponse({"uploads": payload})
+
+    async def delete_animation_upload(self, upload_id: str):
+        """Delete a temporary animation upload and deregister it."""
+        removed = animation_uploads.delete_upload(upload_id)
+        try:
+            animations_root = animation_uploads.get_upload_root(upload_id) / "animations"
+            if getattr(self, "animation_handler", None):
+                self.animation_handler.remove_temporary_search_path(animations_root)
+        except Exception:
+            pass
+        if not removed:
+            raise HTTPException(status_code=404, detail="Upload not found")
+        return JSONResponse({"status": "ok", "removed": upload_id})
+
+    async def promote_animation_upload(self, request: Request):
+        """Promote a temporary upload into a permanent skin animation folder."""
+        if os.getenv("SYNTH_MATEENGINE_PROMOTE_ENABLED", "0") != "1":
+            raise HTTPException(status_code=403, detail="Promotion is disabled on this server")
+        data = await request.json()
+        upload_id = data.get("upload_id")
+        target_skin = data.get("target_skin")
+        if not upload_id or not target_skin:
+            raise HTTPException(status_code=400, detail="upload_id and target_skin are required")
+
+        target_state = data.get("target_state")
+        overwrite = bool(data.get("overwrite", False))
+        rename = data.get("rename")
+
+        try:
+            promoted = animation_uploads.promote_upload(
+                upload_id,
+                target_skin=target_skin,
+                target_state=target_state,
+                overwrite=overwrite,
+                rename=rename,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except FileExistsError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        promoted_urls = []
+        for path in promoted:
+            try:
+                rel = path.relative_to(Path(__file__).resolve().parent.parent)
+                promoted_urls.append(f"/{rel.as_posix()}")
+            except Exception:
+                promoted_urls.append(str(path))
+
+        return JSONResponse({"status": "ok", "promoted": promoted_urls, "skin": target_skin})
+
+    async def get_prompt_override(self, request: Request):
+        """Return prompt override/injection instructions for external interfaces."""
+        override = os.getenv("SYNTH_MATEENGINE_PROMPT_OVERRIDE", "0") == "1"
+        host = None
+        try:
+            if request and request.client:
+                host = request.client.host
+        except Exception:
+            host = None
+
+        os_name = os.getenv("SYNTH_HOST_OS") or platform.platform()
+        host_label = host or "unknown-host"
+
+        injection = (
+            "Interface note (MateEngine, host={host}, os={os}): "
+            "This interface may request limited animation control and UI hints; "
+            "do not replace SyntH system instructions."
+        ).format(host=host_label, os=os_name)
+
+        payload = {
+            "override": override,
+            "injection": injection,
+            "source": "MateEngine",
+            "static": True,
+            "metadata": {
+                "os": os_name,
+                "host": host_label,
+                "controls": {"animations": "limited"},
+            },
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+        }
+        return JSONResponse(payload)
+
+    async def enqueue_outbox(self, source: str, *, text: str, target: Optional[str] = None) -> None:
+        """Enqueue a message for a named integration outbox (public API).
+
+        Args:
+            source: integration source name (e.g., 'mate')
+            text: message text
+            target: optional recipient target
+        """
+        # Ensure the destination outbox exists
+        self.ensure_integration_outbox(source)
+        entry = {"text": text, "target": target, "created_at": datetime.now(tz=timezone.utc).isoformat()}
+        async with self._integration_outbox_locks[source]:
+            self._integration_outboxes[source].append(entry)
+
+    # Backwards compatibility shim (internal use only)
+    async def _enqueue_integration_outbox(self, *, source: str, text: str, target: Optional[str] = None) -> None:
+        await self.enqueue_outbox(source, text=text, target=target)
+
+    async def post_integration_message(self, request: Request):
+        """Accept messages from external integrations (generic). Expected JSON:
+        { "source": "mate", "type": "chat", "payload": {...}, "metadata": {...} }
+        """
+        data = await request.json()
+        source = data.get("source")
+        typ = data.get("type") or data.get("message_type") or "chat"
+        payload = data.get("payload") or {}
+        metadata = data.get("metadata") or {}
+        if not source:
+            raise HTTPException(status_code=400, detail="'source' is required")
+        if typ in ("chat", "message"):
+            text = payload.get("text")
+            if not isinstance(text, str) or not text.strip():
+                raise HTTPException(status_code=400, detail="'payload.text' must be a non-empty string for chat messages")
+            # Create a lightweight message object for routing
+            from types import SimpleNamespace
+            msg = SimpleNamespace()
+            msg.chat_id = payload.get("conversation_id") or None
+            msg.interface_path = f"integration:{source}"
+            # Forward into the message chain so plugins and the core can handle it
+            from core import message_chain
+            result = await message_chain.handle_incoming_message(None, msg, text, source="interface", context={"integration_source": source, "metadata": metadata})
+            return JSONResponse({"status": "ok", "result": result})
+        else:
+            # Other message types: store in integration outbox
+            text = payload.get("text") or json.dumps(payload)
+            await self._enqueue_integration_outbox(source=source, text=text, target=payload.get("target"))
+            return JSONResponse({"status": "ok", "stored": True})
+
+    async def get_integration_outbox(self, request: Request):
+        """Return and clear queued messages for a given integration source."""
+        params = request.query_params
+        source = params.get("source")
+        if not source:
+            raise HTTPException(status_code=400, detail="'source' query param is required")
+        self.ensure_integration_outbox(source)
+        async with self._integration_outbox_locks[source]:
+            items = list(self._integration_outboxes[source])
+            self._integration_outboxes[source].clear()
+        return JSONResponse({"messages": items})
+
+    def ensure_integration_outbox(self, src: str) -> None:
+        """Create per-source outbox and lock if they don't exist."""
+        if src not in self._integration_outboxes:
+            self._integration_outboxes[src] = deque(maxlen=500)
+            import asyncio as _asyncio
+            self._integration_outbox_locks[src] = _asyncio.Lock()
 
     async def diary_summary(self, request: Request):
         """Return persona snapshot and recent diary entries for the Diary tab."""
@@ -1605,11 +2843,12 @@ class SynthWebUIInterface:
             # Convert rows to entries format
             entries = []
             for row in rows:
+                ts = row[3]
                 entry = {
                     'id': row[0],
                     'content': row[1],
                     'personal_thought': row[2],
-                    'timestamp': row[3].isoformat() if row[3] else None,
+                    'timestamp': self._dt_to_utc_iso(ts),
                     'context_tags': json.loads(row[4] or '[]'),
                     'involved_users': json.loads(row[5] or '[]'),
                     'emotions': json.loads(row[6] or '[]'),
@@ -1721,8 +2960,6 @@ class SynthWebUIInterface:
 
         try:
             from core.db import get_conn_ctx
-            from core.time_zone_utils import utc_to_local
-            from datetime import timezone
             
             offset = (page - 1) * per_page
             order = "DESC" if sort == "desc" else "ASC"
@@ -1747,7 +2984,7 @@ class SynthWebUIInterface:
                     if not include_archived:
                         # Get approximate count using LIMIT + 1 trick (faster than COUNT)
                         query = f"""
-                            SELECT id, LEFT(content, 200) as content, LEFT(personal_thought, 100) as personal_thought, 
+                            SELECT id, content as content, personal_thought as personal_thought, 
                                    timestamp, interaction_summary, 
                                    JSON_EXTRACT(emotions, '$[0].type') as primary_emotion,
                                    JSON_LENGTH(involved_users) as user_count
@@ -1776,7 +3013,7 @@ class SynthWebUIInterface:
                         # With archived: use simpler UNION but with LIMIT push-down
                         query = f"""
                             SELECT * FROM (
-                                (SELECT id, LEFT(content, 200) as content, LEFT(personal_thought, 100) as personal_thought, 
+                                (SELECT id, content as content, personal_thought as personal_thought, 
                                        timestamp, interaction_summary,
                                        JSON_EXTRACT(emotions, '$[0].type') as primary_emotion,
                                        JSON_LENGTH(involved_users) as user_count,
@@ -1786,7 +3023,7 @@ class SynthWebUIInterface:
                                 ORDER BY timestamp {order}
                                 LIMIT {per_page * 2})
                                 UNION ALL
-                                (SELECT id, LEFT(content, 200), LEFT(personal_thought, 100), 
+                                (SELECT id, content as content, personal_thought as personal_thought, 
                                        timestamp, interaction_summary,
                                        JSON_EXTRACT(emotions, '$[0].type'),
                                        JSON_LENGTH(involved_users),
@@ -1811,23 +3048,13 @@ class SynthWebUIInterface:
                     
                     # Build minimal response objects with timezone conversion
                     for row in rows:
-                        # Convert timestamp to local timezone
-                        timestamp = row[3]
-                        if timestamp:
-                            # Database timestamp is assumed to be in server timezone
-                            # Convert to UTC-aware then to local
-                            if timestamp.tzinfo is None:
-                                # Assume UTC if no timezone info
-                                timestamp = timestamp.replace(tzinfo=timezone.utc)
-                            timestamp_local = utc_to_local(timestamp)
-                            timestamp_str = timestamp_local.isoformat()
-                        else:
-                            timestamp_str = None
+                        # Emit explicit UTC timestamps; naive datetimes are assumed local TZ.
+                        timestamp_str = self._dt_to_utc_iso(row[3])
                         
                         entries.append({
                             "id": row[0],
-                            "content": row[1],  # Already truncated by LEFT()
-                            "personal_thought": row[2],  # Already truncated
+                            "content": row[1],
+                            "personal_thought": row[2],
                             "timestamp": timestamp_str,
                             "interaction_summary": row[4],
                             "primary_emotion": row[5],  # Single emotion instead of array
@@ -1870,8 +3097,6 @@ class SynthWebUIInterface:
 
         try:
             from core.db import get_conn_ctx
-            from core.time_zone_utils import utc_to_local
-            from datetime import timezone
             
             offset = (page - 1) * per_page
             order = "DESC" if sort == "desc" else "ASC"
@@ -1894,14 +3119,20 @@ class SynthWebUIInterface:
             entries = []
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
-                    # Simplified query without JOIN
+                    # Include a lightweight join to ai_diary so the UI can show the actual
+                    # reflective text when response_text is missing/empty.
                     query = f"""
-                        SELECT id, beat_type, LEFT(prompt_text, 300) as prompt_text, 
-                               LEFT(response_text, 500) as response_text,
-                               diary_entry_id, executed_at
-                        FROM grillo_activity_log
+                        SELECT g.id,
+                               g.beat_type,
+                               g.prompt_text as prompt_text,
+                               g.response_text as response_text,
+                               g.diary_entry_id,
+                               g.executed_at,
+                               d.content as diary_content
+                        FROM grillo_activity_log g
+                        LEFT JOIN ai_diary d ON g.diary_entry_id = d.id
                         WHERE {where_clause}
-                        ORDER BY executed_at {order}
+                        ORDER BY g.executed_at {order}
                         LIMIT %s OFFSET %s
                     """
                     
@@ -1913,16 +3144,8 @@ class SynthWebUIInterface:
                         rows = rows[:per_page]
                     
                     for row in rows:
-                        # Convert UTC timestamp to local timezone
-                        executed_at_utc = row[5]
-                        if executed_at_utc:
-                            # Ensure it has UTC timezone info
-                            if executed_at_utc.tzinfo is None:
-                                executed_at_utc = executed_at_utc.replace(tzinfo=timezone.utc)
-                            executed_at_local = utc_to_local(executed_at_utc)
-                            executed_at_str = executed_at_local.isoformat()
-                        else:
-                            executed_at_str = None
+                        # Emit explicit UTC timestamps; naive datetimes are assumed local TZ.
+                        executed_at_str = self._dt_to_utc_iso(row[5])
                         
                         entries.append({
                             "id": row[0],
@@ -1931,16 +3154,39 @@ class SynthWebUIInterface:
                             "response_text": row[3],  # Truncated LLM response
                             "diary_entry_id": row[4],
                             "executed_at": executed_at_str,
-                            "has_diary": row[4] is not None  # Flag instead of content
+                            "has_diary": row[4] is not None,  # Flag instead of content
+                            "diary_content": row[6]
                         })
             
+            # Lazy-load list of available beat types (for populating the UI selector)
+            beat_types = []
+            if page == 1 and not beat_type_filter:
+                async with get_conn_ctx() as conn:
+                    async with conn.cursor() as cur:
+                        # Fetch a large set of distinct beat types for the UI filter
+                        await cur.execute("SELECT DISTINCT beat_type FROM grillo_activity_log ORDER BY beat_type LIMIT 1000")
+                        rows_bt = await cur.fetchall()
+                        # Normalize by trimming whitespace and ignore NULLs
+                        beat_types = [row[0].strip() for row in rows_bt if row[0] and str(row[0]).strip()]
+
             # Estimate total
             total_count = offset + len(rows) + (per_page if has_more else 0)
             total_pages = (total_count + per_page - 1) // per_page
+
+            # Attach per-action execs to entries
+            try:
+                from plugins.grillo.grillo_impl import GrilloPlugin
+                activity_ids = [e['id'] for e in entries]
+                action_map = await GrilloPlugin.fetch_action_execs(activity_ids) if activity_ids else {}
+                for e in entries:
+                    e['actions'] = action_map.get(e['id'], [])
+            except Exception as e:
+                log_debug(f"[webui] fetch_action_execs failed: {e}")
             
             return JSONResponse({
                 "success": True,
                 "entries": entries,
+                "beat_types": beat_types,
                 "page": page,
                 "per_page": per_page,
                 "total_count": total_count,
@@ -1970,8 +3216,6 @@ class SynthWebUIInterface:
 
         try:
             from core.db import get_conn_ctx
-            from core.time_zone_utils import utc_to_local
-            from datetime import timezone
             
             offset = (page - 1) * per_page
             order = "DESC" if sort == "desc" else "ASC"
@@ -1995,7 +3239,7 @@ class SynthWebUIInterface:
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     query = f"""
-                        SELECT interface_path, sender_name, LEFT(message_text, 500) as message_text, timestamp
+                        SELECT interface_path, sender_name, message_text, timestamp
                         FROM chat_history_cache
                         WHERE {where_clause}
                         ORDER BY timestamp {order}
@@ -2010,20 +3254,12 @@ class SynthWebUIInterface:
                         rows = rows[:per_page]
                     
                     for row in rows:
-                        # Convert timestamp from UTC to local timezone
-                        timestamp = row[3]
-                        if timestamp:
-                            if timestamp.tzinfo is None:
-                                timestamp = timestamp.replace(tzinfo=timezone.utc)
-                            timestamp_local = utc_to_local(timestamp)
-                            timestamp_str = timestamp_local.isoformat()
-                        else:
-                            timestamp_str = None
+                        timestamp_str = self._dt_to_utc_iso(row[3])
                         
                         messages.append({
                             "interface_path": row[0],
                             "sender_name": row[1],
-                            "message_text": row[2],  # Truncated
+                            "message_text": row[2],
                             "timestamp": timestamp_str
                         })
             
@@ -2052,6 +3288,261 @@ class SynthWebUIInterface:
             
         except Exception as exc:
             log_error(f"{LOG_PREFIX} Failed to fetch chat history: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    # ------------------------------------------------------------------
+    # Chat archive endpoints (filesystem-backed)
+    # ------------------------------------------------------------------
+    async def archive_chat(self, request: Request):
+        """Archive current chat messages for the persistent session and clear them.
+
+        Returns: { success, archive_id }
+        """
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        session_id = payload.get('session_id') or self.session_id
+        if not session_id:
+            raise HTTPException(status_code=400, detail='No session_id available')
+        try:
+            from core.chat_history_cache import load_chat_history, clear_chat_history
+            from core.chat_archives_db import create_archive, init_chat_archives_table
+            from core.session_meta import get_session_meta
+            from core.chat_context_manager import clear_chat_context
+
+            interface_path = f"{INTERFACE_NAME}/{session_id}"
+            messages_deque = await load_chat_history(interface_path)
+            # Convert deque to list
+            messages = list(messages_deque) if messages_deque else []
+            try:
+                # Ensure DB table exists
+                try:
+                    await init_chat_archives_table()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            # Fetch current session metadata (camera state, rect) to include with archive
+            try:
+                metadata = await get_session_meta(interface_path)
+            except Exception:
+                metadata = None
+            log_info(f"{LOG_PREFIX} Creating archive from {len(messages)} current messages for session {session_id}")
+            archive = await create_archive(session_id, messages, name=payload.get('name'), metadata=metadata)
+            # Clear DB cache and context
+            await clear_chat_history(interface_path)
+            clear_chat_context(interface_path)
+            # Clear in-memory message history
+            self.message_history.pop(session_id, None)
+            # Also clear session processing flag so clients don't keep typing indicator
+            try:
+                from core.session_meta import set_session_meta as set_meta_fn
+                await set_meta_fn(interface_path, {'processing': False})
+            except Exception as e:
+                log_debug(f"{LOG_PREFIX} Failed to clear session processing meta after archive: {e}")
+            response = {"success": True, "archive_id": archive.get('id')}
+            if archive.get('path'):
+                response['path'] = archive.get('path')
+            return JSONResponse(response)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to archive chat: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def list_chat_archives(self, request: Request):
+        try:
+            from core.chat_archives_db import list_archives
+            archives = await list_archives()
+            return JSONResponse({"success": True, "archives": archives})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to list chat archives: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def get_chat_archive(self, archive_id: str):
+        try:
+            from core.chat_archives_db import load_archive
+            arch = await load_archive(archive_id)
+            return JSONResponse({"success": True, "archive": arch})
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="Archive not found")
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to get chat archive {archive_id}: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def restore_chat_archive(self, request: Request):
+        """Restore a previously-created chat archive to the current session.
+
+        This will first archive the current conversation, then restore the requested archive
+        by pushing messages into the chat_history_cache and memory, and replay them to client.
+        """
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        archive_id = payload.get('archive_id')
+        session_id = payload.get('session_id') or self.session_id
+        if not archive_id:
+            raise HTTPException(status_code=400, detail='Missing archive_id')
+        if not session_id:
+            raise HTTPException(status_code=400, detail="No session available to restore into")
+        try:
+            from core.chat_archives_db import load_archive, create_archive
+            from core.session_meta import set_session_meta
+            from core.chat_history_cache import save_chat_message, clear_chat_history, load_chat_history
+            from core.chat_context_manager import clear_chat_context, get_or_create_chat_context
+            # 1) Archive current chat
+            interface_path = f"{INTERFACE_NAME}/{session_id}"
+            current_msgs = await load_chat_history(interface_path)
+            if current_msgs:
+                _ = await create_archive(session_id, list(current_msgs))
+            await clear_chat_history(interface_path)
+            clear_chat_context(interface_path)
+            self.message_history.pop(session_id, None)
+            # Ensure we clear the session processing flag when restoring to avoid stale typing indicators
+            try:
+                await set_session_meta(interface_path, {'processing': False})
+            except Exception as e:
+                log_debug(f"{LOG_PREFIX} Failed to clear session processing meta after restore: {e}")
+            # 2) Load archive file
+            log_debug(f"{LOG_PREFIX} restore_chat_archive called with archive_id={archive_id} session_id={session_id}")
+            meta = await load_archive(archive_id)
+            log_info(f"{LOG_PREFIX} Loaded archive {archive_id}")
+            messages = meta.get('messages', [])
+            # Also restore session metadata if present
+            metadata = meta.get('metadata')
+            if metadata:
+                try:
+                    await set_session_meta(interface_path, metadata)
+                except Exception as e:
+                    log_debug(f"{LOG_PREFIX} Failed to restore session metadata: {e}")
+            else:
+                log_debug(f"{LOG_PREFIX} No session metadata in archive {archive_id}")
+            # 3) Save back to DB and memory
+            saved_count = 0
+            for i, msg in enumerate(messages):
+                text = msg.get('text') or msg.get('message_text') or ''
+                sender_name = msg.get('sender_name') or msg.get('username') or 'unknown'
+                # Normalize aliases used for the SyntH agent to the canonical 'self'
+                try:
+                    if isinstance(sender_name, str) and sender_name.lower() in ('synth', 'bot', 'system', 'synth_webui'):
+                        sender_name = 'self'
+                except Exception:
+                    pass
+                sender_id = msg.get('sender_id') or msg.get('user_id') or 'unknown'
+                ts = msg.get('timestamp')
+                try:
+                    saved = await save_chat_message(interface_path, text, sender_name=sender_name, sender_id=sender_id, timestamp=ts)
+                    if saved:
+                        saved_count += 1
+                        log_debug(f"{LOG_PREFIX} Saved restored message {i+1}/{len(messages)} for session {session_id}")
+                    else:
+                        log_debug(f"{LOG_PREFIX} Skipped saving restored message {i+1}/{len(messages)} for session {session_id} (empty or invalid message)")
+                except Exception as e:
+                    log_warning(f"{LOG_PREFIX} Failed to save restored message {i+1}/{len(messages)} to cache: {e}")
+            # ensure the in-memory context is repopulated
+            from core.chat_context_manager import load_chat_history as ctx_load
+            await ctx_load(interface_path)
+            ctx = get_or_create_chat_context(interface_path)
+            self.message_history[session_id] = ctx
+            # 4) Replay to connected websocket if present
+            try:
+                await self._replay_history(session_id)
+                log_info(f"{LOG_PREFIX} Replayed {len(messages)} messages for session {session_id}")
+            except Exception as e:
+                log_debug(f"{LOG_PREFIX} Failed to replay history after restore: {e}")
+
+            # Remove the archive after successful restore so it won't be re-archived as duplicate
+            deleted_archive_id = None
+            # Delete only if we successfully saved at least one message
+            if saved_count > 0:
+                try:
+                    from core.chat_archives_db import delete_archive as db_delete_archive
+                    await db_delete_archive(archive_id)
+                    log_info(f"{LOG_PREFIX} Deleted archive {archive_id} after successful restore")
+                    deleted_archive_id = archive_id
+                except Exception as e:
+                    log_debug(f"{LOG_PREFIX} Failed to delete archive {archive_id} after restore: {e}")
+            else:
+                log_warning(f"{LOG_PREFIX} Restore completed but no messages were saved for archive {archive_id} (saved_count=0). Archive kept for inspection.")
+                # Log message keys for debug purposes
+                try:
+                    for i, msg in enumerate(messages):
+                        if isinstance(msg, dict):
+                            keys = list(msg.keys())
+                        else:
+                            keys = [type(msg).__name__]
+                        log_debug(f"{LOG_PREFIX} Archive {archive_id} message {i+1} keys: {keys}")
+                except Exception as e:
+                    log_debug(f"{LOG_PREFIX} Failed to log archive message keys: {e}")
+            # Note: do not return raw messages here to avoid double-rendering on client
+            # We always replay the restored messages via WebSocket (_replay_history), so
+            # the client should rely on the WebSocket replay instead of rendering
+            # the API response to avoid duplicates.
+            return JSONResponse({"success": True, "restored": len(messages), "saved_count": saved_count, "deleted_archive_id": deleted_archive_id})
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="Archive not found")
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to restore chat archive: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def delete_chat_archive(self, archive_id: str):
+        try:
+            from core.chat_archives_db import delete_archive
+            await delete_archive(archive_id)
+            return JSONResponse({"success": True})
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="Archive not found")
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to delete chat archive {archive_id}: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def set_session_meta(self, request: Request):
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        session_id = payload.get('session_id') or self.session_id
+        meta = payload.get('meta')
+        if not session_id or not isinstance(meta, dict):
+            raise HTTPException(status_code=400, detail='Missing session_id or meta')
+        try:
+            from core.session_meta import set_session_meta as set_meta_fn
+            interface_path = f"{INTERFACE_NAME}/{session_id}"
+            await set_meta_fn(interface_path, meta)
+            return JSONResponse({"success": True})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to set session meta: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def get_session_meta(self, request: Request):
+        session_id = request.query_params.get('session_id') or self.session_id
+        if not session_id:
+            raise HTTPException(status_code=400, detail='Missing session_id')
+        try:
+            from core.session_meta import get_session_meta as get_meta_fn
+            interface_path = f"{INTERFACE_NAME}/{session_id}"
+            meta = await get_meta_fn(interface_path)
+            return JSONResponse({"success": True, "meta": meta or {}})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to get session meta: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def rename_chat_archive(self, archive_id: str, request: Request):
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        new_name = payload.get('name')
+        if not new_name:
+            raise HTTPException(status_code=400, detail='Missing name')
+        try:
+            from core.chat_archives_db import rename_archive
+            meta = await rename_archive(archive_id, new_name)
+            return JSONResponse({"success": True, "archive": {"id": meta.get('id'), 'name': meta.get('name'), 'created_at': meta.get('created_at')}})
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail='Archive not found')
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to rename chat archive {archive_id}: {exc}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
 
     async def update_config_entry(self, request: Request):
@@ -2412,9 +3903,9 @@ class SynthWebUIInterface:
         if not raw_name:
             return ""
         overrides = {
-            "synth_webui": "SyntH Web UI",
-            "synth-webui": "SyntH Web UI",
-            "synth_webui_interface": "SyntH Web UI",
+            "synth_webui": "Synthetic Heart",
+            "synth-webui": "Synthetic Heart",
+            "synth_webui_interface": "Synthetic Heart",
         }
         key = str(raw_name)
         lower_key = key.lower()
@@ -2595,6 +4086,27 @@ class SynthWebUIInterface:
                     log_warning(f"{LOG_PREFIX} error reading action types for engine {engine_name}: {exc}")
 
             meta = self._get_component_meta(engine_name)
+            # Attempt to include login info for Selenium-based engines without inducing side-effects
+            login_state = "unknown"
+            logged_in = False
+            try:
+                from core.selenium_llm_base import SeleniumLLMBase
+                if instance is not None and isinstance(instance, SeleniumLLMBase):
+                    # If the driver isn't initialized, avoid creating it just to check login
+                    if getattr(instance, 'driver', None) is None:
+                        login_state = "unknown"
+                        logged_in = False
+                    else:
+                        try:
+                            logged_in = bool(instance.is_user_logged_in())
+                            login_state = "logged" if logged_in else "unlogged"
+                        except Exception:
+                            login_state = "unknown"
+                            logged_in = False
+            except Exception:
+                # If SeleniumLLMBase is not importable, just skip enrichment
+                pass
+
             llm_engines.append(
                 {
                     "name": engine_name,
@@ -2605,6 +4117,8 @@ class SynthWebUIInterface:
                     "status": meta["status"],
                     "details": meta["details"],
                     "error": meta["error"],
+                    "login_state": login_state,
+                    "logged_in": logged_in,
                     "actions": actions,
                 }
             )
@@ -2646,11 +4160,18 @@ class SynthWebUIInterface:
             )
 
         # Add Selkies Web Desktop as a special hardcoded component
-        # Use SELKIES_HTTPS_PORT (default 3000) for HTTPS connections
-        # Use SELKIES_HTTP_PORT (default 3001) for HTTP connections
-        # Note: The actual hostname will be resolved client-side in JavaScript
-        selkies_protocol = "https" if os.getenv("SECURE_CONNECTION", "0") == "1" else "http"
-        selkies_port = self.selkies_https_port if selkies_protocol == "https" else self.selkies_http_port
+        # Prefer explicit SELKIES_HTTPS_PORT/SELKIES_HTTP_PORT env vars when deciding protocol
+        # If SELKIES_HTTPS_PORT is set, prefer https regardless of SECURE_CONNECTION value.
+        # This avoids accidental inversion when docker/env mappings differ from runtime.
+        if os.getenv('SELKIES_HTTPS_PORT'):
+            selkies_protocol = 'https'
+            selkies_port = self.selkies_https_port
+        elif os.getenv('SELKIES_HTTP_PORT'):
+            selkies_protocol = 'http'
+            selkies_port = self.selkies_http_port
+        else:
+            selkies_protocol = "https" if os.getenv("SECURE_CONNECTION", "0") == "1" else "http"
+            selkies_port = self.selkies_https_port if selkies_protocol == "https" else self.selkies_http_port
         
         # Mark as dynamic - JavaScript will construct the full URL client-side
         interfaces_data.append(
@@ -2668,6 +4189,17 @@ class SynthWebUIInterface:
                 "selkies_port": selkies_port,
             }
         )
+
+        # Deduplicate interfaces by name to avoid duplicates when modules are scanned multiple times
+        seen = set()
+        deduped_interfaces = []
+        for iface in interfaces_data:
+            if iface["name"] in seen:
+                log_debug(f"[webui] Skipping duplicate interface entry: {iface['name']}")
+                continue
+            seen.add(iface["name"])
+            deduped_interfaces.append(iface)
+        interfaces_data = deduped_interfaces
 
         plugins_data: List[dict] = []
         for name, plugin in sorted(PLUGIN_REGISTRY.items()):
@@ -2696,6 +4228,17 @@ class SynthWebUIInterface:
                     "error": meta["error"],
                 }
             )
+
+        # Deduplicate plugins by name to avoid duplicates in the UI
+        seen_p = set()
+        deduped_plugins = []
+        for p in plugins_data:
+            if p["name"] in seen_p:
+                log_debug(f"[webui] Skipping duplicate plugin entry: {p['name']}")
+                continue
+            seen_p.add(p["name"])
+            deduped_plugins.append(p)
+        plugins_data = deduped_plugins
 
         component_summary = {"success": 0, "failed": 0, "loading": 0}
         try:
@@ -2758,6 +4301,116 @@ class SynthWebUIInterface:
             raise HTTPException(status_code=500, detail=f"Failed to activate LLM '{name}'") from exc
 
         return JSONResponse({"status": "ok", "active": name})
+
+    async def llm_login(self, request: Request):
+        """Start the login flow for a Selenium-based LLM engine (non-blocking).
+
+        Expects JSON: { "name": "selenium_chatgpt" }
+        """
+        try:
+            data = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+
+        name = str(data.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Missing 'name'")
+
+        try:
+            from core.llm_registry import get_llm_registry
+            registry = get_llm_registry()
+            engine = registry.get_engine(name)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} unable to access LLM registry: {exc}")
+            raise HTTPException(status_code=500, detail="Unable to access LLM registry") from exc
+
+        if not engine:
+            raise HTTPException(status_code=404, detail=f"LLM engine '{name}' not loaded")
+
+        try:
+            from core.selenium_llm_base import SeleniumLLMBase
+            if not isinstance(engine, SeleniumLLMBase):
+                raise HTTPException(status_code=400, detail=f"LLM engine '{name}' is not Selenium-based")
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=400, detail=f"LLM engine '{name}' is not Selenium-based")
+
+        try:
+            # Fire-and-forget the login flow so the endpoint is non-blocking
+            try:
+                task = asyncio.create_task(engine.start_login_flow())
+                log_info(f"{LOG_PREFIX} Started login flow for LLM '{name}' (task: {task})")
+            except RuntimeError:
+                # If event loop is not running or other issues, try scheduling differently
+                loop = asyncio.get_event_loop()
+                loop.create_task(engine.start_login_flow())
+
+            # Return immediate status (do not wait for the login to complete)
+            current_logged = False
+            try:
+                current_logged = bool(getattr(engine, 'is_user_logged_in') and engine.is_user_logged_in())
+            except Exception:
+                current_logged = False
+
+            return JSONResponse({"status": "ok", "name": name, "action": "started", "logged_in": current_logged})
+
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to start login flow for '{name}': {exc}")
+            raise HTTPException(status_code=500, detail=f"Failed to start login flow for '{name}': {exc}") from exc
+
+    async def run_component(self, request: Request):
+        """Run a component/plugin action on demand.
+
+        Expected JSON: { "name": "component_name", "action": "action_name", "payload": { ... } }
+        """
+        try:
+            data = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+
+        name = str(data.get("name") or data.get("component") or "").strip()
+        action = str(data.get("action") or "run_now")
+        payload = data.get("payload") or {}
+
+        if not name:
+            raise HTTPException(status_code=400, detail="Missing 'name' / 'component' field")
+
+        try:
+            from core.core_initializer import PLUGIN_REGISTRY, INTERFACE_REGISTRY
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Unable to access registries: {exc}")
+            raise HTTPException(status_code=500, detail="Unable to access component registry") from exc
+
+        component = PLUGIN_REGISTRY.get(name) or INTERFACE_REGISTRY.get(name)
+        if component is None:
+            raise HTTPException(status_code=404, detail=f"Component '{name}' not found")
+
+        # Prefer standardized run_action method
+        if hasattr(component, "run_action"):
+            try:
+                result = component.run_action(action, payload, context=data.get("context"))
+                if asyncio.iscoroutine(result):
+                    result = await result
+                return JSONResponse({"status": "ok", "result": result})
+            except Exception as exc:
+                log_error(f"{LOG_PREFIX} Component run_action failed for {name}: {exc}")
+                raise HTTPException(status_code=500, detail=f"Component run_action failed: {exc}") from exc
+
+        # Fallback to common method names
+        for method_name in ("run_now", "run_once", "execute_now"):
+            if hasattr(component, method_name):
+                try:
+                    meth = getattr(component, method_name)
+                    result = meth(payload) if not asyncio.iscoroutinefunction(meth) else await meth(payload)
+                    return JSONResponse({"status": "ok", "result": result})
+                except Exception as exc:
+                    log_error(f"{LOG_PREFIX} Component {method_name} failed for {name}: {exc}")
+                    raise HTTPException(status_code=500, detail=f"Component {method_name} failed: {exc}") from exc
+
+        raise HTTPException(status_code=400, detail="Component does not support run_action or run_now")
 
     async def reload_component(self, request: Request):
         """Reload a specific component (interface or plugin)."""
@@ -2938,20 +4591,61 @@ class SynthWebUIInterface:
         import uvicorn
 
         try:
-            log_info(f"{LOG_PREFIX} Creating Uvicorn config for http://{self.host}:{self.port}")
-            config = uvicorn.Config(
-                self.app,
+            scheme = "https" if self.tls_enabled else "http"
+            log_info(f"{LOG_PREFIX} Creating Uvicorn config for {scheme}://{self.host}:{self.port}")
+            # If TLS is enabled, ensure certs exist (or generate self-signed)
+            if self.tls_enabled:
+                try:
+                    self._ensure_tls_files()
+                except Exception as tls_exc:
+                    log_warning(f"{LOG_PREFIX} TLS requested but failed to prepare certificates: {tls_exc}")
+                    self.tls_enabled = False
+            config_kwargs = dict(
+                app=self.app,
                 host=self.host,
                 port=self.port,
                 log_level=self.log_level or "info",
                 lifespan="off",
             )
-            server = uvicorn.Server(config)
-            with self._server_lock:
-                self._server = server
-            log_info(f"{LOG_PREFIX} Starting Uvicorn server...")
-            await server.serve()
-            log_info(f"{LOG_PREFIX} Uvicorn server stopped normally")
+            if self.tls_enabled and self.tls_certfile and self.tls_keyfile:
+                log_info(f"{LOG_PREFIX} TLS enabled, using certfile={self.tls_certfile} keyfile={self.tls_keyfile}")
+                config_kwargs.update({
+                    'ssl_certfile': self.tls_certfile,
+                    'ssl_keyfile': self.tls_keyfile,
+                })
+            # If TLS is enabled and an HTTP port is provided, start both HTTPS and HTTP servers
+            if self.tls_enabled and self.http_port and self.http_port != self.port:
+                # HTTPS server (original)
+                config_https = uvicorn.Config(**config_kwargs)
+                server_https = uvicorn.Server(config_https)
+                # HTTP server (no TLS)
+                config_http_kwargs = dict(**config_kwargs)
+                config_http_kwargs.update({"port": self.http_port})
+                # Remove SSL keys for HTTP server
+                config_http_kwargs.pop('ssl_certfile', None)
+                config_http_kwargs.pop('ssl_keyfile', None)
+                config_http = uvicorn.Config(**config_http_kwargs)
+                server_http = uvicorn.Server(config_http)
+
+                with self._server_lock:
+                    self._server = server_https
+
+                log_info(f"{LOG_PREFIX} Starting Uvicorn HTTPS server on {self.host}:{self.port} and HTTP server on {self.host}:{self.http_port}...")
+
+                # Run both servers concurrently
+                https_task = asyncio.create_task(server_https.serve())
+                http_task = asyncio.create_task(server_http.serve())
+
+                await asyncio.gather(https_task, http_task)
+                log_info(f"{LOG_PREFIX} Uvicorn servers stopped normally")
+            else:
+                config = uvicorn.Config(**config_kwargs)
+                server = uvicorn.Server(config)
+                with self._server_lock:
+                    self._server = server
+                log_info(f"{LOG_PREFIX} Starting Uvicorn server...")
+                await server.serve()
+                log_info(f"{LOG_PREFIX} Uvicorn server stopped normally")
         except Exception as exc:
             log_error(f"{LOG_PREFIX} Error in _run_server: {exc}")
             import traceback
@@ -2971,6 +4665,108 @@ class SynthWebUIInterface:
                 pass
         if self._server_thread and self._server_thread.is_alive():
             self._server_thread.join(timeout=2)
+
+    def _ensure_tls_files(self) -> None:
+        """Ensure TLS certificate and key files exist, generating self-signed files if needed.
+
+        The generated files are stored under a default cert dir, by default `/config/ssl`.
+        This function will update `self.tls_certfile` and `self.tls_keyfile` to point to
+        the created or provided files.
+        """
+        if not self.tls_enabled:
+            return
+
+        cert_dir = os.getenv('SYNTH_WEBUI_CERT_DIR', '/config/ssl')
+        try:
+            Path(cert_dir).mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            log_warning(f"{LOG_PREFIX} Could not create cert dir {cert_dir}: {e}")
+
+        if self.tls_certfile and self.tls_keyfile:
+            if Path(self.tls_certfile).exists() and Path(self.tls_keyfile).exists():
+                return
+            else:
+                log_warning(f"{LOG_PREFIX} Provided TLS files not found: cert={self.tls_certfile}, key={self.tls_keyfile}")
+
+        # Use default filenames if not specified
+        default_cert = os.getenv('SYNTH_WEBUI_CERTFILE', os.path.join(cert_dir, 'synth_webui.crt'))
+        default_key = os.getenv('SYNTH_WEBUI_KEYFILE', os.path.join(cert_dir, 'synth_webui.key'))
+
+        # if both exist, use them
+        if Path(default_cert).exists() and Path(default_key).exists():
+            self.tls_certfile = default_cert
+            self.tls_keyfile = default_key
+            return
+
+        # Attempt to generate a self-signed cert using openssl if available
+        import shutil
+        import subprocess
+        openssl_path = shutil.which('openssl')
+        if not openssl_path:
+            # If openssl is not available, try to use Python's cryptography package
+            try:
+                from cryptography import x509  # type: ignore
+                has_cryptography = True
+            except Exception:
+                has_cryptography = False
+
+            if not has_cryptography:
+                raise RuntimeError('Cannot generate self-signed certificate: openssl not found and cryptography not installed')
+
+            # Use cryptography to generate self-signed cert
+            try:
+                from cryptography.hazmat.primitives import serialization, hashes
+                from cryptography.hazmat.primitives.asymmetric import rsa
+                from cryptography.hazmat.primitives.serialization import BestAvailableEncryption
+                from cryptography.x509.oid import NameOID
+                import datetime
+
+                key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+                subject = issuer = x509.Name([
+                    x509.NameAttribute(NameOID.COUNTRY_NAME, u"US"),
+                    x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, u"NA"),
+                    x509.NameAttribute(NameOID.LOCALITY_NAME, u"Local"),
+                    x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"Synthetic Heart"),
+                    x509.NameAttribute(NameOID.COMMON_NAME, u"localhost"),
+                ])
+                cert = (
+                    x509.CertificateBuilder()
+                    .subject_name(subject)
+                    .issuer_name(issuer)
+                    .public_key(key.public_key())
+                    .serial_number(x509.random_serial_number())
+                    .not_valid_before(datetime.datetime.utcnow())
+                    .not_valid_after(datetime.datetime.utcnow() + datetime.timedelta(days=3650))
+                    .add_extension(x509.SubjectAlternativeName([x509.DNSName(u"localhost")]), critical=False)
+                    .sign(key, hashes.SHA256())
+                )
+                with open(default_key, 'wb') as f:
+                    f.write(key.private_bytes(
+                        encoding=serialization.Encoding.PEM,
+                        format=serialization.PrivateFormat.TraditionalOpenSSL,
+                        encryption_algorithm=serialization.NoEncryption(),
+                    ))
+                with open(default_cert, 'wb') as f:
+                    f.write(cert.public_bytes(serialization.Encoding.PEM))
+                self.tls_certfile = default_cert
+                self.tls_keyfile = default_key
+                log_info(f"{LOG_PREFIX} Generated self-signed TLS certificate using cryptography at {default_cert}")
+                return
+            except Exception as exc:
+                raise RuntimeError(f'cryptography generation failed: {exc}')
+
+        # If openssl exists, use it to generate cert/key
+        subj = os.getenv('SYNTH_WEBUI_CERT_SUBJ', '/CN=localhost')
+        days = os.getenv('SYNTH_WEBUI_CERT_DAYS', '3650')
+        cmd = [openssl_path, 'req', '-x509', '-nodes', '-days', str(days), '-newkey', 'rsa:2048', '-keyout', default_key, '-out', default_cert, '-subj', subj]
+        try:
+            log_info(f"{LOG_PREFIX} Generating self-signed certificate using openssl at {default_cert}")
+            subprocess.run(cmd, check=True)
+            self.tls_certfile = default_cert
+            self.tls_keyfile = default_key
+            log_info(f"{LOG_PREFIX} Self-signed certificate generated: cert={self.tls_certfile} key={self.tls_keyfile}")
+        except Exception as exc:
+            raise RuntimeError(f'Failed to generate self-signed certificate: {exc}')
 
     async def start(self) -> None:
         """Start the web UI interface if autostart is enabled."""
@@ -3387,7 +5183,7 @@ class SynthWebUIInterface:
 
 
 async def start_server() -> None:
-    """Compatibility helper to run the SyntH Web UI server in the foreground."""
+    """Compatibility helper to run the Synthetic Heart Web UI server in the foreground."""
     if not synth_webui_interface.autostart:
         await synth_webui_interface._run_server()
         return
@@ -3447,3 +5243,7 @@ def shutdown_interface():
         log_error(f"{LOG_PREFIX} Error during interface shutdown: {e}")
     
     synth_webui_interface = None
+
+
+# Backward-compatible alias used by older code/tests.
+WebUI = SynthWebUIInterface

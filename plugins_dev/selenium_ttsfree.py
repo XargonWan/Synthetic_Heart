@@ -7,7 +7,10 @@ import time
 import shutil
 from typing import Any, Dict, List, Tuple, Optional
 
-import undetected_chromedriver as uc
+try:  # pragma: no cover - import guard for test/container environments
+    import undetected_chromedriver as uc  # type: ignore
+except Exception:  # pragma: no cover
+    uc = None
 import subprocess
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -66,6 +69,9 @@ class SeleniumTTSFreePlugin:
     def __init__(self) -> None:
         register_plugin("selenium_ttsfree", self)
         log_info("[selenium_ttsfree] Plugin initialized")
+
+        if uc is None:
+            log_warning("[selenium_ttsfree] undetected_chromedriver unavailable; generation will fail if invoked")
 
     # === Action metadata ===
     def get_supported_action_types(self) -> List[str]:

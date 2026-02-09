@@ -122,6 +122,30 @@ def test_nonexistent_action():
     print("✅ Non-existent action test passed!")
 
 
+def test_message_send_is_not_converted_and_triggers_corrector():
+    """Ensure legacy 'message_send' is not converted silently - it must be treated
+    as unsupported so the corrector can ask the LLM for a fix."""
+    print("Testing that 'message_send' is treated as unsupported...")
+
+    registry = get_validation_registry()
+    registry.clear()
+
+    action = {
+        "type": "message_send",
+        "payload": {
+            "text": "Hello Telegram",
+            "interface_path": "telegram_bot/31321637/"
+        }
+    }
+
+    is_valid, errors = validate_action(action)
+    print(f"Validation result for message_send: is_valid={is_valid}, errors={errors}")
+    assert not is_valid, "message_send should NOT be considered valid without explicit alias registration"
+    assert any("Unsupported type 'message_send'" in e for e in errors), f"Expected unsupported type error, got: {errors}"
+
+    print("✅ message_send is not converted and is flagged as unsupported")
+
+
 def main():
     """Run all tests."""
     print("🚀 Testing new validation system...\n")

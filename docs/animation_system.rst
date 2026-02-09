@@ -214,21 +214,18 @@ Adding New Animations
 
 Backend
 -------
+1. Place your FBX file(s) under the active skin's ``animations/<state>/`` folder, e.g.
 
-1. Add the FBX file to ``res/synth_webui/animations/``
-2. Update the ``ANIMATION_MAP`` in ``core/animation_handler.py``:
+    skins/Rei/animations/think/Thinking.fbx
 
-.. code-block:: python
+2. Optionally add a JSON descriptor alongside an FBX file named ``<animation>.fbx.json``
+    to describe ``intro``, ``loop`` and ``outro`` frame ranges or a ``play_once`` flag.
 
-    ANIMATION_MAP: Dict[AnimationState, List[str]] = {
-        AnimationState.THINK: ["Thinking.fbx"],
-        AnimationState.WRITE: ["Texting While Standing.fbx", "Texting.fbx"],
-        AnimationState.TALK: ["talking.fbx"],
-        AnimationState.IDLE: ["Idle.fbx", "Idle2.fbx", "Happy Idle.fbx"],
-        AnimationState.CUSTOM: ["CustomAnimation.fbx"],  # New animation
-    }
+3. The backend will dynamically discover available animations. Plugins may also:
 
-3. Add the new state to the ``AnimationState`` enum if needed
+    - Register override lists via ``register_state_animations(state, animations, sequential=False)``
+    - Register aliases via ``register_state_aliases({})``
+    - Add search paths via ``set_animation_search_paths([...])``
 
 Frontend
 --------
@@ -246,12 +243,66 @@ Frontend
         custom: ['CustomAnimation.fbx']  // New animation
     };
 
+Temporary Animation Uploads
+===========================
+
+The WebUI exposes endpoints to upload **temporary** animations that do not modify
+the active persona skin until explicitly promoted. Uploaded files are stored under
+``skins/temp/<upload_id>/animations/<state>/`` with a companion metadata file at
+``skins/temp/<upload_id>/meta.json``.
+
+**Upload flow**
+
+1. Client uploads an FBX/VRMA to ``POST /api/animations/upload``.
+2. The server writes the file to ``skins/temp/<upload_id>/animations/<state>/``.
+3. The ``AnimationHandler`` adds the upload root as a **temporary search path** so
+   the animation can be discovered without touching the active skin.
+
+**Promotion flow**
+
+When you are ready to make the animation permanent, call
+``POST /api/animations/promote`` to copy the upload into
+``skins/<persona>/animations/<state>/``.
+
+**Endpoints**
+
+- ``POST /api/animations/upload`` (multipart)
+- ``GET /api/animations/uploads``
+- ``DELETE /api/animations/uploads/{upload_id}``
+- ``POST /api/animations/promote``
+
+**Notes**
+
+- Temporary uploads are prioritized using search paths; they can be removed at any time.
+- Descriptors can be provided alongside the upload as JSON (`<file>.fbx.json`).
+- Cleanup runs automatically based on ``SYNTH_MATEENGINE_UPLOAD_TTL_DAYS`` (default: 7 days).
+- Promotion is guarded by ``SYNTH_MATEENGINE_PROMOTE_ENABLED=1``.
+
 Integration with Interfaces
 ============================
 
 While the WebUI interface automatically manages animations for message handling,
-other interfaces (Telegram, Discord, Matrix) can also trigger animations by
-accessing the animation handler if needed.
+other interfaces (Telegram, Discord, Matrix) can integrate with the animation system.
+
+Preferred integration pattern
+-----------------------------
+
+Interfaces should generally **not** broadcast animation states directly on message receipt.
+The core message queue is the fallback owner of the lifecycle:
+
+- Message accepted/enqueued → THINK
+- Generation start → WRITE (or TALK)
+- Generation end → IDLE
+
+If an interface needs a different mapping (e.g. TTS prefers TALK instead of WRITE), it
+should pass override hints through the message context (or implement the optional
+interface hooks used by the queue) rather than bypassing the core chain.
+
+Direct control (advanced)
+------------------------
+
+If an interface explicitly opts out of the core queue animation broadcast (and takes
+full responsibility for animation state), it may call the animation handler directly.
 
 Example for an interface that wants to show the avatar is "thinking":
 

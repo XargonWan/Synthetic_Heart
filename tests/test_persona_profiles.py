@@ -32,3 +32,9 @@ def test_other_skins_profile_contains_parts(skin):
     assert base in profile
     assert pj.get("description", "") in profile
     assert pj.get("attributes", {}).get("appearance", "") in profile
+
+
+def test_profile_mentions_agency():
+    pm = persona_manager.PersonaManager(config={})
+    pj, profile = _assemble_for_skin(pm, "Rekku")
+    assert ("agency" in profile.lower()) or ("autonom" in profile.lower())

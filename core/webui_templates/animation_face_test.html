@@ -1,0 +1,39 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Animation Face Test</title>
+  </head>
+  <body>
+    <h1>Animation Face Test</h1>
+    <pre id="log"></pre>
+    <script>
+      // Minimal harness to test AnimationHandler expressions application
+      (function(){
+        const logEl = document.getElementById('log');
+        function append(s){ logEl.textContent += s + '\n'; }
+
+        // Minimal fake vrm with blendShapeProxy
+        const fakeVRM = { blendShapeProxy: { _values: {}, setValue(k, v){ this._values[k]=v; append(`setValue ${k}=${v.toFixed(3)}`); } } };
+
+        // Simple sample AnimationHandler implementation from synth_webui
+        // Create a tiny version for test without dependencies
+        class AnimationHandlerTest {
+          constructor(vrm){ this.vrm = vrm; this._personaCache = {}; this._expressionState = {}; }
+          async _loadPersonaForSkin(skin){ try{ const res = await fetch(`/skins/${encodeURIComponent(skin)}/persona.json`); if(!res.ok) return null; this._personaCache[skin]=await res.json(); return this._personaCache[skin]; } catch(e){ return null; } }
+          applyExpressionsForFrame(state, dt=0.033){ if(!state || !state.expressions) return; const blendMap = (this._personaCache['Rei'] && this._personaCache['Rei'].blendshape_map) ? this._personaCache['Rei'].blendshape_map : {}; const desired = {}; state.expressions.forEach(expr=>{ if(0<=0 && 0<=expr.end_frame){ Object.keys(expr.targets).forEach(k=>{ const mapped = blendMap[k] || k; desired[mapped] = expr.targets[k]; }); } }); Object.keys(desired).forEach(k=>{ this._expressionState[k]=(this._expressionState[k]||0)+desired[k]; try{ this.vrm.blendShapeProxy.setValue(k, this._expressionState[k]); }catch(e){} }); }
+        }
+
+        (async ()=>{
+          append('Starting test...');
+          const handler = new AnimationHandlerTest(fakeVRM);
+          // try to load persona for Rei (optional) then run sample
+          await handler._loadPersonaForSkin('Rei');
+          const sample = { expressions: [ { start_frame:0, end_frame:15, targets: { 'happy': 0.8, 'mouth.O': 0.2 } } ], timing: { time_in_clip: 0.2 }, clip: { fps: 30 } };
+          handler.applyExpressionsForFrame(sample, 0.033);
+          append('Done');
+        })();
+      })();
+    </script>
+  </body>
+</html>

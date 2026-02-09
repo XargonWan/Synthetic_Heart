@@ -307,6 +307,21 @@ def register_all():
         tags=["persona"],
     )
 
+    # Autonomy allowed actions (combobox choices populated by available unsafe actions)
+    register_exposed_var(
+        "AUTONOMY_ALLOWED_ACTIONS",
+        label="Autonomy Allowed Actions",
+        default=[],
+        value_type="json",
+        ui_type="tag-combobox",
+        description=(
+            "List of action types the synth may execute autonomously when in 'whitelisted' or 'autonomous' modes. "
+            "Options are dynamically populated from actions declared with 'safe: false' by plugins, interfaces and LLM engines."
+        ),
+        scope="synth",
+        component="persona",
+    )
+
     # SYNTH_NAME is registered within persona_manager (keeps getter/setter behavior)
 
     register_exposed_var(
@@ -316,6 +331,30 @@ def register_all():
         value_type="json",
         ui_type="tags",
         description="Alternative names the synth responds to",
+        scope="synth",
+        component="persona",
+        tags=["persona"],
+    )
+
+    register_exposed_var(
+        "SYNTH_LIKES",
+        label="Synth Likes",
+        default=[],
+        value_type="json",
+        ui_type="tags",
+        description="List of the synth's likes (used by triggers and persona context)",
+        scope="synth",
+        component="persona",
+        tags=["persona"],
+    )
+
+    register_exposed_var(
+        "SYNTH_DISLIKES",
+        label="Synth Dislikes",
+        default=[],
+        value_type="json",
+        ui_type="tags",
+        description="List of the synth's dislikes (used by triggers and persona context)",
         scope="synth",
         component="persona",
         tags=["persona"],
@@ -343,6 +382,23 @@ def register_all():
         scope="synth",
         component="animation",
         readonly=True,
+    )
+
+    # Expose SYNTH_AUTONOMY_MODE as a combobox for better UX (choices shown and selectable)
+    register_exposed_var(
+        "SYNTH_AUTONOMY_MODE",
+        label="Synth Autonomy Mode",
+        default="suggest",
+        value_type=str,
+        ui_type="combobox",
+        description=("Autonomy level: 'passive' (respond only), 'suggest' (propose actions), "
+                     "'whitelisted' (automatically execute ONLY actions listed in AUTONOMY_ALLOWED_ACTIONS), "
+                     "'autonomous' (full autonomy — executes actions without whitelist restrictions; use with caution)."),
+        scope="synth",
+        component="persona",
+        options=["passive", "suggest", "whitelisted", "autonomous"],
+        validator={"choices": ["passive", "suggest", "whitelisted", "autonomous"]},
+        tags=["persona"],
     )
 
     # --- Core: Trainer IDs ---
@@ -376,9 +432,10 @@ def register_all():
         default=240,
         value_type=int,
         ui_type="number",
-        description="Maximum time in seconds to wait for LLM responses before sending fallback message.",
+        description="Maximum time in seconds to wait for LLM responses before sending fallback message. (Advanced)",
         scope="core",
         component="core",
+        advanced=True,
     )
 
     register_exposed_var(
@@ -426,6 +483,67 @@ def register_all():
         }
     )
 
+    # --- Database connection settings (advanced) ---
+    register_exposed_var(
+        "DB_HOST",
+        label="Database Host",
+        default="synth-db",
+        value_type=str,
+        ui_type="string",
+        description="Hostname or IP address for the database server.",
+        scope="core",
+        component="core",
+        advanced=True,
+    )
+
+    register_exposed_var(
+        "DB_PORT",
+        label="Database Port",
+        default=3306,
+        value_type=int,
+        ui_type="number",
+        description="Port used to connect to the database server (e.g., 3306).",
+        scope="core",
+        component="core",
+        advanced=True,
+    )
+
+    register_exposed_var(
+        "DB_USER",
+        label="Database User",
+        default="synth",
+        value_type=str,
+        ui_type="string",
+        description="Username for database connection.",
+        scope="core",
+        component="core",
+        advanced=True,
+    )
+
+    register_exposed_var(
+        "DB_PASS",
+        label="Database Password",
+        default="synth",
+        value_type=str,
+        ui_type="password",
+        description="Password for database connection (hidden in the UI).",
+        scope="core",
+        component="core",
+        advanced=True,
+    )
+
+    register_exposed_var(
+        "DB_NAME",
+        label="Database Name",
+        default="synth",
+        value_type=str,
+        ui_type="string",
+        description="Name of the database/schema to use.",
+        scope="core",
+        component="core",
+        advanced=True,
+    )
+
     register_exposed_var(
         "LLM_MODE",
         label="LLM Mode",
@@ -437,6 +555,143 @@ def register_all():
         tags=["bootstrap"],
     )
 
+    # --- Emotion system tuning (advanced) ---
+    register_exposed_var(
+        "EMOTION_DECAY_TAU",
+        label="Emotion Decay Half-Life",
+        default=3600,
+        value_type=int,
+        ui_type="number",
+        description="Decay half-life in seconds for emotion fading (larger = slower decay).",
+        scope="plugins",
+        component="emotion_manager",
+        advanced=True,
+    )
+
+    register_exposed_var(
+        "EMOTION_MAX_DISPLAY",
+        label="Max Emotions Display",
+        default=7,
+        value_type=int,
+        ui_type="number",
+        description="Maximum number of concurrent emotions shown in UI/diary.",
+        scope="plugins",
+        component="emotion_manager",
+        advanced=True,
+    )
+
+    # --- Grillo scheduler ---
+    register_exposed_var(
+        "GRILLO_BEAT_INTERVAL",
+        label="Grillo Beat Interval",
+        default=1800,
+        value_type=int,
+        ui_type="number",
+        description="Default interval in seconds between Grillo plugin beats (e.g., 1800 = 30 minutes).",
+        scope="grillo",
+        component="grillo",
+        advanced=False,
+    )
+
+    # Grillo Dream settings (grouped under 'Grillo Dream' subgroup in UI)
+    register_exposed_var(
+        "GRILLO_DREAM_ENABLED",
+        label="Enable Grillo Dreams",
+        default=True,
+        value_type=bool,
+        ui_type="bool",
+        description="Enable daily dreams generated by Grillo (uses LLM/dream pipeline).",
+        scope="grillo",
+        component="grillo",
+        advanced=False,
+    )
+
+    register_exposed_var(
+        "GRILLO_DREAM_SAMPLES",
+        label="Grillo Dream Samples",
+        default=10,
+        value_type=int,
+        ui_type="number",
+        description="Number of fragments to include in the dream prompt (mix of chat excerpts and memories).",
+        scope="grillo",
+        component="grillo",
+        advanced=False,
+    )
+
+    register_exposed_var(
+        "GRILLO_DREAM_TIME",
+        label="Grillo Dream Time",
+        default="05:00",
+        value_type=str,
+        ui_type="string",
+        description="Local time (HH:MM) when Grillo generates a dream each day.",
+        scope="grillo",
+        component="grillo",
+        advanced=False,
+    )
+
+    # Grillo Observer settings
+    register_exposed_var(
+        "GRILLO_OBSERVER_ENABLED",
+        label="Enable Grillo Chat Observer",
+        default=True,
+        value_type=bool,
+        ui_type="bool",
+        description="Enable periodic chat observation and proposal beat.",
+        scope="grillo",
+        component="grillo",
+        advanced=False,
+    )
+
+    register_exposed_var(
+        "GRILLO_OBSERVER_INTERVAL",
+        label="Grillo Observer Interval (s)",
+        default=3600,
+        value_type=int,
+        ui_type="number",
+        description="Seconds between observer runs (default 3600 = 1 hour).",
+        scope="grillo",
+        component="grillo",
+        advanced=False,
+    )
+
+    register_exposed_var(
+        "GRILLO_OBSERVER_SAMPLES",
+        label="Grillo Observer Samples",
+        default=10,
+        value_type=int,
+        ui_type="number",
+        description="Number of recent chat snippets to include in the observer prompt.",
+        scope="grillo",
+        component="grillo",
+        advanced=False,
+    )
+
+    register_exposed_var(
+        "GRILLO_OBSERVER_PROPOSE_ONLY",
+        label="Grillo Observer Propose Only",
+        default=True,
+        value_type=bool,
+        ui_type="bool",
+        description="When True, the observer will instruct the LLM to propose actions only (no auto-execution).",
+        scope="grillo",
+        component="grillo",
+        advanced=False,
+    )
+
+    # History Evaluator plugin defaults
+    register_exposed_var(
+        "HISTORY_EVALUATOR_DEFAULT_ENTRIES",
+        label="History Evaluator Default Entries",
+        default=10,
+        value_type=int,
+        ui_type="number",
+        description="Default number of history entries to consider when evaluating history.",
+        scope="grillo",
+        component="grillo",
+        advanced=False,
+    )
+
     register_exposed_var(
         "CHAT_HISTORY",
         label="Chat History Length",
@@ -446,6 +701,42 @@ def register_all():
         description="Number of recent messages to include in chat history context.",
         scope="core",
         component="conversation",
+    )
+
+    register_exposed_var(
+        "LOG_LLM_TRAFFIC_ENABLED",
+        label="Log LLM Traffic",
+        default=False,
+        value_type=bool,
+        ui_type="bool",
+        description="Persist prompt/response pairs to a JSONL file for debugging.",
+        scope="logging",
+        component="core",
+        advanced=True,
+    )
+
+    register_exposed_var(
+        "LOG_LLM_TRAFFIC_PATH",
+        label="LLM Traffic Log Path",
+        default="logs/llm_traffic.jsonl",
+        value_type=str,
+        ui_type="string",
+        description="Path to the JSONL log file for LLM traffic.",
+        scope="logging",
+        component="core",
+        advanced=True,
+    )
+
+    register_exposed_var(
+        "LOG_LLM_TRAFFIC_REDACT_ACTIONS",
+        label="Redact Actions In LLM Log",
+        default=True,
+        value_type=bool,
+        ui_type="bool",
+        description="Remove the actions block from logged prompts to reduce size.",
+        scope="logging",
+        component="core",
+        advanced=True,
     )
 
     register_exposed_var(
@@ -469,6 +760,33 @@ def register_all():
                      "⚠️ Note: Some interfaces or servers/channels may not support all emojis as reactions."),
         scope="core",
         component="reactions",
+    )
+
+    # --- Corrector / retry behaviour (advanced) ---
+    register_exposed_var(
+        "CORRECTOR_RETRIES",
+        label="Corrector Retries",
+        default=4,
+        value_type=int,
+        ui_type="number",
+        description="Number of automatic correction attempts the corrector may perform before giving up.",
+        scope="core",
+        component="core",
+        advanced=True,
+    )
+
+    register_exposed_var(
+        "CONTEXT_LINK_MAP",
+        label="Context Link Map (JSON)",
+        default={},
+        value_type="json",
+        ui_type="json",
+        description=(
+            "JSON map to link different interface paths to a single context (Unified Lane). "
+            "Format: {'source_path_or_id': 'target_path'}."
+        ),
+        scope="core",
+        component="core",
     )
 
     log_info("[variables_engine] Completed explicit exposed var registrations")

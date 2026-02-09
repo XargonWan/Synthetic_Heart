@@ -6,58 +6,95 @@ synth_ALIASES_LOWER = [alias.lower() for alias in synth_ALIASES]
 
 
 def get_current_aliases() -> list[str]:
-    """Get the current persona's aliases, falling back to hardcoded ones."""
+    """Return activation aliases merged from persona, config, and fallbacks."""
+    aliases: list[str] = []
+
+    # 1) Persona-derived aliases (if available)
     try:
         from core.persona_manager import get_persona_manager
-        from core.config_manager import config_registry
+
         persona_manager = get_persona_manager()
         current_persona = persona_manager.get_current_persona()
-        if current_persona and current_persona.aliases:
-            log_debug(f"[mention] Loaded aliases from persona: {current_persona.aliases}")
-            return current_persona.aliases
-
-        # If persona not loaded or aliases empty, try reading from config registry
-        try:
-            # config_registry.get_value may return a JSON string for json types
-            raw = config_registry.get_value("SYNTH_ALIASES", ["SyntH", "Synthetic Heart"], value_type="json")
-            # If it's a string that looks like JSON, try to parse it
-            if isinstance(raw, str):
-                import json
-                try:
-                    parsed = json.loads(raw)
-                    if isinstance(parsed, list):
-                        log_debug(f"[mention] Loaded aliases from config (JSON parsed): {parsed}")
-                        return parsed
-                except Exception:
-                    # Not JSON, fall through
-                    pass
-            if isinstance(raw, list):
-                log_debug(f"[mention] Loaded aliases from config (direct list): {raw}")
-                return raw
-        except Exception as config_e:
-            # If config registry isn't available or value missing, fall back
-            log_debug(f"[mention] Error reading aliases from config registry: {config_e}")
+        if current_persona:
+            persona_aliases = getattr(current_persona, "aliases", None)
+            if persona_aliases:
+                log_debug(f"[mention] Loaded aliases from persona: {persona_aliases}")
+                aliases.extend(list(persona_aliases))
+            persona_name = getattr(current_persona, "name", None)
+            if persona_name:
+                aliases.append(persona_name)
     except Exception as e:
-        log_debug(f"[mention] Error getting current persona aliases: {e}")
-    # Fallback to hardcoded aliases
-    log_debug(f"[mention] Using fallback aliases: {synth_ALIASES}")
-    return synth_ALIASES
+        log_debug(f"[mention] Error reading persona aliases: {e}")
+
+    # 2) Config-derived aliases (DB/UI) as an additional source of truth
+    try:
+        from core.config_manager import config_registry
+
+        raw = config_registry.get_value(
+            "SYNTH_ALIASES",
+            ["SyntH", "Synthetic Heart"],
+            value_type="json",
+        )
+        if isinstance(raw, str):
+            import json
+
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    log_debug(f"[mention] Loaded aliases from config (JSON parsed): {parsed}")
+                    aliases.extend(parsed)
+            except Exception:
+                pass
+        elif isinstance(raw, list):
+            log_debug(f"[mention] Loaded aliases from config (direct list): {raw}")
+            aliases.extend(raw)
+    except Exception as config_e:
+        log_debug(f"[mention] Error reading aliases from config registry: {config_e}")
+
+    # 3) Always include hardcoded fallback aliases (e.g. 'synth')
+    aliases.extend(synth_ALIASES)
+
+    # De-duplicate while preserving order.
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for alias in aliases:
+        if not alias:
+            continue
+        key = str(alias).strip()
+        if not key:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(key)
+
+    if not deduped:
+        log_debug(f"[mention] Using fallback aliases: {synth_ALIASES}")
+        return synth_ALIASES
+
+    return deduped
 
 
-from core.logging_utils import log_debug
+from core.logging_utils import log_debug, log_info
 
 
 
 async def get_bot_username(bot):
     """Get the bot's username from the bot instance."""
     try:
+        # Handle different bot shapes (Telegram, Discord, etc.)
+        # 1) direct attribute (some wrappers expose .username)
         if hasattr(bot, 'username'):
             return bot.username
-        elif hasattr(bot, 'get_me'):
+        # 2) classic Telegram-like Bot with get_me()
+        if hasattr(bot, 'get_me'):
             me = await bot.get_me()
             return getattr(me, 'username', None)
-        else:
-            return None
+        # 3) discord.py Client/Cog exposes .user with .name and .id
+        if hasattr(bot, 'user') and getattr(bot, 'user') is not None:
+            user = getattr(bot, 'user')
+            return getattr(user, 'name', None) or getattr(user, 'username', None)
+        return None
     except Exception as e:
         log_debug(f"[mention] Error getting bot username: {e}")
         return None
@@ -67,24 +104,16 @@ def is_synth_mentioned(text: str) -> bool:
     """Return ``True`` if ``text`` contains any alias for synth."""
     if not text:
         return False
-    import re
     lowered = text.lower()
     aliases = get_current_aliases()
-    # Use word-boundary-aware matching to reduce false positives (e.g. avoid
-    # matching 'synth' inside longer words). Support multi-word aliases.
+    # Match aliases as substrings intentionally: users expect 'synth'
+    # to match 'synth-chan' and similar variations.
     for alias in aliases:
         if not alias:
             continue
-        pattern = r"\b" + re.escape(alias.lower()) + r"\b"
-        try:
-            if re.search(pattern, lowered, flags=re.UNICODE):
-                log_debug(f"[mention] synth alias matched: '{alias}'")
-                return True
-        except Exception:
-            # Fallback: simple substring match if regex fails for some alias
-            if alias.lower() in lowered:
-                log_debug(f"[mention] synth alias matched by fallback: '{alias}'")
-                return True
+        if alias.lower() in lowered:
+            log_debug(f"[mention] synth alias matched (substring): '{alias}'")
+            return True
     return False
 
 
@@ -137,6 +166,7 @@ async def is_message_for_bot(
     # Priority 1: Check for private messages (1:1 chat) - HIGHEST PRIORITY
     try:
         if message.chat.type == "private":
+            log_debug("[mention] match_reason=private_message")
             log_debug("[mention] ✅ Private message detected - PRIORITY 1 - always for bot")
             return True, None
     except Exception as e:
@@ -153,11 +183,23 @@ async def is_message_for_bot(
             
             # Check if reply is to bot by username
             if reply_username and bot_username and reply_username.lower() == bot_username.lower():
+                log_debug("[mention] match_reason=reply_username")
                 log_debug("[mention] ✅ Reply to bot message (username match) - PRIORITY 2 - message is for bot")
                 return True, None
             
             # Check if reply is to bot by ID
-            if reply_id and hasattr(bot, 'id') and reply_id == bot.id:
+            # Support different bot shapes: bot.id or bot.user.id (discord.py)
+            bot_id = None
+            try:
+                if hasattr(bot, 'id'):
+                    bot_id = getattr(bot, 'id')
+                elif hasattr(bot, 'user') and getattr(bot, 'user') is not None:
+                    bot_id = getattr(bot.user, 'id', None)
+            except Exception:
+                bot_id = None
+
+            if reply_id and bot_id and reply_id == bot_id:
+                log_debug("[mention] match_reason=reply_id")
                 log_debug("[mention] ✅ Reply to bot message (ID match) - PRIORITY 2 - message is for bot")
                 return True, None
     
@@ -165,12 +207,17 @@ async def is_message_for_bot(
     if message_text and "@" in message_text:
         # Check for @synth mention
         if "@synth" in message_text.lower():
+            log_debug("[mention] match_reason=@synth_mention")
             log_debug("[mention] ✅ Explicit @synth mention found - PRIORITY 3 - message is for bot")
             return True, None
-        # Check for bot username if provided
-        if bot_username and f"@{bot_username}" in message_text:
-            log_debug(f"[mention] ✅ Explicit @mention found: @{bot_username} - PRIORITY 3 - message is for bot")
-            return True, None
+        # Check for bot username if provided (case-insensitive)
+        if bot_username:
+            normalized_msg = message_text.lower()
+            normalized_bot = f"@{bot_username}".lower()
+            if normalized_bot in normalized_msg:
+                log_debug(f"[mention] match_reason=@{bot_username}_mention")
+                log_debug(f"[mention] ✅ Explicit @mention found: @{bot_username} (case-insensitive) - PRIORITY 3 - message is for bot")
+                return True, None
     
     # Priority 4: Check for synth aliases in message text (activation words)
     if message_text:
@@ -178,45 +225,82 @@ async def is_message_for_bot(
         log_debug(f"[mention] Checking aliases in text: '{text_lower}'")
         aliases = get_current_aliases()
         log_debug(f"[mention] Current aliases to check: {aliases}")
-        for alias in aliases:
-            if alias.lower() in text_lower:
-                log_debug(f"[mention] ✅ Alias found: '{alias}' - PRIORITY 4 - message is for bot")
+        # Use the alias-aware helper which performs word-boundary-aware matching
+        try:
+            if is_synth_mentioned(message_text):
+                log_debug("[mention] match_reason=alias")
+                log_debug(f"[mention] ✅ Alias found in text - PRIORITY 4 - message is for bot")
                 return True, None
+        except Exception:
+            # Fallback to simple substring matching if helper unavailable for any reason
+            for alias in aliases:
+                if alias.lower() in text_lower:
+                    log_debug(f"[mention] match_reason=alias:{alias}")
+                    log_debug(f"[mention] ✅ Alias found: '{alias}' - PRIORITY 4 - message is for bot")
+                    return True, None
         log_debug(f"[mention] No aliases found in '{text_lower}'")
     
     # Priority 4b: Check for persona name in message text
     if message_text:
         try:
+            log_debug("[mention] Checking persona via get_persona_manager()")
             from core.persona_manager import get_persona_manager
             persona_manager = get_persona_manager()
+            log_debug(f"[mention] persona_manager instance: {persona_manager}")
             current_persona = persona_manager.get_current_persona()
+            log_debug(f"[mention] current_persona: {current_persona}")
             if current_persona and current_persona.name:
                 persona_name = current_persona.name
                 text_lower = message_text.lower()
-                if persona_name.lower() in text_lower:
-                    log_debug(f"[mention] ✅ Persona name found: '{persona_name}' - PRIORITY 4b - message is for bot")
-                    return True, None
-                else:
-                    log_debug(f"[mention] Persona name '{persona_name}' not found in '{text_lower}'")
+                # Use word-boundary-aware matching for persona name to avoid
+                # accidental matches inside longer words (e.g. 'synthesis').
+                import re
+                pattern = r"\b" + re.escape(persona_name.lower()) + r"\b"
+                try:
+                    if re.search(pattern, text_lower, flags=re.UNICODE):
+                        log_debug(f"[mention] match_reason=persona_name:{persona_name}")
+                        log_debug(f"[mention] ✅ Persona name found: '{persona_name}' - PRIORITY 4b - message is for bot")
+                        return True, None
+                    else:
+                        log_debug(f"[mention] Persona name '{persona_name}' not found in '{text_lower}'")
+                except Exception:
+                    # Fallback to simple substring check if regex fails for some reason
+                    if persona_name.lower() in text_lower:
+                        log_debug(f"[mention] match_reason=persona_name_fallback:{persona_name}")
+                        log_debug(f"[mention] ✅ Persona name found by fallback: '{persona_name}' - PRIORITY 4b - message is for bot")
+                        return True, None
+                    else:
+                        log_debug(f"[mention] Persona name '{persona_name}' not found in '{text_lower}' (fallback)")
             else:
                 log_debug(f"[mention] No persona name available to check")
         except Exception as e:
             log_debug(f"[mention] Error checking persona name: {e}")
+
+    # Priority 4c: Check for persona triggers (aliases/likes/dislikes/interests)
+    if message_text:
+        try:
+            from core.persona_manager import get_persona_manager
+
+            persona_manager = get_persona_manager()
+            if persona_manager and persona_manager.check_triggers(message_text):
+                log_debug("[mention] match_reason=persona_trigger")
+                log_debug("[mention] ✅ Persona trigger found (aliases/likes/dislikes/interests) - PRIORITY 4c - message is for bot")
+                return True, None
+        except Exception as e:
+            log_debug(f"[mention] Error checking persona triggers: {e}")
     
     # Priority 5: Check for chat 1:1 using human count (fallback)
     if human_count is not None and human_count == 1:
+        log_debug("[mention] match_reason=single_human")
         log_debug("[mention] ✅ Single human in chat - PRIORITY 5 - treating as message for bot")
         return True, None
     
-    # No direct mention found and either multiple humans or unknown count
+    # No direct mention found and either multiple humans or unknown count.
+    # If we can't determine human_count, treat it as not 1:1 by default.
     if human_count is None:
-        log_debug("[mention] ⚠️ No direct mention found and human count unavailable - checking if we should fallback")
-        # Fallback: if this is a group/supergroup and no direct mention found, don't process
-        # But if this is being called in a context where we couldn't determine human_count,
-        # we allow it to be processed if there's ANY indication it could be for the bot
-        # For now, return False with missing_human_count reason to let the caller decide
-        return False, "missing_human_count"
-    else:
-        log_debug(f"[mention] No direct mention found and multiple humans in chat ({human_count})")
-        return False, "multiple_humans"
+        log_debug("[mention] No direct mention found and human count unavailable - treating as not 1:1")
+        return False, "unknown_human_count"
+
+    log_debug(f"[mention] No direct mention found and multiple humans in chat ({human_count})")
+    return False, "multiple_humans"
 

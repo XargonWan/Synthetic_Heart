@@ -81,6 +81,36 @@ The interval can be changed at runtime without restarting:
    from core.config_manager import config_registry
    config_registry.set_value("GRILLO_BEAT_INTERVAL", 3600)  # 1 hour
 
+**New Variable:** ``GRILLO_SUPPRESS_INACTIVE``
+
+- **Default:** True
+- **Type:** Boolean
+- **Group:** ``grillo``
+- **Component:** ``grillo_plugin``
+- **Description:** When enabled, Grillo-originated outbound messages will be suppressed when the last message in the target thread was authored by the synth (to avoid duplicate messages/spam). This can be toggled at runtime for controlled rollout.
+
+**Metric / Auditability:**
+
+- ``GrilloPlugin.suppressed_count`` (in-memory counter) tracks suppressed outbound messages and mirrors the persistent count on the activity row.
+- The ``grillo_activity_log`` table now has a new ``suppressed_count`` column (INT DEFAULT 0) that is incremented (best-effort) when an outbound beat is suppressed. When suppression occurs and an originating ``activity_log`` row exists, the activity row will be annotated with a short ``[suppressed: reason]`` note so the History > Grillo view can show why the beat didn't post.
+
+Database Migration
+^^^^^^^^^^^^^^^^^^
+
+If you are upgrading an existing deployment, run the following migration against your synth database (adjust for your tooling):
+
+.. code-block:: sql
+
+   ALTER TABLE grillo_activity_log ADD COLUMN suppressed_count INT DEFAULT 0;
+
+Run this migration in a maintenance window; the operation is fast and safe but requires DB write permissions.
+
+
+.. code-block:: python
+
+   from core.config_manager import config_registry
+   config_registry.set_value("GRILLO_BEAT_INTERVAL", 3600)  # 1 hour
+
 Priority System
 ---------------
 
@@ -162,6 +192,17 @@ stop()
 
 Implementation Details
 ----------------------
+
+History > Grillo Output
+^^^^^^^^^^^^^^^^^^^^^^^
+
+The History > Grillo view is backed by the ``grillo_activity_log`` table.
+
+- ``prompt_text`` stores the beat prompt used to trigger reflection.
+- ``diary_entry_id`` links to the resulting ``ai_diary`` entry (when one is created).
+- ``response_text`` stores the *outbound* message text when a beat triggers a message action
+   (e.g. ``message_telegram_bot``). This ensures Grillo-originated posts still appear under
+   Grillo history even when they are sent through an external interface.
 
 Background Loop
 ^^^^^^^^^^^^^^^
@@ -247,6 +288,22 @@ Disable Plugin Temporarily
 
 .. code-block:: bash
 
+
+Running Tests
+^^^^^^^^^^^^^
+
+For reliable test execution, run the test suite inside a Python virtual environment (venv):
+
+.. code-block:: bash
+
+   python -m venv venv
+   source venv/bin/activate
+   pip install -r requirements.txt
+   pytest tests/test_grillo_prevent_duplicates.py -q
+
+This avoids contaminating the global Python environment and ensures deterministic dependency versions.
+
+
    # Move to plugins_dev to disable
    mv plugins/grillo_plugin.py plugins_dev/
    
@@ -254,6 +311,32 @@ Disable Plugin Temporarily
    videodrome synth restart dev
    
    # Beats are now disabled but preserved in database
+
+Dreams (Daily)
+--------------
+
+The Grillo "dream" beat generates a daily creative consolidation of recent experiences:
+
+- **What it does:** once per day (configurable local time), Grillo samples recent chat snippets and stored memories, constructs a compact context labeled as a "dream", and asks the LLM to generate an evocative dream narrative.
+- **Primary outcome:** the LLM should reply with a single JSON action to create a personal diary entry (``create_personal_diary_entry``). The entry is linked to ``grillo_activity_log`` so the dream appears in History > Grillo.
+
+Configuration variables:
+
+- ``GRILLO_DREAM_ENABLED`` (bool, default: ``True``) — enable/disable daily dream generation
+- ``GRILLO_DREAM_TIME`` (string, default: ``"05:00"``) — local time (HH:MM) when the dream job runs daily (uses system TZ / ``TZ`` config)
+- ``GRILLO_DREAM_SAMPLES`` (int, default: ``10``) — number of fragments (mix of chats and memories) to include in the dream prompt
+- ``HISTORY_EVALUATOR_DEFAULT_ENTRIES`` (int, default: ``10``) — default number of history entries considered by the History Evaluator plugin
+
+UI: These variables are exposed in the WebUI under **Configurations → Grillo** (they are visible by default, not in the Advanced subsection). Other Grillo-related plugin settings (e.g. ``GRILLO_OBSERVER_*``) appear under **Configurations → Grillo → Grillo Observer** and History Evaluator settings appear under **Configurations → Grillo → History Evaluator**.
+
+Observer memory flag:
+
+- ``GRILLO_OBSERVER_STORE_MEMORIES`` (bool, default: ``True``) — when enabled, the observer persists sampled snippets as passive memories.
+
+Notes:
+
+- The system stores and schedules events in UTC internally, but dream scheduling is *interpreted in local time* (see ``core.time_zone_utils``). If you set the dream time to 05:00 and your TZ is JST (UTC+9), the plugin calculates the next occurrence in JST and converts appropriately to UTC for scheduling.
+- Prompts are truncated to keep prompt size manageable; the LLM is instructed to RESPOND ONLY WITH VALID JSON and must include the correct action payload.
 
 Future Enhancements
 -------------------

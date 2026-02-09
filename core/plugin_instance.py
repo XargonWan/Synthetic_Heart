@@ -6,17 +6,20 @@ from core.llm_registry import get_llm_registry
 import asyncio
 from types import SimpleNamespace
 from datetime import datetime
+import json
+import os
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.action_parser import parse_action
 from core.json_utils import dumps as json_dumps, sanitize_for_json
 from core.image_processor import get_image_processor, process_image_message
 from core.abstract_context import AbstractContext, AbstractUser, AbstractMessage
 from core.mention_utils import is_message_for_bot
+from core.config_manager import config_registry
 
 # Plugin managed centrally in initialize_core_components
 plugin = None
 
-async def load_plugin(name: str, notify_fn=None):
+async def load_plugin(name: str, notify_fn=None, *, ensure_started: bool = False, start_timeout: float = 30.0):
     global plugin
 
     # 🔁 If already loaded but different, replace it or update notify_fn
@@ -117,18 +120,59 @@ async def load_plugin(name: str, notify_fn=None):
                     loop = asyncio.get_running_loop()
                 except RuntimeError:
                     loop = None
+
                 if loop and loop.is_running():
-                    loop.create_task(start_fn())
-                    log_debug("[plugin] Plugin start executed on running loop.")
+                    if ensure_started:
+                        # Await the coroutine start to ensure plugin initialized properly
+                        try:
+                            log_debug("[plugin] Awaiting async plugin start (ensure_started=True)")
+                            await asyncio.wait_for(start_fn(), timeout=start_timeout)
+                            log_debug("[plugin] ✅ Async plugin start awaited and completed")
+                        except asyncio.TimeoutError:
+                            log_error(f"[plugin] ❌ Async plugin start timed out after {start_timeout}s")
+                            raise
+                        except Exception as e:
+                            log_error(f"[plugin] ❌ Async plugin start failed: {e}", e)
+                            raise
+                    else:
+                        # Schedule start as background task but attach callback to handle exceptions
+                        task = loop.create_task(start_fn())
+
+                        def _on_start_done(t):
+                            try:
+                                exc = t.exception()
+                                if exc:
+                                    log_error(f"[plugin] Async plugin start failed: {exc}")
+                                else:
+                                    log_debug("[plugin] Async plugin start completed successfully")
+                            except asyncio.CancelledError:
+                                log_warning("[plugin] Async plugin start task was cancelled")
+                            except Exception as e:
+                                log_error(f"[plugin] Error handling plugin start completion: {e}")
+
+                        task.add_done_callback(_on_start_done)
+                        log_debug("[plugin] Plugin start scheduled on running loop.")
                 else:
+                    if ensure_started:
+                        # We cannot await start() without a running loop in this context
+                        log_error("[plugin] ❌ Cannot ensure async plugin start: no running event loop available")
+                        raise RuntimeError("No running event loop to await plugin start")
                     log_debug(
                         "[plugin] No running loop; plugin start will be invoked later."
                     )
             else:
-                start_fn()
-                log_debug("[plugin] Plugin start executed.")
+                # Synchronous start
+                if ensure_started:
+                    start_fn()
+                    log_debug("[plugin] ✅ Synchronous plugin start executed (ensure_started=True)")
+                else:
+                    start_fn()
+                    log_debug("[plugin] Plugin start executed.")
         except Exception as e:
             log_error(f"[plugin] Error during plugin start: {e}", e)
+            if ensure_started:
+                # Propagate errors when the caller requested a guaranteed start
+                raise
 
     # Default model
     if hasattr(plugin, "get_supported_models"):
@@ -164,6 +208,13 @@ async def handle_incoming_message(bot, message, context_memory_or_prompt, interf
         except Exception as fallback_e:
             log_error(f"[plugin_instance] Fallback plugin loading failed: {fallback_e}")
             raise ValueError("No LLM plugin loaded and fallback failed")
+
+    # Normalize message user/date fields to avoid AttributeErrors later
+    try:
+        from core.user_utils import ensure_message_user_fields
+        ensure_message_user_fields(message)
+    except Exception:
+        pass
 
     if message is None and isinstance(context_memory_or_prompt, dict):
         prompt = context_memory_or_prompt
@@ -357,6 +408,10 @@ async def handle_incoming_message(bot, message, context_memory_or_prompt, interf
             raise ValueError("No LLM plugin loaded")
             
         result = await plugin.handle_incoming_message(bot, message, prompt)
+        try:
+            _log_llm_traffic(prompt, result, interface)
+        except Exception as e:
+            log_error(f"[plugin_instance] Failed to log LLM traffic: {e}")
         # Log that plugin finished processing
         try:
             log_info(f"[flow] <- LLM plugin: completed for chat_id={getattr(message, 'chat_id', None)} result_type={type(result)}")
@@ -377,6 +432,9 @@ async def handle_incoming_message(bot, message, context_memory_or_prompt, interf
                 llm_context['chat_id'] = message.chat_id
             if hasattr(message, 'interface_path'):
                 llm_context['interface_path'] = message.interface_path
+            # Ensure action_parser/plugins can reliably detect the originating interface
+            if interface:
+                llm_context['interface'] = interface
             if isinstance(context_memory_or_prompt, dict):
                 llm_context.update(context_memory_or_prompt)
             
@@ -418,6 +476,85 @@ def get_supported_models():
     if plugin and hasattr(plugin, "get_supported_models"):
         return plugin.get_supported_models()
     return []
+
+
+def get_current_model():
+    if plugin and hasattr(plugin, "get_current_model"):
+        try:
+            return plugin.get_current_model()
+        except Exception:
+            pass
+    try:
+        from core.config import get_current_model as _get_current_model
+
+        return _get_current_model()
+    except Exception:
+        return None
+
+
+def set_current_model(model: str) -> None:
+    from core.config import set_current_model as _set_current_model
+
+    _set_current_model(model)
+    if plugin and hasattr(plugin, "set_current_model"):
+        try:
+            plugin.set_current_model(model)
+        except Exception:
+            pass
+
+
+def _log_llm_traffic(prompt, response, interface_name):
+    """Log raw LLM traffic to a JSONL file (optional)."""
+    try:
+        enabled = config_registry.get_value(
+            "LOG_LLM_TRAFFIC_ENABLED",
+            False,
+            value_type=bool,
+            group="logging",
+            component="core",
+        )
+        if not enabled:
+            return
+        log_path = config_registry.get_value(
+            "LOG_LLM_TRAFFIC_PATH",
+            "logs/llm_traffic.jsonl",
+            value_type=str,
+            group="logging",
+            component="core",
+        )
+        redact_actions = config_registry.get_value(
+            "LOG_LLM_TRAFFIC_REDACT_ACTIONS",
+            True,
+            value_type=bool,
+            group="logging",
+            component="core",
+        )
+    except Exception:
+        return
+
+    log_prompt = prompt
+    if redact_actions and isinstance(prompt, dict):
+        try:
+            log_prompt = prompt.copy()
+            log_prompt.pop("actions", None)
+        except Exception:
+            pass
+
+    entry = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "interface": interface_name,
+        "input_context": log_prompt,
+        "response": response,
+    }
+
+    try:
+        log_dir = os.path.dirname(os.path.abspath(log_path)) or "logs"
+        os.makedirs(log_dir, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, indent=2, default=str) + "\n\n")
+        log_debug(f"[plugin_instance] 📝 Logged LLM traffic to {log_path}")
+    except Exception as e:
+        log_error(f"[plugin_instance] Failed to write to traffic log: {e}")
 
 
 def get_target(message_id):

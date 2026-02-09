@@ -51,9 +51,19 @@ Beta, but stable enough for daily use. Development branch gives access to the la
 - Action plugins such as a persistent terminal and scheduled events
 - Action plugins such as a persistent terminal and scheduled events
 - G.R.I.L.L.O. ("grillo"): an autonomous internal "beat" system that periodically triggers reflective prompts (memory consolidation, tag elaboration, self-reflection, curiosity, relationship checks) and can create diary entries, schedule actions, or enqueue other tasks. G.R.I.L.L.O. stands for "Generator for Reflective Inner Loop & Logical Observation" — and the word "grillo" in Italian literally means 'cricket' (see the Pinocchio reference: "grillo parlante", the talking cricket). See `plugins/grillo_plugin.py` for details; it's configurable and may be enabled or disabled.
-- Context memory injection with `/context`
 - Ollama-compatible HTTP bridge so existing Ollama clients can talk to Synthetic Heart
 - Docker deployment with automatic database backups
+- Mobile support
+
+<div align="center">
+   <img src="docs/res/screenshots/mobile_home.jpg" alt="SyntH Mobile Home Screenshot" style="max-width: 150px; border-radius: 8px; margin: 8px;" />
+   <img src="docs/res/screenshots/mobile_menu.jpg" alt="SyntH Mobile Menu Screenshot" style="max-width: 150px; border-radius: 8px; margin: 8px;" />
+   <img src="docs/res/screenshots/mobile_archive.jpg" alt="SyntH Mobile Chat Archive Screenshot" style="max-width: 150px; border-radius: 8px; margin: 8px;" />
+   <img src="docs/res/screenshots/mobile_config.jpg" alt="SyntH Mobile Config Screenshot" style="max-width: 150px; border-radius: 8px; margin: 8px;" />
+</div>
+<p align="center" style="font-size: 0.9em; color: #888;">
+   <em>* SyntH is fully usable on mobile devices via the WebUI.</em>
+</p>
 
 > [!NOTE]
 > **G.R.I.L.L.O. System**: SyntH personas already maintain persistent awareness and memory. The G.R.I.L.L.O. system (Generator for Reflective Inner Loop & Logical Observation) enables them to autonomously think and initiate actions based on their interests and internal motivations—much like a real person deciding to act on their own. The name "grillo" nods to the Italian "grillo parlante" (the talking cricket) from Pinocchio — the companion conscience.
@@ -75,13 +85,35 @@ The project ships with an **Ollama-compatible interface** (`interface/ollama_com
    <img src="docs/res/quickstart.png" alt="SyntH Home Screenshot" style="max-width: 700px; border-radius: 8px; margin: 16px 0;" />
 </div>
 
-1. Copy `.env.example` to `.env` and fill the required values.
-2. Start the stack:
+1. Clone this repository or simply download the composer file and the skins folder (see the note below).
+2. [OPTIONAL] Copy `.env.example` to `.env` to customize the deployment.
+3. Start the stack:
    ```bash
-   docker compose up
+   docker compose up -d
    ```
-3. If using the Selenium engine with ChatGPT or Gemini, open `http://<host>:5006` and log into the web interface. You might want to send a message to the bot to trigger a browser session if you're unsure.
+   
+   > **Note about logs:** The stack now uses a Docker-managed volume for application logs by default (`synth_logs` -> `/app/logs`). This avoids common host-permission problems so a user can run `docker compose up -d` out-of-the-box.
+   > 
+   > If you prefer to store logs on the host, replace the volume mapping in `docker-compose.yml` with a bind-mount (uncomment `./logs:/app/logs`). On systems with SELinux enabled, append `:Z` to the mount (for example: `./logs:/app/logs:Z`).
+4. Connect to the WebUI via https (default port is 8000)
+
+Note: The default compose configuration is now turnkey — the image ships with built-in skins and uses Docker-managed volumes for logs and skins so a fresh clone should work with a single `docker compose up -d` command. The WebUI is served over HTTPS at `https://localhost:8000` by default (a self-signed certificate is generated automatically if none is provided). If the database is initializing the first run, give it a few seconds; the service will retry until the DB is ready.
+5. Once in the WebUI navigate to components and select the desired LLM Engine.
+6. If using the Selenium engine (such as ChatGPT or Gemini), don't forget to press the Login button and log into the web interface.
 From there you can login.
+
+**NOTE:** skins folder is optional if the user is not interested in edit them. In this case, however, the mount point for the skins folder on the docker compose should be commented out, else an empty skin folder will be mounted overriding the included one.
+
+### Customize your Synth
+
+Then you might want to edit the following settings on the WebUI -> Settings:
+- Default Location: your location, so the synth knows where they are, useful for the weather for example
+- Timezone: (if you didn´t do via compose) with your timezone, useful to make the synth aware of what time is actually in your place
+- Trainer Name: your name, else the synth don't know who you are
+- Synth Name: The name of the Synth. To not be mistaken with the name of the skin, that is just a name given to the skin but itś not set as the synth name. A Symnth can be called Kotone and have the skin of Rei for example.
+- Synth Profile: A description of how your synth is, written in second person, check the default one.
+
+Moreover you can add more skins or just upload your vrm model.
 
 See the [documentation](https://synthetic-heart.readthedocs.io) for installation details, advanced features and contribution guidelines.
 
@@ -96,7 +128,6 @@ Pull requests are welcome! Everyone is encouraged to submit contributions—espe
 Here are the main improvements and integrations we plan to work on — contributions are welcome:
 
 - [ ] Event system fixes
-- [ ] Enhancements to the WebUI (usability & feature parity)
 - [ ] Global animation engine fixes — make animations always reflect the actual state of the SyntH and their current actions
 - [ ] Helper LLM engine — offload some background/service actions to a dedicated helper model running alongside the user-facing LLM
 - [ ] Memory retagging engine — improve tagging and indexing of memory entries for better recall and context

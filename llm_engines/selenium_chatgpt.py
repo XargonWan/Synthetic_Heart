@@ -17,6 +17,7 @@ register_exposed_var(
     component="selenium_chatgpt",
     tags=["llm_engine"],
     advanced=True,
+    hidden=True,  # Hide model selection until model-selection UX is improved
 )
 
 # ChatGPT configuration - constants only

@@ -16,11 +16,14 @@ try:  # pragma: no cover - import guard
 except Exception:  # pragma: no cover - executed when aiomysql missing
     async def _missing_connect(*args, **kwargs):
         raise RuntimeError("aiomysql is not installed")
-
+    # Provide a minimal stub exposing the async connect/create_pool API so
+    # calling sites receive a clear RuntimeError instead of an AttributeError
+    # when aiomysql is not installed.
     aiomysql = SimpleNamespace(  # type: ignore
         Connection=object,
         Cursor=object,
         connect=_missing_connect,
+        create_pool=_missing_connect,
     )
 
 from core.logging_utils import log_debug, log_info, log_warning, log_error
@@ -37,23 +40,40 @@ def _read_db_config():
     """Return DB_HOST, DB_PORT, DB_USER, DB_PASS, DB_NAME reading from
     config_registry when available, otherwise from environment or defaults.
     """
+    # DB connection settings must be environment-driven.
+    # If a previous run persisted an incorrect DB_HOST (e.g. "localhost") into
+    # config_registry/DB, preferring that value can lock the system out of DB.
+    env_host = os.getenv('DB_HOST')
+    env_port = os.getenv('DB_PORT')
+    env_user = os.getenv('DB_USER')
+    env_pass = os.getenv('DB_PASS')
+    env_name = os.getenv('DB_NAME')
+
+    # Start from env (or hard defaults if env is missing)
+    host = env_host or 'localhost'
     try:
-        # Prefer config_registry values if accessible
-        host = config_registry.get_value('DB_HOST', os.getenv('DB_HOST', 'localhost'))
-        port = int(config_registry.get_value('DB_PORT', int(os.getenv('DB_PORT', 3306))))
-        user = config_registry.get_value('DB_USER', os.getenv('DB_USER', 'synth'))
-        passwd = config_registry.get_value('DB_PASS', os.getenv('DB_PASS', 'synth'))
-        dbname = config_registry.get_value('DB_NAME', os.getenv('DB_NAME', 'synth'))
+        port = int(env_port) if env_port is not None else 3306
     except Exception:
-        # Fall back to environment or defaults if config_registry is not ready
-        host = os.getenv('DB_HOST', 'localhost')
-        try:
-            port = int(os.getenv('DB_PORT', '3306'))
-        except Exception:
-            port = 3306
-        user = os.getenv('DB_USER', 'synth')
-        passwd = os.getenv('DB_PASS', 'synth')
-        dbname = os.getenv('DB_NAME', 'synth')
+        port = 3306
+    user = env_user or 'synth'
+    passwd = env_pass or 'synth'
+    dbname = env_name or 'synth'
+
+    # Allow config_registry to fill only the missing pieces (never override env)
+    try:
+        if env_host is None:
+            host = config_registry.get_value('DB_HOST', host)
+        if env_port is None:
+            port = int(config_registry.get_value('DB_PORT', port))
+        if env_user is None:
+            user = config_registry.get_value('DB_USER', user)
+        if env_pass is None:
+            passwd = config_registry.get_value('DB_PASS', passwd)
+        if env_name is None:
+            dbname = config_registry.get_value('DB_NAME', dbname)
+    except Exception:
+        pass
+
     return host, port, user, passwd, dbname
 
 # Test di connessione con retry e logging dettagliato
@@ -62,7 +82,7 @@ async def wait_for_db(max_attempts=10, delay=3):
     for attempt in range(1, max_attempts + 1):
         try:
             host, port, user, passwd, dbname = _read_db_config()
-            log_info(f"[db] Attempt {attempt}: connecting to {user}@{host}:{port}/{dbname}")
+            log_debug(f"[db] Attempt {attempt}: connecting to {user}@{host}:{port}/{dbname}")
             conn = await aiomysql.connect(
                 host=host,
                 port=port,
@@ -71,7 +91,7 @@ async def wait_for_db(max_attempts=10, delay=3):
                 db=dbname,
                 autocommit=True,
             )
-            log_info("[db] Successfully connected to the database!")
+            log_debug("[db] Successfully connected to the database!")
             conn.close()
             return True
         except Exception as e:
@@ -81,6 +101,9 @@ async def wait_for_db(max_attempts=10, delay=3):
     return False
 
 _db_logging_initialized = False
+
+# Track if we've already warned about unsupported `max_execution_time` so we don't spam logs
+_max_execution_time_unsupported_reported = False
 
 def initialize_db_logging():
     """Log database configuration for debugging purposes."""
@@ -237,7 +260,26 @@ async def get_conn() -> aiomysql.Connection:
         async with conn.cursor() as cur:
             await cur.execute("SET SESSION max_execution_time=30000")  # 30 second timeout per query
     except Exception as e:
-        log_debug(f"[db] Could not set query timeout: {e}")
+        # Some MySQL/MariaDB servers (or older versions) don't support
+        # the `max_execution_time` session variable (error 1193 / "Unknown system variable").
+        # Treat that specific case as informational but warn only once to avoid log spamming.
+        try:
+            msg = str(e)
+            if "Unknown system variable 'max_execution_time'" in msg or "1193" in msg:
+                try:
+                    # report the unsupported-variable condition only the first time
+                    global _max_execution_time_unsupported_reported
+                    if not _max_execution_time_unsupported_reported:
+                        log_warning("[db] DB server does not support session max_execution_time; query timeouts will not be enforced (first occurrence): %s" % msg)
+                        _max_execution_time_unsupported_reported = True
+                except Exception:
+                    # Fallback to debug logging if something goes wrong updating the flag
+                    log_debug(f"[db] Could not set query timeout (ignoring unsupported var): {e}")
+            else:
+                # Other errors are unexpected — log as error so maintainers notice
+                log_error(f"[db] Could not set query timeout: {e}")
+        except Exception:
+            log_error(f"[db] Could not set query timeout: {e}")
 
     # Track active connections for monitoring/leak detection
     try:
@@ -337,6 +379,163 @@ async def get_conn() -> aiomysql.Connection:
                     _conn_acquired_stacks.pop(id(self._conn), None)
                 except Exception:
                     pass
+
+        def cursor(self, *args, **kwargs):
+            """Return a cursor helper that supports both awaiting and async-context use.
+
+            Call sites in the codebase historically do two different things:
+            - "cursor = await conn.cursor()" (awaiting a coroutine that returns a cursor)
+            - "async with conn.cursor() as cur: ..." (using an async context manager)
+
+            To remain compatible with both styles, we return a small wrapper that
+            implements both the awaitable protocol (so `await conn.cursor()` returns
+            the underlying cursor) and the async context manager protocol (so
+            `async with conn.cursor() as cur` works too). The wrapper will also
+            attempt to close the underlying cursor on exit, awaiting `close()` if
+            it's awaitable.
+            """
+            try:
+                real_cursor_call = getattr(self._conn, 'cursor')
+            except Exception:
+                real_cursor_call = None
+
+            if real_cursor_call is None:
+                # Fallback to a no-op context manager
+                from contextlib import asynccontextmanager
+
+                @asynccontextmanager
+                async def _null_ctx():
+                    yield None
+                return _null_ctx()
+
+            real_cursor_obj = real_cursor_call(*args, **kwargs)
+
+            import inspect
+
+            class _CursorWrapper:
+                def __init__(self, real):
+                    self._real = real
+                    self._cursor = None
+
+                def __await__(self):
+                    async def _get():
+                        # Case 1: the underlying call is awaitable and returns a cursor
+                        if inspect.isawaitable(self._real):
+                            cur = await self._real
+                            self._cursor = cur
+                            return cur
+
+                        # Case 2: the underlying object is an async context manager
+                        # (e.g., contextlib._AsyncGeneratorContextManager). In this
+                        # case we enter it and return a small proxy that forwards
+                        # attribute access to the real cursor but also ensures we
+                        # call __aexit__ when the proxy's async close() is invoked.
+                        if hasattr(self._real, '__aenter__'):
+                            cm = self._real
+                            enter_res = cm.__aenter__()
+                            if inspect.isawaitable(enter_res):
+                                cur = await enter_res
+                            else:
+                                cur = enter_res
+
+                            self._cursor = cur
+                            self._entered_cm = cm
+
+                            class _ProxyCursor:
+                                def __init__(self, inner_cur, cm_obj):
+                                    self._inner = inner_cur
+                                    self._cm = cm_obj
+
+                                def __getattr__(self, name):
+                                    return getattr(self._inner, name)
+
+                                async def close(self):
+                                    # Close inner cursor if possible
+                                    try:
+                                        close_fn = getattr(self._inner, 'close', None)
+                                        if close_fn:
+                                            res = close_fn()
+                                            if inspect.isawaitable(res):
+                                                await res
+                                    except Exception:
+                                        pass
+
+                                    # Exit the context manager to release resources
+                                    try:
+                                        exit_fn = getattr(self._cm, '__aexit__', None)
+                                        if exit_fn:
+                                            res = exit_fn(None, None, None)
+                                            if inspect.isawaitable(res):
+                                                await res
+                                    except Exception:
+                                        pass
+
+                                # Provide sync-compatible close for callers that do not await
+                                def close_sync(self):
+                                    try:
+                                        close = getattr(self._inner, 'close', None)
+                                        if close:
+                                            close()
+                                    except Exception:
+                                        pass
+                                    try:
+                                        exit_fn = getattr(self._cm, '__aexit__', None)
+                                        if exit_fn:
+                                            # Best-effort: call without awaiting
+                                            exit_fn(None, None, None)
+                                    except Exception:
+                                        pass
+
+                            return _ProxyCursor(cur, cm)
+
+                        # Case 3: plain object (cursor already returned)
+                        cur = self._real
+                        self._cursor = cur
+                        return cur
+
+                    return _get().__await__()
+
+                async def __aenter__(self):
+                    # Ensure we have the resolved cursor instance
+                    if self._cursor is None:
+                        self._cursor = await self
+
+                    # If the underlying cursor is itself an async context manager,
+                    # prefer to delegate to its __aenter__ for any setup logic.
+                    try:
+                        enter_fn = getattr(self._cursor, '__aenter__', None)
+                        if enter_fn:
+                            res = enter_fn()
+                            if inspect.isawaitable(res):
+                                return await res
+                            return res
+                    except Exception:
+                        pass
+                    return self._cursor
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    # If the underlying cursor provides __aexit__, use it.
+                    try:
+                        exit_fn = getattr(self._cursor, '__aexit__', None)
+                        if exit_fn:
+                            res = exit_fn(exc_type, exc, tb)
+                            if inspect.isawaitable(res):
+                                await res
+                            return
+                    except Exception:
+                        pass
+
+                    # Otherwise, attempt to close the cursor (await if necessary)
+                    try:
+                        close_fn = getattr(self._cursor, 'close', None)
+                        if close_fn:
+                            res = close_fn()
+                            if inspect.isawaitable(res):
+                                await res
+                    except Exception:
+                        pass
+
+            return _CursorWrapper(real_cursor_obj)
 
     return _ConnProxy(conn, pool)
 

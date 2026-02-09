@@ -50,6 +50,8 @@ Runtime Commands
 **Engine Management**
     - ``/llm``: List available LLM engines
     - ``/llm <engine_name>``: Switch to a specific engine
+    - ``/model``: List available models for the active engine
+    - ``/model <model_name>``: Switch the active model (e.g. ``gemini_api``)
 
 **Context Control**
     - ``/context on``: Enable message context injection
@@ -79,6 +81,10 @@ Components are configured through environment variables in the ``.env`` file:
 **LLM API Keys**
     - ``OPENAI_API_KEY``: OpenAI API access
     - ``GEMINI_API_KEY``: Google Gemini access
+
+**Gemini API (REST)**
+    - ``GEMINI_API_BASE_URL``: Override the Gemini REST base URL (default: https://generativelanguage.googleapis.com)
+    - ``GEMINI_MODEL``: Select the Gemini model (visible in the WebUI when ``gemini_api`` is loaded)
 
 The modular architecture ensures that components only load when their required configuration is present, making the system highly flexible and secure.
 

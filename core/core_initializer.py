@@ -53,6 +53,7 @@ class CoreInitializer:
         self._summary_displayed = False  # Flag to prevent duplicate summaries
         self._building_actions_block = False  # Flag to prevent infinite rebuild loops
         self._initial_initialization = False  # Flag to indicate we're in initial startup phase
+        self._background_tasks = set()
         
         # Component tracking system
         self.components: Dict[str, ComponentInfo] = {}
@@ -69,6 +70,26 @@ class CoreInitializer:
     def are_dev_components_enabled(self) -> bool:
         """Check if dev components are currently enabled."""
         return self._enable_dev_components
+
+    def _evaluate_llm_health(self, plugin: Any) -> tuple[bool, str]:
+        """Return (ok, error_message) for an LLM engine health check."""
+        if plugin is None:
+            return False, "LLM engine instance is missing"
+
+        if hasattr(plugin, "get_health_status"):
+            try:
+                result = plugin.get_health_status()
+                if isinstance(result, tuple) and len(result) >= 2:
+                    return bool(result[0]), str(result[1] or "")
+                if isinstance(result, dict):
+                    ok = bool(result.get("ok", True))
+                    error = str(result.get("error") or result.get("message") or "")
+                    return ok, error
+                return bool(result), ""
+            except Exception as exc:
+                return False, f"Health check failed: {exc}"
+
+        return True, ""
     
     async def initialize_all(self, notify_fn=None):
         """Initialize all synth components in the correct order."""
@@ -162,6 +183,18 @@ class CoreInitializer:
                 log_debug("[core_initializer] ✅ _initialize_persona_manager() completed")
             except Exception as e:
                 log_warning(f"[core_initializer] Persona manager async init failed: {e}")
+
+            # 4.4. Auto-discover and import interface modules BEFORE loading DB configs
+            # Interface modules register their config variables at import time (via config_registry.get_var).
+            # If we load configs from DB before importing interfaces, interface settings like BOTFATHER_TOKEN
+            # won't be registered yet and therefore won't be loaded.
+            log_info("[core_initializer] Discovering interface modules (pre-config load)...")
+            try:
+                self._discover_interfaces()
+                log_info("[core_initializer] ✅ Interface module discovery completed")
+            except Exception as e:
+                log_error(f"[core_initializer] Error in _discover_interfaces (pre-config load): {e}")
+                self.startup_errors.append(f"Interface discovery (pre-config load) failed: {e}")
             
             # 3.5. Load all configurations from DB AFTER persona manager initialization
             # This ensures SYNTH_NAME, SYNTH_PROFILE, SYNTH_ALIASES have been registered and can be loaded from DB
@@ -211,15 +244,9 @@ class CoreInitializer:
                 self.startup_errors.append(f"Actions block build failed: {e}")
 
             log_info("[core_initializer] 🎯 CHECKPOINT: Actions block completed, proceeding to interface discovery")
-            
-            # 4.5. Auto-discover and import interface modules
-            log_debug("[core_initializer] Auto-discovering interface modules...")
-            try:
-                self._discover_interfaces()
-                log_debug("[core_initializer] Interface discovery completed")
-            except Exception as e:
-                log_error(f"[core_initializer] Error in _discover_interfaces: {e}")
-                self.startup_errors.append(f"Interface discovery failed: {e}")
+
+            # NOTE: Interface modules were already discovered earlier (pre-config load)
+            log_debug("[core_initializer] Interface modules already discovered earlier")
             
             # 6. Initialize interface instances now that config is loaded
             log_info("[core_initializer] Initializing interface instances...")
@@ -238,6 +265,11 @@ class CoreInitializer:
             self._initial_initialization = False  # Reset flag - plugins can now trigger auto-refresh
             log_debug("[core_initializer] Set _initial_initialization=False - auto-refresh now allowed")
             self.initialization_completed = True
+            # Many components (plugins/interfaces) are optional by design.
+            # Keep startup_errors for diagnostics, but don't abort core startup.
+            if self.startup_errors:
+                combined = '; '.join(self.startup_errors)
+                log_warning(f"[core_initializer] Startup warnings/errors: {combined}")
             log_info("[core_initializer] ✅ All core components initialized successfully")
             
             # Start database pool cleanup monitor to prevent exhaustion under load
@@ -246,6 +278,23 @@ class CoreInitializer:
                 await start_pool_cleanup_task()
             except Exception as e:
                 log_warning(f"[core_initializer] Failed to start pool cleanup task: {e}")
+
+            # Start chat update checker service (non-critical) — only if explicitly configured to auto-start
+            try:
+                from core.config_manager import config_registry
+                auto_start = config_registry.get_value("CHAT_UPDATE_CHECKER_AUTO_START", False,
+                                                     label="Auto-start chat update checker",
+                                                     description="If True, start the chat update checker background loop at core startup",
+                                                     value_type=bool,
+                                                     group="scheduling",
+                                                     component="core")
+                if auto_start:
+                    from core.chat_update_checker import start_chat_update_checker
+                    await start_chat_update_checker()
+                else:
+                    log_debug("[core_initializer] Chat update checker auto-start disabled by config; checker will run on demand only")
+            except Exception as e:
+                log_warning(f"[core_initializer] Failed to start chat update checker: {e}")
             
             # Start all registered interfaces
             await self._start_interfaces()
@@ -409,7 +458,13 @@ class CoreInitializer:
                 self.mark_component_failed(self.active_llm, error_msg, "LLM plugin initialization failed")
             else:
                 log_debug(f"[core_initializer] Plugin {self.active_llm} loaded successfully: {plugin.__class__.__name__}")
-                self.mark_component_success(self.active_llm, details=f"LLM engine: {plugin.__class__.__name__}")
+                ok, error = self._evaluate_llm_health(plugin)
+                if ok:
+                    self.mark_component_success(self.active_llm, details=f"LLM engine: {plugin.__class__.__name__}")
+                else:
+                    message = error or "LLM engine loaded but not ready"
+                    log_warning(f"[core_initializer] LLM engine health check failed: {message}")
+                    self.mark_component_failed(self.active_llm, message, "LLM engine configuration incomplete")
             
             log_debug(f"[core_initializer] Active LLM engine loaded: {self.active_llm}")
         except Exception as e:
@@ -446,6 +501,24 @@ class CoreInitializer:
 
                 module_name = ".".join(py_file.relative_to(root_dir).with_suffix("").parts)
 
+                # Enforce policy: plugin files must not write directly to queue internals
+                try:
+                    content = py_file.read_text(encoding='utf-8')
+                    # Detect direct writes to the queue internals to enforce use of enqueue APIs
+                    if (
+                        'message_queue._queue.put' in content
+                        or 'message_queue._queue' in content
+                        or '_queue.put(' in content
+                        or '_queue._queue.put' in content
+                        or '_queue._queue' in content
+                    ):
+                        err_msg = f"Plugin {py_file} writes directly to queue internals; please use enqueue()/enqueue_low_priority()"
+                        log_error(f"[core_initializer] {err_msg}")
+                        self.startup_errors.append(err_msg)
+                        continue
+                except Exception:
+                    log_debug(f"[core_initializer] Could not inspect plugin file for queue write policy: {py_file}")
+
                 try:
                     module = importlib.import_module(module_name)
                 except Exception as e:
@@ -464,9 +537,6 @@ class CoreInitializer:
                 ):
                     log_warning(
                         f"[core_initializer] ⚠️ Plugin {module_name} doesn't implement action interface"
-                    )
-                    self.startup_errors.append(
-                        f"Plugin {module_name}: Missing action interface"
                     )
                     continue
 
@@ -501,7 +571,9 @@ class CoreInitializer:
                                 try:
                                     loop = asyncio.get_running_loop()
                                     if loop and loop.is_running():
-                                        loop.create_task(instance.start())
+                                        task = loop.create_task(instance.start())
+                                        self._background_tasks.add(task)
+                                        task.add_done_callback(self._background_tasks.discard)
                                         log_info(
                                             f"[core_initializer] Started async plugin: {module_name}"
                                         )
@@ -536,6 +608,12 @@ class CoreInitializer:
                         log_debug(
                             f"[core_initializer] Plugin {module_name} has no start method"
                         )
+
+                    # Track success for WebUI diagnostics
+                    self.mark_component_success(
+                        plugin_short_name,
+                        details=f"Loaded from {module_name}",
+                    )
 
                 except Exception as e:
                     log_error(
@@ -697,44 +775,60 @@ class CoreInitializer:
         is changed, the corresponding component's reload handler is triggered automatically.
         """
         from core.config_manager import config_registry
+        import sys
         
-        # Define reload handlers for each interface
-        reload_handlers = {}
-        
-        # Telegram interface reload handler
-        try:
-            from interface import telegram_bot
-            if hasattr(telegram_bot, 'reload_interface'):
-                reload_handlers['telegram_bot'] = telegram_bot.reload_interface
-                log_debug("[core_initializer] Registered reload handler for telegram_bot")
-        except Exception as e:
-            log_debug(f"[core_initializer] Failed to register telegram_bot reload handler: {e}")
-        
-        # Discord interface reload handler
-        try:
-            from interface import discord_bot
-            if hasattr(discord_bot, 'reload_interface'):
-                reload_handlers['discord_bot'] = discord_bot.reload_interface
-                log_debug("[core_initializer] Registered reload handler for discord_bot")
-        except Exception as e:
-            log_debug(f"[core_initializer] Failed to register discord_bot reload handler: {e}")
-        
-        # Matrix interface reload handler
-        try:
-            from interface import matrix_bot
-            if hasattr(matrix_bot, 'reload_interface'):
-                reload_handlers['matrix_bot'] = matrix_bot.reload_interface
-                log_debug("[core_initializer] Registered reload handler for matrix_bot")
-        except Exception as e:
-            log_debug(f"[core_initializer] Failed to register matrix_bot reload handler: {e}")
-        
-        # Register all handlers with config registry
-        for component_name, handler in reload_handlers.items():
+        # Discover reload handlers from registered interface modules (agnostic)
+        for interface_name, interface_instance in INTERFACE_REGISTRY.items():
             try:
-                config_registry.register_reload_handler(component_name, handler)
-                log_info(f"[core_initializer] ✅ Reload handler registered for component: {component_name}")
+                module_name = getattr(interface_instance, "__module__", None)
+                module = sys.modules.get(module_name) if module_name else None
+                if module and hasattr(module, "reload_interface"):
+                    handler = getattr(module, "reload_interface")
+                    config_registry.register_reload_handler(interface_name, handler)
+                    log_info(
+                        f"[core_initializer] ✅ Reload handler registered for component: {interface_name}"
+                    )
             except Exception as e:
-                log_error(f"[core_initializer] Failed to register reload handler for {component_name}: {e}")
+                log_error(
+                    f"[core_initializer] Failed to register reload handler for {interface_name}: {e}"
+                )
+
+        # Register reload handlers for LLM engines (e.g., API keys)
+        try:
+            from core.config import list_available_llms, get_active_llm
+            from core.llm_registry import get_llm_registry
+            from core.plugin_instance import load_plugin
+
+            for engine_name in list_available_llms():
+                async def _reload_llm_engine(engine_name=engine_name):
+                    llm_registry = get_llm_registry()
+                    try:
+                        active = await get_active_llm()
+                    except Exception:
+                        active = None
+
+                    if active == engine_name:
+                        await load_plugin(engine_name, ensure_started=True)
+                        from core.plugin_instance import plugin as active_plugin
+
+                        if active_plugin is None:
+                            self.mark_component_failed(engine_name, "LLM reload returned no instance", "Reload failed")
+                        else:
+                            ok, error = self._evaluate_llm_health(active_plugin)
+                            if ok:
+                                self.mark_component_success(engine_name, details=f"LLM engine: {active_plugin.__class__.__name__}")
+                            else:
+                                message = error or "LLM engine loaded but not ready"
+                                self.mark_component_failed(engine_name, message, "LLM engine configuration incomplete")
+                    else:
+                        if llm_registry.get_engine(engine_name):
+                            llm_registry.unload_engine(engine_name)
+                        llm_registry.load_engine(engine_name)
+
+                config_registry.register_reload_handler(engine_name, _reload_llm_engine)
+                log_info(f"[core_initializer] ✅ Reload handler registered for LLM engine: {engine_name}")
+        except Exception as e:
+            log_warning(f"[core_initializer] Failed to register LLM reload handlers: {e}")
     
     def register_interface(self, interface_name: str):
         """Register an active interface."""

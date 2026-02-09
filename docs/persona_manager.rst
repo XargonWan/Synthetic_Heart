@@ -172,6 +172,11 @@ Environment Variables
 - ``SYNTH_LIKES_TRIGGER=false``: Activate when likes are mentioned
 - ``SYNTH_DISLIKES_TRIGGER=false``: Activate when dislikes are mentioned
 
+Exposed variables:
+
+- ``SYNTH_LIKES`` (json, default: ``[]``) — list of preferred topics/things the synth likes (editable in WebUI under Configurations → Persona)
+- ``SYNTH_DISLIKES`` (json, default: ``[]``) — list of disliked topics/things (editable in WebUI under Configurations → Persona)
+
 When any configured trigger is found in a user message, the bot will automatically respond, even in group chats where it might not normally activate.
 
 Database Schema

@@ -47,11 +47,44 @@ Multi-Platform Integration
 **Cross-Platform Messaging**
     Send messages across different platforms using unified chat identifiers.
 
+Progressive Web App (PWA) Mode (Experimental)
+---------------------------------------------
+
+**Status**: In development — may not be fully functional. Use with caution in production environments.
+
+The Web UI can be installed as a Progressive Web App (PWA) on supported browsers to provide an app-like experience (fullscreen, home-screen install, and basic offline caching). A service worker is included (see ``res/synth_webui/static/service-worker.js``) and the Web UI templates register the service worker and handle the ``beforeinstallprompt`` event to show an install button.
+
+Known limitations include partial offline behavior (real-time features are limited while offline), varying support for push notifications and background sync across browsers, and occasional install prompt availability depending on the client environment.
+
+Desktop Notifications (Web UI)
+------------------------------
+
+The Web UI can display in-browser desktop notifications when new messages arrive while the tab is in the background.
+
+Notes:
+    - Requires HTTPS (or ``localhost``) due to browser security restrictions.
+    - The browser permission prompt is requested on the first user action that sends a message.
+    - Notifications can be toggled from the Web UI settings.
+
+See ``docs/chat_history.rst`` for how session persistence and archives interact with the Web UI when using PWA mode.
+
+Web UI Chat Archiving
+---------------------
+
+The Web UI supports archiving and restoring entire conversations for the single persistent session. Archives are filesystem-backed JSON snapshots stored under ``backups/chat_archives/`` and exposed via the Web UI API. Basic operations (archive, list, restore, delete) are available and documented in :doc:`chat_history`.
+
+This archiving mechanism is intended for the Web UI MVP; production deployments may prefer database-backed archives or additional metadata storage.
+
 Avatar System
 -------------
 
 **VRM Avatar Support**
     Synthetic Heart includes a default SyntH avatar for 3D visualization, but users can provide their own VRM avatar files for customization. The system supports animated states including idle, talking, and thinking, reflecting the persona's current activity.
+
+Web UI Animation Sync
+---------------------
+
+The Web UI receives real-time animation commands from the backend. When the global action phase changes (e.g. ``THINKING``, ``WRITING``, ``TALKING``, ``IDLE``), the backend triggers the AnimationHandler to broadcast the corresponding animation state to Web UI clients. This keeps the backend authoritative for animation timing, while still allowing plugins/skins to override which files are used for each logical state.
 
 Plugin Ecosystem
 ----------------

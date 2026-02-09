@@ -266,6 +266,14 @@ class ConfigRegistry:
             )
 
 
+        # Validate constrained choices before applying setter/persisting
+        constraints = definition.constraints or {}
+        if constraints and isinstance(constraints, dict) and "choices" in constraints:
+            choices = constraints.get("choices") or []
+            # Compare using string form to be robust across types
+            if str(new_value) not in choices:
+                raise ValueError(f"Invalid value for '{key}': {new_value!r}. Allowed values: {choices}")
+
         # If definition has a setter, use it instead of persisting to DB
         if definition.setter is not None:
             try:
@@ -274,7 +282,7 @@ class ConfigRegistry:
                 definition.raw_value = self._serialize_value(definition, new_value)
                 definition.loaded = True
 
-                log_info(f"[config] Updated '{key}' via setter")
+                log_debug(f"[config] Updated '{key}' via setter")
 
                 for callback in list(definition.listeners):
                     try:
@@ -298,7 +306,7 @@ class ConfigRegistry:
         definition.raw_value = serialized
         definition.loaded = True
 
-        log_info(f"[config] Updated '{key}' via Web UI/API")
+        log_debug(f"[config] Updated '{key}' via Web UI/API")
 
         for callback in list(definition.listeners):
             try:
@@ -391,6 +399,13 @@ class ConfigRegistry:
                     self._load_definition_sync(defn)
                 except Exception as exc:
                     log_warning(f"[config] Failed to load '{defn.key}' during export: {exc}")
+
+            if defn.getter is not None:
+                try:
+                    defn.value = defn.getter()
+                    defn.raw_value = self._serialize_value(defn, defn.value)
+                except Exception as exc:
+                    log_warning(f"[config] Failed to refresh '{defn.key}' during export: {exc}")
 
             exported.append(
                 {
@@ -486,7 +501,9 @@ class ConfigRegistry:
         definition.env_value = None
 
         env_value = os.getenv(definition.key)
-        if env_value is not None:
+        # Treat empty env values as "not set" so DB can take precedence.
+        # This is important when env files contain placeholders like KEY=.
+        if env_value is not None and str(env_value).strip() != "":
             definition.env_override = True
             definition.env_value = env_value
             definition.raw_value = env_value
@@ -820,6 +837,22 @@ class ConfigRegistry:
         """
         loaded_count = 0
         skipped_count = 0
+
+        # Batch-load all config values in one DB round-trip.
+        # This avoids exhausting the DB pool during startup when many components
+        # are initializing concurrently.
+        config_rows: Dict[str, str] = {}
+        try:
+            from core.db import get_conn_ctx, ensure_core_tables
+            await ensure_core_tables()
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute("SELECT config_key, value FROM config")
+                    rows = await cur.fetchall()
+                    config_rows = {row[0]: row[1] for row in rows if row and len(row) >= 2}
+        except Exception as exc:
+            log_warning(f"[config] Failed to batch-load config from DB: {exc}")
+
         for definition in self._definitions.values():
             # Skip bootstrap configs (already loaded from env)
             if "bootstrap" in definition.tags:
@@ -851,42 +884,25 @@ class ConfigRegistry:
                 log_debug(f"[config] '{definition.key}' has default value, will try DB reload")
             
             try:
-                # Skip problematic configs during initial load to avoid deadlocks
-                # NOTE: DO NOT skip persona configs (SYNTH_NAME, SYNTH_PROFILE, SYNTH_ALIASES)
-                #       as they need to be loaded from DB for the webui
-                problematic_configs = {
-                    'LOGGING_LOGCHAT_LEVEL',
-                    'MATRIX_HOMESERVER',
-                    'MATRIX_USER',
-                    'MATRIX_PASSWORD',
-                    'MATRIX_ACCESS_TOKEN',
-                    'MATRIX_DEVICE_ID',
-                    'MATRIX_DEVICE_NAME',
-                    'MATRIX_ALLOWED_ROOMS'
-                }
-                if definition.key in problematic_configs:
-                    log_debug(f"[config] Skipping '{definition.key}' during initial load to avoid deadlock")
-                    skipped_count += 1
-                    continue
-                    
-                raw_value = await self._load_from_db(definition.key)
+                raw_value = config_rows.get(definition.key)
                 if raw_value is not None:
                     definition.raw_value = raw_value
                     definition.value = self._convert_value(definition, raw_value)
                     definition.loaded = True
                     loaded_count += 1
-                    log_debug(f"[config] ✓ Loaded '{definition.key}' from DB: {raw_value}")
+                    if definition.sensitive:
+                        log_debug(f"[config] ✓ Loaded '{definition.key}' from DB: <redacted>")
+                    else:
+                        log_debug(f"[config] ✓ Loaded '{definition.key}' from DB")
                 else:
-                    # Use default value if not in DB and persist it
+                    # Use default value if not in DB. Avoid persisting defaults here to keep
+                    # startup light on DB writes; defaults can be persisted later via UI edits.
                     if not definition.loaded:
                         definition.value = definition.default
                         definition.raw_value = self._serialize_value(definition, definition.default)
                         definition.loaded = True
-                        # Persist default to DB
-                        await self._persist_to_db(definition.key, definition.raw_value)
-                        log_debug(f"[config] Persisted default for '{definition.key}' to DB")
             except Exception as exc:
-                log_warning(f"[config] Failed to load '{definition.key}' from DB: {exc}")
+                log_warning(f"[config] Failed to apply DB value for '{definition.key}': {exc}")
         
         log_info(f"[config] ✓ load_all_from_db completed: loaded={loaded_count}, skipped={skipped_count}, total={len(self._definitions)}")
 

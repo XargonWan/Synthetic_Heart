@@ -237,6 +237,133 @@ The WebUI uses this information to:
 - Prepare outro frames for graceful stopping
 
 
+Optional ``animation_state`` payload (facial state)
+-----------------------------------------------
+
+Alongside ``type: "animation"`` commands, the backend may include an **optional** rich ``animation_state``
+object. This is backward compatible: if absent, the WebUI behaves as before.
+
+``animation_state`` is designed for a **hybrid** approach:
+
+- The backend can provide suggestions (descriptor ``expressions`` / ``blink`` / ``eye_movement``) and the
+  current emotion snapshot (``emotions``).
+- The WebUI applies facial changes by resolving logical keys via the active skin's ``persona.json``
+  (``blendshape_map``), so different skins can map emotions/visemes/blendshapes differently.
+
+Minimal example (shortened):
+
+.. code-block:: json
+
+    {
+      "type": "animation",
+      "state": "write",
+      "animation": "/skins/Rei/animations/Write/Texting.fbx",
+      "descriptor": { "loop": {"start_frame": 0, "end_frame": 120} },
+      "animation_state": {
+        "action": "write",
+        "phase": "loop",
+        "animation": "/skins/Rei/animations/Write/Texting.fbx",
+        "descriptor": { "loop": {"start_frame": 0, "end_frame": 120} },
+        "clip": { "name": "Texting", "duration": 4.0, "fps": 30 },
+        "timing": { "started_at": "2025-12-20T20:00:00Z", "time_in_clip": 0.0, "current_frame": 0 },
+        "expressions": [],
+        "blink": { "auto": true, "rate_s": 3.5, "intensity": 0.6 },
+        "eye_movement": { "auto": true, "saccade_rate_s": 2 },
+        "emotions": { "dominant": "happy", "values": { "happy": 7.5, "calm": 5.2 } },
+        "lipsync": false
+      }
+    }
+
+Notes:
+
+- ``lipsync`` is a boolean consent flag only (default: ``false`` when not present).
+- ``expressions.targets`` uses logical keys; the WebUI resolves them using the skin mapping.
+
+
+Emotion overlay (client-side)
+-----------------------------
+
+When ``animation_state.emotions`` is present, the WebUI may apply a short "emotion overlay" facial pose:
+
+- pick the strongest emotion from ``emotions.values`` (ties are broken randomly)
+- wait a small random delay **after action start**
+- apply the corresponding face for a random duration that scales with the emotion intensity
+
+This is intentionally **not** tied to WRITING specifically, because plugins may override or bypass the
+writing phase/action. The mapping is done through ``persona.json`` under the new ``emotions`` mapping.
+
+Per-skin overrides
+^^^^^^^^^^^^^^^^^^^
+
+Skins can optionally expose an ``emotions`` mapping in ``skins/<SkinName>/persona.json`` to
+customize emotion face definitions for that skin. The new compact format uses a mapping keyed
+by emotion name; each value is a flat dictionary of blendshape names to weights. For example::
+
+    "emotions": {
+        "angry": { "mouth_frown": 1.0, "brow_down": 0.9 },
+        "happy": { "mouth_smile": 1.0, "eyes_smile": 0.6 },
+        "sad": { "mouth_frown": 1.0, "eyes_closed": 0.8 }
+    }
+
+Notes:
+
+- The ``emotions`` field is a mapping; UI components derive the exposed emotion list from the
+  mapping keys (no separate list is required).
+- The per-emotion objects contain blendshape -> weight pairs (floats 0.0-1.0). The previous
+  ``targets`` wrapper and ``priority`` field are no longer used in the new format.
+
+The WebUI will expose these presets in ``window.__synth_emotion_face_presets`` and will set
+``window.__synth_persona_emotions_list`` to the list of keys from the mapping for UI components
+(sliders, overlays) to consume.
+
+
+Optional ``animation_state`` payload (facial state)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+In addition to the legacy fields (``state``, ``animation``, ``descriptor``), the backend may attach a richer
+``animation_state`` object to the WebSocket payload. This is **optional** and fully backward compatible.
+
+Note: the lightweight animation state summary broadcast (used for state synchronization) will also try to
+enrich the ``animation_state`` with runtime emotions when an Emotion Manager plugin is available.
+
+Typical use cases:
+
+- Provide a single structured snapshot for facial controllers (expressions, blink, eye movement)
+- Expose emotional state to the UI (for skin-specific mapping)
+- Declare lip-sync consent via a simple boolean flag
+
+Example (shortened)::
+
+    {
+      "type": "animation",
+      "state": "think",
+      "animation": "/skins/Rei/animations/Think/Thinking.fbx",
+      "descriptor": { ... },
+      "animation_state": {
+        "action": "think",
+        "phase": "loop",
+        "animation": "/skins/Rei/animations/Think/Thinking.fbx",
+        "descriptor": { ... },
+        "clip": { "name": "Thinking", "duration": 2.34, "fps": 30 },
+        "timing": { "started_at": "2025-12-17T20:00:00Z", "time_in_clip": 1.2, "current_frame": 36 },
+        "expressions": [ ... ],
+        "blink": { "auto": true, "rate_s": 3.5, "intensity": 0.6 },
+        "eye_movement": { "auto": true, "saccade_rate_s": 2 },
+        "emotions": { "dominant": "happy", "values": { "happy": 7.5, "calm": 5.2 } },
+        "lipsync": false
+      }
+    }
+
+Notes:
+
+- ``lipsync`` is a boolean consent flag only (default: ``false`` when not provided).
+- Blink defaults are tuned to a human-like frequency (~15–20 blinks/min), i.e. roughly one blink every 3–4 seconds.
+- The WebUI emits browser events when a rich ``animation_state`` is received:
+
+  - ``synth_animation_state_updated`` (detail: full state)
+  - ``synth_animation_lipsync_changed`` (detail: ``{ lipsync: boolean }``)
+
+
 Backward Compatibility
 ----------------------
 - Animations without descriptors work as before (use provided loop parameter)
@@ -298,5 +425,73 @@ Tests verify:
 - Loop behavior determination
 - play_once flag handling
 - Outro playback
+
+Animation State (server → WebUI)
+-------------------------------
+
+The backend may include an optional ``animation_state`` object in the WebSocket payload. This object provides fine-grained instructions and the current emotional state for client-side facial animation. Example schema (abridged):
+
+Server endpoints
+----------------
+
+- ``GET /api/animation_state`` – Return the current centralized animation state (used by remote clients to sync).
+- ``POST /api/animation_state`` – Request a centralized animation state change. Body: ``{state, session_id?, loop?, context_id?, source?}``.
+
+**Security note:** Accepting remote requests to modify the global animation state can affect how the avatar behaves persistently; the server should apply appropriate access controls (API keys, interface-level trust, or admin confirmation) before honoring requests that alter the central state.
+
+.. code-block:: json
+
+    {
+      "animation_state": {
+        "action": "think",
+        "phase": "loop",
+        "descriptor": { ... },
+        "clip": { "name": "Thinking", "duration": 2.34, "fps": 30 },
+        "timing": { "started_at": "2025-12-17T20:00:00Z", "time_in_clip": 1.2, "current_frame": 36 },
+        "expressions": [ { "start_frame":0, "end_frame":15, "targets": { "eyes_closed": 0.1, "mouth.O": 0.02 }, "source": "server", "priority": 10 } ],
+        "blink": { "auto": true, "rate_s": 4, "intensity": 0.6 },
+        "eye_movement": { "auto": true, "saccade_rate_s": 2 },
+        "emotions": { "dominant": "happy", "values": { "happy": 7.5, "calm": 5.2 } },
+        "lipsync": false
+      }
+    }
+
+Notes:
+
+- ``animation_state`` is optional and preserved for backward compatibility if missing.
+- ``lipsync`` is a boolean flag (default ``false``) — it is a signal that lip‑sync may be enabled by a consumer, it does not automatically start lip‑sync processing.
+- The WebUI is responsible for resolving expression targets to per‑skin blendshapes using ``skins/<skin>/persona.json`` (``blendshape_map``) and applying smoothing locally.
+
+Per-skin persona mapping
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Place mappings in ``skins/<skin>/persona.json`` under the ``blendshape_map`` key. Example:
+
+.. code-block:: json
+
+    {
+      "blendshape_map": {
+         "happy": "Smile",
+         "mouth.O": "Vowel_O"
+      },
+      "emotion_speed": { "default": 6.0, "decay": 4.0 }
+    }
+
+The map can be minimal: only include the logical keys your skin actually uses (e.g., eyelid closure, mouth O, and the viseme aliases required by your VRM). Example minimal map::
+
+    "blendshape_map": {
+        "eyes_closed": "eyes_closed",
+        "mouth.O": "mouth_O",
+        "visemes": { "A": {"mouth_A": 1.0}, "O": {"mouth_O": 1.0} }
+    }
+
+Do not place per-emotion presets inside ``blendshape_map`` — use the top-level ``emotions`` mapping instead (see section above). Keeping ``blendshape_map`` minimal reduces maintenance and lowers the chance of mismatches between animation descriptors and skin mappings.
+The WebUI will fetch ``/skins/<skin>/persona.json`` and apply the mapping when resolving targets from ``animation_state.expressions``.
+
+Testing & manual QA
+^^^^^^^^^^^^^^^^^^^^
+
+ - A small manual test harness is available at ``core/webui_templates/animation_face_test.html`` to exercise face expressions and verify that ``blendShapeProxy.setValue`` is invoked.
+ - The WebUI template now emits global events ``synth_animation_state_updated`` and ``synth_animation_lipsync_changed`` that can be used by other consumers.
 - Graceful stopping
 - Various animation combinations

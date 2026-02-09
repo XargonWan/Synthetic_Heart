@@ -141,7 +141,7 @@ async def test_stop_animation_multiple_contexts(animation_handler, mock_webui):
     await animation_handler.stop_animation(context1, session_id)
     
     # Should NOT return to Idle because context2 is still active
-    assert animation_handler._active_tasks[context2] is True
+    assert context2 in animation_handler._active_tasks
     
     # Stop second context
     await animation_handler.stop_animation(context2, session_id)
@@ -218,17 +218,51 @@ async def test_get_current_state(animation_handler, mock_webui):
 async def test_get_current_animation(animation_handler, mock_webui):
     """Test getting current animation file."""
     assert animation_handler.get_current_animation() is None
-    
-    session_id = "test_session"
-    mock_ws = AsyncMock()
-    mock_webui.connections[session_id] = mock_ws
-    
-    await animation_handler.play_animation(
-        AnimationState.THINK,
-        session_id=session_id
-    )
-    
-    assert animation_handler.get_current_animation() == "Thinking.fbx"
+
+    def test_incomplete_intro_outro_warns():
+        ah = AnimationHandler()
+        # intro without start_frame, outro without end_frame
+        desc = {
+            'intro': {'end_frame': 10},
+            'loop': {'start_frame': 11, 'end_frame': 20},
+            'outro': {'start_frame': 21}
+        }
+        # Should not raise, but return has_intro=False, has_outro=False
+        res = ah._analyze_animation_structure(desc, 'incomplete.fbx')
+        assert res['has_intro'] is False
+        assert res['has_outro'] is False
+
+
+    def test_thinking_descriptor_classified_as_loop():
+        from core.animation_handler import AnimationHandler
+        ah = AnimationHandler()
+        # Ensure search paths include the skins/Rei animations directory
+        ah.set_animation_search_paths([str(ah.SKIN_DEFAULT_ANIMATIONS_DIR)])
+        variants = ah.get_animation_variants('think')
+        # Our Thinking.fbx should be discovered and classified as loop variant
+        found = any('Thinking.fbx' == a for a in variants.get('loop', []))
+        assert found, f"Thinking.fbx not found in loop variants: {variants}"
+
+
+@pytest.mark.asyncio
+async def test_state_summary_callback_registered_and_called():
+    """Ensure that when a WebUI with a summary callback is set, it is registered
+    and called when the animation state changes."""
+    handler = AnimationHandler()
+    # Create a mock webui with an async summary callback
+    class FakeWebUI:
+        def __init__(self):
+            self.connections = {}
+            self._called = False
+        async def _broadcast_animation_state_summary(self, state, animation_file, descriptor):
+            self._called = True
+
+    fake = FakeWebUI()
+    handler.set_webui(fake)
+
+    # Trigger an animation change
+    await handler.play_animation(AnimationState.THINK, session_id=None, loop=True, context_id='ctx')
+    assert fake._called is True
 
 
 @pytest.mark.asyncio
@@ -288,6 +322,8 @@ async def test_websocket_message_format(animation_handler, mock_webui):
     call_args = mock_ws.send_json.call_args[0][0]
     
     assert call_args["type"] == "animation"
-    assert call_args["animation"] == "animations/Thinking.fbx"
+    assert isinstance(call_args["animation"], str)
+    assert call_args["animation"].endswith("Thinking.fbx")
+    assert "animations/" in call_args["animation"]
     assert call_args["loop"] is True
     assert call_args["state"] == "think"

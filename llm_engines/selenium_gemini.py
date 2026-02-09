@@ -9,6 +9,26 @@ SERVICE_URL = "https://gemini.google.com"
 MODEL_CONFIG_VAR = "GEMINI_MODEL"
 DEFAULT_MODEL = "2.5-flash"
 
+# Expose GEMINI_MODEL for persistence but keep it hidden until UX is improved
+try:
+    from core.variables_engine import register_exposed_var
+    register_exposed_var(
+        "GEMINI_MODEL",
+        label="Gemini Model",
+        default=DEFAULT_MODEL,
+        value_type=str,
+        ui_type="string",
+        description="Gemini model name used for requests (hidden until model-selection UX is improved).",
+        scope="llm",
+        component="selenium_gemini",
+        tags=["llm_engine"],
+        advanced=True,
+        hidden=True,
+    )
+except Exception:
+    # Fail silently during import-time if variables engine isn't ready
+    pass
+
 # Gemini-specific model limits (character context limits)
 MODEL_LIMITS_MAP = {
     "2.5-flash": 32000,        # Gemini 2.5 Flash: 32k characters practical limit
@@ -139,6 +159,72 @@ class SeleniumGeminiPlugin(SeleniumLLMBase):
         self._update_interface_limits()
         return self.interface_limits
 
+    def _engine_ui_reset_hook(self, previous_response: str | None = None) -> str | None:
+        """Engine-specific UI reset hook for Gemini.
+
+        If a 'new chat' button exists under #chat-history, click it to open a fresh
+        chat and return a retry indicator string starting with '❌'. Otherwise return None.
+        """
+        try:
+            current_url = ""
+            try:
+                current_url = (self.driver.current_url or "").lower()
+            except Exception:
+                current_url = ""
+
+            if "gemini" not in current_url:
+                return None
+
+            # Prefer Selenium's By when available
+            try:
+                from selenium.webdriver.common.by import By
+                buttons = self.driver.find_elements(By.CSS_SELECTOR, "#chat-history > div > button")
+            except Exception:
+                try:
+                    buttons = self.driver.find_elements("#chat-history > div > button")
+                except Exception:
+                    buttons = []
+
+            if not buttons:
+                return None
+
+            # Click the first button to open a new chat
+            first = buttons[0]
+            try:
+                try:
+                    self.driver.execute_script("arguments[0].scrollIntoView(true);", first)
+                    time.sleep(0.05)
+                except Exception:
+                    pass
+
+                try:
+                    first.click()
+                except Exception as click_err:
+                    log_debug(f"[selenium_gemini] Direct click failed: {click_err}")
+                    try:
+                        # Try JavaScript click
+                        self.driver.execute_script("arguments[0].click();", first)
+                        log_debug("[selenium_gemini] Clicked new chat via JS")
+                    except Exception as js_err:
+                        log_debug(f"[selenium_gemini] JS click failed: {js_err}")
+                        try:
+                            # Try ActionChains click
+                            from selenium.webdriver.common.action_chains import ActionChains
+                            ActionChains(self.driver).move_to_element(first).click().perform()
+                            log_debug("[selenium_gemini] Clicked new chat via ActionChains")
+                        except Exception:
+                            log_debug("[selenium_gemini] All click methods failed for new chat button")
+
+            except Exception as e:
+                log_debug(f"[selenium_gemini] _engine_ui_reset_hook click attempt failed: {e}")
+
+            # Small pause to let UI create the new chat
+            time.sleep(0.5)
+            log_info("[selenium_gemini] Opened new chat via UI reset")
+            return "❌ Gemini UI reset: opened new chat and will retry (gemini_ui_reset)"
+        except Exception as e:
+            log_debug(f"[selenium_gemini] _engine_ui_reset_hook failed: {e}")
+            return None
     def _get_response_choice_selectors(self) -> list:
         """Get CSS selectors for Gemini response choice buttons.
         

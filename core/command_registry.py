@@ -119,6 +119,9 @@ async def help_command() -> str:
     help_text += (
         "\n*📋 Misc*\n"
         "`/last_chats` – Last active chats\n"
+        "`/wake` – Enable normal routing in this chat\n"
+        "`/sleep` – Ignore non-command messages in this chat\n"
+        "`/status` – Show wake/sleep status for this chat\n"
         "`/diary [days]` – View synth's diary entries (default: 7 days)\n"
         "`/purge_map [days]` – Purge old mappings\n"
         "`/clean_chat_link <chat_id>` – Remove the link between a chat and conversation.\n"
@@ -183,6 +186,76 @@ register_command("help", help_command)
 register_command("diary", diary_command)
 
 
+async def _resolve_interface_context(interface_context: Any) -> tuple[str | None, Any | None, Any | None]:
+    """Extract (interface_id, update, context) from an interface_context payload."""
+    if not interface_context:
+        return None, None, None
+    interface_id = interface_context.get("interface_id") if isinstance(interface_context, dict) else None
+    update = interface_context.get("update") if isinstance(interface_context, dict) else None
+    context = interface_context.get("context") if isinstance(interface_context, dict) else None
+    return interface_id, update, context
+
+
+async def wake_command(interface_context=None) -> str:
+    """Set the chat to awake (normal routing)."""
+    interface_id, update, _context = await _resolve_interface_context(interface_context)
+    if interface_id != "telegram_bot" or not update:
+        return "👀 Awake."
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if chat_id is None:
+        return "⚠️ Unable to determine chat."
+    try:
+        from interface.telegram_bot import chat_attention_state
+
+        chat_attention_state[chat_id] = True
+    except Exception as exc:
+        log_debug(f"[command_registry] Failed to set wake state: {exc}")
+        return "❌ Failed to set awake state."
+    return "👀 Awake: normal routing enabled."
+
+
+async def sleep_command(interface_context=None) -> str:
+    """Set the chat to sleep (ignore non-command messages)."""
+    interface_id, update, _context = await _resolve_interface_context(interface_context)
+    if interface_id != "telegram_bot" or not update:
+        return "💤 Asleep."
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if chat_id is None:
+        return "⚠️ Unable to determine chat."
+    try:
+        from interface.telegram_bot import chat_attention_state
+
+        chat_attention_state[chat_id] = False
+    except Exception as exc:
+        log_debug(f"[command_registry] Failed to set sleep state: {exc}")
+        return "❌ Failed to set sleep state."
+    return "💤 Asleep: non-command messages are ignored."
+
+
+async def status_command(interface_context=None) -> str:
+    """Report wake/sleep state for the chat."""
+    interface_id, update, _context = await _resolve_interface_context(interface_context)
+    if interface_id != "telegram_bot" or not update:
+        return "🤖 Status unavailable for this interface."
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if chat_id is None:
+        return "⚠️ Unable to determine chat."
+    try:
+        from interface.telegram_bot import chat_attention_state
+
+        is_awake = chat_attention_state.get(chat_id, True)
+    except Exception as exc:
+        log_debug(f"[command_registry] Failed to read status: {exc}")
+        return "❌ Failed to read status."
+    status_text = "Awake (normal routing)" if is_awake else "Asleep (ignoring non-commands)"
+    return f"🤖 Status: {status_text}"
+
+
+register_command("wake", wake_command)
+register_command("sleep", sleep_command)
+register_command("status", status_command)
+
+
 async def llm_command(*args) -> str:
     """Handle LLM switching command."""
     from core.config import get_active_llm, set_active_llm, list_available_llms
@@ -201,12 +274,9 @@ async def llm_command(*args) -> str:
         return f"❌ LLM `{choice}` not found."
 
     try:
-        await set_active_llm(choice)
-        
-        # Reload system with new LLM
-        from core.core_initializer import core_initializer
-        # Note: This should be handled by the interface that needs notification
-        await core_initializer.initialize_all()
+        # Use centralized switching helper to ensure consistent behavior and notifications
+        from core.config import switch_active_llm
+        await switch_active_llm(choice, use_hot_swap=False)
         
         return f"✅ LLM mode dynamically updated to `{choice}`."
     except Exception as e:
@@ -316,6 +386,51 @@ async def splitprompt_command(*args) -> str:
 
 
 register_command("splitprompt", splitprompt_command)
+
+
+async def agent_command(*args, interface_context=None) -> str:
+    """Handle agent subcommands (trainer-only).
+
+    Usage:
+      /agent approve <proposal_id>
+    """
+    if not args:
+        return "Usage: /agent approve <proposal_id>"
+
+    sub = args[0].lower()
+    if sub == 'approve':
+        if len(args) < 2:
+            return "❌ Use: /agent approve <proposal_id>"
+        try:
+            proposal_id = int(args[1])
+        except ValueError:
+            return "❌ proposal_id must be an integer"
+
+        # Extract possible trainer info from interface_context
+        trainer_id = None
+        try:
+            if interface_context and isinstance(interface_context, dict):
+                update = interface_context.get('update')
+                if update and getattr(update, 'effective_user', None):
+                    trainer_id = getattr(update.effective_user, 'id', None)
+        except Exception:
+            trainer_id = None
+
+        try:
+            from core.core_initializer import PLUGIN_REGISTRY
+            plugin = PLUGIN_REGISTRY.get('agent')
+            if not plugin:
+                return "❌ Agent plugin not available"
+            original_message = {'sender_id': trainer_id}
+            res = await plugin.execute_action({'type': 'approve_action', 'payload': {'proposal_id': proposal_id}}, {}, None, original_message)
+            return f"✅ Approval result: {res}"
+        except Exception as e:
+            return f"❌ Error approving proposal: {e}"
+
+    return "❌ Unknown agent subcommand. Use: /agent approve <proposal_id>"
+
+
+register_command("agent", agent_command)
 
 
 async def block_command(*args) -> str:

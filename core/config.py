@@ -98,16 +98,19 @@ LLM_MODE = config_registry.get_var(
 
 # === Persistent LLM mode ===
 
-# Exposed configuration for active LLM (hidden from UI - set via Components tab)
+# Exposed configuration for active LLM (managed via Components tab). We'll register a
+# visible choice list later once the available engines are enumerated.
 # NOTE: Do NOT use "bootstrap" tag - this config MUST be loaded from DB
+# Placeholder registration kept to ensure key exists during import; we'll re-register
+# with choices after enumerating available engines further down.
 ACTIVE_LLM = config_registry.get_var(
     "ACTIVE_LLM",
     "selenium_chatgpt",
     label="Active LLM",
-    description="The currently active LLM engine. Set via the Components tab in the Web UI.",
+    description="The currently active LLM engine. Synced with the Components tab.",
     group="core",
     component="core",
-    hidden=True,  # Hidden from UI config - only set via Components tab
+    hidden=True,  # Temporarily hidden until we re-register with choices
 )
 
 async def get_active_llm():
@@ -143,47 +146,94 @@ async def set_active_llm(name: str):
 async def switch_active_llm(name: str, use_hot_swap: bool = True):
     """
     Switch to a different active LLM engine.
-    
-    This is the centralized entry point for changing the active LLM, used by both
-    the WebUI and Telegram commands to ensure consistency.
-    
-    Args:
-        name: The name of the LLM engine to activate
-        use_hot_swap: If True, performs hot-swap (direct plugin reload without full reinitialization).
-                      If False, performs full reinitialization (useful for some edge cases).
-    
-    Raises:
-        ValueError: If the LLM name is not available
+
+    This centralizes active LLM changes, serializing concurrent attempts using
+    `_llm_switch_lock` to avoid races during persist/load phases.
     """
     from core.config import list_available_llms
-    
+
     available = list_available_llms()
     if name not in available:
         raise ValueError(f"LLM '{name}' is not available. Available: {', '.join(available)}")
-    
+
     current = await get_active_llm()
-    if name == current:
-        log_debug(f"[config] 🔄 LLM already active: {name}, no switch needed.")
+
+    def _get_loaded_plugin_name() -> str | None:
+        try:
+            from core import plugin_instance
+            loaded = getattr(plugin_instance, "plugin", None)
+            if loaded is None:
+                return None
+            return loaded.__class__.__module__.split(".")[-1]
+        except Exception:
+            return None
+
+    loaded_name = _get_loaded_plugin_name()
+    if name == current and loaded_name == name:
+        log_debug(f"[config] 🔄 LLM already active and loaded: {name}, no switch needed.")
         return
-    
-    # Persist the new LLM choice to config
-    await set_active_llm(name)
-    log_info(f"[config] 🔄 Switching LLM from {current} to {name}")
-    
-    try:
-        if use_hot_swap:
-            # Hot-swap: direct plugin reload
-            from core.plugin_instance import load_plugin
-            await load_plugin(name)
-            log_info(f"[config] ✅ LLM hot-swapped to {name}")
-        else:
-            # Full reinitialization
-            from core.core_initializer import core_initializer
-            await core_initializer.initialize_all()
-            log_info(f"[config] ✅ LLM switched to {name} (full reinitialization)")
-    except Exception as e:
-        log_error(f"[config] ❌ Failed to switch LLM to {name}: {e}")
-        raise
+
+    # Ensure only one LLM switch runs at a time
+    log_debug(f"[config] ⏳ Waiting to acquire LLM switch lock for '{name}'")
+    async with _llm_switch_lock:
+        log_debug(f"[config] 🔒 Acquired LLM switch lock for '{name}'")
+        # Re-check under lock in case another switch occurred
+        current = await get_active_llm()
+        loaded_name = _get_loaded_plugin_name()
+        if name == current and loaded_name == name:
+            log_debug(f"[config] 🔄 LLM already active and loaded under lock: {name}, no switch needed.")
+            return
+
+        # Persist the new LLM choice to config
+        try:
+            # Only persist if we're actually changing the configured value.
+            if name != current:
+                await set_active_llm(name)
+                log_info(f"[config] 🔄 Switching LLM from {current} to {name}")
+            else:
+                log_info(
+                    f"[config] 🔄 ACTIVE_LLM already '{name}' but loaded plugin is '{loaded_name}', reloading engine"
+                )
+        except Exception as e:
+            log_error(f"[config] ❌ Error persisting active LLM '{name}': {e}", exc=e)
+            # Surface the error to the caller (no silent fallback)
+            raise
+
+        try:
+            if use_hot_swap:
+                # Hot-swap: direct plugin reload and ensure plugin start succeeds
+                from core.plugin_instance import load_plugin
+                await load_plugin(name, ensure_started=True, start_timeout=30.0)
+                log_info(f"[config] ✅ LLM hot-swapped to {name}")
+                # Notify trainer about successful change
+                try:
+                    from core.notifier import notify_trainer
+                    notify_trainer(f"✅ LLM mode dynamically updated to `{name}`.")
+                except Exception as e:  # pragma: no cover - best-effort notify
+                    log_warning(f"[config] Failed to notify trainer about LLM change: {e}")
+            else:
+                # Full reinitialization
+                from core.core_initializer import core_initializer
+                await core_initializer.initialize_all()
+                log_info(f"[config] ✅ LLM switched to {name} (full reinitialization)")
+                # Notify trainer about successful change
+                try:
+                    from core.notifier import notify_trainer
+                    notify_trainer(f"✅ LLM mode dynamically updated to `{name}`.")
+                except Exception as e:  # pragma: no cover - best-effort notify
+                    log_warning(f"[config] Failed to notify trainer about LLM change: {e}")
+        except Exception as e:
+            # Log with traceback and notify trainer about failure
+            log_error(f"[config] ❌ Failed to switch LLM to {name}: {e}", exc=e)
+            try:
+                from core.notifier import notify_trainer
+                notify_trainer(f"❌ Failed to switch LLM to `{name}`: {e}")
+            except Exception:
+                pass
+            # Re-raise so callers (and tests) can handle failure deterministically
+            raise
+        finally:
+            log_debug(f"[config] 🔓 Released LLM switch lock for '{name}'")
 
 _log_chat_id: int | None = None  # cached log chat ID
 _log_chat_thread_id: int | None = None  # cached log chat thread ID
@@ -362,8 +412,23 @@ def list_available_llms():
         if fname.endswith(".py") and not fname.startswith("__")
     )
 
+# Make ACTIVE_LLM visible in the Settings UI as a choice/combo, synced with available engines
+# We cannot re-register the key (it already exists), so update the internal definition if present.
+try:
+    choices = list_available_llms()
+    existing = config_registry._definitions.get('ACTIVE_LLM')
+    if existing:
+        existing.hidden = False
+        existing.description = "The currently active LLM engine. Synced with the Components tab."
+        existing.constraints = {'choices': choices}
+except Exception as e:
+    log_warning(f"[config] Could not populate ACTIVE_LLM choices: {e}")
+
 # === Global model management ===
 MODEL_FILE = os.path.join(os.path.dirname(__file__), "model_config.json")
+
+# Lock used to serialize concurrent LLM switches to avoid races
+_llm_switch_lock = asyncio.Lock()
 
 def get_current_model():
     if os.path.exists(MODEL_FILE):

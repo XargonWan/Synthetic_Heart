@@ -291,6 +291,25 @@
                 margin-bottom: 1rem;
             }
 
+            /* When diary content is very long, make it internally scrollable */
+            .history-entry-content--limited {
+                max-height: calc(1.5em * 6);
+                overflow-y: auto;
+                border-radius: 6px;
+                padding: 0.5rem;
+                background: rgba(255,255,255,0.02);
+                scrollbar-width: thin;
+            }
+
+            .history-entry-content--limited::-webkit-scrollbar {
+                width: 6px;
+            }
+
+            .history-entry-content--limited::-webkit-scrollbar-thumb {
+                background: rgba(255,255,255,0.25);
+                border-radius: 999px;
+            }
+
             .history-entry-detail {
                 font-size: 0.85rem;
                 color: var(--text-soft);
@@ -309,13 +328,153 @@
                 border-radius: 4px;
                 font-size: 0.85rem;
                 color: var(--text-soft);
+                white-space: pre-wrap;
+                word-break: break-word;
+            }
+
+            .grillo-prompt--limited {
+                max-height: calc(1.5em * 5);
+                overflow-y: auto;
+                scrollbar-width: thin;
+                scrollbar-color: rgba(255, 255, 255, 0.25) transparent;
+            }
+
+            .grillo-response {
+                background: rgba(76, 175, 80, 0.1);
+                border-left: 3px solid #4CAF50;
+                padding: 0.75rem;
+                border-radius: 4px;
+                font-size: 0.9rem;
+                line-height: 1.5;
+                color: var(--text);
+                white-space: pre-wrap;
+                word-break: break-word;
+            }
+
+            .grillo-response--limited {
+                max-height: calc(1.5em * 5);
+                overflow-y: auto;
+                scrollbar-width: thin;
+                scrollbar-color: rgba(255, 255, 255, 0.25) transparent;
+            }
+
+            .grillo-prompt--limited::-webkit-scrollbar,
+            .grillo-response--limited::-webkit-scrollbar {
+                width: 6px;
+            }
+
+            .grillo-prompt--limited::-webkit-scrollbar-track,
+            .grillo-response--limited::-webkit-scrollbar-track {
+                background: transparent;
+            }
+
+            .grillo-prompt--limited::-webkit-scrollbar-thumb,
+            .grillo-response--limited::-webkit-scrollbar-thumb {
+                background: rgba(255, 255, 255, 0.35);
+                border-radius: 999px;
+            }
+
+            .grillo-actions {
+                margin-top: 0.85rem;
+                padding: 0.75rem;
+                border-radius: 8px;
+                border: 1px solid var(--border);
+                background: rgba(12, 12, 20, 0.25);
+            }
+
+            .grillo-actions-header {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 0.5rem;
+                font-size: 0.85rem;
+                color: var(--text-soft);
+                margin-bottom: 0.65rem;
+            }
+
+            .grillo-actions-counts {
+                display: flex;
+                gap: 0.4rem;
+                flex-wrap: wrap;
+            }
+
+            .grillo-actions-counts span {
+                padding: 0.15rem 0.5rem;
+                border-radius: 999px;
+                font-size: 0.75rem;
+                font-weight: 600;
+                background: rgba(255, 255, 255, 0.08);
+                color: var(--text-soft);
+            }
+
+            .grillo-actions-list {
+                display: flex;
+                flex-direction: column;
+                gap: 0.6rem;
+            }
+
+            .grillo-action-item {
+                border-radius: 6px;
+                padding: 0.6rem 0.75rem;
+                background: rgba(255, 255, 255, 0.03);
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                display: flex;
+                flex-direction: column;
+                gap: 0.35rem;
+            }
+
+            .grillo-action-header {
+                display: flex;
+                align-items: center;
+                gap: 0.5rem;
+                flex-wrap: wrap;
+                font-size: 0.85rem;
+            }
+
+            .grillo-action-type {
+                font-weight: 600;
+                color: var(--text);
+            }
+
+            .grillo-action-status {
+                padding: 0.1rem 0.45rem;
+                border-radius: 999px;
+                font-size: 0.7rem;
+                font-weight: 700;
+                text-transform: uppercase;
+            }
+
+            .grillo-action-status.pending {
+                background: rgba(255, 193, 7, 0.2);
+                color: #ffc107;
+            }
+
+            .grillo-action-status.processed {
+                background: rgba(76, 175, 80, 0.2);
+                color: #4caf50;
+            }
+
+            .grillo-action-status.failed {
+                background: rgba(244, 67, 54, 0.2);
+                color: #f44336;
+            }
+
+            .grillo-action-detail {
+                font-size: 0.78rem;
+                color: var(--text-soft);
+                white-space: pre-wrap;
+                word-break: break-word;
+                background: rgba(12, 12, 20, 0.35);
+                border-radius: 6px;
+                padding: 0.45rem 0.6rem;
             }
 
             .chat-message {
                 display: flex;
-                gap: 0.75rem;
-                padding: 0.75rem;
+                gap: 0.5rem;
+                padding: 0.25rem 0.5rem;
                 border-bottom: 1px solid var(--border);
+                align-items: center;
             }
 
             .chat-message:last-child {
@@ -325,12 +484,54 @@
             .chat-sender {
                 font-weight: 600;
                 color: var(--accent);
-                min-width: 120px;
+                min-width: 100px;
+                padding: 0 0.25rem;
+                align-self: center;
             }
 
             .chat-text {
                 flex: 1;
                 line-height: 1.5;
+                white-space: pre-wrap;
+                word-break: break-word;
+                /* No visual box for short messages - keep layout clean */
+                padding: 0;
+                border-radius: 0;
+                border: none;
+                background: transparent;
+                display: inline-block;
+                vertical-align: middle;
+            }
+
+            .chat-text--limited {
+                /* Limit visible height to ~5 lines and allow internal scrolling */
+                max-height: calc(1.5em * 5);
+                overflow-y: auto;
+                overflow-x: hidden;
+                padding: 0.45rem 0.5rem;
+                border-radius: 6px;
+                border: 1px solid transparent;
+                background: rgba(255, 255, 255, 0.03);
+                transition: border-color 0.2s ease;
+                scrollbar-width: thin;
+                scrollbar-color: rgba(255, 255, 255, 0.25) transparent;
+            }
+
+            .chat-text--limited:hover {
+                border-color: rgba(255, 255, 255, 0.28);
+            }
+
+            .chat-text--limited::-webkit-scrollbar {
+                width: 6px;
+            }
+
+            .chat-text--limited::-webkit-scrollbar-track {
+                background: transparent;
+            }
+
+            .chat-text--limited::-webkit-scrollbar-thumb {
+                background: rgba(255, 255, 255, 0.35);
+                border-radius: 999px;
             }
 
             .chat-time {
@@ -574,11 +775,36 @@
                     const response = await fetch(`/api/history/grillo?${params}`);
                     const data = await response.json();
 
-                    if (data.success && data.entries.length > 0) {
-                        content.innerHTML = data.entries.map(entry => renderGrilloEntry(entry)).join('');
-                        renderPagination('grillo', data.page, data.total_pages, data.total_count);
+                    if (data.success) {
+                        // Populate beat-type selector with server-provided beat_types, merging with existing options
+                        const beatSelect = document.getElementById('history-grillo-beat-type');
+                        if (beatSelect && data.beat_types) {
+                            // Build a set of existing values to avoid duplicates
+                            const existing = new Set(Array.from(beatSelect.options).map(o => o.value));
+                            data.beat_types.forEach(bt => {
+                                const trimmed = String(bt).trim();
+                                if (!trimmed || existing.has(trimmed)) return;
+                                const option = document.createElement('option');
+                                option.value = trimmed;
+                                option.textContent = trimmed.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+                                beatSelect.appendChild(option);
+                                existing.add(trimmed);
+                            });
+                            // Optionally sort options (keep the first default option in place)
+                            const opts = Array.from(beatSelect.options).slice(1);
+                            opts.sort((a,b) => a.textContent.localeCompare(b.textContent));
+                            // Re-attach sorted options
+                            opts.forEach(o => beatSelect.appendChild(o));
+                        }
+
+                        if (data.entries && data.entries.length > 0) {
+                            content.innerHTML = data.entries.map(entry => renderGrilloEntry(entry)).join('');
+                            renderPagination('grillo', data.page, data.total_pages, data.total_count);
+                        } else {
+                            content.innerHTML = '<div class="empty-state"><div class="icon">🦗</div><p>No grillo activity found</p></div>';
+                        }
                     } else {
-                        content.innerHTML = '<div class="empty-state"><div class="icon">🦗</div><p>No grillo activity found</p></div>';
+                        content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load grillo activity</p></div>';
                     }
                 } catch (error) {
                     console.error('Failed to load grillo history:', error);
@@ -630,7 +856,16 @@
             function renderDiaryEntry(entry) {
                 const timestamp = formatTimestamp(entry.timestamp);
                 const archived = entry.archived ? ' archived' : '';
-                
+
+                let safeContent = escapeHtml(entry.content || '');
+                // Trim leading whitespace/newlines to avoid accidental leading space
+                safeContent = safeContent.replace(/^[\s\u00A0]+/, '').replace(/[\n\r]+$/, '');
+                const isLong = safeContent.split('\n').length > 6 || safeContent.length > 800;
+                const longClass = isLong ? ' history-entry-content--limited' : '';
+
+                let safeThought = escapeHtml(entry.personal_thought || '');
+                safeThought = safeThought.replace(/^[\s\u00A0]+/, '').replace(/[\n\r]+$/, '');
+
                 return `
                     <div class="history-entry${archived}">
                         <div class="history-entry-header">
@@ -639,8 +874,8 @@
                                 ${entry.interaction_summary ? `<div class="history-entry-detail">${escapeHtml(entry.interaction_summary)}</div>` : ''}
                             </div>
                         </div>
-                        <div class="history-entry-content">${escapeHtml(entry.content)}</div>
-                        ${entry.personal_thought ? `<div class="history-entry-detail"><strong>💭 Thought:</strong> ${escapeHtml(entry.personal_thought)}</div>` : ''}
+                        <div class="history-entry-content${longClass}">${safeContent}</div>
+                        ${entry.personal_thought ? `<div class="history-entry-detail"><strong>💭 Thought:</strong> ${safeThought}</div>` : ''}
                         ${entry.primary_emotion ? `<div class="history-entry-detail"><strong>😊 Emotion:</strong> ${entry.primary_emotion}</div>` : ''}
                         ${entry.user_count > 0 ? `<div class="history-entry-detail"><strong>👥 With:</strong> ${entry.user_count} user${entry.user_count > 1 ? 's' : ''}</div>` : ''}
                     </div>
@@ -650,7 +885,24 @@
             function renderGrilloEntry(entry) {
                 const timestamp = formatTimestamp(entry.executed_at);
                 const beatTypeLabel = entry.beat_type.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-                
+
+                const rawResponse = (entry.response_text || '') || '';
+                const diaryContent = (entry.diary_content || '') || '';
+                let displayResponse = rawResponse || diaryContent || '';
+
+                // Prepare safe strings and trim leading whitespace/newlines
+                let safePrompt = escapeHtml(entry.prompt_text || '');
+                safePrompt = safePrompt.replace(/^[\s\u00A0]+/, '').replace(/[\n\r]+$/, '');
+                const promptIsLong = safePrompt.split('\n').length > 6 || safePrompt.length > 600;
+                const promptClass = promptIsLong ? ' grillo-prompt--limited' : '';
+
+                let safeResponse = escapeHtml(displayResponse || '');
+                safeResponse = safeResponse.replace(/^[\s\u00A0]+/, '').replace(/[\n\r]+$/, '');
+                const responseIsLong = safeResponse.split('\n').length > 6 || safeResponse.length > 600;
+                const responseClass = responseIsLong ? ' grillo-response--limited' : '';
+
+                const actionsBlock = renderGrilloActions(entry.actions || []);
+
                 return `
                     <div class="history-entry">
                         <div class="history-entry-header">
@@ -659,7 +911,14 @@
                                 <span class="history-entry-type">${beatTypeLabel}</span>
                             </div>
                         </div>
-                        <div class="grillo-prompt">${escapeHtml(entry.prompt_text)}</div>
+                        <div class="grillo-prompt${promptClass}">${safePrompt}</div>
+                        ${safeResponse ? `
+                        <div style="margin-top: 0.75rem;">
+                            <div style="font-size: 0.85rem; color: var(--text-soft); margin-bottom: 0.5rem; font-weight: 500;">Response:</div>
+                            <div class="grillo-response${responseClass}">${safeResponse}</div>
+                        </div>
+                        ` : ''}
+                        ${actionsBlock}
                         ${entry.has_diary ? `
                             <div class="history-entry-detail" style="margin-top: 1rem;">
                                 <strong>📝 Reflection created</strong>
@@ -670,16 +929,86 @@
                 `;
             }
 
+            function renderGrilloActions(actions) {
+                if (!Array.isArray(actions) || actions.length === 0) {
+                    return `
+                        <div class="grillo-actions">
+                            <div class="grillo-actions-header">
+                                <span>Azioni Grillo</span>
+                            </div>
+                            <div class="history-entry-detail" style="margin: 0; opacity: 0.7;"><em>Nessuna azione proposta</em></div>
+                        </div>
+                    `;
+                }
+
+                const counts = actions.reduce((acc, action) => {
+                    const key = (action.status || 'pending').toLowerCase();
+                    acc[key] = (acc[key] || 0) + 1;
+                    return acc;
+                }, {});
+
+                const countChips = ['pending', 'processed', 'failed']
+                    .filter(key => counts[key])
+                    .map(key => `<span>${key}: ${counts[key]}</span>`)
+                    .join('');
+
+                const items = actions.map(action => {
+                    const status = (action.status || 'pending').toLowerCase();
+                    const typeLabel = escapeHtml(action.action_type || 'unknown');
+                    const payload = formatJsonBlock(action.payload);
+                    const result = formatJsonBlock(action.result);
+                    const errorText = action.error_text ? escapeHtml(action.error_text) : '';
+                    const createdAt = action.created_at ? formatTimestamp(action.created_at) : '';
+
+                    return `
+                        <div class="grillo-action-item">
+                            <div class="grillo-action-header">
+                                <span class="grillo-action-type">${typeLabel}</span>
+                                <span class="grillo-action-status ${status}">${status}</span>
+                                ${createdAt ? `<span style="font-size: 0.7rem; color: var(--text-soft);">${createdAt}</span>` : ''}
+                            </div>
+                            ${payload ? `<div class="grillo-action-detail"><strong>Payload:</strong>\n${payload}</div>` : ''}
+                            ${result ? `<div class="grillo-action-detail"><strong>Result:</strong>\n${result}</div>` : ''}
+                            ${errorText ? `<div class="grillo-action-detail"><strong>Error:</strong> ${errorText}</div>` : ''}
+                        </div>
+                    `;
+                }).join('');
+
+                return `
+                    <div class="grillo-actions">
+                        <div class="grillo-actions-header">
+                            <span>Azioni Grillo</span>
+                            ${countChips ? `<div class="grillo-actions-counts">${countChips}</div>` : ''}
+                        </div>
+                        <div class="grillo-actions-list">${items}</div>
+                    </div>
+                `;
+            }
+
+            function formatJsonBlock(value) {
+                if (value === undefined || value === null || value === '') return '';
+                try {
+                    const normalized = typeof value === 'string' ? JSON.parse(value) : value;
+                    return escapeHtml(JSON.stringify(normalized, null, 2));
+                } catch (e) {
+                    return escapeHtml(String(value));
+                }
+            }
+
             function renderChatMessage(msg) {
-                const timestamp = new Date(msg.timestamp).toLocaleString('en-US', { 
-                    hour: '2-digit', 
-                    minute: '2-digit' 
-                });
-                
+                const timestamp = formatTimestamp(msg.timestamp);
+                let safeMessage = escapeHtml(msg.message_text || '');
+                // Trim leading whitespace/newlines to avoid accidental leading spaces in UI
+                safeMessage = safeMessage.replace(/^[\s\u00A0]+/, '').replace(/[\n\r]+$/, '');
+                const isLong = safeMessage.split('\n').length > 6 || safeMessage.length > 600;
+                const longClass = isLong ? ' chat-text--limited' : '';
+
                 return `
                     <div class="chat-message">
                         <div class="chat-sender">${escapeHtml(msg.sender_name || 'Unknown')}</div>
-                        <div class="chat-text">${escapeHtml(msg.message_text)}</div>
+                        <div class="chat-text${longClass}" title="${safeMessage}">
+                            ${safeMessage}
+                        </div>
                         <div class="chat-time">${timestamp}</div>
                     </div>
                 `;
@@ -723,17 +1052,38 @@
             }
 
             function escapeHtml(text) {
+                if (text === undefined || text === null) return '';
                 const div = document.createElement('div');
                 div.textContent = text;
                 return div.innerHTML;
             }
 
             function formatTimestamp(isoString) {
-                // Converte timestamp ISO (UTC) in formato locale leggibile
+                // Normalize timestamps and include the local timezone abbreviation.
                 if (!isoString) return 'Unknown time';
                 try {
-                    const date = new Date(isoString);
-                    return date.toLocaleString();
+                    let normalized = String(isoString).trim();
+                    if (!normalized.endsWith('Z') && !/[+-]\d{2}:\d{2}$/.test(normalized)) {
+                        normalized += 'Z';
+                    }
+                    const parsed = new Date(normalized);
+                    if (Number.isNaN(parsed.getTime())) {
+                        return isoString;
+                    }
+                    // Force formatting into the browser's local timeZone explicitly to
+                    // avoid ambiguous interpretations (always show local wall-clock time)
+                    const localTZ = Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
+                    return new Intl.DateTimeFormat('it-IT', {
+                        year: 'numeric',
+                        month: '2-digit',
+                        day: '2-digit',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        second: '2-digit',
+                        hour12: false,
+                        timeZone: localTZ,
+                        timeZoneName: 'short'
+                    }).format(parsed);
                 } catch (e) {
                     return isoString;
                 }

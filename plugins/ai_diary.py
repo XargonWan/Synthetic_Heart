@@ -129,10 +129,10 @@ def get_max_diary_chars(interface_name: str = None, current_prompt_length: int =
             try:
                 from core.selenium_llm_base import get_active_selenium_limits
                 selenium_limits = get_active_selenium_limits()
-                max_selenium_chars = selenium_limits.get("max_prompt_chars", 128000)
+                max_selenium_chars = selenium_limits.get("max_prompt_chars", 128001)
                 return max_selenium_chars
             except Exception:
-                return 128000  # Safe fallback
+                return 128001  # Safe fallback
         
         registry = get_llm_registry()
         engine = registry.get_engine(active_llm)
@@ -141,16 +141,16 @@ def get_max_diary_chars(interface_name: str = None, current_prompt_length: int =
             engine = registry.load_engine(active_llm)
         
         # Try to get limits from active Selenium LLM engine first
-        max_prompt_chars = 128000  # Safe fallback default
+        max_prompt_chars = 128001  # Safe fallback default
         try:
             from core.selenium_llm_base import get_active_selenium_limits
             selenium_limits = get_active_selenium_limits()
-            max_prompt_chars = selenium_limits.get("max_prompt_chars", 128000)
+            max_prompt_chars = selenium_limits.get("max_prompt_chars", 128001)
         except Exception:
             # If not a Selenium engine, try to get from the engine itself
             if engine and hasattr(engine, 'get_interface_limits'):
                 limits = engine.get_interface_limits()
-                max_prompt_chars = limits.get("max_prompt_chars", 128000)
+                max_prompt_chars = limits.get("max_prompt_chars", 128001)
         
         # Check if this is a memory-focused operation (e.g., Grillo memory consolidation beat)
         maximize_diary = False
@@ -170,7 +170,7 @@ def get_max_diary_chars(interface_name: str = None, current_prompt_length: int =
         return max(diary_allocation, 5000)  # Minimum 5k chars
     except Exception as e:
         log_warning(f"[ai_diary] Error calculating diary limit: {e}")
-        return 8000  # Fallback
+        return 8001  # Fallback
 
 
 async def _run_sync_async(coro):
@@ -399,12 +399,16 @@ def _run(coro):
         return None
 
 
-async def _execute(query: str, params: tuple = ()) -> None:
-    """Execute a database query."""
+async def _execute(query: str, params: tuple = ()):
+    """Execute a database query and return the cursor.
+
+    Returning the cursor allows callers to read `lastrowid` and `rowcount`.
+    """
     async with get_db() as conn:
         cursor = await conn.cursor()
         await cursor.execute(query, params)
         await conn.commit()
+        return cursor
 
 
 async def _fetchall(query: str, params: tuple = ()) -> List[Dict]:
@@ -526,7 +530,13 @@ def add_diary_entry(
             try:
                 import asyncio
                 from plugins.grillo_plugin import GrilloPlugin
-                asyncio.create_task(GrilloPlugin.link_diary_entry_to_activity(grillo_activity_log_id, diary_entry_id))
+                asyncio.create_task(
+                    GrilloPlugin.link_diary_entry_to_activity(
+                        grillo_activity_log_id,
+                        diary_entry_id,
+                        response_text=content,
+                    )
+                )
                 log_debug(f"[ai_diary] Scheduled grillo activity link: activity_log={grillo_activity_log_id}, diary={diary_entry_id}")
             except Exception as link_error:
                 log_warning(f"[ai_diary] Failed to link grillo activity: {link_error}")
@@ -636,7 +646,11 @@ async def add_diary_entry_async(
         if grillo_activity_log_id and diary_entry_id:
             try:
                 from plugins.grillo_plugin import GrilloPlugin
-                await GrilloPlugin.link_diary_entry_to_activity(grillo_activity_log_id, diary_entry_id)
+                await GrilloPlugin.link_diary_entry_to_activity(
+                    grillo_activity_log_id,
+                    diary_entry_id,
+                    response_text=content,
+                )
                 log_debug(f"[ai_diary] Linked grillo activity: activity_log={grillo_activity_log_id}, diary={diary_entry_id}")
             except Exception as link_error:
                 log_warning(f"[ai_diary] Failed to link grillo activity: {link_error}")
@@ -862,7 +876,8 @@ def create_personal_diary_entry(
     involved_users: List[str] = None,
     interface: str = None,
     chat_id: str = None,
-    thread_id: str = None
+    thread_id: str = None,
+    grillo_activity_log_id: int = None
 ) -> None:
     """Helper function to create a complete personal diary entry.
     
@@ -906,7 +921,8 @@ def create_personal_diary_entry(
         involved_users=involved_users,
         interface=interface,
         chat_id=chat_id,
-        thread_id=thread_id
+        thread_id=thread_id,
+        grillo_activity_log_id=grillo_activity_log_id
     )
 
 
@@ -1047,9 +1063,6 @@ def _generate_emotions_from_interaction(
     """Generate emotions that synth would feel during this interaction."""
     emotions = []
     
-    # Base emotion - engagement (always present during interaction)
-    emotions.append({"type": "engaged", "intensity": 6})
-    
     # Emotions based on context
     if context_tags:
         if 'help' in context_tags or 'assistance' in context_tags:
@@ -1089,6 +1102,10 @@ def _generate_emotions_from_interaction(
     
     if len(synth_response) > 200:  # Long, detailed response
         emotions.append({"type": "thorough", "intensity": 6})
+
+    # Fallback emotion: if nothing else was detected, mark as engaged.
+    if not emotions:
+        emotions.append({"type": "engaged", "intensity": 6})
     
     # Remove duplicates while preserving the highest intensity for each emotion type
     emotion_dict = {}
@@ -1148,6 +1165,29 @@ class DiaryPlugin:
 
     def get_supported_action_types(self):
         return ["static_inject", "create_personal_diary_entry"]
+
+    def get_history_contributions(self, **kwargs):
+        """Provide diary entries as a history contribution for the core HistoryEngine."""
+        try:
+            from core.history_types import HistoryContribution
+            from core.config_manager import config_registry
+
+            try:
+                days = int(config_registry.get_value('DIARY_HISTORY_DAYS', 2, value_type=int))
+            except Exception:
+                days = 2
+
+            entries = get_recent_entries(days=days, max_chars=None)
+            return [
+                HistoryContribution(
+                    name='ai_diary',
+                    priority=INJECTION_PRIORITY,
+                    entries=entries,
+                    enabled_var='ENABLE_AI_DIARY',
+                )
+            ]
+        except Exception:
+            return []
 
     def get_supported_actions(self):
         return {

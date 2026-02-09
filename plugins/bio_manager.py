@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from core.db import get_conn_ctx
 from core.logging_utils import log_error, log_info, log_debug, log_warning
 from core.core_initializer import core_initializer, register_plugin
+from core.user_utils import get_user_display_name, get_user_usertag
 
 
 # Injection priority for participant bios
@@ -930,8 +931,8 @@ class BioPlugin:
             participants.append(
                 {
                     "id": uid,
-                    "username": message.from_user.full_name,
-                    "usertag": f"@{message.from_user.username}" if message.from_user.username else "(no tag)",
+                        "username": get_user_display_name(getattr(message, "from_user", None)),
+                    "usertag": get_user_usertag(getattr(message, 'from_user', None)),
                 }
             )
             seen.add(uid)
@@ -964,21 +965,9 @@ class BioPlugin:
                 bio = {}
             short_info = bio.get("information", "")[:200]
             
-            # Build chat_history for this participant from context_memory
-            user_chat_history = []
-            if chat_msgs:
-                for msg in chat_msgs:
-                    if str(msg.get("user_id")) == p["id"]:
-                        user_chat_history.append({
-                            "text": msg.get("text", ""),
-                            "timestamp": msg.get("timestamp", ""),
-                            "username": msg.get("username", "")
-                        })
-            
             entry = {
                 "id": p["id"],
                 "usertag": p.get("usertag"),
-                "chat_history": user_chat_history,
                 "nicknames": bio.get("known_as", []),
                 "short_bio": short_info,
                 "feelings": bio.get("feelings", []),

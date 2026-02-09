@@ -51,6 +51,28 @@ Database Schema
 - ``interface_path``: Unified address (e.g., ``telegram_bot/123456/789``)
 - ``sender_name``: Display name of message sender
 - ``sender_id``: Unique identifier of sender
+   Chat Archiving (WebUI)
+   ----------------------
+
+   The Web UI supports archiving and restoring entire conversations for the single persistent session. Archives are filesystem-backed JSON snapshots located under ``backups/chat_archives/``. The following endpoints are exposed on the Web UI API:
+
+   - ``POST /api/chat/archive``
+      Archive the current conversation; returns ``{ "success": true, "archive_id": "..." }``. The current chat is cleared after archiving.
+   - ``GET /api/chat/archives``
+      List available archives with basic metadata.
+   - ``POST /api/chat/restore``
+      Restore an archive into the current persistent session (payload: ``{ "archive_id": "..." }``). The current chat will be archived first.
+   - ``DELETE /api/chat/archives/{archive_id}``
+      Delete an archive file.
+
+   Notes:
+   - Archiving is filesystem-backed for the MVP to avoid DB schema changes. Production deployments may prefer database-backed archives or additional metadata storage.
+   - Archiving/restore operations are atomic from the client's perspective and broadcast restored messages to the WebSocket-connected client.
+
+   WebUI Session Persistence
+   -------------------------
+
+   The Web UI uses a single persistent session per deploy (single user semantics). The session id is stored in ``backups/webui_session_id.txt`` on the server and is used as the ``interface_path`` namespace for chat history (``synth_webui/<session_id>``). This allows the Web UI to restore conversation history when the container restarts.
 - ``message_text``: Full message content
 - ``timestamp``: Message timestamp with microsecond precision
 

@@ -356,6 +356,28 @@ If your service offers multiple response options, override ``_get_response_choic
 3. **Integration Testing**: Send test messages and verify response extraction
 4. **Choice Testing**: Test with services that offer multiple response options
 
+Agentic Hooks (optional)
+------------------------
+
+LLM engines can optionally implement *agentic* hooks so the core Agent plugin
+can attach and cooperate with engine-level features. These hooks are
+non-mandatory and engines should degrade gracefully if the Agent plugin is
+absent or disabled.
+
+Suggested hooks for engines:
+
+- ``supports_agent() -> bool`` — Return True if the engine provides agentic extensions.
+- ``attach_agent(agent_plugin)`` / ``detach_agent(agent_plugin)`` — Called when the
+  core Agent plugin attaches or detaches; engines can use this to cache the
+  plugin reference or perform initialization.
+- ``agent_prepare_prompt(context) -> dict`` — Return additional engine-specific
+  prompt material.
+- ``agent_execute(action_dict, context) -> dict`` — Optional execution helper;
+  return a dict with execution result, or ``{"status": "unsupported"}``.
+
+Engines must not raise exceptions if the Agent plugin is absent; calls should be
+protected and degrade safely.
+
 Engine Integration
 ------------------
 
@@ -590,6 +612,34 @@ Override methods as needed for your service:
            "button.choice-option",  # Primary
            ".response-choices button",  # Fallback
        ]
+
+Web UI: Login flow endpoint
+---------------------------
+
+The Web UI provides an API to initiate an interactive login flow for Selenium-based
+LLM engines. This is intended to start a browser session (Selkies/Chromium) so a
+user can authenticate via the service's web interface.
+
+Endpoint:
+
+``POST /api/components/llm/login``
+
+Request JSON:
+
+``{ "name": "selenium_chatgpt" }``
+
+Typical success response (acknowledgement, non-blocking):
+
+``{ "status": "ok", "name": "selenium_chatgpt", "action": "started", "logged_in": false }``
+
+Notes:
+
+- The login flow is started asynchronously and the endpoint returns immediately.
+- Selkies availability is checked as a best-effort; absence does not prevent
+    the flow from proceeding where possible, but a helpful error will be returned
+    if the engine is not Selenium-based or not loaded.
+- The client (Web UI) may poll ``GET /api/components`` to detect updates to
+    the engine's ``login_state`` and ``logged_in`` fields.
 
 Step 3: Define Robust Selectors
 ---------------------------------

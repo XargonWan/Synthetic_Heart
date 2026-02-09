@@ -1,0 +1,9 @@
+This is a placeholder marker file.
+
+Please place your XFCE menu screenshot at:
+
+  docs/res/selkies_chromium_menu.png
+
+The Quickstart page references this filename to show how to open the
+Chromium SynthH browser inside Selkies. If you prefer, replace the file with
+the attached screenshot provided in the issue/request.

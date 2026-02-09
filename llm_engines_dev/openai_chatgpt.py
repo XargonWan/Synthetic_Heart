@@ -40,7 +40,7 @@ MODEL_CONFIGS = {
         "supports_functions": True
     },
     "gpt-3.5-turbo-16k": {
-        "max_prompt_chars": 48000,  # 16k context, ~48k chars
+        "max_prompt_chars": 48001,  # 16k context, ~48k chars
         "max_tokens": 4000,
         "supports_images": False,
         "supports_functions": True

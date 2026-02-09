@@ -174,6 +174,14 @@ Emotions can be specified in LLM responses using the format ``{emotion intensity
 
    I'm so excited about this project! {excitement 8.5} {curiosity 7.2}
 
+**Canonical emotion set:**
+
+To keep behavior consistent the LLM should use the canonical emotion set (Ekman 6 + neutral + relaxed):
+
+- ``happy``, ``sad``, ``angry``, ``fear``, ``disgust``, ``surprised``, ``neutral``, ``relaxed``
+
+If the LLM uses an unknown emotion name, the system will trigger a corrector requesting the LLM to resend using only canonical emotion names (format: ``{emotion intensity}``, intensity 0.0-10.0).
+
 **Automatic Extraction:**
 
 The engine automatically scans LLM messages for emotion tags and applies them to the emotional state with balancing.
