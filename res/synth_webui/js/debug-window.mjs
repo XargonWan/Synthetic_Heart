@@ -94,13 +94,7 @@ export function createDebugWindow() {
                     <div style="margin-top:8px;font-size:11px;color:var(--text-soft);">Loaded: <span id="synth-debug-loop-loaded">0</span></div>
                 </div>
 
-                <div class="card" style="margin:0;">
-                    <h2 style="margin:0 0 8px 0;">Feelings</h2>
-                    <div id="synth-debug-feelings" style="display:flex;flex-direction:column;gap:8px;"></div>
-                    <div style="display:flex;gap:8px;margin-top:8px;">
-                        <button id="synth-debug-feelings-clear" class="pill secondary" type="button">Clear Overrides</button>
-                    </div>
-                </div>
+                <!-- Feelings panel removed -->
 
                 <div class="card" style="margin:0;">
                     <h2 style="margin:0 0 8px 0;">Facial Morphs</h2>
@@ -246,10 +240,10 @@ export function createDebugWindow() {
             });
         }
 
-        async function resyncFromBackend() {
+        async function resyncFromBackend(force = false) {
             try {
                 if (!window.animationHandler) return;
-                if (isPaused()) return;
+                if (isPaused() && !force) return;
                 try {
                     const st = window.__synth_last_rich_animation_state || null;
                     if (st && typeof window.animationHandler.applyAnimationState === 'function') {
@@ -519,32 +513,35 @@ export function createDebugWindow() {
                             }
                         }
                     } catch (e) { /* ignore */ }
-                    const s = parseInt((startInput && startInput.value) ? startInput.value : '0', 10);
+                    let s = parseInt((startInput && startInput.value) ? startInput.value : '0', 10);
+                    const fps = parseFloat((fpsInput && fpsInput.value) ? fpsInput.value : '30');
                     const eRaw = (endInput && String(endInput.value).trim() !== '') ? parseInt(endInput.value, 10) : NaN;
                     let e = Number.isFinite(eRaw) ? eRaw : NaN;
-                    const fps = parseFloat((fpsInput && fpsInput.value) ? fpsInput.value : '30');
 
-                    // If end not provided or invalid/<=start, try to compute it from the clip descriptor or loaded animation
-                    if (!Number.isFinite(e) || e <= s) {
+                    // Always compute end from the animation max frame when starting the debug loop
+                    let descriptor = null;
+                    let useFps = 30;
+                    try {
+                        let computedMax = 0;
+                        descriptor = (window.animationHandler && window.animationHandler.loadedDescriptors) ? (window.animationHandler.loadedDescriptors[aFile] || null) : null;
+                        const desiredFps = (descriptor && Number.isFinite(Number(descriptor.fps))) ? Number(descriptor.fps) : Number(fps || 30);
+                        useFps = (Number.isFinite(desiredFps) && desiredFps > 0) ? desiredFps : 30;
                         try {
-                            let computedMax = 0;
-                            const descriptor = (window.animationHandler && window.animationHandler.loadedDescriptors) ? (window.animationHandler.loadedDescriptors[aFile] || null) : null;
-                            const desiredFps = (descriptor && Number.isFinite(Number(descriptor.fps))) ? Number(descriptor.fps) : Number(fps || 30);
-                            const useFps = (Number.isFinite(desiredFps) && desiredFps > 0) ? desiredFps : 30;
-                            try {
-                                if (window.animationHandler && window.animationHandler.loadedAnimations) {
-                                    const norm = (typeof window.animationHandler._normalizeAnimationKey === 'function') ? window.animationHandler._normalizeAnimationKey(aFile) : aFile;
-                                    const clip = window.animationHandler.loadedAnimations[norm] || window.animationHandler.loadedAnimations[aFile] || null;
-                                    if (clip) computedMax = computeMaxFramesFromClip(clip, useFps);
-                                }
-                            } catch (e2) { /* ignore */ }
-                            if (!computedMax) computedMax = computeMaxFramesFromDescriptor(descriptor);
-                            if (computedMax && computedMax > s) {
-                                e = computedMax;
-                                try { if (endInput) endInput.value = String(e); } catch (e) { /* ignore */ }
+                            if (window.animationHandler && window.animationHandler.loadedAnimations) {
+                                const norm = (typeof window.animationHandler._normalizeAnimationKey === 'function') ? window.animationHandler._normalizeAnimationKey(aFile) : aFile;
+                                const clip = window.animationHandler.loadedAnimations[norm] || window.animationHandler.loadedAnimations[aFile] || null;
+                                if (clip) computedMax = computeMaxFramesFromClip(clip, useFps);
                             }
-                        } catch (e3) { /* ignore */ }
-                    }
+                        } catch (e2) { /* ignore */ }
+                        if (!computedMax) computedMax = computeMaxFramesFromDescriptor(descriptor);
+                        if (computedMax >= 0) {
+                            e = computedMax;
+                            try { if (endInput) endInput.value = String(e); } catch (e) { /* ignore */ }
+                        }
+                    } catch (e3) { /* ignore */ }
+
+                    // Default start to 0 when invalid
+                    if (!Number.isFinite(s) || s < 0) s = 0;
 
                     // Basic validation before queuing
                     if (!aFile) {
@@ -552,10 +549,30 @@ export function createDebugWindow() {
                         try { console.debug('[debug-window] No animation file selected; selFile.options=', selFile && selFile.options ? Array.from(selFile.options).map(o=>o.value) : null); } catch (e) {}
                         return;
                     }
-                    if (!Number.isFinite(s) || !Number.isFinite(e)) return alert('Please enter numeric frame values');
-                    if (e <= s) return alert('end must be > start');
+
+                    // Ensure UI inputs are populated with a sensible fallback immediately so the user sees values
+                    try {
+                        if (startInput && String(startInput.value || '').trim() === '') {
+                            startInput.value = '0';
+                            s = 0;
+                        }
+                        if (endInput && String(endInput.value || '').trim() === '') {
+                            const fallback = Math.max(1, (Number.isFinite(s) ? (s + 1) : 1));
+                            endInput.value = String(fallback);
+                            e = fallback;
+                            console.debug('[debug-window] Pre-filled endInput with fallback', { aFile, s, e: fallback });
+                        }
+                    } catch (e) { /* ignore */ }
 
                     if (!window.animationHandler) {
+                        // If end not available or <= start, pick a fallback end = start+1 (or 1) so we can queue a preview
+                        if (!Number.isFinite(e) || e <= s) {
+                            const fallback = Math.max(1, (Number.isFinite(s) ? (s + 1) : 1));
+                            console.debug('[debug-window] Using fallback end frame (queued)', { aFile, s, fallback });
+                            e = fallback;
+                            try { if (endInput) endInput.value = String(e); } catch (e) { /* ignore */ }
+                        }
+                        if (!Number.isFinite(s) || !Number.isFinite(e)) return alert('Please enter numeric frame values');
                         try {
                             // Preview semantics: visually indicate Preview (handler will run it when ready). Keep the queued action so it will execute later, but label it 'Preview' to reflect intent.
                             window.__synth_pending_actions = window.__synth_pending_actions || [];
@@ -570,12 +587,14 @@ export function createDebugWindow() {
                     try {
                         // Try to ensure the requested clip is actually loadable first - call loadAnimation if available
                         let clipOk = false;
+                        let loadedClip = null;
                         try {
                             if (typeof window.animationHandler.loadAnimation === 'function') {
                                 try {
                                     const loaded = await window.animationHandler.loadAnimation(aType, aFile);
                                     console.debug('[debug-window] loadAnimation pre-check result', { aFile, loaded: !!loaded, duration: loaded && loaded.duration });
                                     clipOk = !!loaded;
+                                    loadedClip = loaded || null;
                                 } catch (e) {
                                     console.debug('[debug-window] loadAnimation threw during pre-check', e);
                                     clipOk = false;
@@ -592,6 +611,7 @@ export function createDebugWindow() {
                                     const loaded2 = await window.animationHandler.loadAnimation(aType, candidatePath);
                                     console.debug('[debug-window] loadAnimation fallback result', { candidatePath, loaded: !!loaded2 });
                                     clipOk = !!loaded2;
+                                    loadedClip = loaded2 || loadedClip;
                                     if (clipOk) {
                                         // If successful, replace the aFile with the full path for the start call
                                         aFile = candidatePath;
@@ -607,6 +627,33 @@ export function createDebugWindow() {
                             console.warn('[debug-window] Aborting startTemporaryLoop - clip not found', { aType, aFile });
                             return;
                         }
+
+                        // Recompute end frame from the loaded clip (authoritative) before starting
+                        try {
+                            let computedMax = 0;
+                            const effectiveFps = (Number.isFinite(useFps) && useFps > 0) ? useFps : 30;
+                            if (loadedClip) {
+                                computedMax = computeMaxFramesFromClip(loadedClip, effectiveFps);
+                            } else if (window.animationHandler && window.animationHandler.loadedAnimations) {
+                                const norm = (typeof window.animationHandler._normalizeAnimationKey === 'function') ? window.animationHandler._normalizeAnimationKey(aFile) : aFile;
+                                const clip = window.animationHandler.loadedAnimations[norm] || window.animationHandler.loadedAnimations[aFile] || null;
+                                if (clip) computedMax = computeMaxFramesFromClip(clip, effectiveFps);
+                            }
+                            if (!computedMax) computedMax = computeMaxFramesFromDescriptor(descriptor);
+                            if (computedMax >= 0) {
+                                e = computedMax;
+                                try { if (endInput) endInput.value = String(e); } catch (e) { /* ignore */ }
+                            }
+                        } catch (e) { /* ignore */ }
+
+                        // If computation failed or computed end <= start, use a fallback end frame
+                        if (!Number.isFinite(e) || e <= s) {
+                            const fallback = Math.max(1, (Number.isFinite(s) ? (s + 1) : 1));
+                            console.debug('[debug-window] Using fallback end frame (post-load)', { aFile, s, fallback });
+                            e = fallback;
+                            try { if (endInput) endInput.value = String(e); } catch (e) { /* ignore */ }
+                        }
+                        if (!Number.isFinite(s) || !Number.isFinite(e)) return alert('Please enter numeric frame values');
 
                         await window.animationHandler.startTemporaryLoop(aType, aFile, s, e, Number.isFinite(fps) ? fps : 30);
                         try { console.debug('[debug-window] startTemporaryLoop called successfully'); } catch (e) {}
@@ -627,6 +674,7 @@ export function createDebugWindow() {
                         return;
                     }
                     window.animationHandler.clearTemporaryOverride();
+                    resyncFromBackend(true);
                 } catch (err) { console.warn('[synth_webui] clear temp loop failed:', err); }
             });
         }
@@ -746,202 +794,7 @@ export function createDebugWindow() {
             } catch (e) { /* ignore */ }
         };
 
-        // Feelings UI helpers (full impl copied from synth_webui_index)
-        const extractEmotionValues = () => {
-            try {
-                const out = {};
-                const mergeObj = (obj) => {
-                    if (!obj || typeof obj !== 'object') return;
-                    const values = (obj.values && typeof obj.values === 'object') ? obj.values : obj;
-                    if (!values || typeof values !== 'object') return;
-                    if (Array.isArray(values)) {
-                        values.forEach((it) => {
-                            try {
-                                const name = it && (it.type || it.name) ? String(it.type || it.name) : '';
-                                if (!name) return;
-                                if (/^\d+$/.test(String(name))) return;
-                                const raw = Number(it.intensity !== undefined ? it.intensity : it.value);
-                                if (!Number.isFinite(raw)) return;
-                                const v01 = (raw > 1) ? (raw / 10.0) : raw;
-                                const vv = Math.max(0, Math.min(1, v01));
-                                out[String(name)] = Math.max(out[String(name)] || 0, vv);
-                            } catch (e) { /* ignore */ }
-                        });
-                        return;
-                    }
-                    Object.keys(values).forEach((k) => {
-                        if (!k) return;
-                        if (/^\d+$/.test(String(k))) return;
-                        const v = Number(values[k]);
-                        if (!Number.isFinite(v)) return;
-                        const v01 = (v > 1) ? (v / 10.0) : v;
-                        const vv = Math.max(0, Math.min(1, v01));
-                        out[String(k)] = Math.max(out[String(k)] || 0, vv);
-                    });
-                };
-
-                // Merge engine-provided emotions and feelings if present
-                mergeObj(window.animationHandler ? (window.animationHandler._lastEmotions || null) : null);
-                mergeObj(window.animationHandler ? (window.animationHandler._lastFeelings || null) : null);
-
-                // Fallback: if animation state contains expressions (array of {type/name,intensity}), merge them too
-                try {
-                    const st = window.animationHandler && window.animationHandler._lastAnimationState ? window.animationHandler._lastAnimationState : null;
-                    if (st && Array.isArray(st.expressions) && st.expressions.length) {
-                        mergeObj({ values: st.expressions });
-                    }
-                } catch (e) { /* ignore */ }
-
-                // Final fallback: if we have a cached server-side emotion snapshot from /api/emotion_state, merge it
-                try {
-                    if ((!Object.keys(out).length) && window.__synth_debug_cached_emotions && typeof window.__synth_debug_cached_emotions === 'object') {
-                        mergeObj(window.__synth_debug_cached_emotions);
-                    }
-                } catch (e) { /* ignore */ }
-
-                try { console.debug('[debug-window] extractEmotionValues ->', out); } catch (e) {}
-                return out;
-            } catch (e) {
-                return {};
-            }
-        };
-
-        const ensureFeelingsRows = (keys) => {
-            try {
-                if (!win) return;
-                const feelingsHost = win.querySelector('#synth-debug-feelings');
-                if (!feelingsHost) return;
-                const sig = keys.join('|');
-                if (__dbgFeelingsSig === sig && __dbgFeelingsRows.size) return;
-
-                __dbgFeelingsSig = sig;
-                __dbgFeelingsRows = new Map();
-                feelingsHost.innerHTML = '';
-
-                if (keys.length === 0) {
-                    const empty = document.createElement('div');
-                    empty.style.fontSize = '12px';
-                    empty.style.color = 'var(--text-soft)';
-                    empty.textContent = '—';
-                    feelingsHost.appendChild(empty);
-                    return;
-                }
-
-                keys.forEach((name) => {
-                    const row = document.createElement('div');
-                    row.style.display = 'grid';
-                    row.style.gridTemplateColumns = '1fr 140px 56px';
-                    row.style.alignItems = 'center';
-                    row.style.gap = '8px';
-
-                    const label = document.createElement('div');
-                    label.style.fontSize = '12px';
-                    label.style.color = 'var(--text)';
-                    label.textContent = name;
-
-                    const slider = document.createElement('input');
-                    slider.type = 'range';
-                    slider.min = '0';
-                    slider.max = '1';
-                    slider.step = '0.01';
-                    slider.value = '0';
-
-                    const num = document.createElement('input');
-                    num.type = 'number';
-                    num.min = '0';
-                    num.max = '1';
-                    num.step = '0.01';
-                    num.value = '0';
-                    num.style.padding = '6px';
-                    num.style.borderRadius = '8px';
-                    num.style.background = 'rgba(255,255,255,0.02)';
-                    num.style.border = '1px solid var(--border)';
-                    num.style.color = 'var(--text)';
-
-                    const apply = (v) => {
-                        const vv = clamp01(v);
-                        slider.value = String(vv);
-                        num.value = String(vv);
-                        try {
-                            // track applied emotion keys so Clear can remove local changes
-                            try { if (!window.__synth_debug_applied_emotions) window.__synth_debug_applied_emotions = new Set(); } catch (e) { window.__synth_debug_applied_emotions = {}; }
-                            try { if (window.__synth_debug_applied_emotions instanceof Set) window.__synth_debug_applied_emotions.add(name); } catch (e) {}
-
-                            const helper = window.__synth_applyDebugEmotion || null;
-                            if (helper) {
-                                const ok = helper(name, vv);
-                                if (ok) console.debug('[debug-window] applied emotion via helper', name, vv);
-                                else {
-                                    window.__synth_pending_debug_actions = window.__synth_pending_debug_actions || [];
-                                    window.__synth_pending_debug_actions.push({ type: 'setDebugEmotionOverride', name, value: vv });
-                                    console.debug('[debug-window] queued debug emotion action (helper failed)', name, vv);
-                                }
-                            } else if (window.animationHandler && window.animationHandler.setDebugEmotionOverride) {
-                                try { window.animationHandler.setDebugEmotionOverride(name, vv); console.debug('[debug-window] applied emotion via animationHandler', name, vv); } catch (e) { /* ignore */ }
-                            } else {
-                                window.__synth_pending_debug_actions = window.__synth_pending_debug_actions || [];
-                                window.__synth_pending_debug_actions.push({ type: 'setDebugEmotionOverride', name, value: vv });
-                                console.debug('[debug-window] queued debug emotion action (no helper)', name, vv);
-                            }
-                        } catch (e) { console.warn('[debug-window] setDebugEmotionOverride failed', e); }
-                    };
-                    row.appendChild(label);
-                    row.appendChild(slider);
-                    row.appendChild(num);
-                    feelingsHost.appendChild(row);
-
-                    __dbgFeelingsRows.set(name, { slider, num });
-                });
-            } catch (e) { /* ignore */ }
-        };
-
-        const renderFeelings = () => {
-            try {
-                const feelingsHost = win.querySelector('#synth-debug-feelings');
-                if (!feelingsHost) return;
-                const base = extractEmotionValues();
-                const overrides = (window.animationHandler && typeof window.animationHandler.getDebugEmotionOverrides === 'function') ? window.animationHandler.getDebugEmotionOverrides() : {};
-                const personaKeys = (window.__synth_persona_emotions_list && Array.isArray(window.__synth_persona_emotions_list)) ? window.__synth_persona_emotions_list : [];
-
-                try { console.debug('[debug-window] renderFeelings baseKeys=', Object.keys(base).slice(0,20), 'overrides=', Object.keys(overrides).slice(0,20), 'personaKeys=', personaKeys && personaKeys.length ? personaKeys.slice(0,20) : personaKeys); } catch (e) {}
-
-                const keysSet = new Set();
-                const cached = (window.__synth_debug_cached_emotions && typeof window.__synth_debug_cached_emotions === 'object') ? window.__synth_debug_cached_emotions : null;
-                if (personaKeys && Array.isArray(personaKeys) && personaKeys.length) {
-                    personaKeys.forEach(k => keysSet.add(k));
-                    Object.keys(base).forEach(k => { if (personaKeys.includes(k)) keysSet.add(k); });
-                    Object.keys(overrides).forEach(k => { if (personaKeys.includes(k)) keysSet.add(k); });
-                } else {
-                    // No persona list: prefer base and overrides, but if both are empty, use cached server snapshot
-                    Object.keys(base).forEach(k => keysSet.add(k));
-                    Object.keys(overrides).forEach(k => keysSet.add(k));
-                    if ((!Object.keys(base).length) && (!Object.keys(overrides).length) && cached) {
-                        Object.keys(cached).forEach(k => keysSet.add(k));
-                        // Merge cached into base for display values
-                        try { Object.keys(cached).forEach(k => { if (!base[k]) base[k] = Number(cached[k]); }); } catch (e) { /* ignore */ }
-                    }
-                }
-                const keys = Array.from(keysSet).filter(k => k && !/^\d+$/.test(String(k))).sort();
-                ensureFeelingsRows(keys);
-                if (!keys.length) {
-                    try { console.debug('[debug-window] renderFeelings: no keys to show'); } catch (e) {}
-                    return;
-                }
-                keys.forEach((name) => {
-                    const row = __dbgFeelingsRows.get(name);
-                    if (!row) return;
-                    const override = (overrides && overrides[name] !== undefined) ? clamp01(overrides[name]) : null;
-                    const current = (override !== null) ? override : clamp01(base[name] || 0);
-
-                    const active = document.activeElement;
-                    const isActive = (active === row.slider || active === row.num);
-                    if (!isActive || override !== null) {
-                        row.slider.value = String(current);
-                        row.num.value = String(current);
-                    }
-                });
-            } catch (e) { /* ignore */ }
-        };
+        // Feelings UI removed — debug window no longer exposes emotion override controls
 
         // Facial morph UI (full impl)
         const getFaceKeys = () => {
@@ -1088,35 +941,8 @@ export function createDebugWindow() {
             } catch (e) { /* ignore */ }
         };
 
-        // Bind feelings & face controls
+        // Bind face controls (feelings UI removed)
         try {
-            const feelingsClearBtn = win.querySelector('#synth-debug-feelings-clear');
-            if (feelingsClearBtn) {
-                feelingsClearBtn.addEventListener('click', () => {
-                    try {
-                        // Immediate local clear of keys applied by this UI
-                        try {
-                            const applied = (window.__synth_debug_applied_emotions && window.__synth_debug_applied_emotions instanceof Set) ? Array.from(window.__synth_debug_applied_emotions) : [];
-                            if (applied.length) {
-                                try { console.debug('[debug-window] clearing local applied emotions', applied); } catch (e) {}
-                                applied.forEach(n => { try { window.__synth_applyDebugEmotion ? window.__synth_applyDebugEmotion(n, null) : null; } catch (e) {} });
-                                try { if (window.__synth_debug_applied_emotions instanceof Set) window.__synth_debug_applied_emotions.clear(); } catch (e) {}
-                            }
-                        } catch (e) { /* ignore */ }
-
-                        if (window.animationHandler && window.animationHandler.clearDebugEmotionOverrides) {
-                            try { window.animationHandler.clearDebugEmotionOverrides(); console.debug('[debug-window] invoked animationHandler.clearDebugEmotionOverrides'); } catch (e) { /* ignore */ }
-                        } else {
-                            window.__synth_pending_debug_actions = window.__synth_pending_debug_actions || [];
-                            window.__synth_pending_debug_actions.push({ type: 'clearDebugEmotionOverrides' });
-                            console.debug('[debug-window] queued clearDebugEmotionOverrides');
-                        }
-                    } catch (e) { /* ignore */ }
-                    __dbgFeelingsSig = '';
-                    try { renderFeelings(); } catch (e) {}
-                });
-            }
-
             const faceFilter = win.querySelector('#synth-debug-face-filter');
             const faceClearBtn = win.querySelector('#synth-debug-face-clear');
             if (faceFilter) faceFilter.addEventListener('input', () => renderFaceList());
@@ -1140,8 +966,8 @@ export function createDebugWindow() {
                         } else {
                             window.__synth_pending_debug_actions = window.__synth_pending_debug_actions || [];
                             window.__synth_pending_debug_actions.push({ type: 'clearDebugFaceOverrides' });
-                            console.debug('[debug-window] queued clearDebugFaceOverrides');
                         }
+                        console.debug('[debug-window] queued clearDebugFaceOverrides');
                     } catch (e) { /* ignore */ }
                     try { renderFaceList(); } catch (e) {}
                 });
@@ -1199,8 +1025,7 @@ export function createDebugWindow() {
                         }
                     } catch (e) { /* ignore */ }
 
-                    // refresh feelings + face current values
-                    renderFeelings();
+                    // refresh face current values
                     if (window.animationHandler && faceRows && faceRows.length) {
                         faceRows.forEach((r) => {
                             try {
@@ -1230,7 +1055,6 @@ export function createDebugWindow() {
             try { window.__synth_debug_resyncFromBackend = resyncFromBackend; } catch (e) { /* ignore */ }
 
             // Initial render
-            renderFeelings();
             renderFaceList();
             try {
                 if (pauseBtn) {
@@ -1254,8 +1078,7 @@ export function createDebugWindow() {
                                     try {
                                         if (persona && persona.emotions && typeof persona.emotions === 'object') {
                                             window.__synth_persona_emotions_list = Object.keys(persona.emotions);
-                                            __dbgFeelingsSig = '';
-                                            try { renderFeelings(); } catch (e) { /* ignore */ }
+                                            /* feelings panel removed */
                                         }
                                     } catch (e) { /* ignore */ }
                                 }).catch(() => {});
@@ -1273,8 +1096,7 @@ export function createDebugWindow() {
                                             const j = await r.json();
                                             if (j && j.emotions && typeof j.emotions === 'object') {
                                                 window.__synth_persona_emotions_list = Object.keys(j.emotions);
-                                                __dbgFeelingsSig = '';
-                                                try { renderFeelings(); } catch (e) { /* ignore */ }
+                                                /* feelings panel removed */
                                             }
                                         }
                                     } catch (e) { /* ignore */ }
@@ -1287,7 +1109,7 @@ export function createDebugWindow() {
                 if (!window.__synth_debug_on_vrm_loaded) {
                     window.__synth_debug_on_vrm_loaded = () => {
                         try { renderFaceList(); } catch (e) { /* ignore */ }
-                        try { __dbgFeelingsSig = ''; renderFeelings(); } catch (e) { /* ignore */ }
+                        try { /* feelings panel removed */ } catch (e) { /* ignore */ }
                         try { autofillLoopInputs(); } catch (e) { /* ignore */ }
                         // Try to refresh loop files now that VRM and animations are likely available
                         try {
@@ -1433,7 +1255,7 @@ export function createDebugWindow() {
                                                     window.__synth_debug_cached_emotions = j.emotions;
                                                     try { console.debug('[debug-window] fetched /api/emotion_state keys=', Object.keys(j.emotions).slice(0,20)); } catch (e) {}
                                                     // trigger immediate re-render
-                                                    try { renderFeelings(); } catch (e) {}
+                                                    /* feelings removed */
                                                 }
                                             }
                                         } catch (e) { /* ignore */ }
