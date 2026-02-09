@@ -119,10 +119,44 @@
         }
 
         header.top-bar.topbar--compact .brand-text {
-            display: none;
+            /* When the topbar is compact (hamburger visible), show the brand text */
+            display: block;
         }
         header.top-bar.topbar--compact .brand {
             gap: 0.6rem;
+        }
+        /* Hide the nav when compact (hamburger will toggle it) */
+        header.top-bar.topbar--compact nav.main-nav {
+            display: none;
+        }
+        /* When hamburger expands the nav, show it as a vertical column */
+        header.top-bar.topbar--compact.nav-open nav.main-nav {
+            display: flex;
+            flex-direction: column;
+            width: 100%;
+            margin-left: 0;
+            margin-top: 0.5rem;
+            gap: 0.6rem;
+            justify-content: flex-start;
+        }
+        /* Fallback: allow nav to open when header.nav-open is set even if topbar--compact wasn't applied */
+        header.top-bar.nav-open nav.main-nav {
+            display: flex;
+            flex-direction: column;
+            width: 100%;
+            margin-left: 0;
+            margin-top: 0.5rem;
+            gap: 0.6rem;
+            justify-content: flex-start;
+            position: fixed;
+            top: var(--topbar-height, 120px);
+            left: 0;
+            right: 0;
+            height: calc(100vh - var(--topbar-height, 120px));
+            background: rgba(12, 12, 20, 0.98);
+            backdrop-filter: blur(18px);
+            z-index: 20000;
+            overflow-y: auto;
         }
         header.top-bar.topbar--wrap {
             flex-wrap: wrap;
@@ -997,12 +1031,13 @@ window.__SYNTH_CONFIG = {
 
     <div id="synth-debug" data-debug-enabled="%%WEB_DEBUG%%" style="display:none"></div>
     <header class="top-bar">
-        <div class="brand">
+        <div class="brand" role="button" tabindex="0" title="Go to Home">
             <img src="%%LOGO_URL%%" alt="SyntH logo" />
             <div class="brand-text">
                 <h1>%%BRAND_NAME%%</h1>
             </div>
         </div>
+        <button class="hamburger" aria-label="Toggle menu" aria-expanded="false">☰</button>
         <nav class="main-nav" aria-label="Primary navigation">
             <button class="nav-btn active" data-tab="home" aria-controls="tab-home" aria-pressed="true">
                 <span class="icon" aria-hidden="true">🏠</span><span>Home</span>

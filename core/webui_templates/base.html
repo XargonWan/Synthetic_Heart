@@ -1081,15 +1081,21 @@
             }
             .hamburger {
                 display: block;
-                background: none;
+                background: transparent;
                 border: none;
                 color: var(--text);
                 font-size: 1.5rem;
                 cursor: pointer;
                 padding: 0.5rem;
+                margin-left: auto; /* align to right */
+                z-index: 20001; /* ensure above nav overlay */
             }
             .hamburger:hover {
                 color: var(--accent);
+            }
+
+            header.top-bar.topbar--compact .hamburger {
+                margin-left: auto;
             }
             #chat {
                 bottom: 0;
@@ -1144,7 +1150,7 @@
 </head>
 <body>
     <header class="top-bar">
-        <div class="brand">
+        <div class="brand" role="button" tabindex="0" title="Go to Home">
             <img src="%%LOGO_URL%%" alt="SyntH logo" />
             <div class="brand-text">
                 <h1>%%BRAND_NAME%%</h1>

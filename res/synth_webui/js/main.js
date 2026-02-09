@@ -1486,8 +1486,10 @@ try {
                         const gapVal = headerStyle ? (headerStyle.columnGap || headerStyle.gap || '0') : '0';
                         const headerGap = Number.parseFloat(gapVal) || 0;
 
-                        header.classList.remove('topbar--compact');
-                        header.classList.remove('topbar--wrap');
+                        // Reset states and ensure nav is closed by default
+                        header.classList.remove('topbar--compact', 'topbar--wrap', 'nav-open');
+                        const hamburger = header.querySelector('.hamburger');
+                        if (hamburger) hamburger.setAttribute('aria-expanded', 'false');
 
                         const headerWidth = header.getBoundingClientRect().width || 0;
                         const brandWidth = brand.getBoundingClientRect().width || 0;
@@ -1503,18 +1505,20 @@ try {
                             const unique = Array.from(new Set(tops));
                             lines = unique.length || 1;
                         } catch (e) { /* ignore */ }
-                        if (lines >= 3) {
+                        // Prefer compact/hamburger already when the nav would require 2 lines
+                        if (lines >= 2) {
                             compact = true;
                         }
                         if (compact && brandText) {
                             header.classList.add('topbar--compact');
-                        }
-
-                        const brandWidthCompact = brand.getBoundingClientRect().width || 0;
-                        const availableCompact = Math.max(0, headerWidth - paddingLeft - paddingRight - brandWidthCompact - headerGap);
-                        const wrap = navRequired > (availableCompact + tolerance);
-                        if (wrap) {
-                            header.classList.add('topbar--wrap');
+                            // avoid adding wrap when compact: we prefer hamburger + collapsed nav
+                        } else {
+                            const brandWidthCompact = brand.getBoundingClientRect().width || 0;
+                            const availableCompact = Math.max(0, headerWidth - paddingLeft - paddingRight - brandWidthCompact - headerGap);
+                            const wrap = navRequired > (availableCompact + tolerance);
+                            if (wrap) {
+                                header.classList.add('topbar--wrap');
+                            }
                         }
                     } catch (e) { /* ignore */ }
                 }
@@ -1580,6 +1584,46 @@ try {
                         }
                     });
                 });
+
+                // Add controls for hamburger and brand click (compatible with both shell variants)
+                try {
+                    const header = document.querySelector('header.top-bar');
+                    const hamburger = document.querySelector('.hamburger');
+                    const brandEl = document.querySelector('.brand');
+                    const navEl = document.querySelector('nav.main-nav');
+                    if (hamburger && header) {
+                        hamburger.addEventListener('click', () => {
+                            const expanded = header.classList.toggle('nav-open');
+                            hamburger.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+                            // Also toggle .open on the nav (used by the other base template)
+                            try { if (navEl) navEl.classList.toggle('open'); } catch (e) { /* ignore */ }
+                        });
+                    }
+                    // Close the collapsed menu after a nav item is selected
+                    document.querySelectorAll('.nav-btn[data-tab]').forEach((b) => {
+                        b.addEventListener('click', () => {
+                            try {
+                                if (header) header.classList.remove('nav-open');
+                                if (hamburger) hamburger.setAttribute('aria-expanded', 'false');
+                                if (navEl) navEl.classList.remove('open');
+                            } catch (e) { /* ignore */ }
+                        });
+                    });
+                    // Clicking the brand/logo goes to the Home tab
+                    if (brandEl) {
+                        brandEl.style.cursor = 'pointer';
+                        brandEl.addEventListener('click', () => {
+                            setActiveTab('home');
+                            try { window.activeTab = 'home'; if (localStorage && localStorage.setItem) localStorage.setItem('synth-webui-active-tab', 'home'); } catch (e) { /* ignore */ }
+                            try {
+                                if (header) header.classList.remove('nav-open');
+                                if (hamburger) hamburger.setAttribute('aria-expanded', 'false');
+                                if (navEl) navEl.classList.remove('open');
+                            } catch (e) { /* ignore */ }
+                        });
+                        brandEl.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); brandEl.click(); } });
+                    }
+                } catch (e) { /* ignore */ }
 
                 // Restore last active tab and load its section once.
                 try {
