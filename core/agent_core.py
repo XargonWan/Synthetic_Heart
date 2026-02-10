@@ -186,6 +186,7 @@ class AgentLoopManager:
 
     async def _run_loop_background(self, task_id: int, engine: str, input_payload: Dict[str, Any], context: Dict[str, Any], max_iterations: int) -> None:
         await self._update_agent_task_status(task_id, "running")
+
         output = None
         try:
             for i in range(1, max_iterations + 1):
@@ -227,6 +228,7 @@ class AgentLoopManager:
                     },
                     "system_message": {"type": "agent_iteration", "task_id": task_id, "iteration": i, "engine": engine},
                 }
+
 
                 log_debug(f"[agent_core] Running iteration {i} for task {task_id} using engine={engine}")
 

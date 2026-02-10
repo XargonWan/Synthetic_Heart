@@ -26,12 +26,18 @@ class CortexRegistry:
         self._engine_modules: Dict[str, str] = {}
         self._engine_meta: Dict[str, Dict[str, Any]] = {}  # name -> {cortex, capabilities}
 
-    def register_engine_module(self, name: str, module_path: str, cortex: str = "llm", capabilities: Optional[Capabilities] = None):
-        """Register an engine module path with optional cortex kind and capabilities."""
+    def register_engine_module(self, name: str, module_path: str, cortex: str = "llm", capabilities: Optional[Capabilities] = None, label: str | None = None):
+        """Register an engine module path with optional cortex kind, capabilities and a human-readable label.
+
+        The optional `label` should be a short sentence explaining what the engine is
+        and when it should be used. This label is displayed in the WebUI so operators
+        can decide which engine to select for a given cortex kind.
+        """
         self._engine_modules[name] = module_path
         self._engine_meta[name] = {
             "cortex": cortex,
             "capabilities": capabilities or {},
+            "label": label or "",
         }
         log_debug(f"[cortex_registry] Registered engine module: {name} (cortex={cortex}) -> {module_path}")
 
@@ -109,16 +115,29 @@ class CortexRegistry:
         plugin_class = getattr(module, "PLUGIN_CLASS")
 
         # Verify display_name
+        # Historically this was enforced strictly, but to improve robustness we
+        # accept plugins missing `display_name` by deriving a friendly display
+        # name from the module/plugin class and logging a warning. This makes
+        # onboarding of legacy engines (migration shims) less brittle while
+        # encouraging authors to set an explicit `display_name`.
         if not hasattr(plugin_class, "display_name"):
-            error_msg = f"Plugin `{name}` (class `{plugin_class.__name__}`) does not define `display_name`. All plugins MUST have a `display_name` class attribute."
-            log_error(f"[cortex_registry] ❌ {error_msg}")
-            raise ValueError(error_msg)
-
-        display_name = getattr(plugin_class, "display_name", "")
-        if not display_name or not isinstance(display_name, str) or not display_name.strip():
-            error_msg = f"Plugin `{name}` (class `{plugin_class.__name__}`) has invalid `display_name`: '{display_name}'. It must be a non-empty string."
-            log_error(f"[cortex_registry] ❌ {error_msg}")
-            raise ValueError(error_msg)
+            fallback = name.replace('_', ' ').title() or plugin_class.__name__
+            warning_msg = (
+                f"Plugin `{name}` (class `{plugin_class.__name__}`) does not define `display_name`. "
+                f"Using fallback display name: '{fallback}'."
+            )
+            log_warning(f"[cortex_registry] ⚠️ {warning_msg}")
+            display_name = fallback
+        else:
+            display_name = getattr(plugin_class, "display_name", "")
+            if not display_name or not isinstance(display_name, str) or not display_name.strip():
+                fallback = name.replace('_', ' ').title() or plugin_class.__name__
+                warning_msg = (
+                    f"Plugin `{name}` (class `{plugin_class.__name__}`) has invalid `display_name`: '{display_name}'. "
+                    f"Using fallback display name: '{fallback}'."
+                )
+                log_warning(f"[cortex_registry] ⚠️ {warning_msg}")
+                display_name = fallback
 
         try:
             plugin_args = plugin_class.__init__.__code__.co_varnames
@@ -180,7 +199,18 @@ def register_default_engines():
                     try:
                         mod = importlib.import_module(module_path)
                         if hasattr(mod, 'PLUGIN_CLASS'):
-                            registry.register_engine_module(module_name, module_path, cortex='llm')
+                            # Try to extract a short label from the module or PLUGIN_CLASS
+                            label = None
+                            try:
+                                label = getattr(mod, 'ENGINE_LABEL', None)
+                            except Exception:
+                                label = None
+                            try:
+                                if not label and hasattr(mod, 'PLUGIN_CLASS'):
+                                    label = getattr(mod.PLUGIN_CLASS, 'engine_label', None)
+                            except Exception:
+                                pass
+                            registry.register_engine_module(module_name, module_path, cortex='llm', label=(label or None))
                             log_debug(f"[cortex_registry] Auto-registered llm engine: {module_name}")
                     except Exception as e:
                         log_warning(f"[cortex_registry] Failed to auto-register llm engine {module_name}: {e}")
@@ -195,7 +225,13 @@ def register_default_engines():
                         if hasattr(mod, 'PLUGIN_CLASS'):
                             # If module exports CAPABILITIES dict, pick it up
                             caps = getattr(mod, 'CAPABILITIES', None)
-                            registry.register_engine_module(module_name, module_path, cortex='live', capabilities=caps)
+                            # Auto-discover label as well for live engines
+                            label = None
+                            try:
+                                label = getattr(mod, 'ENGINE_LABEL', None)
+                            except Exception:
+                                label = None
+                            registry.register_engine_module(module_name, module_path, cortex='live', capabilities=caps, label=(label or None))
                             log_debug(f"[cortex_registry] Auto-registered live engine: {module_name}")
                     except Exception as e:
                         log_warning(f"[cortex_registry] Failed to auto-register live engine {module_name}: {e}")

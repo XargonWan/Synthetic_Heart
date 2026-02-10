@@ -410,9 +410,10 @@ class SynthWebUIInterface:
         # Debug endpoints (only enabled when WEB_DEBUG=1)
         self.app.get("/api/debug/db_pool")(self.db_pool_debug)
         self.app.post("/api/config")(self.update_config_entry)
-        self.app.post("/api/components/llm")(self.set_llm_engine)
-        # Login control for Selenium-based LLM engines
-        self.app.post("/api/components/llm/login")(self.llm_login)
+        # Cortex-aware endpoints
+        self.app.post("/api/components/cortex")(self.set_cortex_engine)
+        # Login control for Selenium-based engines
+        self.app.post("/api/components/cortex/login")(self.cortex_login)
         # Run component actions on demand (e.g., Run Now button)
         self.app.post("/api/components/run")(self.run_component)
         self.app.get("/api/logchat/info")(self.get_logchat_info)
@@ -4761,6 +4762,7 @@ class SynthWebUIInterface:
                     "active": engine_name == active_engine,
                     "loaded": instance is not None,
                     "description": self._extract_description(instance),
+                    "label": cortex_reg._engine_meta.get(engine_name, {}).get("label", ""),
                     "status": meta["status"],
                     "details": meta["details"],
                     "error": meta["error"],
@@ -4770,7 +4772,6 @@ class SynthWebUIInterface:
                     "cortex": cortex_reg._engine_meta.get(engine_name, {}).get("cortex", "llm"),
                 }
             )
-
         interfaces_data: List[dict] = []
         for name, interface in sorted(INTERFACE_REGISTRY.items()):
             description = ""
@@ -4949,21 +4950,28 @@ class SynthWebUIInterface:
             raise HTTPException(status_code=400, detail="Missing 'name'")
 
         try:
-            from core.config import switch_active_llm
-        except Exception as exc:  # pragma: no cover - defensive
-            log_error(f"{LOG_PREFIX} unable to import LLM configuration helpers: {exc}")
-            raise HTTPException(status_code=500, detail="Unable to access LLM configuration") from exc
+            # Prefer cortex-aware switch (supports llm/live/agent engines). Fall back
+            # to legacy switch_active_llm when cortex helpers aren't available.
+            from core.config import switch_active_cortex_engine as switch_engine
+        except Exception:
+            try:
+                from core.config import switch_active_llm as switch_engine
+            except Exception as exc:  # pragma: no cover - defensive
+                log_error(f"{LOG_PREFIX} unable to import engine switching helpers: {exc}")
+                raise HTTPException(status_code=500, detail="Unable to access engine configuration") from exc
 
         try:
             # Use the centralized switch function with hot-swap
-            await switch_active_llm(name, use_hot_swap=True)
-            log_info(f"{LOG_PREFIX} Successfully switched LLM to {name}")
+            await switch_engine(name, use_hot_swap=True)
+            log_info(f"{LOG_PREFIX} Successfully switched active engine to {name}")
         except ValueError as exc:
-            log_warning(f"{LOG_PREFIX} LLM not available: {exc}")
+            log_warning(f"{LOG_PREFIX} Engine not available: {exc}")
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except Exception as exc:
-            log_error(f"{LOG_PREFIX} failed to switch LLM to {name}: {exc}")
-            raise HTTPException(status_code=500, detail=f"Failed to activate LLM '{name}'") from exc
+            # Log and return a useful error message to help debugging switch failures
+            log_error(f"{LOG_PREFIX} failed to switch active engine to {name}: {exc}")
+            # Include exception message in the HTTP response for easier debugging in dev environments
+            raise HTTPException(status_code=500, detail=f"Failed to activate engine '{name}': {exc}") from exc
 
         return JSONResponse({"status": "ok", "active": name})
 
@@ -5025,6 +5033,24 @@ class SynthWebUIInterface:
         except Exception as exc:
             log_error(f"{LOG_PREFIX} Failed to start login flow for '{name}': {exc}")
             raise HTTPException(status_code=500, detail=f"Failed to start login flow for '{name}': {exc}") from exc
+
+    # Backwards-compatible cortex endpoints
+    async def set_cortex_engine(self, request: Request):
+        """Compatibility handler for `/api/components/cortex`.
+
+        Delegates to the existing `set_llm_engine` implementation which is
+        already cortex-aware internally (supports llm/live/agent switching).
+        """
+        return await self.set_llm_engine(request)
+
+    async def cortex_login(self, request: Request):
+        """Compatibility handler for `/api/components/cortex/login`.
+
+        Delegates to `llm_login` which validates Selenium-based engines and
+        starts the login flow. Kept for compatibility so clients can call the
+        more explicit cortex path.
+        """
+        return await self.llm_login(request)
 
     async def run_component(self, request: Request):
         """Run a component/plugin action on demand.

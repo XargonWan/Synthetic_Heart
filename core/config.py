@@ -306,8 +306,9 @@ def list_available_cortexs() -> list[str]:
             c = meta.get("cortex")
             if c:
                 kinds.add(c)
-        if not kinds:
-            return ["llm", "live", "agent"]
+        # Ensure common cortex kinds are always present so UI can show them even
+        # when no engine of that kind is registered yet (useful for discovery/selection)
+        kinds.update({"llm", "live", "agent"})
         return sorted(list(kinds))
     except Exception:
         return ["llm", "live", "agent"]

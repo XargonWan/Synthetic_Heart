@@ -270,6 +270,18 @@ LLM engines are automatically discovered through the core initializer:
 4. **Capability Indexing**: Engine capabilities are indexed for runtime selection
 5. **Dynamic Loading**: Engines can be loaded/unloaded without system restart
 
+Labeling engines for the WebUI
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Engines may provide a short, human-readable label used by the WebUI to help operators
+choose the right engine for a task. Provide a label by either:
+
+- exporting ``ENGINE_LABEL = "short description"`` in the engine module, or
+- defining ``engine_label = "short description"`` on ``PLUGIN_CLASS``
+- or passing ``label="short description"`` to ``CortexRegistry.register_engine_module``
+
+These labels are surfaced in the Components page under "Cortex Engines" and are intended
+to be brief and informative (one sentence).
+
 Developing LLM Engines
 ----------------------
 
@@ -653,7 +665,7 @@ user can authenticate via the service's web interface.
 
 Endpoint:
 
-``POST /api/components/llm/login``
+``POST /api/components/cortex/login``
 
 Request JSON:
 

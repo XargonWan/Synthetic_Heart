@@ -380,6 +380,34 @@ async def handle_incoming_message(bot, message, context_memory_or_prompt, interf
             log_debug(f"[plugin_instance] Passing max_chars={max_chars} to build_json_prompt()")
             prompt = await build_json_prompt(message, context_memory_or_prompt, interface_name, image_data=processed_image_data, max_chars=max_chars)
 
+    # Ensure local time fields exist for ALL prompts (pre-built or built by build_json_prompt)
+    try:
+        include_local = bool(config_registry.get_value("INCLUDE_LOCAL_TIME_IN_PROMPTS", True, value_type=bool))
+    except Exception:
+        include_local = True
+
+    if include_local:
+        try:
+            from core.time_zone_utils import get_local_time_fields
+
+            # Prefer message.interface_path if available, otherwise fall back to prompt payload
+            interface_path = None
+            try:
+                interface_path = getattr(message, "interface_path", None) or prompt.get("input", {}).get("payload", {}).get("source", {}).get("interface_path")
+            except Exception:
+                interface_path = None
+
+            dt_for_fields = getattr(message, "date", None)
+            fields = await get_local_time_fields(dt_for_fields, interface_path)
+            if isinstance(fields, dict):
+                payload = prompt.setdefault("input", {}).setdefault("payload", {})
+                for k, v in fields.items():
+                    # Do not override existing values produced by build_json_prompt
+                    if k not in payload:
+                        payload[k] = v
+        except Exception as e:
+            log_debug(f"[plugin_instance] local time injection failed: {e}")
+
     prompt = sanitize_for_json(prompt)
     log_debug("🌐 JSON PROMPT built for the plugin:")
     try:

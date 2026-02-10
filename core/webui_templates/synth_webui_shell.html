@@ -118,6 +118,18 @@
             box-shadow: 0 18px 35px -24px rgba(255, 107, 214, 0.95);
         }
 
+        /* Default: ensure dropdowns/selects use dark background and text by default */
+        select, select option, .components-list select {
+            background: var(--surface) !important;
+            color: var(--text) !important;
+            border-color: var(--border) !important;
+        }
+        /* Some browsers require option pseudo-classes for consistent styling */
+        select option {
+            background: var(--surface);
+            color: var(--text);
+        }
+
         header.top-bar.topbar--compact .brand-text {
             /* When the topbar is compact (hamburger visible), show the brand text */
             display: block;

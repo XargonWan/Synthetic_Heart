@@ -1204,69 +1204,104 @@ try {
                     if (!res.ok) throw new Error('HTTP ' + res.status);
                     const data = await res.json();
 
-                    if (componentsLLMSummaryEl && data.llm) {
-                        componentsLLMSummaryEl.textContent = `Active engine: ${data.llm.active || '—'}`;
+                    // Cortex summary (backward-compatible with previous LLM payload)
+                    if (componentsLLMSummaryEl && data.cortex) {
+                        componentsLLMSummaryEl.textContent = `Active engine: ${data.cortex.active_engine || '—'} (cortex: ${data.cortex.active_kind || '—'})`;
                     }
 
+                    const cortexKindSelect = document.getElementById('cortex-kind-select');
                     const llmSelect = document.getElementById('llm-engine-select');
                     const llmModelLabel = document.getElementById('llm-engine-model');
+                    const llmLabel = document.getElementById('llm-engine-label');
                     const llmLoginStateLabel = document.getElementById('llm-engine-login-state');
                     const llmLoginBtn = document.getElementById('llm-login-btn');
                     const devToggle = document.getElementById('dev-components-toggle');
 
-                    if (llmSelect && data.llm && Array.isArray(data.llm.engines)) {
-                        const engines = data.llm.engines.slice().sort((a, b) => {
+                    // Helper to render engines list and select for a particular cortex kind
+                    const renderForCortex = (kind) => {
+                        const byCortex = (data.cortex && data.cortex.by_cortex) || {};
+                        const engines = (Array.isArray(byCortex[kind]) ? byCortex[kind].slice() : []).sort((a, b) => {
                             const an = (a.display_name || a.name || '').toLowerCase();
                             const bn = (b.display_name || b.name || '').toLowerCase();
                             return an.localeCompare(bn);
                         });
-                        llmSelect.innerHTML = '';
-                        engines.forEach((engine) => {
-                            const opt = document.createElement('option');
-                            opt.value = engine.name;
-                            opt.textContent = engine.display_name || engine.name || 'LLM';
-                            if (engine.active) opt.selected = true;
-                            llmSelect.appendChild(opt);
-                        });
 
-                        const resolveActive = () => engines.find(e => e.active) || engines.find(e => e.name === data.llm.active) || engines[0] || null;
-                        const updateLlmInfo = (engine) => {
-                            if (llmModelLabel) llmModelLabel.textContent = `model: ${engine ? (engine.display_name || engine.name || '—') : '—'}`;
-                            const loginState = engine ? (engine.login_state || (engine.logged_in ? 'logged' : 'unlogged')) : '—';
-                            if (llmLoginStateLabel) llmLoginStateLabel.textContent = `state: ${loginState}`;
-                            if (llmLoginBtn) {
-                                llmLoginBtn.disabled = !engine || !engine.loaded;
-                                llmLoginBtn.textContent = engine && engine.logged_in ? 'Logged' : 'Login';
-                            }
-                        };
-                        updateLlmInfo(resolveActive());
-
-                        if (!llmSelect.dataset.bound) {
-                            llmSelect.addEventListener('change', async () => {
-                                const selected = llmSelect.value;
-                                if (!selected) return;
-                                try {
-                                    const res = await fetch('/api/components/llm', {
-                                        method: 'POST',
-                                        headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({ name: selected })
-                                    });
-                                    if (!res.ok) throw new Error('HTTP ' + res.status);
-                                    await loadComponentsSummary();
-                                } catch (e) {
-                                    console.error('[synth_webui] Failed to switch LLM', e);
-                                    alert('Failed to switch LLM engine.');
-                                }
+                        // Populate engine select
+                        if (llmSelect) {
+                            llmSelect.innerHTML = '';
+                            engines.forEach((engine) => {
+                                const opt = document.createElement('option');
+                                opt.value = engine.name;
+                                opt.textContent = engine.display_name || engine.name || 'Engine';
+                                if (engine.active) opt.selected = true;
+                                llmSelect.appendChild(opt);
                             });
-                            llmSelect.dataset.bound = '1';
                         }
 
-                        if (llmLoginBtn && !llmLoginBtn.dataset.bound) {
+                        // Update info field with active engine for this cortex
+                        const active = engines.find(e => e.active) || engines.find(e => e.name === (data.cortex && data.cortex.active_engine)) || engines[0] || null;
+                        if (llmModelLabel) llmModelLabel.textContent = `model: ${active ? (active.display_name || active.name || '—') : '—'}`;
+                        if (llmLabel) llmLabel.textContent = active ? (active.label || active.description || '') : '';
+                        const loginState = active ? (active.login_state || (active.logged_in ? 'logged' : 'unlogged')) : '—';
+                        if (llmLoginStateLabel) llmLoginStateLabel.textContent = `state: ${loginState}`;
+                        if (llmLoginBtn) {
+                            llmLoginBtn.disabled = !active || !active.loaded;
+                            llmLoginBtn.textContent = active && active.logged_in ? 'Logged' : 'Login';
+                        }
+                    };
+
+                    // Populate cortex kind select
+                    if (cortexKindSelect && data.cortex && Array.isArray(data.cortex.available_kinds)) {
+                        cortexKindSelect.innerHTML = '';
+                        data.cortex.available_kinds.forEach((k) => {
+                            const opt = document.createElement('option');
+                            opt.value = k;
+                            opt.textContent = k.toUpperCase();
+                            if (k === data.cortex.active_kind) opt.selected = true;
+                            cortexKindSelect.appendChild(opt);
+                        });
+
+                        // Bind change handler
+                        if (!cortexKindSelect.dataset.bound) {
+                            cortexKindSelect.addEventListener('change', () => {
+                                const kind = cortexKindSelect.value;
+                                renderForCortex(kind);
+                            });
+                            cortexKindSelect.dataset.bound = '1';
+                        }
+                    }
+
+                    // Initial render
+                    const initialKind = (data.cortex && data.cortex.active_kind) || (data.cortex && data.cortex.available_kinds && data.cortex.available_kinds[0]) || 'llm';
+                    renderForCortex(initialKind);
+
+                    // Bind llmSelect change to switch engine (backwards-compatible endpoint)
+                    if (!llmSelect.dataset.bound) {
+                        llmSelect.addEventListener('change', async () => {
+                            const selected = llmSelect.value;
+                            if (!selected) return;
+                            try {
+                                const res = await fetch('/api/components/cortex', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ name: selected })
+                                });
+                                if (!res.ok) throw new Error('HTTP ' + res.status);
+                                await loadComponentsSummary();
+                            } catch (e) {
+                                console.error('[synth_webui] Failed to switch engine', e);
+                                alert('Failed to switch engine.');
+                            }
+                        });
+                        llmSelect.dataset.bound = '1';
+                    }
+
+                    if (llmLoginBtn && !llmLoginBtn.dataset.bound) {
                             llmLoginBtn.addEventListener('click', async () => {
                                 const selected = llmSelect.value;
                                 if (!selected) return;
                                 try {
-                                    const res = await fetch('/api/components/llm/login', {
+                                    const res = await fetch('/api/components/cortex/login', {
                                         method: 'POST',
                                         headers: { 'Content-Type': 'application/json' },
                                         body: JSON.stringify({ name: selected })
@@ -1280,7 +1315,6 @@ try {
                             });
                             llmLoginBtn.dataset.bound = '1';
                         }
-                    }
 
                     if (devToggle) {
                         devToggle.checked = !!data.dev_components_enabled;
@@ -1347,6 +1381,17 @@ try {
                             summary.appendChild(summaryActions);
                             details.appendChild(summary);
 
+                            // Short label (engine-provided) shown as muted helper text
+                            if (item.label) {
+                                const lbl = document.createElement('div');
+                                lbl.className = 'component-helper';
+                                lbl.style.color = 'var(--muted)';
+                                lbl.style.fontSize = '0.92rem';
+                                lbl.style.marginBottom = '6px';
+                                lbl.textContent = item.label;
+                                details.appendChild(lbl);
+                            }
+
                             const desc = document.createElement('div');
                             desc.className = 'component-description';
                             desc.textContent = item.details || item.description || '';
@@ -1389,7 +1434,10 @@ try {
                         });
                     };
 
-                    renderDetailsList(data.llm && data.llm.engines ? data.llm.engines : [], componentsLLMListEl);
+                    // Render engine list for the selected cortex kind (fallback to llm list for backward compatibility)
+                    const toRenderKind = initialKind || 'llm';
+                    const byCortex = (data.cortex && data.cortex.by_cortex) || {};
+                    renderDetailsList(byCortex[toRenderKind] || (data.llm && data.llm.engines) || [], componentsLLMListEl);
                     renderDetailsList(data.interfaces || [], componentsInterfacesListEl);
                     renderDetailsList(data.plugins || [], componentsPluginsListEl);
                 } catch (e) {
