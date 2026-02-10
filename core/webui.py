@@ -3662,15 +3662,15 @@ class SynthWebUIInterface:
                     grillo_plugin = None
 
                 activity_ids = [e['id'] for e in entries]
-                action_map = {}
+                action_map: dict[int, list] = {}
                 if grillo_plugin and hasattr(grillo_plugin, 'fetch_action_execs'):
                     action_map = await grillo_plugin.fetch_action_execs(activity_ids) if activity_ids else {}
                 else:
                     try:
                         from plugins.grillo.grillo_impl import GrilloPlugin
                         action_map = await GrilloPlugin.fetch_action_execs(activity_ids) if activity_ids else {}
-                    except Exception as e:
-                        log_debug(f"[webui] fetch_action_execs failed: {e}")
+                    except Exception as exc:
+                        log_debug(f"[webui] fetch_action_execs failed: {exc}")
                 for e in entries:
                     e['actions'] = action_map.get(e['id'], [])
             except Exception as e:

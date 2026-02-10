@@ -1,11 +1,12 @@
 import asyncio
 import json
 import time
+from typing import Any, Tuple
 from core.db import get_conn_ctx
 
 age_days = 60
 
-async def insert_rows_async():
+async def insert_rows_async() -> None:
     async with get_conn_ctx() as conn:
         async with conn.cursor() as cur:
             # Insert two untagged legacy-like diary entries older than age_days
@@ -20,7 +21,7 @@ async def insert_rows_async():
                         ("Tagged entry B about food and pizza", None, '[]', None, age_days + 1, 'webui', 'cF2', None, None, json.dumps(['food', 'pizza']), '[]'))
             # Commit is handled by the connection context manager where applicable
 
-async def query_counts_async():
+async def query_counts_async() -> Tuple[int, int, int, int]:
     async with get_conn_ctx() as conn:
         async with conn.cursor() as cur:
             await cur.execute('SELECT COUNT(*) FROM ai_diary')
@@ -53,7 +54,7 @@ if __name__ == '__main__':
     print('archived_memories total:', comp)
     print('memories total:', mems)
 
-async def run_compactor(dry_run=True, marker=None):
+async def run_compactor(dry_run: bool = True, marker: Any = None) -> Any:
     # Ensure active LLM is set to 'manual' in this process and hot-swapped
     try:
         from core.config import switch_active_llm

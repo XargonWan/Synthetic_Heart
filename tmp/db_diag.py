@@ -5,7 +5,7 @@ from core.db import get_conn_ctx
 # Diagnostic helper — do NOT hardcode credentials. Use the project's DB context (reads config/env).
 # Example usage: DB connection will be picked up from the environment or the running container config.
 
-async def _run_diagnostics(age_days: int = 30):
+async def _run_diagnostics(age_days: int = 30) -> None:
     async with get_conn_ctx() as conn:
         async with conn.cursor() as cur:
             await cur.execute('SELECT COUNT(*) AS cnt_total FROM memories WHERE timestamp < DATE_SUB(NOW(), INTERVAL %s DAY)', (age_days,))
