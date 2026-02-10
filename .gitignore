@@ -80,3 +80,4 @@ test_pipeline_output.wav
 *copy.ps1
 res/synth_webui/static/audio/
 .vscode
+docker-compose-dev.yml
