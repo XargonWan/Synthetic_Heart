@@ -1178,11 +1178,20 @@ class PersonaManager(PluginBase):
                             0.0, min(10.0, intensity)
                         )  # Clamp to 0-10 range
 
-                        # Normalize using EmotionManager helper when possible
+                        # Normalize using EmotionManager plugin helper when possible (via PLUGIN_REGISTRY)
                         try:
-                            from plugins.emotion_manager import normalize_emotion_name
+                            from core.core_initializer import PLUGIN_REGISTRY
+                            em_plugin = None
+                            try:
+                                if isinstance(PLUGIN_REGISTRY, dict):
+                                    em_plugin = PLUGIN_REGISTRY.get('emotion_manager')
+                            except Exception:
+                                em_plugin = None
 
-                            normalized = normalize_emotion_name(raw)
+                            if em_plugin and hasattr(em_plugin, 'normalize_emotion_name'):
+                                normalized = em_plugin.normalize_emotion_name(raw)
+                            else:
+                                normalized = raw if raw in VALID_EMOTIONS else None
                         except Exception:
                             normalized = raw if raw in VALID_EMOTIONS else None
 
@@ -1329,23 +1338,33 @@ class PersonaManager(PluginBase):
             log_info(f"[persona_manager] Updating emotive state with: {emotion_data}")
             self.update_emotive_state(emotion_data)
 
-        # Try to delegate to emotion_manager plugin for centralized storage/update
+        # Try to delegate to emotion_manager plugin for centralized storage/update via PLUGIN_REGISTRY
         try:
-            from plugins.emotion_manager import EmotionManager
-
-            emotion_mgr = EmotionManager()
-
-            # Run async delegated update (schedule and forget)
+            from core.core_initializer import PLUGIN_REGISTRY
+            emotion_mgr = None
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    asyncio.create_task(
-                        emotion_mgr.update_emotion_from_tags(message_text)
-                    )
-                else:
-                    asyncio.run(emotion_mgr.update_emotion_from_tags(message_text))
-            except RuntimeError:
-                asyncio.run(emotion_mgr.update_emotion_from_tags(message_text))
+                if isinstance(PLUGIN_REGISTRY, dict):
+                    emotion_mgr = PLUGIN_REGISTRY.get('emotion_manager')
+            except Exception:
+                emotion_mgr = None
+
+            # Run async delegated update (schedule and forget) if plugin available
+            if emotion_mgr and hasattr(emotion_mgr, 'update_emotion_from_tags'):
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.create_task(emotion_mgr.update_emotion_from_tags(message_text))
+                    else:
+                        try:
+                            asyncio.run(emotion_mgr.update_emotion_from_tags(message_text))
+                        except RuntimeError:
+                            # If asyncio.run cannot be used (already running loop), fallback to scheduling a task
+                            try:
+                                asyncio.create_task(emotion_mgr.update_emotion_from_tags(message_text))
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
 
             log_debug(
                 "[persona_manager] Delegated emotion update to emotion_manager plugin (background)"
