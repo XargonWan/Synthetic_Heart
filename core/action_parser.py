@@ -1099,6 +1099,14 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
                         failed_actions.append({"index": idx, "action": action, "errors": [error_msg]})
                         continue
 
+                    # Special-case: heuristic-recovered actions must not be auto-executed
+                    if action.get('metadata', {}).get('heuristic_recovery'):
+                        error_msg = f"Action '{action.get('type')}' flagged as heuristic recovery and requires human validation; quarantined"
+                        log_warning(f"[action_parser] {error_msg}")
+                        collected_errors.append(error_msg)
+                        failed_actions.append({"index": idx, "action": action, "errors": [error_msg]})
+                        continue
+
                     # If synth is in 'whitelisted' mode, only execute actions present in AUTONOMY_ALLOWED_ACTIONS
                     if synth_mode == 'whitelisted':
                         if allowed_autonomy and action.get('type') not in allowed_autonomy:

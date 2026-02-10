@@ -518,16 +518,34 @@ async def _grillo_fire_and_forget(bot, message, original_user_message: str, llm_
 
     if auto_exec:
         try:
+            # Quarantine heuristic-recovered actions: do not auto-execute them
+            quarantined_actions = [a for a in actions if a.get('metadata', {}).get('heuristic_recovery')]
+            actions_to_exec = [a for a in actions if not a.get('metadata', {}).get('heuristic_recovery')]
+
+            if quarantined_actions:
+                log_info(f"[grillo] Quarantined {len(quarantined_actions)} heuristic-recovered action(s); persisting as proposals")
+                if GrilloPlugin:
+                    try:
+                        activity_id_q = await GrilloPlugin.create_activity_log(beat_type='grillo_quarantined', prompt_text=str({'user': original_user_message, 'llm_reply': llm_reply}), metadata={'quarantined_actions': quarantined_actions})
+                        log_info(f"[grillo] Persisted quarantined actions activity_id={activity_id_q}")
+                    except Exception as e:
+                        log_debug(f"[grillo] Failed to persist quarantined actions: {e}")
+
+            # If no remaining actions to auto-execute, return early
+            if not actions_to_exec:
+                log_info("[grillo] No actions to auto-execute after quarantining; returning")
+                return
+
             # Run actions through the canonical action parser so policy/autonomy
             # checks are applied consistently.
             from core import action_parser
             run_ctx = dict(context or {})
             run_ctx['grillo_auto'] = True
-            result = await action_parser.run_actions(actions, run_ctx, bot, message)
-            log_info(f"[grillo] Auto-executed {len(actions)} action(s); result: {result}")
+            result = await action_parser.run_actions(actions_to_exec, run_ctx, bot, message)
+            log_info(f"[grillo] Auto-executed {len(actions_to_exec)} action(s); result: {result}")
             if GrilloPlugin:
                 try:
-                    activity_id = await GrilloPlugin.create_activity_log(beat_type='grillo_auto_exec', prompt_text=str({'user': original_user_message, 'llm_reply': llm_reply}), metadata={'suggested_actions': actions, 'result': result})
+                    activity_id = await GrilloPlugin.create_activity_log(beat_type='grillo_auto_exec', prompt_text=str({'user': original_user_message, 'llm_reply': llm_reply}), metadata={'suggested_actions': actions_to_exec, 'result': result})
                     log_info(f"[grillo] Logged auto-exec activity id={activity_id}")
                 except Exception as e:
                     log_debug(f"[grillo] create_activity_log failed after auto-exec: {e}")
@@ -539,7 +557,7 @@ async def _grillo_fire_and_forget(bot, message, original_user_message: str, llm_
                     failed = result.get('failed_actions', []) if isinstance(result, dict) else []
                     db_count = 0
                     fallback_count = 0
-                    for idx, a in enumerate(actions):
+                    for idx, a in enumerate(actions_to_exec):
                         try:
                             if any((a == p) or (p.get('type') == a.get('type') and p.get('payload') == a.get('payload')) for p in processed):
                                 res = await GrilloPlugin.create_action_exec(activity_log_id=activity_id, action_index=idx, action_type=a.get('type'), payload=a.get('payload'), status='processed', result=result)

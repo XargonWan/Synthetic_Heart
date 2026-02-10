@@ -28,6 +28,10 @@ _BOT_NONE_WARNED = False
 _LAST_BOT_NONE_LOG_TIME = 0
 _BOT_NONE_LOG_THROTTLE_SEC = 5  # Log at most once every 5 seconds
 
+# Short-lived dedupe cache for outgoing LLM-originated messages
+_OUTGOING_DEDUPE: dict = {}  # key -> last_sent_timestamp
+_DEFAULT_DEDUPE_WINDOW = 30  # seconds (configurable via OUTGOING_DEDUPE_WINDOW)
+
 # Per-chat cooldowns to avoid retry storms when Telegram reports flood/network errors
 _CHAT_COOLDOWNS: dict = {}
 DEFAULT_COOLDOWN_SECONDS = 30
@@ -677,6 +681,28 @@ async def llm_response_send(bot, chat_id: int, text: str, chunk_size: int = 4000
 
         except Exception as e:
             log_warning(f"[telegram_safe_send] Failed to process JSON actions: {e}")
+
+    # Dedupe: suppress duplicate sends within a short window
+    try:
+        from core.config_manager import config_registry
+        dedupe_window = int(config_registry.get_value('OUTGOING_DEDUPE_WINDOW', _DEFAULT_DEDUPE_WINDOW))
+    except Exception:
+        dedupe_window = _DEFAULT_DEDUPE_WINDOW
+
+    try:
+        import time
+        norm_text = " ".join(str(text).split())[:500]
+        dedupe_key = f"{chat_id}:{norm_text}"
+        last = _OUTGOING_DEDUPE.get(dedupe_key)
+        now = time.time()
+        if last and (now - last) < dedupe_window:
+            log_info(f"[llm_response_send] Suppressing duplicate send to {chat_id} (within {dedupe_window}s)")
+            return None
+        # Record this send
+        _OUTGOING_DEDUPE[dedupe_key] = now
+    except Exception:
+        # Non-fatal if dedupe fails
+        pass
 
     # Send as normal text with chunking
     log_debug(f"[telegram_safe_send] Sending as normal text with chunking")
