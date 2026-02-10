@@ -127,6 +127,9 @@ class RecentChatsPlugin:
 
     def __init__(self):
         register_plugin("recent_chats", self)
+        # Expose module-level helpers as instance methods to let core access them via PLUGIN_REGISTRY
+        self.update_chat_activity = update_chat_activity
+        self.get_recent_chats = get_recent_chats
         log_info("[recent_chats] RecentChatsPlugin initialized and registered")
 
     def get_supported_action_types(self):

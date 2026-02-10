@@ -185,18 +185,41 @@ async def add_message_to_context(
     # Automatically update chat activity (mechanical action, centralized here)
     # This tracks the last activity time for each chat without requiring LLM reasoning
     try:
-        from plugins.recent_chats import update_chat_activity
+        from core.core_initializer import PLUGIN_REGISTRY
+        rc_plugin = None
+        try:
+            if isinstance(PLUGIN_REGISTRY, dict):
+                rc_plugin = PLUGIN_REGISTRY.get('recent_chats')
+        except Exception:
+            rc_plugin = None
+
         # Extract chat_id from interface_path (format: interface/chat_id/thread_id)
         parts = interface_path.split('/')
         chat_id = parts[1] if len(parts) > 1 else interface_path
-        await update_chat_activity(
-            chat_id=chat_id,
-            metadata={
-                'username': sender_name,
-                'user_id': sender_id,
-                'interface_path': interface_path
-            }
-        )
+
+        if rc_plugin and hasattr(rc_plugin, 'update_chat_activity'):
+            await rc_plugin.update_chat_activity(
+                chat_id=chat_id,
+                metadata={
+                    'username': sender_name,
+                    'user_id': sender_id,
+                    'interface_path': interface_path
+                }
+            )
+        else:
+            # Fallback to module-level helper (legacy)
+            try:
+                from plugins.recent_chats import update_chat_activity
+                await update_chat_activity(
+                    chat_id=chat_id,
+                    metadata={
+                        'username': sender_name,
+                        'user_id': sender_id,
+                        'interface_path': interface_path
+                    }
+                )
+            except Exception:
+                pass
     except Exception as e:
         log_debug(f"[context_manager] Failed to update chat activity: {e}")
     
