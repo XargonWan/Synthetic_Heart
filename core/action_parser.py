@@ -108,11 +108,21 @@ async def _maybe_record_grillo_outbound_message(action_type: str, payload: dict,
         if not text or not isinstance(text, str):
             return
 
-        from plugins.grillo_plugin import GrilloPlugin
+        from core.core_initializer import PLUGIN_REGISTRY
 
-        if GrilloPlugin is None:
+        # Use PLUGIN_REGISTRY to avoid importing plugin internals in core
+        grillo_plugin = None
+        if isinstance(PLUGIN_REGISTRY, dict):
+            grillo_plugin = PLUGIN_REGISTRY.get("grillo_plugin") or PLUGIN_REGISTRY.get("grillo_impl")
+        else:
+            try:
+                grillo_plugin = getattr(PLUGIN_REGISTRY, "get", lambda k: None)("grillo_plugin")
+            except Exception:
+                grillo_plugin = None
+
+        if grillo_plugin is None:
             return
-        setter = getattr(GrilloPlugin, "set_activity_response_text", None)
+        setter = getattr(grillo_plugin, "set_activity_response_text", None)
         if not callable(setter):
             return
 
@@ -840,8 +850,8 @@ async def run_action(action: Any, context: Dict[str, Any], bot, original_message
     # When preflight=True in context we only allow read-only/search actions (e.g., memory_search).
     try:
         if isinstance(context, dict) and bool(context.get('preflight')):
-            PRELIGHT_BLOCKED_ACTIONS = {"create_personal_diary_entry", "create_diary_entry"}
-            if action_type in PRELIGHT_BLOCKED_ACTIONS:
+            PREFLIGHT_BLOCKED_ACTIONS = {"create_personal_diary_entry", "create_diary_entry"}
+            if action_type in PREFLIGHT_BLOCKED_ACTIONS:
                 log_info(f"[action_parser] ⚠️ Skipping action '{action_type}' during preflight to avoid side-effects")
                 return {"skipped_due_to_preflight": True, "action": action}
     except Exception:

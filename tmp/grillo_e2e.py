@@ -1,28 +1,57 @@
 import asyncio
 import json
-import pymysql
 import time
-
-DB_HOST = 'synth-db'
-DB_USER = 'synth'
-DB_PASS = 'DigiHeart01'
-DB_NAME = 'synth'
+from core.db import get_conn_ctx
 
 age_days = 60
 
-def insert_rows(conn):
-    with conn.cursor() as cur:
-        # Insert two untagged legacy-like diary entries older than age_days
-        cur.execute("INSERT INTO ai_diary (content, personal_thought, emotions, interaction_summary, timestamp, interface, chat_id, thread_id, user_message, context_tags, involved_users) VALUES (%s, %s, %s, %s, DATE_SUB(NOW(), INTERVAL %s DAY), %s, %s, %s, %s, %s, %s)",
-                    ("Legacy entry A", None, '[]', None, age_days + 1, 'webui', 'cA', None, None, None, '[]'))
-        cur.execute("INSERT INTO ai_diary (content, personal_thought, emotions, interaction_summary, timestamp, interface, chat_id, thread_id, user_message, context_tags, involved_users) VALUES (%s, %s, %s, %s, DATE_SUB(NOW(), INTERVAL %s DAY), %s, %s, %s, %s, %s, %s)",
-                    ("Legacy entry B", None, '[]', None, age_days + 1, 'webui', 'cB', None, None, None, '[]'))
-        # Insert two tagged entries older than age_days
-        cur.execute("INSERT INTO ai_diary (content, personal_thought, emotions, interaction_summary, timestamp, interface, chat_id, thread_id, user_message, context_tags, involved_users) VALUES (%s, %s, %s, %s, DATE_SUB(NOW(), INTERVAL %s DAY), %s, %s, %s, %s, %s, %s)",
-                    ("Tagged entry A about food", None, '[]', None, age_days + 1, 'webui', 'cF1', None, None, json.dumps(['food']), '[]'))
-        cur.execute("INSERT INTO ai_diary (content, personal_thought, emotions, interaction_summary, timestamp, interface, chat_id, thread_id, user_message, context_tags, involved_users) VALUES (%s, %s, %s, %s, DATE_SUB(NOW(), INTERVAL %s DAY), %s, %s, %s, %s, %s, %s)",
-                    ("Tagged entry B about food and pizza", None, '[]', None, age_days + 1, 'webui', 'cF2', None, None, json.dumps(['food', 'pizza']), '[]'))
-        conn.commit()
+async def insert_rows_async():
+    async with get_conn_ctx() as conn:
+        async with conn.cursor() as cur:
+            # Insert two untagged legacy-like diary entries older than age_days
+            await cur.execute("INSERT INTO ai_diary (content, personal_thought, emotions, interaction_summary, timestamp, interface, chat_id, thread_id, user_message, context_tags, involved_users) VALUES (%s, %s, %s, %s, DATE_SUB(NOW(), INTERVAL %s DAY), %s, %s, %s, %s, %s, %s)",
+                        ("Legacy entry A", None, '[]', None, age_days + 1, 'webui', 'cA', None, None, None, '[]'))
+            await cur.execute("INSERT INTO ai_diary (content, personal_thought, emotions, interaction_summary, timestamp, interface, chat_id, thread_id, user_message, context_tags, involved_users) VALUES (%s, %s, %s, %s, DATE_SUB(NOW(), INTERVAL %s DAY), %s, %s, %s, %s, %s, %s)",
+                        ("Legacy entry B", None, '[]', None, age_days + 1, 'webui', 'cB', None, None, None, '[]'))
+            # Insert two tagged entries older than age_days
+            await cur.execute("INSERT INTO ai_diary (content, personal_thought, emotions, interaction_summary, timestamp, interface, chat_id, thread_id, user_message, context_tags, involved_users) VALUES (%s, %s, %s, %s, DATE_SUB(NOW(), INTERVAL %s DAY), %s, %s, %s, %s, %s, %s)",
+                        ("Tagged entry A about food", None, '[]', None, age_days + 1, 'webui', 'cF1', None, None, json.dumps(['food']), '[]'))
+            await cur.execute("INSERT INTO ai_diary (content, personal_thought, emotions, interaction_summary, timestamp, interface, chat_id, thread_id, user_message, context_tags, involved_users) VALUES (%s, %s, %s, %s, DATE_SUB(NOW(), INTERVAL %s DAY), %s, %s, %s, %s, %s, %s)",
+                        ("Tagged entry B about food and pizza", None, '[]', None, age_days + 1, 'webui', 'cF2', None, None, json.dumps(['food', 'pizza']), '[]'))
+            # Commit is handled by the connection context manager where applicable
+
+async def query_counts_async():
+    async with get_conn_ctx() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute('SELECT COUNT(*) FROM ai_diary')
+            total_diary = (await cur.fetchone())[0]
+            await cur.execute('SELECT COUNT(*) FROM ai_diary_archive')
+            archived = (await cur.fetchone())[0]
+            await cur.execute('SELECT COUNT(*) FROM archived_memories')
+            comp = (await cur.fetchone())[0]
+            await cur.execute('SELECT COUNT(*) FROM memories')
+            mems = (await cur.fetchone())[0]
+    return total_diary, archived, comp, mems
+
+if __name__ == '__main__':
+    print('Inserting test rows into ai_diary...')
+    asyncio.run(insert_rows_async())
+    print('Done. Sleeping 1s to allow DB to settle...')
+    time.sleep(1)
+
+    print('\n--- Dry-run (should propose clusters for tagged entries) ---')
+    asyncio.run(run_compactor(dry_run=True))
+
+    print('\n--- Persist run (will archive sources and insert compacted memory) ---')
+    # Ensure archived_memories table exists for this test — leave to DB migration scripts in prod
+    asyncio.run(run_compactor(dry_run=False))
+
+    print('\n--- Querying DB counts ---')
+    total_diary, archived, comp, mems = asyncio.run(query_counts_async())
+    print('ai_diary total:', total_diary)
+    print('ai_diary_archive total:', archived)
+    print('archived_memories total:', comp)
+    print('memories total:', mems)
 
 async def run_compactor(dry_run=True, marker=None):
     # Ensure active LLM is set to 'manual' in this process and hot-swapped
