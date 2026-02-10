@@ -52,32 +52,13 @@ logs/
 skins/Rekku
 skins/temp
 !skins/temp/README.md
+docker-compose-*.yml
 backups/
 SyntH_main
 TODO*.md
 .github/prompts
 old
+.vscode
 node_modules/
 
-# --- Custom Ignores ---
-.gnore
-WEBWAIFU/
-res/synth_webui/static/tts_cache/
-*.vrm
-*.backup
-*.disabled
-check_discord_load.py
-check_plugin_api.py
-check_tts_import.py
-debug_env_db.py
-fix_autonomy.py
-gemini-3.md.txt
-interfaces.md
-read_logs.py
-test_audio_pipeline.py
-test_pipeline_output.wav
-*copy.py
-*copy.ps1
-res/synth_webui/static/audio/
-.vscode
-docker-compose-dev.yml
+
