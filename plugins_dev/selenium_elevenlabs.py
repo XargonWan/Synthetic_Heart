@@ -15,7 +15,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.service import Service
 
-from core.core_initializer import core_initializer, register_plugin
+from core.core_initializer import register_plugin
 from core.logging_utils import (
     log_debug,
     log_error,
@@ -28,6 +28,7 @@ from core.logging_utils import (
 try:
     from core.notifier import notify_trainer
 except Exception:
+
     def notify_trainer(message: str) -> None:  # pragma: no cover - fallback
         log_warning("[selenium_elevenlabs] notifier not available")
 
@@ -99,7 +100,13 @@ class SeleniumElevenLabsPlugin:
         return errors
 
     # === Execution ===
-    async def execute_action(self, action: Dict[str, Any], context: Dict[str, Any], bot: Any, original_message: Any) -> None:
+    async def execute_action(
+        self,
+        action: Dict[str, Any],
+        context: Dict[str, Any],
+        bot: Any,
+        original_message: Any,
+    ) -> None:
         payload = action.get("payload", {})
         text = payload.get("message", "")
         destinations = payload.get("destinations", [])
@@ -148,7 +155,9 @@ class SeleniumElevenLabsPlugin:
             )
             log_debug(f"[selenium_elevenlabs] Using Chromium binary: {chromium_binary}")
             try:
-                output = subprocess.check_output([chromium_binary, "--version"], text=True)
+                output = subprocess.check_output(
+                    [chromium_binary, "--version"], text=True
+                )
                 match = re.search(r"(\d+)\.", output)
                 chromium_major = int(match.group(1)) if match else None
             except Exception:
@@ -169,15 +178,23 @@ class SeleniumElevenLabsPlugin:
                 if "login" in driver.current_url.lower():
                     email = os.getenv("ELEVENLABS_EMAIL", "")
                     password = os.getenv("ELEVENLABS_PASSWORD", "")
-                    wait.until(EC.presence_of_element_located((By.NAME, "email"))).send_keys(email)
-                    wait.until(EC.presence_of_element_located((By.NAME, "password"))).send_keys(password)
-                    driver.find_element(By.XPATH, "//button[contains(., 'Sign in')]").click()
+                    wait.until(
+                        EC.presence_of_element_located((By.NAME, "email"))
+                    ).send_keys(email)
+                    wait.until(
+                        EC.presence_of_element_located((By.NAME, "password"))
+                    ).send_keys(password)
+                    driver.find_element(
+                        By.XPATH, "//button[contains(., 'Sign in')]"
+                    ).click()
                     time.sleep(2)
 
                 # Skip possible onboarding dialogs
                 for text_btn in ["Skip", "Creative Platform"]:
                     try:
-                        btn = driver.find_element(By.XPATH, f"//*[contains(text(), '{text_btn}')]")
+                        btn = driver.find_element(
+                            By.XPATH, f"//*[contains(text(), '{text_btn}')]"
+                        )
                         btn.click()
                         time.sleep(1)
                     except Exception:
@@ -185,14 +202,18 @@ class SeleniumElevenLabsPlugin:
 
                 try:
                     tts_btn = wait.until(
-                        EC.element_to_be_clickable((By.XPATH, "//p[text()='Text to Speech']"))
+                        EC.element_to_be_clickable(
+                            (By.XPATH, "//p[text()='Text to Speech']")
+                        )
                     )
                     tts_btn.click()
                 except Exception:
                     pass
 
                 textarea = wait.until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, "textarea[data-testid='tts-editor']"))
+                    EC.presence_of_element_located(
+                        (By.CSS_SELECTOR, "textarea[data-testid='tts-editor']")
+                    )
                 )
                 textarea.clear()
                 textarea.send_keys(text)
@@ -206,19 +227,27 @@ class SeleniumElevenLabsPlugin:
                 try:
                     wait.until(
                         EC.presence_of_element_located(
-                            (By.CSS_SELECTOR, "button[aria-label='Loading'][data-loading='true']")
+                            (
+                                By.CSS_SELECTOR,
+                                "button[aria-label='Loading'][data-loading='true']",
+                            )
                         )
                     )
                     wait.until_not(
                         EC.presence_of_element_located(
-                            (By.CSS_SELECTOR, "button[aria-label='Loading'][data-loading='true']")
+                            (
+                                By.CSS_SELECTOR,
+                                "button[aria-label='Loading'][data-loading='true']",
+                            )
                         )
                     )
                 except Exception:
                     pass
 
                 download_btn = wait.until(
-                    EC.element_to_be_clickable((By.CSS_SELECTOR, "button[aria-label='Download']"))
+                    EC.element_to_be_clickable(
+                        (By.CSS_SELECTOR, "button[aria-label='Download']")
+                    )
                 )
                 download_btn.click()
 

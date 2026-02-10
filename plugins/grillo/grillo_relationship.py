@@ -9,6 +9,7 @@ from core.ai_plugin_base import AIPluginBase
 display_name = "G.R.I.L.L.O Relationship Reflection"
 BEAT_TYPE = "relationship"
 
+
 class GrilloRelationshipPlugin(AIPluginBase):
     display_name = display_name
     BEAT_TYPE = BEAT_TYPE
@@ -23,5 +24,6 @@ class GrilloRelationshipPlugin(AIPluginBase):
             "End with a JSON action to create a diary entry about relationship insights."
             '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content": "your insights"}}]}'
         )
+
 
 PLUGIN_CLASS = GrilloRelationshipPlugin

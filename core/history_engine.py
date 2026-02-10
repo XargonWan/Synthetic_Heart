@@ -3,10 +3,10 @@ from __future__ import annotations
 import hashlib
 import inspect
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from core.config_manager import config_registry
-from core.logging_utils import log_debug, log_warning
+from core.logging_utils import log_debug
 from core.variables_engine import register_exposed_var
 
 from core.history_types import HistoryContribution, HistoryEntry
@@ -148,10 +148,10 @@ def _get_bool(key: str, default: bool) -> bool:
 def _format_ts(ts: Any) -> str:
     try:
         if isinstance(ts, str):
-            ts = ts.replace('Z', '+00:00')
+            ts = ts.replace("Z", "+00:00")
             dt = datetime.fromisoformat(ts)
             return dt.strftime("%d/%m/%y:%H%M")
-        if hasattr(ts, 'isoformat'):
+        if hasattr(ts, "isoformat"):
             # datetime
             return ts.strftime("%d/%m/%y:%H%M")  # type: ignore[attr-defined]
     except Exception:
@@ -167,30 +167,37 @@ def _entry_to_text(entry: HistoryEntry) -> str:
         return str(entry)
 
     # Chat-like message dicts
-    text = entry.get('text') or entry.get('message_text') or entry.get('content') or ""
-    sender = entry.get('sender_name') or entry.get('username') or entry.get('sender_id') or "Unknown"
-    ts = entry.get('timestamp') or entry.get('date') or ""
+    text = entry.get("text") or entry.get("message_text") or entry.get("content") or ""
+    sender = (
+        entry.get("sender_name")
+        or entry.get("username")
+        or entry.get("sender_id")
+        or "Unknown"
+    )
+    ts = entry.get("timestamp") or entry.get("date") or ""
 
     # Diary-like dicts
-    if 'interaction_summary' in entry or 'personal_thought' in entry:
-        summary = entry.get('interaction_summary') or ""
-        thought = entry.get('personal_thought') or ""
+    if "interaction_summary" in entry or "personal_thought" in entry:
+        summary = entry.get("interaction_summary") or ""
+        thought = entry.get("personal_thought") or ""
         parts = []
         if summary:
             parts.append(f"summary: {summary}")
         if thought:
             parts.append(f"thought: {thought}")
         body = " | ".join(parts) or (text or "")
-        return f"[diary { _format_ts(ts) }] {body}".strip()
+        return f"[diary {_format_ts(ts)}] {body}".strip()
 
     safe_text = str(text).replace('"', "'")
-    return f"[{_format_ts(ts)}] {sender}: \"{safe_text}\"".strip()
+    return f'[{_format_ts(ts)}] {sender}: "{safe_text}"'.strip()
 
 
-def _source_label(entry: HistoryEntry, current_interface_path: str | None = None) -> str | None:
+def _source_label(
+    entry: HistoryEntry, current_interface_path: str | None = None
+) -> str | None:
     if not isinstance(entry, dict):
         return None
-    entry_path = entry.get('interface_path') or entry.get('source_path')
+    entry_path = entry.get("interface_path") or entry.get("source_path")
     if not entry_path:
         return None
     if current_interface_path and entry_path == current_interface_path:
@@ -198,7 +205,9 @@ def _source_label(entry: HistoryEntry, current_interface_path: str | None = None
     return str(entry_path)
 
 
-def _entry_to_text_with_source(entry: HistoryEntry, current_interface_path: str | None = None) -> str:
+def _entry_to_text_with_source(
+    entry: HistoryEntry, current_interface_path: str | None = None
+) -> str:
     base = _entry_to_text(entry)
     label = _source_label(entry, current_interface_path=current_interface_path)
     if not label:
@@ -208,7 +217,7 @@ def _entry_to_text_with_source(entry: HistoryEntry, current_interface_path: str 
 
 def _dedup_key(text: str) -> str:
     normalized = " ".join((text or "").strip().split()).lower()
-    return hashlib.sha256(normalized.encode('utf-8')).hexdigest()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 async def _call_with_supported_kwargs(obj: Any, method_name: str, **kwargs):
@@ -228,7 +237,9 @@ async def _call_with_supported_kwargs(obj: Any, method_name: str, **kwargs):
             return await result
         return result
     except Exception as e:
-        log_debug(f"[history_engine] {obj.__class__.__name__}.{method_name} failed: {e}")
+        log_debug(
+            f"[history_engine] {obj.__class__.__name__}.{method_name} failed: {e}"
+        )
         return None
 
 
@@ -243,38 +254,40 @@ class HistoryEngine:
         text: str = "",
         memories: Optional[Sequence[HistoryEntry]] = None,
     ) -> Dict[str, Any]:
-        verbosity = max(0, _get_int('CONTEXT_VERBOSITY', 10))
-        thoughts_limit = max(0, _get_int('THOUGHTS_LIMIT', 5))
+        verbosity = max(0, _get_int("CONTEXT_VERBOSITY", 10))
+        thoughts_limit = max(0, _get_int("THOUGHTS_LIMIT", 5))
 
-        enable_current = _get_bool('ENABLE_HISTORY_CURRENT_CHAT', True)
-        enable_recent = _get_bool('ENABLE_HISTORY_RECENT', True)
-        enable_diary = _get_bool('ENABLE_AI_DIARY', True)
-        enable_memories = _get_bool('ENABLE_MEMORIES', True)
-        enable_thoughts = _get_bool('ENABLE_THOUGHTS', True)
-        enable_tags_placeholder = _get_bool('ENABLE_TAGS_PLACEHOLDER', True)
-        diary_full = _get_bool('AI_DIARY_FULL', True)
-        unified_mode = _get_bool('UNIFIED_HISTORY', True)
+        enable_current = _get_bool("ENABLE_HISTORY_CURRENT_CHAT", True)
+        enable_recent = _get_bool("ENABLE_HISTORY_RECENT", True)
+        enable_diary = _get_bool("ENABLE_AI_DIARY", True)
+        enable_memories = _get_bool("ENABLE_MEMORIES", True)
+        enable_thoughts = _get_bool("ENABLE_THOUGHTS", True)
+        enable_tags_placeholder = _get_bool("ENABLE_TAGS_PLACEHOLDER", True)
+        diary_full = _get_bool("AI_DIARY_FULL", True)
+        unified_mode = _get_bool("UNIFIED_HISTORY", True)
 
-        interface_path = getattr(message, 'interface_path', None)
+        interface_path = getattr(message, "interface_path", None)
         if not interface_path:
             try:
                 # Common runtime shape: message is a dict similar to prompt `input`
                 if isinstance(message, dict):
                     interface_path = (
-                        (message.get('payload') or {}).get('source') or {}
-                    ).get('interface_path')
+                        (message.get("payload") or {}).get("source") or {}
+                    ).get("interface_path")
                 # Or message has a `payload` attribute
-                elif hasattr(message, 'payload'):
-                    payload = getattr(message, 'payload', None) or {}
+                elif hasattr(message, "payload"):
+                    payload = getattr(message, "payload", None) or {}
                     if isinstance(payload, dict):
-                        interface_path = (payload.get('source') or {}).get('interface_path')
+                        interface_path = (payload.get("source") or {}).get(
+                            "interface_path"
+                        )
             except Exception:
                 interface_path = None
 
         # Additional fallback: plugin_instance passes `context_memory['interface_path']`
         if not interface_path and isinstance(context_memory, dict):
             try:
-                interface_path = context_memory.get('interface_path')
+                interface_path = context_memory.get("interface_path")
             except Exception:
                 interface_path = None
 
@@ -283,18 +296,26 @@ class HistoryEngine:
         # - an interface/user context dict (e.g. Telegram user_data)
         # - a mixed dict (chat map + metadata like 'interface_path')
         # We normalize to a chat-map view where possible.
-        chat_map: Optional[dict] = context_memory if isinstance(context_memory, dict) else None
+        chat_map: Optional[dict] = (
+            context_memory if isinstance(context_memory, dict) else None
+        )
         if interface_path:
             try:
-                current_val = chat_map.get(interface_path) if isinstance(chat_map, dict) else None
-                has_current = isinstance(current_val, (list, tuple)) or hasattr(current_val, '__iter__')
+                current_val = (
+                    chat_map.get(interface_path) if isinstance(chat_map, dict) else None
+                )
+                has_current = isinstance(current_val, (list, tuple)) or hasattr(
+                    current_val, "__iter__"
+                )
             except Exception:
                 has_current = False
 
             if not has_current:
                 # Fall back to centralized context manager when the caller passes a context dict.
                 try:
-                    from core.chat_context_manager import get_context_memory as _get_global_context_memory
+                    from core.chat_context_manager import (
+                        get_context_memory as _get_global_context_memory,
+                    )
 
                     global_map = _get_global_context_memory()
                     if isinstance(global_map, dict) and interface_path in global_map:
@@ -322,16 +343,22 @@ class HistoryEngine:
                 # Fall back to persisted cache if not enough
                 if verbosity > 0 and len(msgs) < verbosity:
                     try:
-                        from core.chat_history_cache import load_chat_history as cache_load
+                        from core.chat_history_cache import (
+                            load_chat_history as cache_load,
+                        )
 
                         cached = await cache_load(interface_path)
                         combined = list(msgs) + list(cached)
                         msgs = combined[-verbosity:]
                     except Exception as e:
-                        log_debug(f"[history_engine] Could not load cached messages for current chat: {e}")
+                        log_debug(
+                            f"[history_engine] Could not load cached messages for current chat: {e}"
+                        )
 
                 for m in msgs[-verbosity:] if verbosity > 0 else []:
-                    line = _entry_to_text_with_source(m, current_interface_path=interface_path)
+                    line = _entry_to_text_with_source(
+                        m, current_interface_path=interface_path
+                    )
                     k = _dedup_key(line)
                     if k in seen_history:
                         continue
@@ -347,28 +374,32 @@ class HistoryEngine:
                 try:
                     from core.chat_history_cache import load_global_chat_history
 
-                    db_history = await load_global_chat_history(limit=verbosity * 2 if verbosity > 0 else 20)
+                    db_history = await load_global_chat_history(
+                        limit=verbosity * 2 if verbosity > 0 else 20
+                    )
                     unified_candidates.extend(list(db_history))
                 except Exception as db_e:
-                    log_debug(f"[history_engine] Failed to load global chat history: {db_e}")
+                    log_debug(
+                        f"[history_engine] Failed to load global chat history: {db_e}"
+                    )
 
                 if isinstance(chat_map, dict):
                     for q in chat_map.values():
-                        if isinstance(q, (list, tuple)) or hasattr(q, '__iter__'):
+                        if isinstance(q, (list, tuple)) or hasattr(q, "__iter__"):
                             unified_candidates.extend(list(q))
 
                 def _uni_sort_key(m: Any) -> float:
                     if not isinstance(m, dict):
                         return 0.0
-                    ts = m.get('timestamp') or m.get('date')
+                    ts = m.get("timestamp") or m.get("date")
                     if isinstance(ts, str):
                         try:
-                            normalized_ts = ts.replace('Z', '+00:00')
+                            normalized_ts = ts.replace("Z", "+00:00")
                             dt = datetime.fromisoformat(normalized_ts)
                             return dt.timestamp()
                         except Exception:
                             return 0.0
-                    if hasattr(ts, 'timestamp'):
+                    if hasattr(ts, "timestamp"):
                         try:
                             return float(ts.timestamp())
                         except Exception:
@@ -382,7 +413,9 @@ class HistoryEngine:
                 seen_history = set()
 
                 for m in unified_candidates[-verbosity:] if verbosity > 0 else []:
-                    line = _entry_to_text_with_source(m, current_interface_path=interface_path)
+                    line = _entry_to_text_with_source(
+                        m, current_interface_path=interface_path
+                    )
                     k = _dedup_key(line)
                     if k in seen_history:
                         continue
@@ -401,9 +434,14 @@ class HistoryEngine:
                         continue
                     try:
                         # Ignore metadata keys (e.g. 'interface_path') that are not chat deques.
-                        if isinstance(ip, str) and ip in ('interface_path', 'chat_id', 'thread_id', 'system_message'):
+                        if isinstance(ip, str) and ip in (
+                            "interface_path",
+                            "chat_id",
+                            "thread_id",
+                            "system_message",
+                        ):
                             continue
-                        if not (isinstance(q, (list, tuple)) or hasattr(q, '__iter__')):
+                        if not (isinstance(q, (list, tuple)) or hasattr(q, "__iter__")):
                             continue
                         for m in list(q or []):
                             if isinstance(m, dict):
@@ -412,14 +450,14 @@ class HistoryEngine:
                         continue
 
                 def _sort_key(m: dict) -> float:
-                    ts = m.get('timestamp') or m.get('date')
+                    ts = m.get("timestamp") or m.get("date")
                     if isinstance(ts, str):
                         try:
-                            dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
                             return dt.timestamp()
                         except Exception:
                             return 0.0
-                    if hasattr(ts, 'timestamp'):
+                    if hasattr(ts, "timestamp"):
                         try:
                             return float(ts.timestamp())
                         except Exception:
@@ -429,7 +467,9 @@ class HistoryEngine:
                 if candidates:
                     candidates.sort(key=_sort_key)
                 for m in candidates[-verbosity:] if verbosity > 0 else []:
-                    line = _entry_to_text_with_source(m, current_interface_path=interface_path)
+                    line = _entry_to_text_with_source(
+                        m, current_interface_path=interface_path
+                    )
                     k = _dedup_key(line)
                     if k in seen_history:
                         continue
@@ -442,7 +482,12 @@ class HistoryEngine:
         contributions: List[HistoryContribution] = []
         try:
             from core.core_initializer import PLUGIN_REGISTRY
-            plugins = list(PLUGIN_REGISTRY.values()) if isinstance(PLUGIN_REGISTRY, dict) else []
+
+            plugins = (
+                list(PLUGIN_REGISTRY.values())
+                if isinstance(PLUGIN_REGISTRY, dict)
+                else []
+            )
         except Exception:
             plugins = []
 
@@ -451,7 +496,7 @@ class HistoryEngine:
                 continue
             contribs = await _call_with_supported_kwargs(
                 plugin,
-                'get_history_contributions',
+                "get_history_contributions",
                 message=message,
                 context_memory=context_memory,
                 interface_name=interface_name,
@@ -459,38 +504,46 @@ class HistoryEngine:
                 text=text,
             )
             if isinstance(contribs, list):
-                contributions.extend([c for c in contribs if isinstance(c, HistoryContribution)])
+                contributions.extend(
+                    [c for c in contribs if isinstance(c, HistoryContribution)]
+                )
 
-        contributions.sort(key=lambda c: int(getattr(c, 'priority', 0)), reverse=True)
+        contributions.sort(key=lambda c: int(getattr(c, "priority", 0)), reverse=True)
 
         for c in contributions:
-            enabled_var = getattr(c, 'enabled_var', None)
+            enabled_var = getattr(c, "enabled_var", None)
             if enabled_var and not _get_bool(enabled_var, True):
                 continue
 
             # Central gating for diary
-            if c.name == 'ai_diary' and not enable_diary:
+            if c.name == "ai_diary" and not enable_diary:
                 continue
 
-            target = c.target or ('history_recent' if c.name != 'thoughts' else 'thoughts')
+            target = c.target or (
+                "history_recent" if c.name != "thoughts" else "thoughts"
+            )
             max_items = c.max_items
 
-            if target in ('history_current_chat', 'history_recent'):
-                for raw in list(c.entries)[: max_items or (verbosity if verbosity > 0 else None)]:
-                    line = _entry_to_text_with_source(raw, current_interface_path=interface_path)
+            if target in ("history_current_chat", "history_recent"):
+                for raw in list(c.entries)[
+                    : max_items or (verbosity if verbosity > 0 else None)
+                ]:
+                    line = _entry_to_text_with_source(
+                        raw, current_interface_path=interface_path
+                    )
                     k = _dedup_key(line)
                     if k in seen_history:
                         continue
-                    if target == 'history_current_chat':
+                    if target == "history_current_chat":
                         history_current_chat.append(line)
                     else:
                         # Special: diary can be thoughts-only
-                        if c.name == 'ai_diary' and not diary_full:
+                        if c.name == "ai_diary" and not diary_full:
                             continue
                         history_recent.append(line)
                     seen_history.add(k)
 
-            elif target == 'thoughts':
+            elif target == "thoughts":
                 if not enable_thoughts:
                     continue
 
@@ -504,15 +557,15 @@ class HistoryEngine:
             # Pull diary entries again from contributions for thoughts extraction
             diary_entries: List[dict[str, Any]] = []
             for c in contributions:
-                if c.name != 'ai_diary':
+                if c.name != "ai_diary":
                     continue
                 for raw in c.entries:
                     if isinstance(raw, dict):
                         diary_entries.append(raw)
             for entry in diary_entries:
-                thought = entry.get('personal_thought')
+                thought = entry.get("personal_thought")
                 if thought:
-                    ts = _format_ts(entry.get('timestamp', ''))
+                    ts = _format_ts(entry.get("timestamp", ""))
                     thoughts.append(f"[thought {ts}] {thought}".strip())
                 if len(thoughts) >= thoughts_limit:
                     break
@@ -530,15 +583,15 @@ class HistoryEngine:
             thoughts = thoughts[-thoughts_limit:]
 
         context: Dict[str, Any] = {
-            'history_current_chat': history_current_chat,
-            'history_recent': history_recent,
-            'thoughts': thoughts,
+            "history_current_chat": history_current_chat,
+            "history_recent": history_recent,
+            "thoughts": thoughts,
         }
 
         if enable_memories:
-            context['memories'] = out_memories
+            context["memories"] = out_memories
 
         if enable_tags_placeholder:
-            context['tags_placeholder'] = []
+            context["tags_placeholder"] = []
 
         return context

@@ -1,21 +1,22 @@
 import asyncio
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from core.db import get_recent_responses, insert_memory
 from core.db import (
     get_active_emotions,
     update_emotion_intensity,
     mark_emotion_resolved,
-    crystallize_emotion
+    crystallize_emotion,
 )
 from core.trigger_processor import process_triggers_for_emotion
-from core.logging_utils import log_debug, log_info, log_warning, log_error
+from core.logging_utils import log_debug, log_info
 
 # ⚙️ Behaviour configuration
 presence_config = {
-    "normal_interval": 1800,   # 30 minutes
+    "normal_interval": 1800,  # 30 minutes
     "cooldown_per_user": {"replies": 3, "per_minutes": 10},
-    "jay_override": True
+    "jay_override": True,
 }
+
 
 # 🧠 Emotion → re-evaluation + crystallization
 async def evaluate_emotions():
@@ -32,7 +33,9 @@ async def evaluate_emotions():
         log_debug(f"[PresenceManager] Valutazione emozione: {em}")
         log_debug(f"[PresenceManager] Delta calcolato: {delta}")
         log_debug(f"[PresenceManager] Intensità aggiornata: {em['intensity'] + delta}")
-        log_debug(f"[PresenceManager] Stato emozione: {'risolta' if em['intensity'] + delta <= 0 else 'cristallizzata' if em['intensity'] + delta >= 10 else 'attiva'}")
+        log_debug(
+            f"[PresenceManager] Stato emozione: {'risolta' if em['intensity'] + delta <= 0 else 'cristallizzata' if em['intensity'] + delta >= 10 else 'attiva'}"
+        )
 
         # 💀 If intensity reaches zero → resolved
         if em["intensity"] + delta <= 0:
@@ -42,9 +45,12 @@ async def evaluate_emotions():
         # 💎 Automatic crystallization if intensity is high
         elif em["intensity"] + delta >= 10:
             await crystallize_emotion(em["id"])
-            log_debug(f"[PresenceManager] 💎 Emotion crystallized: {em['emotion']} ({em['id']})")
+            log_debug(
+                f"[PresenceManager] 💎 Emotion crystallized: {em['emotion']} ({em['id']})"
+            )
 
         await apply_emotion_decay(em)
+
 
 # ♻️ Main loop
 async def presence_loop():
@@ -52,6 +58,7 @@ async def presence_loop():
         log_debug("[PresenceManager] Cyclic check running...")
         await evaluate_emotions()
         await asyncio.sleep(presence_config["normal_interval"])
+
 
 # 💭 Transformative reflection
 async def reflect_on_recent_responses():
@@ -70,9 +77,10 @@ async def reflect_on_recent_responses():
                 scope=meta["scope"],
                 emotion=meta["emotion"],
                 intensity=meta["intensity"],
-                emotion_state=meta["emotion_state"]
+                emotion_state=meta["emotion_state"],
             )
             log_info("[synth] 💭 Transformative reflection saved.")
+
 
 def get_transformative_metadata(response_text: str) -> dict:
     """
@@ -85,8 +93,9 @@ def get_transformative_metadata(response_text: str) -> dict:
         "emotion": "reflection",
         "intensity": 9,
         "emotion_state": "crystallized",
-        "source": "reflection"
+        "source": "reflection",
     }
+
 
 async def apply_emotion_decay(emotion: dict):
     """
@@ -101,7 +110,9 @@ async def apply_emotion_decay(emotion: dict):
     intensity = emotion.get("intensity", 0)
     if intensity > 0:
         await update_emotion_intensity(emotion["id"], delta=-1)
-        log_debug(f"[Decay] 🕯️ Emotion {emotion['id']} decreasing: {intensity} → {intensity - 1}")
+        log_debug(
+            f"[Decay] 🕯️ Emotion {emotion['id']} decreasing: {intensity} → {intensity - 1}"
+        )
 
         if intensity - 1 <= 0:
             await mark_emotion_resolved(emotion["id"])

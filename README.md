@@ -85,24 +85,52 @@ The project ships with an **Ollama-compatible interface** (`interface/ollama_com
    <img src="docs/res/quickstart.png" alt="SyntH Home Screenshot" style="max-width: 700px; border-radius: 8px; margin: 16px 0;" />
 </div>
 
-1. Clone this repository or simply download the composer file and the skins folder (see the note below).
-2. [OPTIONAL] Copy `.env.example` to `.env` to customize the deployment.
-3. Start the stack:
-   ```bash
-   docker compose up -d
-   ```
-   
-   > **Note about logs:** The stack now uses a Docker-managed volume for application logs by default (`synth_logs` -> `/app/logs`). This avoids common host-permission problems so a user can run `docker compose up -d` out-of-the-box.
-   > 
-   > If you prefer to store logs on the host, replace the volume mapping in `docker-compose.yml` with a bind-mount (uncomment `./logs:/app/logs`). On systems with SELinux enabled, append `:Z` to the mount (for example: `./logs:/app/logs:Z`).
-4. Connect to the WebUI via https (default port is 8000)
+### Option A: Docker (Recommended)
 
-Note: The default compose configuration is now turnkey — the image ships with built-in skins and uses Docker-managed volumes for logs and skins so a fresh clone should work with a single `docker compose up -d` command. The WebUI is served over HTTPS at `https://localhost:8000` by default (a self-signed certificate is generated automatically if none is provided). If the database is initializing the first run, give it a few seconds; the service will retry until the DB is ready.
-5. Once in the WebUI navigate to the Components tab. First select the *Cortex* kind (e.g., `llm`, `live`, `agent`), then choose the specific engine for that cortex (e.g., `selenium_chatgpt` for an LLM, `gemini_live` for live mode).
-6. If using a Selenium-based engine (such as ChatGPT or a Selenium connector for Gemini), don't forget to press the Login button and sign into the provider's web interface.
-From there you can login.
+1.  Clone this repository or simply download the `docker-compose.yml` and the `skins` folder (see the note below).
+2.  **[OPTIONAL]** Copy `.env.example` to `.env` to customize the deployment.
+3.  Start the stack:
+    ```bash
+    docker compose up -d --build
+    ```
 
-**NOTE:** skins folder is optional if the user is not interested in edit them. In this case, however, the mount point for the skins folder on the docker compose should be commented out, else an empty skin folder will be mounted overriding the included one.
+    > **Note about logs:** The default configuration uses a Docker-managed volume for application logs (`synth_logs` -> `/app/logs`). This avoids host-permission issues.
+    >
+    > **For Developers:** If you want to view logs directly in your project folder, uncomment the bind-mount line in `docker-compose.yml` (`./logs:/app/logs`).
+
+4.  Connect to the WebUI via HTTPS (default port is **8000**): `https://localhost:8000`.
+
+### Option B: Windows Native (with `uv`)
+
+For the fastest development experience on Windows, we recommend using **uv**. It handles Python installation, virtual environments, and dependencies automatically.
+
+1.  **Install uv** (if not installed):
+    ```powershell
+    pip install uv
+    ```
+2.  **Clone the repository** and enter the folder:
+    ```powershell
+    git clone [https://github.com/Scarlet-Raine/Synthetic_Heart.git](https://github.com/Scarlet-Raine/Synthetic_Heart.git)
+    cd Synthetic_Heart
+    ```
+3.  **Sync Dependencies:**
+    ```powershell
+    # This creates the environment and installs all packages instantly
+    uv sync
+    ```
+4.  **Run the App:**
+    ```powershell
+    uv run main.py
+    ```
+
+---
+
+### First Run Setup
+1.  **Access the WebUI:** Navigate to `https://localhost:8000` (Accept the self-signed certificate warning if prompted).
+2.  **Select Engine:** Go to **Components** and select your desired LLM Engine.
+3.  **Login (Selenium Engines):** If using a Selenium engine (like ChatGPT or Gemini), click the **Login** button to authenticate via the virtual browser.
+
+> **Note on Skins:** The `skins` folder is optional if you do not intend to edit them. If you skip downloading it, ensure the volume mapping for `./skins` is commented out in your compose file, otherwise, an empty folder will override the built-in skins.
 
 ### Customize your Synth
 

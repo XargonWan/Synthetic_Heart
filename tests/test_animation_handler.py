@@ -4,9 +4,8 @@ This module tests the animation handler's ability to manage VRM animations
 and coordinate with the WebUI.
 """
 
-import asyncio
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from core.animation_handler import (
     AnimationHandler,
     AnimationState,
@@ -53,14 +52,14 @@ async def test_play_animation(animation_handler, mock_webui):
     session_id = "test_session"
     mock_ws = AsyncMock()
     mock_webui.connections[session_id] = mock_ws
-    
+
     await animation_handler.play_animation(
         AnimationState.THINK,
         session_id=session_id,
         loop=True,
-        context_id="test_context"
+        context_id="test_context",
     )
-    
+
     assert animation_handler.current_state == AnimationState.THINK
     assert animation_handler.current_animation == "Thinking.fbx"
     assert mock_ws.send_json.called
@@ -72,17 +71,15 @@ async def test_animation_with_multiple_files(animation_handler, mock_webui):
     session_id = "test_session"
     mock_ws = AsyncMock()
     mock_webui.connections[session_id] = mock_ws
-    
+
     # Play idle animation multiple times to test random selection
     animations_used = set()
     for _ in range(10):
         await animation_handler.play_animation(
-            AnimationState.IDLE,
-            session_id=session_id,
-            loop=True
+            AnimationState.IDLE, session_id=session_id, loop=True
         )
         animations_used.add(animation_handler.current_animation)
-    
+
     # Should have used at least one of the idle animations
     # (actual animations may vary based on skins available)
     expected_animations = {"Idle.fbx", "Idle2.fbx", "Happy Idle.fbx", "Look Around.fbx"}
@@ -95,21 +92,19 @@ async def test_stop_animation_single_context(animation_handler, mock_webui):
     session_id = "test_session"
     mock_ws = AsyncMock()
     mock_webui.connections[session_id] = mock_ws
-    
+
     context_id = "test_context"
-    
+
     # Start animation with context
     await animation_handler.play_animation(
-        AnimationState.THINK,
-        session_id=session_id,
-        context_id=context_id
+        AnimationState.THINK, session_id=session_id, context_id=context_id
     )
-    
+
     assert animation_handler.current_state == AnimationState.THINK
-    
+
     # Stop context
     await animation_handler.stop_animation(context_id, session_id)
-    
+
     # Should return to Idle
     assert animation_handler.current_state == AnimationState.IDLE
 
@@ -120,32 +115,28 @@ async def test_stop_animation_multiple_contexts(animation_handler, mock_webui):
     session_id = "test_session"
     mock_ws = AsyncMock()
     mock_webui.connections[session_id] = mock_ws
-    
+
     context1 = "context1"
     context2 = "context2"
-    
+
     # Start two contexts
     await animation_handler.play_animation(
-        AnimationState.THINK,
-        session_id=session_id,
-        context_id=context1
+        AnimationState.THINK, session_id=session_id, context_id=context1
     )
-    
+
     await animation_handler.play_animation(
-        AnimationState.WRITE,
-        session_id=session_id,
-        context_id=context2
+        AnimationState.WRITE, session_id=session_id, context_id=context2
     )
-    
+
     # Stop first context
     await animation_handler.stop_animation(context1, session_id)
-    
+
     # Should NOT return to Idle because context2 is still active
     assert context2 in animation_handler._active_tasks
-    
+
     # Stop second context
     await animation_handler.stop_animation(context2, session_id)
-    
+
     # Now should return to Idle
     assert animation_handler.current_state == AnimationState.IDLE
 
@@ -156,13 +147,11 @@ async def test_transition_to(animation_handler, mock_webui):
     session_id = "test_session"
     mock_ws = AsyncMock()
     mock_webui.connections[session_id] = mock_ws
-    
+
     await animation_handler.transition_to(
-        AnimationState.WRITE,
-        session_id=session_id,
-        context_id="test"
+        AnimationState.WRITE, session_id=session_id, context_id="test"
     )
-    
+
     assert animation_handler.current_state == AnimationState.WRITE
     assert mock_ws.send_json.called
 
@@ -171,14 +160,10 @@ async def test_transition_to(animation_handler, mock_webui):
 async def test_animation_without_webui():
     """Test animation handler without WebUI reference."""
     handler = AnimationHandler()
-    
+
     # Should not raise exception, just log warning
-    await handler.play_animation(
-        AnimationState.THINK,
-        session_id="test",
-        loop=True
-    )
-    
+    await handler.play_animation(AnimationState.THINK, session_id="test", loop=True)
+
     assert handler.current_state == AnimationState.THINK
 
 
@@ -186,14 +171,12 @@ async def test_animation_without_webui():
 async def test_animation_without_websocket(animation_handler, mock_webui):
     """Test animation when WebSocket is not connected."""
     session_id = "nonexistent_session"
-    
+
     # Should not raise exception, just log warning
     await animation_handler.play_animation(
-        AnimationState.THINK,
-        session_id=session_id,
-        loop=True
+        AnimationState.THINK, session_id=session_id, loop=True
     )
-    
+
     assert animation_handler.current_state == AnimationState.THINK
 
 
@@ -201,16 +184,13 @@ async def test_animation_without_websocket(animation_handler, mock_webui):
 async def test_get_current_state(animation_handler, mock_webui):
     """Test getting current animation state."""
     assert animation_handler.get_current_state() == AnimationState.IDLE
-    
+
     session_id = "test_session"
     mock_ws = AsyncMock()
     mock_webui.connections[session_id] = mock_ws
-    
-    await animation_handler.play_animation(
-        AnimationState.THINK,
-        session_id=session_id
-    )
-    
+
+    await animation_handler.play_animation(AnimationState.THINK, session_id=session_id)
+
     assert animation_handler.get_current_state() == AnimationState.THINK
 
 
@@ -223,24 +203,24 @@ async def test_get_current_animation(animation_handler, mock_webui):
         ah = AnimationHandler()
         # intro without start_frame, outro without end_frame
         desc = {
-            'intro': {'end_frame': 10},
-            'loop': {'start_frame': 11, 'end_frame': 20},
-            'outro': {'start_frame': 21}
+            "intro": {"end_frame": 10},
+            "loop": {"start_frame": 11, "end_frame": 20},
+            "outro": {"start_frame": 21},
         }
         # Should not raise, but return has_intro=False, has_outro=False
-        res = ah._analyze_animation_structure(desc, 'incomplete.fbx')
-        assert res['has_intro'] is False
-        assert res['has_outro'] is False
-
+        res = ah._analyze_animation_structure(desc, "incomplete.fbx")
+        assert res["has_intro"] is False
+        assert res["has_outro"] is False
 
     def test_thinking_descriptor_classified_as_loop():
         from core.animation_handler import AnimationHandler
+
         ah = AnimationHandler()
         # Ensure search paths include the skins/Rei animations directory
         ah.set_animation_search_paths([str(ah.SKIN_DEFAULT_ANIMATIONS_DIR)])
-        variants = ah.get_animation_variants('think')
+        variants = ah.get_animation_variants("think")
         # Our Thinking.fbx should be discovered and classified as loop variant
-        found = any('Thinking.fbx' == a for a in variants.get('loop', []))
+        found = any("Thinking.fbx" == a for a in variants.get("loop", []))
         assert found, f"Thinking.fbx not found in loop variants: {variants}"
 
 
@@ -249,19 +229,25 @@ async def test_state_summary_callback_registered_and_called():
     """Ensure that when a WebUI with a summary callback is set, it is registered
     and called when the animation state changes."""
     handler = AnimationHandler()
+
     # Create a mock webui with an async summary callback
     class FakeWebUI:
         def __init__(self):
             self.connections = {}
             self._called = False
-        async def _broadcast_animation_state_summary(self, state, animation_file, descriptor):
+
+        async def _broadcast_animation_state_summary(
+            self, state, animation_file, descriptor
+        ):
             self._called = True
 
     fake = FakeWebUI()
     handler.set_webui(fake)
 
     # Trigger an animation change
-    await handler.play_animation(AnimationState.THINK, session_id=None, loop=True, context_id='ctx')
+    await handler.play_animation(
+        AnimationState.THINK, session_id=None, loop=True, context_id="ctx"
+    )
     assert fake._called is True
 
 
@@ -270,13 +256,13 @@ async def test_global_handler():
     """Test global animation handler singleton."""
     handler1 = get_animation_handler()
     handler2 = get_animation_handler()
-    
+
     assert handler1 is handler2
-    
+
     # Test setting global handler
     new_handler = AnimationHandler()
     set_animation_handler(new_handler)
-    
+
     handler3 = get_animation_handler()
     assert handler3 is new_handler
 
@@ -287,19 +273,17 @@ async def test_idle_animation_rotation_task_created(animation_handler, mock_webu
     session_id = "test_session"
     mock_ws = AsyncMock()
     mock_webui.connections[session_id] = mock_ws
-    
+
     # Play idle animation (has multiple files)
     await animation_handler.play_animation(
-        AnimationState.IDLE,
-        session_id=session_id,
-        loop=True
+        AnimationState.IDLE, session_id=session_id, loop=True
     )
-    
+
     # Check that a rotation task was created
     key = f"{session_id}:idle"
     assert key in animation_handler._rotation_tasks
     assert animation_handler._rotation_tasks[key] is not None
-    
+
     # Clean up the task
     await animation_handler._stop_rotation_task(session_id, AnimationState.IDLE)
 
@@ -310,18 +294,14 @@ async def test_websocket_message_format(animation_handler, mock_webui):
     session_id = "test_session"
     mock_ws = AsyncMock()
     mock_webui.connections[session_id] = mock_ws
-    
+
     await animation_handler.play_animation(
-        AnimationState.THINK,
-        session_id=session_id,
-        loop=True
+        AnimationState.THINK, session_id=session_id, loop=True
     )
-    
-    # There may be preload messages or multiple send_json calls; find the animation payload
-    calls = [c[0][0] for c in mock_ws.send_json.call_args_list]
-    anim_calls = [c for c in calls if c.get("type") == "animation"]
-    assert len(anim_calls) == 1, f"Expected one 'animation' message, got: {anim_calls}"
-    call_args = anim_calls[0]
+
+    # Check that send_json was called with correct format
+    mock_ws.send_json.assert_called_once()
+    call_args = mock_ws.send_json.call_args[0][0]
 
     assert call_args["type"] == "animation"
     assert isinstance(call_args["animation"], str)

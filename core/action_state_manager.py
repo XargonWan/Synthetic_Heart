@@ -21,6 +21,7 @@ LOG_PREFIX = "ACTION_STATE"
 
 class AnimationPhase(str, Enum):
     """Animation phases that SyntH can be in."""
+
     IDLE = "IDLE"
     THINKING = "THINKING"
     WRITING = "WRITING"
@@ -30,30 +31,30 @@ class AnimationPhase(str, Enum):
 
 # Priority levels for animation phases (higher = more important, cannot be interrupted)
 PHASE_PRIORITIES = {
-    AnimationPhase.IDLE: 0,         # Idle - lowest priority, can be interrupted by anything
-    AnimationPhase.WRITING: 3,      # Writing - low priority
-    AnimationPhase.TALKING: 5,      # Talking - medium priority
-    AnimationPhase.CORRECTING: 7,   # Correcting - high priority
-    AnimationPhase.THINKING: 10,    # Thinking - highest priority, cannot be interrupted
+    AnimationPhase.IDLE: 0,  # Idle - lowest priority, can be interrupted by anything
+    AnimationPhase.WRITING: 3,  # Writing - low priority
+    AnimationPhase.TALKING: 5,  # Talking - medium priority
+    AnimationPhase.CORRECTING: 7,  # Correcting - high priority
+    AnimationPhase.THINKING: 10,  # Thinking - highest priority, cannot be interrupted
 }
 
 
 class ActionStackEntry:
     """Represents one action in the global stack."""
-    
+
     def __init__(
         self,
         action_id: str,
         phase: AnimationPhase,
         component: str,
-        parent_id: Optional[str] = None
+        parent_id: Optional[str] = None,
     ):
         self.action_id = action_id
         self.phase = phase
         self.component = component
         self.parent_id = parent_id
         self.started_at = datetime.utcnow()
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
@@ -61,27 +62,27 @@ class ActionStackEntry:
             "phase": self.phase.value,
             "component": self.component,
             "parent_id": self.parent_id,
-            "started_at": self.started_at.isoformat()
+            "started_at": self.started_at.isoformat(),
         }
 
 
 class ActionStateManager:
     """
     Manages the global action state for the SyntH instance.
-    
+
     This state is shared across ALL interfaces (WebUI, Telegram, Discord, etc).
     It's like SyntH being in a real room - everyone sees the same state.
-    
+
     The stack allows for nested actions (e.g., corrector entering while original
     message is still being processed).
     """
-    
+
     def __init__(self):
         self._action_stack: List[ActionStackEntry] = []
         self._lock = asyncio.Lock()
         self._state_changed_callbacks: List[callable] = []
         log_info(f"{LOG_PREFIX} ActionStateManager initialized")
-    
+
     # ------------------------------------------------------------------
     # Stack management
     # ------------------------------------------------------------------
@@ -90,20 +91,20 @@ class ActionStateManager:
         action_id: str,
         phase: AnimationPhase,
         component: str,
-        parent_id: Optional[str] = None
+        parent_id: Optional[str] = None,
     ) -> bool:
         """
         Add a new action to the stack.
-        
+
         Only allows pushing if the new phase has equal or higher priority than the current phase.
         Lower priority actions are silently rejected (logged at debug level).
-        
+
         Args:
             action_id: Unique identifier for this action
             phase: Initial animation phase (THINKING, WRITING, etc)
             component: Component triggering this action (webui, telegram, corrector, etc)
             parent_id: If this is a nested action (e.g., corrector), reference parent
-            
+
         Returns:
             True if action was pushed, False if rejected due to lower priority
         """
@@ -113,10 +114,10 @@ class ActionStateManager:
             if self._action_stack:
                 current_phase = self._action_stack[-1].phase
                 current_priority = PHASE_PRIORITIES.get(current_phase, 0)
-            
+
             # Get new phase priority
             new_priority = PHASE_PRIORITIES.get(phase, 0)
-            
+
             # Check if new phase can interrupt current phase
             if new_priority < current_priority:
                 log_debug(
@@ -125,28 +126,30 @@ class ActionStateManager:
                     f"(current phase={self._action_stack[-1].phase.value if self._action_stack else 'IDLE'})"
                 )
                 return False
-            
+
             entry = ActionStackEntry(action_id, phase, component, parent_id)
             self._action_stack.append(entry)
             log_info(
                 f"{LOG_PREFIX} Action pushed: {action_id} phase={phase.value} priority={new_priority} "
                 f"component={component} stack_depth={len(self._action_stack)}"
             )
-            log_info(f"{LOG_PREFIX} About to notify state changed with {len(self._state_changed_callbacks)} callbacks")
+            log_info(
+                f"{LOG_PREFIX} About to notify state changed with {len(self._state_changed_callbacks)} callbacks"
+            )
             await self._notify_state_changed()
             log_info(f"{LOG_PREFIX} Notified state changed")
             return True
-    
+
     async def update_phase(self, action_id: str, new_phase: AnimationPhase) -> bool:
         """
         Update the phase of an existing action.
-        
+
         Only allows updating if the new phase has equal or higher priority than other actions in the stack.
-        
+
         Args:
             action_id: ID of action to update
             new_phase: New phase to set
-            
+
         Returns:
             True if updated, False if action not found or priority is too low
         """
@@ -157,30 +160,32 @@ class ActionStateManager:
                 if entry.action_id == action_id:
                     target_index = i
                     break
-            
+
             if target_index is None:
                 log_warning(f"{LOG_PREFIX} Action not found for update: {action_id}")
                 return False
-            
+
             # Get priorities
             old_entry = self._action_stack[target_index]
             old_priority = PHASE_PRIORITIES.get(old_entry.phase, 0)
             new_priority = PHASE_PRIORITIES.get(new_phase, 0)
-            
+
             # Check if new phase can interrupt actions above it
             # (i.e., check against the top of stack, excluding this action)
             max_other_priority = 0
             for i, entry in enumerate(self._action_stack):
                 if i != target_index:  # Skip the action we're updating
-                    max_other_priority = max(max_other_priority, PHASE_PRIORITIES.get(entry.phase, 0))
-            
+                    max_other_priority = max(
+                        max_other_priority, PHASE_PRIORITIES.get(entry.phase, 0)
+                    )
+
             if new_priority < max_other_priority:
                 log_debug(
                     f"{LOG_PREFIX} Action update rejected (priority): {action_id} "
                     f"new_phase={new_phase.value} priority={new_priority} < max_other_priority={max_other_priority}"
                 )
                 return False
-            
+
             old_entry.phase = new_phase
             log_info(
                 f"{LOG_PREFIX} Action phase updated: {action_id} "
@@ -188,14 +193,14 @@ class ActionStateManager:
             )
             await self._notify_state_changed()
             return True
-    
+
     async def pop_action(self, action_id: str) -> bool:
         """
         Remove an action from the stack (when it completes).
-        
+
         Args:
             action_id: ID of action to remove
-            
+
         Returns:
             True if removed, False if not found
         """
@@ -209,31 +214,31 @@ class ActionStateManager:
                     )
                     await self._notify_state_changed()
                     return True
-            
+
             log_warning(f"{LOG_PREFIX} Action not found for pop: {action_id}")
             return False
-    
+
     # ------------------------------------------------------------------
     # State queries
     # ------------------------------------------------------------------
     async def get_current_action(self) -> Optional[Dict[str, Any]]:
         """
         Get the current (top of stack) action state.
-        
+
         Returns:
             Dict with action_id, phase, component, or None if stack is empty
         """
         async with self._lock:
             if not self._action_stack:
                 return None
-            
+
             top = self._action_stack[-1]
             return top.to_dict()
-    
+
     async def get_current_phase(self) -> AnimationPhase:
         """
         Get only the animation phase of the current action.
-        
+
         Returns:
             AnimationPhase (THINKING, WRITING, IDLE, etc)
         """
@@ -241,37 +246,37 @@ class ActionStateManager:
         if action:
             return AnimationPhase(action["phase"])
         return AnimationPhase.IDLE
-    
+
     async def get_stack(self) -> List[Dict[str, Any]]:
         """
         Get the entire stack (for debugging/monitoring).
-        
+
         Returns:
             List of action dictionaries from bottom to top
         """
         async with self._lock:
             return [entry.to_dict() for entry in self._action_stack]
-    
+
     async def is_empty(self) -> bool:
         """Check if stack is empty."""
         async with self._lock:
             return len(self._action_stack) == 0
-    
+
     # ------------------------------------------------------------------
     # State change notifications
     # ------------------------------------------------------------------
     def register_state_changed_callback(self, callback: callable) -> None:
         """
         Register a callback to be called when state changes.
-        
+
         Callback signature: async callback(state: Dict[str, Any])
         """
         self._state_changed_callbacks.append(callback)
-    
+
     async def _notify_state_changed(self) -> None:
         """
         Notify all listeners that state has changed.
-        
+
         NOTE: This is called WHILE holding the lock, so we access _action_stack directly
         without acquiring the lock again (to avoid deadlock).
         """
@@ -281,9 +286,11 @@ class ActionStateManager:
         else:
             top = self._action_stack[-1]
             current = top.to_dict()
-        
-        log_info(f"{LOG_PREFIX} State changed - notifying {len(self._state_changed_callbacks)} callbacks with phase: {current.get('phase') if current else 'IDLE'}")
-        
+
+        log_info(
+            f"{LOG_PREFIX} State changed - notifying {len(self._state_changed_callbacks)} callbacks with phase: {current.get('phase') if current else 'IDLE'}"
+        )
+
         for callback in self._state_changed_callbacks:
             try:
                 if asyncio.iscoroutinefunction(callback):

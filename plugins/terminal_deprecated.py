@@ -1,5 +1,9 @@
-# Terminal plugin removed (deprecated)
-# This file previously implemented a legacy terminal wrapper. It has been
-# removed in favor of the Agent plugin's internal executor and audit logging.
-# If any code imports this module, fail fast so callers can be migrated.
-raise ImportError("plugins.terminal_deprecated removed: use Agent plugin execution APIs instead")
+# plugins/terminal_deprecated.py
+# Deprecated wrapper for the previous Terminal plugin. Kept here for reference during the Agent PoC branch.
+# The Agent plugin provides an internal executor and policy controls; remove this file in a follow-up cleanup if desired.
+
+from core.logging_utils import log_warning
+
+log_warning(
+    "[terminal_deprecated] The terminal plugin has been deprecated in favor of the Agent plugin's internal executor. Remove in cleanup."
+)

@@ -1,6 +1,5 @@
 import asyncio
 import json
-import os
 import time
 import urllib.parse
 import urllib.request
@@ -9,7 +8,7 @@ from datetime import datetime
 from typing import Optional
 import concurrent.futures
 
-from core.core_initializer import core_initializer, register_plugin
+from core.core_initializer import register_plugin
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.time_zone_utils import get_local_location, utc_to_local
 from core.config_manager import config_registry
@@ -68,7 +67,7 @@ register_exposed_var(
 
 class WeatherPlugin:
     """Plugin to provide weather information using wttr.in."""
-    
+
     display_name = "Weather"
 
     def __init__(self):
@@ -76,7 +75,7 @@ class WeatherPlugin:
         log_info("[weather_plugin] Registered WeatherPlugin")
         self._cached_weather: Optional[str] = None
         self._last_fetch: float = 0.0
-        
+
         # Register configuration with config_registry
         self.fetch_minutes = config_registry.get_value(
             "WEATHER_FETCH_TIME",
@@ -108,35 +107,47 @@ class WeatherPlugin:
             component="weather_plugin",
             advanced=True,
         )
-        
+
         # Add listener to update fetch_minutes when config changes
         def _update_fetch_minutes(value):
             try:
                 self.fetch_minutes = int(value) if value is not None else 60
-                log_info(f"[weather_plugin] Fetch interval updated to {self.fetch_minutes} minutes")
+                log_info(
+                    f"[weather_plugin] Fetch interval updated to {self.fetch_minutes} minutes"
+                )
             except (ValueError, TypeError):
-                log_warning(f"[weather_plugin] Invalid WEATHER_FETCH_TIME value: {value}, using default 60")
+                log_warning(
+                    f"[weather_plugin] Invalid WEATHER_FETCH_TIME value: {value}, using default 60"
+                )
                 self.fetch_minutes = 60
-        
+
         config_registry.add_listener("WEATHER_FETCH_TIME", _update_fetch_minutes)
 
         def _update_daily_report_enabled(value):
             try:
                 self.daily_report_enabled = bool(value)
-                log_info(f"[weather_plugin] Daily report enabled: {self.daily_report_enabled}")
+                log_info(
+                    f"[weather_plugin] Daily report enabled: {self.daily_report_enabled}"
+                )
             except Exception:
                 self.daily_report_enabled = False
 
         def _update_daily_report_interface(value):
             try:
                 self.daily_report_interface = str(value) if value else ""
-                log_info(f"[weather_plugin] Daily report interface set to: {self.daily_report_interface or 'none'}")
+                log_info(
+                    f"[weather_plugin] Daily report interface set to: {self.daily_report_interface or 'none'}"
+                )
             except Exception:
                 self.daily_report_interface = ""
 
-        config_registry.add_listener("WEATHER_DAILY_REPORT_ENABLED", _update_daily_report_enabled)
-        config_registry.add_listener("WEATHER_DAILY_REPORT_INTERFACE", _update_daily_report_interface)
-        
+        config_registry.add_listener(
+            "WEATHER_DAILY_REPORT_ENABLED", _update_daily_report_enabled
+        )
+        config_registry.add_listener(
+            "WEATHER_DAILY_REPORT_INTERFACE", _update_daily_report_interface
+        )
+
         # Use a dedicated executor so we don't depend on the event loop's default executor
         # which may be shut down during interpreter shutdown.
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
@@ -160,7 +171,7 @@ class WeatherPlugin:
                 "description": "Manually trigger a weather announcement via LLM.",
                 "required_fields": [],
                 "optional_fields": ["interface_path", "interface_id"],
-            }
+            },
         }
 
     async def execute_action(self, action: dict, context: dict, bot, original_message):
@@ -173,8 +184,13 @@ class WeatherPlugin:
             if not target_iface and isinstance(target_path, str) and "/" in target_path:
                 target_iface = target_path.split("/")[0]
             if not target_iface:
-                log_warning("[weather_plugin] trigger_weather_report missing interface_id/interface_path")
-                return {"status": "error", "message": "interface_id or interface_path required"}
+                log_warning(
+                    "[weather_plugin] trigger_weather_report missing interface_id/interface_path"
+                )
+                return {
+                    "status": "error",
+                    "message": "interface_id or interface_path required",
+                }
 
             success = await self._trigger_manual_report(target_iface)
             return {"status": "success" if success else "failed"}
@@ -187,10 +203,7 @@ class WeatherPlugin:
 
     async def _ensure_weather(self) -> None:
         now = time.time()
-        if (
-            not self._cached_weather
-            or now - self._last_fetch > self.fetch_minutes * 60
-        ):
+        if not self._cached_weather or now - self._last_fetch > self.fetch_minutes * 60:
             await self._update_weather()
 
     async def _update_weather(self) -> None:
@@ -203,37 +216,55 @@ class WeatherPlugin:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
                 # Event loop is closed; skip update
-                log_warning("[weather_plugin] Event loop closed; aborting weather update")
+                log_warning(
+                    "[weather_plugin] Event loop closed; aborting weather update"
+                )
                 self._cached_weather = f"{location}: ⚠️ Weather service temporarily unavailable (system shutting down)"
                 return
 
             try:
-                response = await loop.run_in_executor(self._executor, urllib.request.urlopen, url)
+                response = await loop.run_in_executor(
+                    self._executor, urllib.request.urlopen, url
+                )
                 data_bytes = await loop.run_in_executor(self._executor, response.read)
             except urllib.error.HTTPError as e:
                 # HTTP errors (404, 500, etc.)
-                log_warning(f"[weather_plugin] HTTP error fetching weather: {e.code} {e.reason}")
-                self._cached_weather = f"{location}: ⚠️ Cannot reach weather service (HTTP {e.code})"
+                log_warning(
+                    f"[weather_plugin] HTTP error fetching weather: {e.code} {e.reason}"
+                )
+                self._cached_weather = (
+                    f"{location}: ⚠️ Cannot reach weather service (HTTP {e.code})"
+                )
                 return
             except urllib.error.URLError as e:
                 # Network/connection errors
-                log_warning(f"[weather_plugin] Network error fetching weather: {e.reason}")
-                self._cached_weather = f"{location}: ⚠️ Cannot reach weather service (connection failed)"
+                log_warning(
+                    f"[weather_plugin] Network error fetching weather: {e.reason}"
+                )
+                self._cached_weather = (
+                    f"{location}: ⚠️ Cannot reach weather service (connection failed)"
+                )
                 return
             except RuntimeError as e:
                 # Executor or loop has been shutdown
                 log_warning(f"[weather_plugin] Could not schedule weather read: {e}")
-                self._cached_weather = f"{location}: ⚠️ Weather service temporarily unavailable"
+                self._cached_weather = (
+                    f"{location}: ⚠️ Weather service temporarily unavailable"
+                )
                 return
             if not data_bytes:
                 log_warning("[weather_plugin] Empty response from weather service")
-                self._cached_weather = f"{location}: ⚠️ Weather service returned empty response"
+                self._cached_weather = (
+                    f"{location}: ⚠️ Weather service returned empty response"
+                )
                 return
             try:
                 data = json.loads(data_bytes.decode())
             except json.JSONDecodeError as e:
                 log_warning(f"[weather_plugin] Invalid JSON weather data: {e}")
-                self._cached_weather = f"{location}: ⚠️ Weather service returned invalid data"
+                self._cached_weather = (
+                    f"{location}: ⚠️ Weather service returned invalid data"
+                )
                 return
             cc = data.get("current_condition", [{}])[0]
             desc = cc.get("weatherDesc", [{}])[0].get("value", "N/A")
@@ -247,8 +278,18 @@ class WeatherPlugin:
             pressure = cc.get("pressure", "N/A")
 
             log_debug(
-                "[weather_plugin] Parsed values: desc=%s temp=%s feels=%s humidity=%s wind=%s%s cloud=%s visibility=%s pressure=%s"%
-                (desc, temp_c, feels_c, humidity, wind_speed, wind_dir, cloudcover, visibility, pressure)
+                "[weather_plugin] Parsed values: desc=%s temp=%s feels=%s humidity=%s wind=%s%s cloud=%s visibility=%s pressure=%s"
+                % (
+                    desc,
+                    temp_c,
+                    feels_c,
+                    humidity,
+                    wind_speed,
+                    wind_dir,
+                    cloudcover,
+                    visibility,
+                    pressure,
+                )
             )
 
             emoji = self._choose_emoji(desc)
@@ -265,7 +306,9 @@ class WeatherPlugin:
         except Exception as e:
             log_warning(f"[weather_plugin] Failed to fetch weather: {e}")
             log_error("[weather_plugin] Weather update error", e)
-            self._cached_weather = f"{location}: ⚠️ Weather service error (please try again later)"
+            self._cached_weather = (
+                f"{location}: ⚠️ Weather service error (please try again later)"
+            )
 
     async def start(self):
         """Start background scheduler to periodically refresh weather cache."""
@@ -286,7 +329,9 @@ class WeatherPlugin:
             log_info("[weather_plugin] Scheduler task started")
         else:
             # If no running loop, schedule task later when start() is invoked in that context
-            log_debug("[weather_plugin] No running loop to start scheduler; will start when event loop is available")
+            log_debug(
+                "[weather_plugin] No running loop to start scheduler; will start when event loop is available"
+            )
 
     async def stop(self):
         """Stop background scheduler and cancel task."""
@@ -325,24 +370,32 @@ class WeatherPlugin:
         try:
             interface_id = (self.daily_report_interface or "").strip()
             if not interface_id:
-                log_warning("[weather_plugin] Daily report interface not configured; skipping announcement")
+                log_warning(
+                    "[weather_plugin] Daily report interface not configured; skipping announcement"
+                )
                 return False
 
             try:
                 from core.core_initializer import INTERFACE_REGISTRY
+
                 interface = INTERFACE_REGISTRY.get(interface_id)
             except Exception as e:
-                log_warning(f"[weather_plugin] Failed to resolve interface registry: {e}")
+                log_warning(
+                    f"[weather_plugin] Failed to resolve interface registry: {e}"
+                )
                 interface = None
 
             if interface is None:
-                log_warning(f"[weather_plugin] Interface '{interface_id}' not available; skipping announcement")
+                log_warning(
+                    f"[weather_plugin] Interface '{interface_id}' not available; skipping announcement"
+                )
                 return False
 
             if not self._cached_weather:
                 await self._update_weather()
 
             from core.auto_response import request_llm_delivery
+
             prompt = (
                 "It is 6:00 AM local time. Use the weather data provided in context to create "
                 "a short, friendly daily weather update. Keep it concise and professional. "
@@ -372,15 +425,19 @@ class WeatherPlugin:
         """Trigger a weather report on demand via LLM."""
         try:
             from core.core_initializer import INTERFACE_REGISTRY
+
             interface = INTERFACE_REGISTRY.get(interface_id)
             if interface is None:
-                log_warning(f"[weather_plugin] Interface '{interface_id}' not available for manual report")
+                log_warning(
+                    f"[weather_plugin] Interface '{interface_id}' not available for manual report"
+                )
                 return False
 
             if not self._cached_weather:
                 await self._update_weather()
 
             from core.auto_response import request_llm_delivery
+
             prompt = (
                 "Manual weather report request. Use the weather data in context to create a short, "
                 "friendly update. Keep it concise. Weather data: "

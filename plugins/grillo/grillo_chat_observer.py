@@ -20,14 +20,9 @@ from core.logging_utils import log_info, log_debug, log_warning, log_error
 from core.config_manager import config_registry
 from core.variables_engine import register_exposed_var
 
-from plugins.grillo.common_instructions import GRILLO_INSTRUCTIONS as OBSERVER_INSTRUCTIONS
-
-# Expose check_for_updates_once here for tests and for backwards compatibility
-try:
-    from core.chat_update_checker import check_for_updates_once
-except Exception:
-    async def check_for_updates_once(consume: bool = True):
-        return {"updated": False, "new_messages": [], "last_checked": None}
+from plugins.grillo.common_instructions import (
+    GRILLO_INSTRUCTIONS as OBSERVER_INSTRUCTIONS,
+)
 
 
 register_exposed_var(
@@ -51,7 +46,8 @@ class GrilloChatObserverPlugin:
 
     def __init__(self):
         self.enabled = config_registry.get_value(
-            "GRILLO_OBSERVER_ENABLED", True,
+            "GRILLO_OBSERVER_ENABLED",
+            True,
             label="Enable Grillo Chat Observer",
             description="Enable periodic chat observation and proposal beat",
             value_type=bool,
@@ -59,26 +55,33 @@ class GrilloChatObserverPlugin:
             component="grillo_chat_observer",
         )
 
-        self.interval = int(config_registry.get_value(
-            "GRILLO_OBSERVER_INTERVAL", 3600,
-            label="Grillo Observer Interval (s)",
-            description="Seconds between observer runs (default 3600 = 1 hour)",
-            value_type=int,
-            group="grillo",
-            component="grillo_chat_observer",
-        ))
+        self.interval = int(
+            config_registry.get_value(
+                "GRILLO_OBSERVER_INTERVAL",
+                3600,
+                label="Grillo Observer Interval (s)",
+                description="Seconds between observer runs (default 3600 = 1 hour)",
+                value_type=int,
+                group="grillo",
+                component="grillo_chat_observer",
+            )
+        )
 
-        self.samples = int(config_registry.get_value(
-            "GRILLO_OBSERVER_SAMPLES", 10,
-            label="Grillo Observer Samples",
-            description="Number of recent chat snippets to include in the prompt",
-            value_type=int,
-            group="grillo",
-            component="grillo_chat_observer",
-        ))
+        self.samples = int(
+            config_registry.get_value(
+                "GRILLO_OBSERVER_SAMPLES",
+                10,
+                label="Grillo Observer Samples",
+                description="Number of recent chat snippets to include in the prompt",
+                value_type=int,
+                group="grillo",
+                component="grillo_chat_observer",
+            )
+        )
 
         self.propose_only = config_registry.get_value(
-            "GRILLO_OBSERVER_PROPOSE_ONLY", True,
+            "GRILLO_OBSERVER_PROPOSE_ONLY",
+            True,
             label="Grillo Observer Propose Only",
             description="When True, the observer will instruct the LLM to propose actions only (no auto-execution)",
             value_type=bool,
@@ -86,7 +89,8 @@ class GrilloChatObserverPlugin:
             component="grillo_chat_observer",
         )
         self.store_memories = config_registry.get_value(
-            "GRILLO_OBSERVER_STORE_MEMORIES", True,
+            "GRILLO_OBSERVER_STORE_MEMORIES",
+            True,
             label="Grillo Observer Store Memories",
             description="Store observer snippets as passive memories",
             value_type=bool,
@@ -104,11 +108,23 @@ class GrilloChatObserverPlugin:
         self._last_run_ts: float = 0.0
 
         # Config listeners
-        config_registry.add_listener("GRILLO_OBSERVER_ENABLED", lambda v: setattr(self, "enabled", bool(v)))
-        config_registry.add_listener("GRILLO_OBSERVER_INTERVAL", lambda v: setattr(self, "interval", int(v)))
-        config_registry.add_listener("GRILLO_OBSERVER_SAMPLES", lambda v: setattr(self, "samples", int(v)))
-        config_registry.add_listener("GRILLO_OBSERVER_PROPOSE_ONLY", lambda v: setattr(self, "propose_only", bool(v)))
-        config_registry.add_listener("GRILLO_OBSERVER_STORE_MEMORIES", lambda v: setattr(self, "store_memories", bool(v)))
+        config_registry.add_listener(
+            "GRILLO_OBSERVER_ENABLED", lambda v: setattr(self, "enabled", bool(v))
+        )
+        config_registry.add_listener(
+            "GRILLO_OBSERVER_INTERVAL", lambda v: setattr(self, "interval", int(v))
+        )
+        config_registry.add_listener(
+            "GRILLO_OBSERVER_SAMPLES", lambda v: setattr(self, "samples", int(v))
+        )
+        config_registry.add_listener(
+            "GRILLO_OBSERVER_PROPOSE_ONLY",
+            lambda v: setattr(self, "propose_only", bool(v)),
+        )
+        config_registry.add_listener(
+            "GRILLO_OBSERVER_STORE_MEMORIES",
+            lambda v: setattr(self, "store_memories", bool(v)),
+        )
 
     def get_supported_action_types(self):
         return []
@@ -121,16 +137,23 @@ class GrilloChatObserverPlugin:
             log_info("[grillo_chat_observer] Disabled by configuration; not starting")
             return
 
-        if GrilloChatObserverPlugin._scheduler_task and not GrilloChatObserverPlugin._scheduler_task.done():
+        if (
+            GrilloChatObserverPlugin._scheduler_task
+            and not GrilloChatObserverPlugin._scheduler_task.done()
+        ):
             log_debug("[grillo_chat_observer] Scheduler already running")
             return
 
         GrilloChatObserverPlugin._scheduler_running = True
-        GrilloChatObserverPlugin._scheduler_task = asyncio.create_task(self._observer_loop())
+        GrilloChatObserverPlugin._scheduler_task = asyncio.create_task(
+            self._observer_loop()
+        )
         # Initialize last run timestamp to now so we don't process old history
         try:
             self._last_run_ts = float(datetime.utcnow().timestamp())
-            log_debug(f"[grillo_chat_observer] Initialized last_run_ts={self._last_run_ts}")
+            log_debug(
+                f"[grillo_chat_observer] Initialized last_run_ts={self._last_run_ts}"
+            )
         except Exception:
             pass
         log_info("[grillo_chat_observer] Scheduler started")
@@ -177,12 +200,14 @@ class GrilloChatObserverPlugin:
             # avoid races with the global checker (which may consume updates).
             try:
                 from core.db import execute_query
+
                 # Ensure last_run_ts initialized
-                if not getattr(self, '_last_run_ts', 0.0):
-                    # Initialize to now but do not skip execution when invoked directly
-                    # (tests call _run_observer() directly and expect it to proceed).
+                if not getattr(self, "_last_run_ts", 0.0):
                     self._last_run_ts = float(datetime.utcnow().timestamp())
-                    log_debug(f"[grillo_chat_observer] last_run_ts uninitialized – initializing and continuing")
+                    log_debug(
+                        "[grillo_chat_observer] last_run_ts uninitialized – initializing and skipping first run"
+                    )
+                    return
 
                 rows = await execute_query(
                     """
@@ -192,7 +217,7 @@ class GrilloChatObserverPlugin:
                       AND COALESCE(sender_id, '') NOT IN (%s, %s)
                       AND COALESCE(sender_name, '') NOT IN (%s, %s)
                     """,
-                    (self._last_run_ts, 'self', 'synth', 'self', 'synth'),
+                    (self._last_run_ts, "self", "synth", "self", "synth"),
                 )
 
                 cnt = 0
@@ -200,38 +225,40 @@ class GrilloChatObserverPlugin:
                 if rows and len(rows) > 0:
                     r = rows[0]
                     if isinstance(r, dict):
-                        cnt = int(r.get('cnt') or 0)
-                        max_ts = r.get('max_ts')
+                        cnt = int(r.get("cnt") or 0)
+                        max_ts = r.get("max_ts")
                     else:
                         cnt = int(r[0] or 0)
                         max_ts = r[1]
 
                 if cnt == 0:
-                    # No DB updates - do a non-consuming checker probe so tests and
-                    # other environments that rely on the checker are still respected
-                    try:
-                        chk = await check_for_updates_once(consume=False)
-                        if not chk.get('updated'):
-                            log_debug('[grillo_chat_observer] No new non-self messages since last_run; skipping')
-                            return
-                        # If checker reports updates, we proceed
-                    except Exception:
-                        log_debug('[grillo_chat_observer] No new non-self messages since last_run; skipping')
-                        return
+                    log_debug(
+                        "[grillo_chat_observer] No new non-self messages since last_run; skipping"
+                    )
+                    return
                 else:
-                    log_debug(f"[grillo_chat_observer] Found {cnt} new non-self messages since last_run; proceeding")
+                    log_debug(
+                        f"[grillo_chat_observer] Found {cnt} new non-self messages since last_run; proceeding"
+                    )
 
             except Exception as e:
-                log_debug(f"[grillo_chat_observer] Direct DB check failed; falling back to checker: {e}")
+                log_debug(
+                    f"[grillo_chat_observer] Direct DB check failed; falling back to checker: {e}"
+                )
                 # Fallback to non-consuming peek
                 try:
-                    # Use the module-level check_for_updates_once (allows tests to monkeypatch it)
+                    from core.chat_update_checker import check_for_updates_once
+
                     chk = await check_for_updates_once(consume=False)
-                    if not chk.get('updated'):
-                        log_debug("[grillo_chat_observer] No new messages after fallback; skipping observer run")
+                    if not chk.get("updated"):
+                        log_debug(
+                            "[grillo_chat_observer] No new messages after fallback; skipping observer run"
+                        )
                         return
                 except Exception as e2:
-                    log_debug(f"[grillo_chat_observer] Chat update checker fallback failed; proceeding: {e2}")
+                    log_debug(
+                        f"[grillo_chat_observer] Chat update checker fallback failed; proceeding: {e2}"
+                    )
 
             fragments = await self._collect_recent_snippets(self.samples)
             if not fragments:
@@ -247,11 +274,16 @@ class GrilloChatObserverPlugin:
             activity_log_id = None
             try:
                 from plugins.grillo.grillo_impl import GrilloPlugin
-                activity_log_id = await GrilloPlugin.create_activity_log(beat_type="observer", prompt_text=prompt)
+
+                activity_log_id = await GrilloPlugin.create_activity_log(
+                    beat_type="observer", prompt_text=prompt
+                )
                 # Definitive logging: include activity id and short prompt snippet for traceability
                 try:
-                    snippet = str(prompt).replace('\n', ' ')[:200]
-                    log_info(f"[grillo_chat_observer] Activity created: GRILLO_ACTIVITY id={activity_log_id} beat=observer propose_only={self.propose_only} prompt_snippet={snippet}")
+                    snippet = str(prompt).replace("\n", " ")[:200]
+                    log_info(
+                        f"[grillo_chat_observer] Activity created: GRILLO_ACTIVITY id={activity_log_id} beat=observer propose_only={self.propose_only} prompt_snippet={snippet}"
+                    )
                 except Exception:
                     # Non-fatal; continue
                     pass
@@ -267,7 +299,9 @@ class GrilloChatObserverPlugin:
                 message.chat_id = -1
                 message.message_id = 0
                 message.text = prompt
-                message.from_user = SimpleNamespace(id=-1, username="grillo", full_name="G.R.I.L.L.O.")
+                message.from_user = SimpleNamespace(
+                    id=-1, username="grillo", full_name="G.R.I.L.L.O."
+                )
                 message.chat = SimpleNamespace(id=-1, type="internal")
                 message.date = datetime.utcnow()
 
@@ -280,8 +314,16 @@ class GrilloChatObserverPlugin:
                     "include_memories": True,
                 }
 
-                await message_queue.enqueue_low_priority(None, message, context_memory=context, interface_id='grillo', original_message=None)
-                log_info("[grillo_chat_observer] Observer prompt enqueued for LLM processing")
+                await message_queue.enqueue_low_priority(
+                    None,
+                    message,
+                    context_memory=context,
+                    interface_id="grillo",
+                    original_message=None,
+                )
+                log_info(
+                    "[grillo_chat_observer] Observer prompt enqueued for LLM processing"
+                )
 
                 # Advance observer last-run to avoid reprocessing the same messages
                 try:
@@ -289,11 +331,15 @@ class GrilloChatObserverPlugin:
                         self._last_run_ts = float(max_ts)
                     else:
                         self._last_run_ts = float(datetime.utcnow().timestamp())
-                    log_debug(f"[grillo_chat_observer] Updated last_run_ts to {self._last_run_ts}")
+                    log_debug(
+                        f"[grillo_chat_observer] Updated last_run_ts to {self._last_run_ts}"
+                    )
                 except Exception:
                     pass
             except Exception as e:
-                log_error(f"[grillo_chat_observer] Failed to enqueue observer prompt: {e}")
+                log_error(
+                    f"[grillo_chat_observer] Failed to enqueue observer prompt: {e}"
+                )
         except Exception as e:
             log_error(f"[grillo_chat_observer] Unexpected error in _run_observer: {e}")
 
@@ -307,86 +353,28 @@ class GrilloChatObserverPlugin:
             for chat_id, name in last:
                 if len(snippets) >= limit:
                     break
-                chat_path = recent_chats.get_chat_path(chat_id) or f"telegram_bot/{chat_id}"
+                chat_path = (
+                    recent_chats.get_chat_path(chat_id) or f"telegram_bot/{chat_id}"
+                )
                 try:
-                    # Respect cooldown: skip public chats where last message from synth is within cooldown
-                    try:
-                        cooldown_hours = int(config_registry.get_value(
-                            "GRILLO_COOLDOWN_HOURS", 24,
-                            label="Grillo cooldown hours for public chats",
-                            description="Hours to wait after a synth message before allowing Grillo to consider the chat.",
-                            group="grillo",
-                            component="grillo_chat_observer",
-                            value_type=int,
-                        ))
-                    except Exception:
-                        cooldown_hours = 24
-
-                    from core.chat_history_cache import get_last_message
-                    last_msg = await get_last_message(chat_path)
-                    if last_msg:
-                        sender_id = last_msg.get('sender_id') or ""
-                        sender_name = (last_msg.get('sender_name') or "").lower()
-                        parts = chat_path.split('/')
-                        maybe_interface = parts[0] if parts else None
-                        maybe_chat_id = parts[1] if len(parts) > 1 else None
-                        is_public = False
-                        try:
-                            if maybe_interface == 'telegram_bot' and maybe_chat_id:
-                                try:
-                                    cid = int(maybe_chat_id)
-                                    if cid < 0:
-                                        is_public = True
-                                except Exception:
-                                    is_public = False
-                            elif maybe_interface in ('discord', 'reddit', 'matrix') and maybe_chat_id:
-                                is_public = True
-                        except Exception:
-                            is_public = False
-
-                        if is_public and (str(sender_id) == 'self' or any(k in sender_name for k in ("synth", "bot", "auto_response", "autoreply"))):
-                            last_ts = last_msg.get('timestamp')
-                            last_dt = None
-                            try:
-                                if isinstance(last_ts, str):
-                                    try:
-                                        last_dt = datetime.fromisoformat(str(last_ts).replace('Z', '+00:00'))
-                                    except Exception:
-                                        last_dt = None
-                                elif isinstance(last_ts, datetime):
-                                    last_dt = last_ts
-                                if last_dt is not None:
-                                    if last_dt.tzinfo is None:
-                                        last_dt = last_dt.replace(tzinfo=timezone.utc)
-                                    else:
-                                        last_dt = last_dt.astimezone(timezone.utc)
-                            except Exception:
-                                last_dt = None
-
-                            if last_dt is None:
-                                # unknown timestamp -> skip conservatively
-                                log_debug(f"[grillo_chat_observer] Skipping chat {chat_path} because last message appears to be from synth and timestamp unknown")
-                                continue
-
-                            hours_since = (datetime.utcnow().replace(tzinfo=timezone.utc) - last_dt).total_seconds() / 3600.0
-                            if hours_since < float(cooldown_hours):
-                                log_debug(f"[grillo_chat_observer] Skipping chat {chat_path}: last synth message {hours_since:.2f}h ago < cooldown {cooldown_hours}h")
-                                continue
-
                     messages = await load_chat_history(chat_path)
                     # take up to 2 recent messages per chat
                     taken = 0
                     for msg in reversed(list(messages)):
                         if not isinstance(msg, dict):
                             continue
-                        text = msg.get('text')
-                        sender = msg.get('sender_name') or msg.get('sender_id') or "unknown"
-                        timestamp = msg.get('timestamp') or ""
+                        text = msg.get("text")
+                        sender = (
+                            msg.get("sender_name") or msg.get("sender_id") or "unknown"
+                        )
+                        timestamp = msg.get("timestamp") or ""
                         if text:
                             snippet = text.strip()
                             if len(snippet) > 300:
                                 snippet = snippet[:300] + "..."
-                            snippets.append(f"(chat:{chat_path} | sender:{sender} | {timestamp}) {snippet}")
+                            snippets.append(
+                                f"(chat:{chat_path} | sender:{sender} | {timestamp}) {snippet}"
+                            )
                             taken += 1
                         if taken >= 2 or len(snippets) >= limit:
                             break
@@ -414,6 +402,7 @@ class GrilloChatObserverPlugin:
         """Persist observer snippets as passive memories when enabled."""
         try:
             from core.db import insert_memory
+
             tags = json.dumps(["grillo", "observer", "passive"])
             for snippet in snippets:
                 try:
@@ -426,7 +415,9 @@ class GrilloChatObserverPlugin:
                     )
                 except Exception as e:
                     log_debug(f"[grillo_chat_observer] Failed to store memory: {e}")
-            log_info(f"[grillo_chat_observer] Stored {len(snippets)} observer snippets as memories")
+            log_info(
+                f"[grillo_chat_observer] Stored {len(snippets)} observer snippets as memories"
+            )
         except Exception as e:
             log_warning(f"[grillo_chat_observer] Memory storage failed: {e}")
 
@@ -442,17 +433,11 @@ class GrilloChatObserverPlugin:
             "Think like a helpful human reading these snippets: which message(s) would you naturally reply to, and what would you say? "
             "Do NOT address or mention the WebUI or any system/internal labels (for example: 'webui' or 'system'); write as if speaking directly to the human participant(s) in the conversation."
         )
-
-        # Instruct the LLM to avoid suggesting messages that merely repeat the content
-        # or concepts already present in the snippets. If a snippet already contains
-        # the essential content, skip proposing a reply for that snippet or suggest
-        # a substantially different angle; do not produce paraphrases that add no
-        # substantive value.
-        propose_clause += " Do NOT propose messages that are conceptually duplicate of the snippets above; avoid paraphrasing or repeating ideas that are already present. If a snippet already contains the key content, either skip proposing a reply or suggest a substantially new angle."
-
         if self.propose_only:
             propose_clause += " Suggested actions should be proposals only (do NOT assume automatic execution)."
-        propose_clause += " Return ONLY a JSON object with an 'actions' array (see examples below)."
+        propose_clause += (
+            " Return ONLY a JSON object with an 'actions' array (see examples below)."
+        )
 
         # Use configured synth name in examples to avoid hardcoding 'G.R.I.L.L.O.'
         synth_name = str(config_registry.get_var("SYNTH_NAME", "SyntH"))

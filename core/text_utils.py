@@ -4,6 +4,7 @@ These helpers are intentionally small: they don't try to be perfect, but
 provide diagnostic detection and a simple recovery path for typical cases
 where UTF-8 bytes were incorrectly decoded as ISO-8859-1/Windows-1252.
 """
+
 from typing import Optional
 
 
@@ -19,10 +20,10 @@ def looks_like_mojibake(text: Optional[str]) -> bool:
     if not text:
         return False
     # Quick heuristic checks
-    if 'Ã' in text or 'Â' in text:
+    if "Ã" in text or "Â" in text:
         return True
     # Emojis that often show as two odd characters when mis-decoded start with 'ð'
-    if 'ð' in text and any(c in text for c in ('', '', '')):
+    if "ð" in text and any(c in text for c in ("", "", "")):
         return True
     # Some mojibake uses multiple consecutive non-ascii sequences
     non_ascii = sum(1 for ch in text if ord(ch) > 127)
@@ -46,14 +47,14 @@ def try_recover_mojibake(text: Optional[str]) -> Optional[str]:
     candidates = []
     try:
         # latin-1 -> utf-8
-        recovered = text.encode('latin-1').decode('utf-8')
+        recovered = text.encode("latin-1").decode("utf-8")
         candidates.append(recovered)
     except Exception:
         pass
 
     try:
         # windows-1252 -> utf-8
-        recovered = text.encode('cp1252').decode('utf-8')
+        recovered = text.encode("cp1252").decode("utf-8")
         candidates.append(recovered)
     except Exception:
         pass
@@ -104,7 +105,15 @@ def normalize_for_outbound(text: Optional[str]) -> Optional[str]:
 
     # If there are visible backslash escapes, attempt unicode unescape
     try:
-        if isinstance(text, str) and ("\\u" in text or "\\n" in text or "\\t" in text or "\\r" in text or "\\x" in text or '\\"' in text or "\\'" in text):
+        if isinstance(text, str) and (
+            "\\u" in text
+            or "\\n" in text
+            or "\\t" in text
+            or "\\r" in text
+            or "\\x" in text
+            or '\\"' in text
+            or "\\'" in text
+        ):
             unescaped = bytes(text, "utf-8").decode("unicode_escape")
             if unescaped and unescaped != text:
                 text = unescaped
@@ -114,8 +123,10 @@ def normalize_for_outbound(text: Optional[str]) -> Optional[str]:
 
     # Also collapse leftover JSON-style escapes like \" -> " and \\ -> \ if present
     try:
-        if isinstance(text, str) and ('\\"' in text or "\\'" in text or '\\\\' in text):
-            new_text = text.replace('\\"', '"').replace("\\'", "'").replace('\\\\', '\\')
+        if isinstance(text, str) and ('\\"' in text or "\\'" in text or "\\\\" in text):
+            new_text = (
+                text.replace('\\"', '"').replace("\\'", "'").replace("\\\\", "\\")
+            )
             if new_text != text:
                 text = new_text
     except Exception:

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from typing import List, Optional, Dict, Any
+from typing import List, Dict
 import aiomysql
 
 from core.db import get_conn_ctx
-from core.logging_utils import log_debug, log_info, log_warning, log_error
-from core.core_initializer import core_initializer, register_plugin
+from core.logging_utils import log_info, log_warning, log_error
+from core.core_initializer import register_plugin
 
 
 async def init_blocklist_table():
@@ -41,7 +41,7 @@ async def block_user(user_id: int, reason: str = None):
                     REPLACE INTO blocklist (user_id, reason, blocked_at)
                     VALUES (%s, %s, NOW())
                     """,
-                    (user_id, reason)
+                    (user_id, reason),
                 )
                 await conn.commit()
                 log_info(f"[blocklist] Blocked user {user_id}: {reason}")
@@ -60,7 +60,7 @@ async def unblock_user(user_id: int):
                     """
                     DELETE FROM blocklist WHERE user_id = %s
                     """,
-                    (user_id,)
+                    (user_id,),
                 )
                 deleted = cur.rowcount
                 await conn.commit()
@@ -85,7 +85,7 @@ async def is_user_blocked(user_id: int) -> bool:
                     """
                     SELECT 1 FROM blocklist WHERE user_id = %s
                     """,
-                    (user_id,)
+                    (user_id,),
                 )
                 result = await cur.fetchone()
                 return result is not None
@@ -115,7 +115,7 @@ async def get_blocked_users() -> List[Dict]:
 
 class BlocklistPlugin:
     """Plugin for user blocking and management."""
-    
+
     display_name = "Blocklist"
 
     def __init__(self):
@@ -160,22 +160,22 @@ class BlocklistPlugin:
                         "scenario": "User is spamming messages",
                         "payload": {
                             "user_id": 123456789,
-                            "reason": "Spamming messages repeatedly"
-                        }
+                            "reason": "Spamming messages repeatedly",
+                        },
                     },
                     {
                         "scenario": "User is being abusive",
                         "payload": {
                             "user_id": 987654321,
-                            "reason": "Abusive language towards other users"
-                        }
-                    }
+                            "reason": "Abusive language towards other users",
+                        },
+                    },
                 ],
                 "notes": [
                     "user_id should be the numeric user ID",
                     "reason is optional but recommended for moderation tracking",
-                    "Blocking is immediate and persistent until manually unblocked"
-                ]
+                    "Blocking is immediate and persistent until manually unblocked",
+                ],
             }
         elif action_name == "unblock_user":
             return {
@@ -184,44 +184,52 @@ class BlocklistPlugin:
                 "examples": [
                     {
                         "scenario": "User appeals their block successfully",
-                        "payload": {
-                            "user_id": 123456789
-                        }
+                        "payload": {"user_id": 123456789},
                     }
                 ],
                 "notes": [
                     "user_id should be the numeric user ID",
                     "Unblocking is immediate",
-                    "Returns success/failure status"
-                ]
+                    "Returns success/failure status",
+                ],
             }
         return {}
 
     def execute_action(self, action: dict, context: dict, bot, original_message):
         action_type = action.get("type")
         payload = action.get("payload", {}) or {}
-        
+
         if action_type == "block_user":
             user_id = payload.get("user_id")
             reason = payload.get("reason", "No reason provided")
             if user_id:
                 import asyncio
-                asyncio.create_task(self._block_user_action(bot, original_message, user_id, reason))
-                
+
+                asyncio.create_task(
+                    self._block_user_action(bot, original_message, user_id, reason)
+                )
+
         elif action_type == "unblock_user":
             user_id = payload.get("user_id")
             if user_id:
                 import asyncio
-                asyncio.create_task(self._unblock_user_action(bot, original_message, user_id))
-                
+
+                asyncio.create_task(
+                    self._unblock_user_action(bot, original_message, user_id)
+                )
+
         elif action_type == "is_user_blocked":
             user_id = payload.get("user_id")
             if user_id:
                 import asyncio
-                asyncio.create_task(self._check_user_blocked(bot, original_message, user_id))
-                
+
+                asyncio.create_task(
+                    self._check_user_blocked(bot, original_message, user_id)
+                )
+
         elif action_type == "get_blocked_users":
             import asyncio
+
             asyncio.create_task(self._send_blocked_users(bot, original_message))
 
     async def _block_user_action(self, bot, original_message, user_id, reason):
@@ -230,12 +238,11 @@ class BlocklistPlugin:
             await block_user(user_id, reason)
             await bot.send_message(
                 original_message.chat_id,
-                f"✅ User {user_id} has been blocked.\nReason: {reason}"
+                f"✅ User {user_id} has been blocked.\nReason: {reason}",
             )
         except Exception as e:
             await bot.send_message(
-                original_message.chat_id,
-                f"❌ Failed to block user {user_id}: {e}"
+                original_message.chat_id, f"❌ Failed to block user {user_id}: {e}"
             )
 
     async def _unblock_user_action(self, bot, original_message, user_id):
@@ -244,18 +251,16 @@ class BlocklistPlugin:
             success = await unblock_user(user_id)
             if success:
                 await bot.send_message(
-                    original_message.chat_id,
-                    f"✅ User {user_id} has been unblocked."
+                    original_message.chat_id, f"✅ User {user_id} has been unblocked."
                 )
             else:
                 await bot.send_message(
                     original_message.chat_id,
-                    f"⚠️ User {user_id} was not in the blocklist."
+                    f"⚠️ User {user_id} was not in the blocklist.",
                 )
         except Exception as e:
             await bot.send_message(
-                original_message.chat_id,
-                f"❌ Failed to unblock user {user_id}: {e}"
+                original_message.chat_id, f"❌ Failed to unblock user {user_id}: {e}"
             )
 
     async def _check_user_blocked(self, bot, original_message, user_id):
@@ -264,13 +269,11 @@ class BlocklistPlugin:
             blocked = await is_user_blocked(user_id)
             status = "🚫 BLOCKED" if blocked else "✅ NOT BLOCKED"
             await bot.send_message(
-                original_message.chat_id,
-                f"User {user_id}: {status}"
+                original_message.chat_id, f"User {user_id}: {status}"
             )
         except Exception as e:
             await bot.send_message(
-                original_message.chat_id,
-                f"❌ Failed to check user {user_id}: {e}"
+                original_message.chat_id, f"❌ Failed to check user {user_id}: {e}"
             )
 
     async def _send_blocked_users(self, bot, original_message):
@@ -283,12 +286,11 @@ class BlocklistPlugin:
                     response += f"• {user['user_id']}: {user['reason']} (blocked: {user['blocked_at']})\n"
             else:
                 response = "✅ No users are currently blocked."
-            
+
             await bot.send_message(original_message.chat_id, response)
         except Exception as e:
             await bot.send_message(
-                original_message.chat_id,
-                f"❌ Failed to get blocked users: {e}"
+                original_message.chat_id, f"❌ Failed to get blocked users: {e}"
             )
 
 

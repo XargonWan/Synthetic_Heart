@@ -1,14 +1,11 @@
-import asyncio
 import os
-import tempfile
 import sys
-import importlib.util
 
 import pytest
 
 # Ensure project root is on sys.path so tests can import plugins_dev when pytest's
 # execution directory does not already include it.
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
@@ -32,12 +29,22 @@ def test_validate_payload_success():
 def test_validate_payload_failures():
     # Too long
     long_msg = "a" * 501
-    payload = {"message": long_msg, "language": "italian", "voice": ["italian", "Isabella"], "interface_path": "x"}
+    payload = {
+        "message": long_msg,
+        "language": "italian",
+        "voice": ["italian", "Isabella"],
+        "interface_path": "x",
+    }
     errs = SeleniumTTSFreePlugin.validate_payload("voice_message_ttsfree", payload)
     assert any("exceeds 500" in e for e in errs)
 
     # Emoji not allowed
-    payload2 = {"message": "Ciao 😃", "language": "italian", "voice": ["italian", "Isabella"], "interface_path": "x"}
+    payload2 = {
+        "message": "Ciao 😃",
+        "language": "italian",
+        "voice": ["italian", "Isabella"],
+        "interface_path": "x",
+    }
     errs2 = SeleniumTTSFreePlugin.validate_payload("voice_message_ttsfree", payload2)
     assert any("unsupported characters" in e for e in errs2)
 
@@ -67,11 +74,11 @@ async def test_execute_action_dispatch(monkeypatch, tmp_path):
 
     class FakeInterface:
         async def send_audio(self, payload):
-            sent['payload'] = payload
+            sent["payload"] = payload
 
     # stash previous value if any and set our fake
-    prev = INTERFACE_REGISTRY.get('test_iface')
-    INTERFACE_REGISTRY['test_iface'] = FakeInterface()
+    prev = INTERFACE_REGISTRY.get("test_iface")
+    INTERFACE_REGISTRY["test_iface"] = FakeInterface()
 
     action = {
         "type": "voice_message_ttsfree",
@@ -80,7 +87,7 @@ async def test_execute_action_dispatch(monkeypatch, tmp_path):
             "language": "italian",
             "voice": ["italian", "Isabella"],
             "interface_path": "test_iface/1/2",
-        }
+        },
     }
 
     # Execute
@@ -88,14 +95,14 @@ async def test_execute_action_dispatch(monkeypatch, tmp_path):
 
     # cleanup
     if prev is None:
-        INTERFACE_REGISTRY.pop('test_iface', None)
+        INTERFACE_REGISTRY.pop("test_iface", None)
     else:
-        INTERFACE_REGISTRY['test_iface'] = prev
+        INTERFACE_REGISTRY["test_iface"] = prev
 
     # Assert dispatched
-    assert 'payload' in sent
-    assert sent['payload']['audio'] == str(temp_mp3)
-    assert sent['payload']['interface_path'] == 'test_iface/1/2'
+    assert "payload" in sent
+    assert sent["payload"]["audio"] == str(temp_mp3)
+    assert sent["payload"]["interface_path"] == "test_iface/1/2"
 
 
 @pytest.mark.asyncio
@@ -114,7 +121,6 @@ async def test_execute_action_resolves_mapping(monkeypatch, tmp_path):
     monkeypatch.setattr(plugin, "_generate_speech", fake_generate)
 
     # Monkeypatch config_registry to return mapping
-    from core import config_manager
 
     # The default mapping is provided by variables_engine.register_all so no setup required
 
@@ -124,10 +130,10 @@ async def test_execute_action_resolves_mapping(monkeypatch, tmp_path):
 
     class FakeInterface:
         async def send_audio(self, payload):
-            sent['payload'] = payload
+            sent["payload"] = payload
 
-    prev = INTERFACE_REGISTRY.get('test_iface')
-    INTERFACE_REGISTRY['test_iface'] = FakeInterface()
+    prev = INTERFACE_REGISTRY.get("test_iface")
+    INTERFACE_REGISTRY["test_iface"] = FakeInterface()
 
     action = {
         "type": "voice_message_ttsfree",
@@ -136,15 +142,15 @@ async def test_execute_action_resolves_mapping(monkeypatch, tmp_path):
             "language": "italian",
             "voice": "italian",
             "interface_path": "test_iface/1/2",
-        }
+        },
     }
 
     await plugin.execute_action(action, {}, None, None)
 
     if prev is None:
-        INTERFACE_REGISTRY.pop('test_iface', None)
+        INTERFACE_REGISTRY.pop("test_iface", None)
     else:
-        INTERFACE_REGISTRY['test_iface'] = prev
+        INTERFACE_REGISTRY["test_iface"] = prev
 
-    assert 'payload' in sent
-    assert sent['payload']['audio'] == str(temp_mp3)
+    assert "payload" in sent
+    assert sent["payload"]["audio"] == str(temp_mp3)

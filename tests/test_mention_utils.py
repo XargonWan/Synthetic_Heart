@@ -1,12 +1,12 @@
-import asyncio
-
 import pytest
 
 from core.mention_utils import is_message_for_bot
 
 
 class DummyChat:
-    def __init__(self, type="group", human_count=None, title=None, username=None, id=123):
+    def __init__(
+        self, type="group", human_count=None, title=None, username=None, id=123
+    ):
         self.type = type
         self.human_count = human_count
         self.title = title
@@ -21,7 +21,9 @@ class DummyUser:
 
 
 class DummyMessage:
-    def __init__(self, text=None, chat=None, from_user=None, reply_to_message=None, caption=None):
+    def __init__(
+        self, text=None, chat=None, from_user=None, reply_to_message=None, caption=None
+    ):
         self.text = text
         self.caption = caption
         self.chat = chat or DummyChat()
@@ -71,7 +73,9 @@ async def test_explicit_at_mention():
 async def test_reply_to_bot_by_username():
     reply_from = DummyUser(username="botname", id=999)
     reply_msg = DummyMessage(text="original", from_user=reply_from)
-    msg = DummyMessage(text="replying", reply_to_message=reply_msg, chat=DummyChat(type="group"))
+    msg = DummyMessage(
+        text="replying", reply_to_message=reply_msg, chat=DummyChat(type="group")
+    )
     bot = DummyBot(username="botname", id=999)
     directed, reason = await is_message_for_bot(msg, bot, bot_username="botname")
     assert directed is True
@@ -79,7 +83,9 @@ async def test_reply_to_bot_by_username():
 
 @pytest.mark.asyncio
 async def test_missing_human_count_returns_reason():
-    msg = DummyMessage(text="just chatting", chat=DummyChat(type="group", human_count=None))
+    msg = DummyMessage(
+        text="just chatting", chat=DummyChat(type="group", human_count=None)
+    )
     bot = DummyBot()
     directed, reason = await is_message_for_bot(msg, bot, human_count=None)
     assert directed is False

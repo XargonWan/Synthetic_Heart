@@ -3,7 +3,6 @@ from core.selenium_llm_base import SeleniumLLMBase
 from core.logging_utils import log_debug
 from core.variables_engine import register_exposed_var
 from selenium.webdriver.common.by import By
-import time
 
 # Register exposed variables for WebUI
 register_exposed_var(
@@ -26,33 +25,31 @@ DEFAULT_MODEL = "grok-beta"
 
 # Grok-specific model limits (character context limits)
 MODEL_LIMITS_MAP = {
-    "grok-beta": 128001,           # Grok: 128k tokens context (~400k characters)
-    "grok-vision-beta": 128001,    # Grok Vision: 128k tokens context (~400k characters)
-    "unlogged": 21500,             # Limited context for free tier
-    "default": 128001              # Safe default for unknown models
+    "grok-beta": 128001,  # Grok: 128k tokens context (~400k characters)
+    "grok-vision-beta": 128001,  # Grok Vision: 128k tokens context (~400k characters)
+    "unlogged": 21500,  # Limited context for free tier
+    "default": 128001,  # Safe default for unknown models
 }
+
 
 class SeleniumGrokPlugin(SeleniumLLMBase):
     display_name = "Selenium Grok"
-    
+
     def __init__(self, notify_fn=None):
         """Initialize the Grok plugin - pass only configuration to base."""
         super().__init__(
-            config={
-                "service_url": SERVICE_URL,
-                "interface_name": "grok"
-            },
-            notify_fn=notify_fn
+            config={"service_url": SERVICE_URL, "interface_name": "grok"},
+            notify_fn=notify_fn,
         )
-        
+
         # Set model configuration - used by base class for auto-selection
         self.model_limits_map = MODEL_LIMITS_MAP
         self.model_config_var = MODEL_CONFIG_VAR
         self.default_model = DEFAULT_MODEL
-        
+
         # Update interface limits based on current model
         self._update_interface_limits()
-        
+
         # Set up Grok-specific selectors - the base will use these for automation
         # IMPORTANT: Order matters - fast/working selectors first to avoid long timeouts
         self.selectors["prompt_area"] = [
@@ -75,7 +72,7 @@ class SeleniumGrokPlugin(SeleniumLLMBase):
             "textarea",
             "div[contenteditable='true']",
         ]
-        
+
         self.selectors["send_button"] = [
             # Primary: Most specific Grok send button selector (found via browser inspection)
             "form > div > button",
@@ -88,7 +85,7 @@ class SeleniumGrokPlugin(SeleniumLLMBase):
             "button[title*='Send']",
             "button[title*='send']",
         ]
-        
+
         self.selectors["response_text"] = [
             "div.grok-response",
             "[data-testid='grok-message']",
@@ -98,7 +95,7 @@ class SeleniumGrokPlugin(SeleniumLLMBase):
             "div.message-response",
             ".chat-message.assistant",
         ]
-        
+
         # Grok (X/Twitter) login detection selectors
         self.login_detection_selectors = [
             (By.CSS_SELECTOR, "a[href*='login']"),
@@ -115,7 +112,7 @@ class SeleniumGrokPlugin(SeleniumLLMBase):
             current_url = driver.current_url
         except Exception:
             current_url = ""
-        
+
         log_debug(f"[selenium_grok] Checking login status at URL: {current_url}")
 
         if not current_url.startswith("https://grok.x.ai"):
@@ -143,7 +140,7 @@ class SeleniumGrokPlugin(SeleniumLLMBase):
 
     def get_current_model(self) -> str:
         """Get the current Grok model being used.
-        
+
         If logged in, returns the configured model or default.
         If not logged in, returns 'unlogged' with reduced limits.
         """
@@ -151,7 +148,7 @@ class SeleniumGrokPlugin(SeleniumLLMBase):
         if not self.is_user_logged_in():
             log_debug("[selenium_grok] User not logged in, using 'unlogged' model")
             return "unlogged"
-        
+
         # User is logged in, return configured model
         return self._get_current_model_name()
 
@@ -162,7 +159,7 @@ class SeleniumGrokPlugin(SeleniumLLMBase):
 
     def _get_response_choice_selectors(self) -> list:
         """Get CSS selectors for Grok response choice buttons.
-        
+
         Grok may offer multiple response options in some cases.
         This returns selectors to find choice buttons so we can auto-select.
         """
@@ -171,5 +168,6 @@ class SeleniumGrokPlugin(SeleniumLLMBase):
             ".choice-buttons button:first-child",
             "button[data-testid*='choice']",
         ]
+
 
 PLUGIN_CLASS = SeleniumGrokPlugin

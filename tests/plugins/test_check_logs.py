@@ -1,8 +1,4 @@
-import os
-import tempfile
-import pytest
-
-from plugins.check_logs import CheckLogsPlugin, _tail_lines, _search_in_lines
+from plugins.check_logs import CheckLogsPlugin, _tail_lines
 
 
 class FakeBot:
@@ -64,7 +60,14 @@ def test_search_logs_keyword(monkeypatch, tmp_path):
     bot = FakeBot()
     msg = FakeMessage()
 
-    action = {"type": "search_logs", "payload": {"file": "synth.log", "queries": ["error", "exception"], "regex": False}}
+    action = {
+        "type": "search_logs",
+        "payload": {
+            "file": "synth.log",
+            "queries": ["error", "exception"],
+            "regex": False,
+        },
+    }
     plugin.execute_action(action, {}, bot, msg)
 
     assert len(bot.messages) == 1
@@ -84,7 +87,10 @@ def test_search_logs_regex(monkeypatch, tmp_path):
     bot = FakeBot()
     msg = FakeMessage()
 
-    action = {"type": "search_logs", "payload": {"file": "synth.log", "queries": ["code=5\\d\\d"], "regex": True}}
+    action = {
+        "type": "search_logs",
+        "payload": {"file": "synth.log", "queries": ["code=5\\d\\d"], "regex": True},
+    }
     plugin.execute_action(action, {}, bot, msg)
 
     assert len(bot.messages) == 1

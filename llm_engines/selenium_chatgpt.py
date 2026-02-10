@@ -3,7 +3,6 @@ from core.selenium_llm_base import SeleniumLLMBase
 from core.logging_utils import log_debug
 from core.variables_engine import register_exposed_var
 from selenium.webdriver.common.by import By
-import time
 
 # Register exposed variables for WebUI
 register_exposed_var(
@@ -30,45 +29,44 @@ DEFAULT_MODEL = "gpt-4o"
 # The numbers represent the maximum number of characters we will send in a single prompt
 # These are CONSERVATIVE limits to work reliably without ChatGPT Plus
 MODEL_LIMITS_MAP = {
-    "gpt-4o": 60000,         # 60,000 characters max
-    "gpt-4o-mini": 60000,    # 60,000 characters max
-    "gpt-4-turbo": 50000,    # 50,000 characters max
-    "gpt-4": 40000,          # 40,000 characters max
+    "gpt-4o": 60000,  # 60,000 characters max
+    "gpt-4o-mini": 60000,  # 60,000 characters max
+    "gpt-4-turbo": 50000,  # 50,000 characters max
+    "gpt-4": 40000,  # 40,000 characters max
     "gpt-3.5-turbo": 30000,  # 30,000 characters max
-    "o1-preview": 50000,     # 50,000 characters max
-    "o1-mini": 50000,        # 50,000 characters max
+    "o1-preview": 50000,  # 50,000 characters max
+    "o1-mini": 50000,  # 50,000 characters max
     # Preview model: GPT-5.1 Codex family (Codex-Max preview)
     "gpt-5.1-codex-max": 100000,  # 100,000 characters max - Preview
-    "unlogged": 20000,       # 20,000 characters max (free tier limited)
-    "default": 51000         # 51,000 characters max (safe default for unknown models)
+    "unlogged": 20000,  # 20,000 characters max (free tier limited)
+    "default": 51000,  # 51,000 characters max (safe default for unknown models)
 }
+
 
 class SeleniumChatGPTPlugin(SeleniumLLMBase):
     display_name = "Selenium ChatGPT"
-    
+
     def __init__(self, notify_fn=None):
         """Initialize the ChatGPT plugin - pass only configuration to base."""
         super().__init__(
-            config={
-                "service_url": SERVICE_URL,
-                "interface_name": "chatgpt"
-            },
-            notify_fn=notify_fn
+            config={"service_url": SERVICE_URL, "interface_name": "chatgpt"},
+            notify_fn=notify_fn,
         )
-        
+
         # Set model configuration - used by base class for auto-selection
         self.model_limits_map = MODEL_LIMITS_MAP
         self.model_config_var = MODEL_CONFIG_VAR
         self.default_model = DEFAULT_MODEL
-        
+
         # Update interface limits based on current model
         self._update_interface_limits()
-        
+
         # Register the ChatGPT limits globally so selenium_llm_base can use them
         from core.selenium_llm_base import set_active_selenium_limits
+
         default_limit = MODEL_LIMITS_MAP.get("default", 51000)
         set_active_selenium_limits(default_limit, "chatgpt")
-        
+
         # Set up ChatGPT-specific selectors - the base will use these for automation
         # IMPORTANT: Order matters - fast/working selectors first, general fallbacks last
         self.selectors["prompt_area"] = [
@@ -99,7 +97,7 @@ class SeleniumChatGPTPlugin(SeleniumLLMBase):
             "textarea",
             "div[contenteditable='true']",
         ]
-        
+
         self.selectors["send_button"] = [
             # Primary: Most specific ChatGPT send button ID
             "#composer-submit-button",
@@ -114,7 +112,7 @@ class SeleniumChatGPTPlugin(SeleniumLLMBase):
             # Fallback: Type-based (slowest, most likely to fail or find wrong button)
             "button[type='submit']",
         ]
-        
+
         self.selectors["response_text"] = [
             # Primary: Most specific ChatGPT response selectors
             "[data-message-author-role='assistant']",
@@ -127,7 +125,7 @@ class SeleniumChatGPTPlugin(SeleniumLLMBase):
             ".prose",
             ".message-content .markdown",
         ]
-        
+
         self.selectors["modal_dismissal"] = [
             # Primary: Specific modal dismissal buttons
             "button[aria-label*='close' i]",
@@ -141,7 +139,7 @@ class SeleniumChatGPTPlugin(SeleniumLLMBase):
             # Fallback: Radix-specific (long xpath-like selectors)
             "#radix-_r_3s_ > div > div.flex.flex-col.items-center.justify-center.self-center.px-6.py-6.md\\:w-\\[464px\\].md\\:py-8 > div > button.btn.relative.btn-secondary.btn-large.w-full",
         ]
-        
+
         # ChatGPT-specific login detection selectors
         # These will be used by the centralized is_user_logged_in() method from SeleniumLLMBase
         self.login_detection_selectors = [
@@ -161,10 +159,12 @@ class SeleniumChatGPTPlugin(SeleniumLLMBase):
             current_url = driver.current_url
         except Exception:
             current_url = ""
-        
+
         log_debug(f"[selenium_chatgpt] Checking login status at URL: {current_url}")
 
-        if not current_url.startswith("https://chat.openai.com") and not current_url.startswith("https://chatgpt.com"):
+        if not current_url.startswith(
+            "https://chat.openai.com"
+        ) and not current_url.startswith("https://chatgpt.com"):
             log_debug("[selenium_chatgpt] Not at ChatGPT, navigating to home")
             try:
                 driver.get(SERVICE_URL)
@@ -189,7 +189,7 @@ class SeleniumChatGPTPlugin(SeleniumLLMBase):
 
     def get_current_model(self) -> str:
         """Get the current ChatGPT model being used.
-        
+
         If logged in, returns the configured model or default.
         If not logged in, returns 'unlogged' with reduced limits.
         Also updates the global selenium limits when model changes.
@@ -201,14 +201,17 @@ class SeleniumChatGPTPlugin(SeleniumLLMBase):
         else:
             # User is logged in, return configured model
             model = self._get_current_model_name()
-        
+
         # Update global limits for this model
         if model in self.model_limits_map:
             limit = self.model_limits_map[model]
             from core.selenium_llm_base import set_active_selenium_limits
+
             set_active_selenium_limits(limit, f"chatgpt_{model}")
-            log_debug(f"[selenium_chatgpt] Updated global limits for model {model}: {limit} chars")
-        
+            log_debug(
+                f"[selenium_chatgpt] Updated global limits for model {model}: {limit} chars"
+            )
+
         return model
 
     def get_interface_limits(self) -> dict:
@@ -218,7 +221,7 @@ class SeleniumChatGPTPlugin(SeleniumLLMBase):
 
     def _get_response_choice_selectors(self) -> list:
         """Get CSS selectors for ChatGPT response choice buttons.
-        
+
         ChatGPT sometimes offers users a choice between multiple responses.
         This returns selectors to find the choice buttons so we can auto-select the first one.
         """
@@ -229,5 +232,6 @@ class SeleniumChatGPTPlugin(SeleniumLLMBase):
             "article .flex > button:first-child",
             "article button",
         ]
+
 
 PLUGIN_CLASS = SeleniumChatGPTPlugin

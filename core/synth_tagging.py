@@ -8,7 +8,8 @@ This module currently provides only simple tag extraction and a placeholder for
 
 from typing import List
 
-from core.logging_utils import log_warning, log_debug
+from core.logging_utils import log_debug
+
 
 def extract_tags(text: str) -> list[str]:
     text = text.lower()
@@ -20,6 +21,7 @@ def extract_tags(text: str) -> list[str]:
     if "amore" in text or "affetto" in text:
         tags.append("emozioni")
     return tags
+
 
 def expand_tags(tags: List[str]) -> List[str]:
     """Return tags unchanged (placeholder implementation).
