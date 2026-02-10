@@ -57,6 +57,7 @@ SyntH_main
 TODO*.md
 .github/prompts
 old
+node_modules/
 
 # --- Custom Ignores ---
 .gnore
