@@ -113,6 +113,14 @@ class CortexRegistry:
             raise ValueError(f"Plugin `{name}` does not define `PLUGIN_CLASS`.")
 
         plugin_class = getattr(module, "PLUGIN_CLASS")
+        # Defensive check: some migration shims set PLUGIN_CLASS = None. Treat
+        # that as an invalid plugin and raise a clear error instead of
+        # letting AttributeError bubble up later when attempting to access
+        # attributes on None.
+        if plugin_class is None or not hasattr(plugin_class, "__name__"):
+            error_msg = f"Plugin `{name}` exports `PLUGIN_CLASS` but it is None or invalid."
+            log_error(f"[cortex_registry] ❌ {error_msg}")
+            raise ValueError(error_msg)
 
         # Verify display_name
         # Historically this was enforced strictly, but to improve robustness we
