@@ -484,9 +484,26 @@ async def _grillo_fire_and_forget(bot, message, original_user_message: str, llm_
     """
     try:
         log_info(f"[grillo] Checker started for chat_id={getattr(message,'chat_id',None)} chain_result={context.get('chain_result') if context else 'unknown'}")
-        from plugins.grillo.grillo_action_checker import GrilloActionChecker
-        checker = GrilloActionChecker()
-        actions = await checker.inspect_reply_and_suggest_actions(llm_reply, original_user_message, context or {}, message)
+        # Prefer plugin-provided checker via PLUGIN_REGISTRY to avoid importing plugin internals from core
+        from core.core_initializer import PLUGIN_REGISTRY
+        grillo_plugin = None
+        try:
+            if isinstance(PLUGIN_REGISTRY, dict):
+                grillo_plugin = PLUGIN_REGISTRY.get("grillo_plugin") or PLUGIN_REGISTRY.get("grillo_impl")
+        except Exception:
+            grillo_plugin = None
+
+        if grillo_plugin and hasattr(grillo_plugin, "suggest_actions_from_reply"):
+            actions = await grillo_plugin.suggest_actions_from_reply(llm_reply, original_user_message, context or {}, message)
+        else:
+            # Fallback to legacy checker module if plugin not available
+            try:
+                from plugins.grillo.grillo_action_checker import GrilloActionChecker
+                checker = GrilloActionChecker()
+                actions = await checker.inspect_reply_and_suggest_actions(llm_reply, original_user_message, context or {}, message)
+            except Exception as e:
+                log_debug(f"[grillo] Checker raised exception: {e}")
+                return
     except Exception as e:
         log_debug(f"[grillo] Checker raised exception: {e}")
         return
@@ -511,10 +528,13 @@ async def _grillo_fire_and_forget(bot, message, original_user_message: str, llm_
     except Exception:
         auto_exec = False
 
+    from core.core_initializer import PLUGIN_REGISTRY
+    grillo_plugin = None
     try:
-        from plugins.grillo.grillo_impl import GrilloPlugin
+        if isinstance(PLUGIN_REGISTRY, dict):
+            grillo_plugin = PLUGIN_REGISTRY.get('grillo_plugin') or PLUGIN_REGISTRY.get('grillo_impl')
     except Exception:
-        GrilloPlugin = None
+        grillo_plugin = None
 
     if auto_exec:
         try:
@@ -524,9 +544,9 @@ async def _grillo_fire_and_forget(bot, message, original_user_message: str, llm_
 
             if quarantined_actions:
                 log_info(f"[grillo] Quarantined {len(quarantined_actions)} heuristic-recovered action(s); persisting as proposals")
-                if GrilloPlugin:
+                if grillo_plugin and hasattr(grillo_plugin, 'create_activity_log'):
                     try:
-                        activity_id_q = await GrilloPlugin.create_activity_log(beat_type='grillo_quarantined', prompt_text=str({'user': original_user_message, 'llm_reply': llm_reply}), metadata={'quarantined_actions': quarantined_actions})
+                        activity_id_q = await grillo_plugin.create_activity_log(beat_type='grillo_quarantined', prompt_text=str({'user': original_user_message, 'llm_reply': llm_reply}), metadata={'quarantined_actions': quarantined_actions})
                         log_info(f"[grillo] Persisted quarantined actions activity_id={activity_id_q}")
                     except Exception as e:
                         log_debug(f"[grillo] Failed to persist quarantined actions: {e}")
@@ -551,7 +571,7 @@ async def _grillo_fire_and_forget(bot, message, original_user_message: str, llm_
                     log_debug(f"[grillo] create_activity_log failed after auto-exec: {e}")
 
             # Persist action-level execution results
-            if GrilloPlugin and activity_id:
+            if grillo_plugin and hasattr(grillo_plugin, 'create_action_exec') and activity_id:
                 try:
                     processed = result.get('processed', []) if isinstance(result, dict) else []
                     failed = result.get('failed_actions', []) if isinstance(result, dict) else []
@@ -560,7 +580,7 @@ async def _grillo_fire_and_forget(bot, message, original_user_message: str, llm_
                     for idx, a in enumerate(actions_to_exec):
                         try:
                             if any((a == p) or (p.get('type') == a.get('type') and p.get('payload') == a.get('payload')) for p in processed):
-                                res = await GrilloPlugin.create_action_exec(activity_log_id=activity_id, action_index=idx, action_type=a.get('type'), payload=a.get('payload'), status='processed', result=result)
+                                res = await grillo_plugin.create_action_exec(activity_log_id=activity_id, action_index=idx, action_type=a.get('type'), payload=a.get('payload'), status='processed', result=result)
                                 if res:
                                     db_count += 1
                                 else:
@@ -570,14 +590,14 @@ async def _grillo_fire_and_forget(bot, message, original_user_message: str, llm_
                                 fail_entry = next((f for f in failed if f.get('index') == idx), None)
                                 if fail_entry:
                                     err = '; '.join(fail_entry.get('errors', [])) if isinstance(fail_entry.get('errors', []), list) else str(fail_entry.get('errors'))
-                                    res = await GrilloPlugin.create_action_exec(activity_log_id=activity_id, action_index=idx, action_type=a.get('type'), payload=a.get('payload'), status='failed', error_text=err, result=fail_entry)
+                                    res = await grillo_plugin.create_action_exec(activity_log_id=activity_id, action_index=idx, action_type=a.get('type'), payload=a.get('payload'), status='failed', error_text=err, result=fail_entry)
                                     if res:
                                         db_count += 1
                                     else:
                                         fallback_count += 1
                                 else:
                                     # Unknown outcome: mark processed with available result
-                                    res = await GrilloPlugin.create_action_exec(activity_log_id=activity_id, action_index=idx, action_type=a.get('type'), payload=a.get('payload'), status='processed', result=result)
+                                    res = await grillo_plugin.create_action_exec(activity_log_id=activity_id, action_index=idx, action_type=a.get('type'), payload=a.get('payload'), status='processed', result=result)
                                     if res:
                                         db_count += 1
                                     else:
@@ -589,17 +609,17 @@ async def _grillo_fire_and_forget(bot, message, original_user_message: str, llm_
                     log_debug(f"[grillo] create_action_exec failed after auto-exec: {e}")
         except Exception as e:
             log_warning(f"[grillo] Auto-execution failed: {e}")
-            if GrilloPlugin:
+            if grillo_plugin and hasattr(grillo_plugin, 'create_activity_log'):
                 try:
-                    await GrilloPlugin.create_activity_log(beat_type='grillo_auto_exec_failure', prompt_text=str({'user': original_user_message, 'llm_reply': llm_reply, 'error': str(e)}), metadata={'suggested_actions': actions})
+                    await grillo_plugin.create_activity_log(beat_type='grillo_auto_exec_failure', prompt_text=str({'user': original_user_message, 'llm_reply': llm_reply, 'error': str(e)}), metadata={'suggested_actions': actions})
                 except Exception:
                     pass
     else:
         # Persist proposal for human review
         try:
-            if GrilloPlugin:
+            if grillo_plugin and hasattr(grillo_plugin, 'create_activity_log'):
                 try:
-                    activity_id = await GrilloPlugin.create_activity_log(beat_type='grillo_proposal', prompt_text=str({'user': original_user_message, 'llm_reply': llm_reply}), metadata={'suggested_actions': actions})
+                    activity_id = await grillo_plugin.create_activity_log(beat_type='grillo_proposal', prompt_text=str({'user': original_user_message, 'llm_reply': llm_reply}), metadata={'suggested_actions': actions})
                     if activity_id:
                         log_info(f'[grillo] Persisted suggested actions to grillo_activity_log id={activity_id}')
                     else:
@@ -611,12 +631,12 @@ async def _grillo_fire_and_forget(bot, message, original_user_message: str, llm_
 
         # Persist suggested actions as pending (best-effort)
         try:
-            if GrilloPlugin and activity_id:
+            if grillo_plugin and hasattr(grillo_plugin, 'create_action_exec') and activity_id:
                 try:
                     pending_count = 0
                     fallback_count = 0
                     for idx, a in enumerate(actions):
-                        res_id = await GrilloPlugin.create_action_exec(
+                        res_id = await grillo_plugin.create_action_exec(
                             activity_log_id=activity_id,
                             action_index=idx,
                             action_type=a.get('type', 'unknown'),
@@ -630,7 +650,7 @@ async def _grillo_fire_and_forget(bot, message, original_user_message: str, llm_
                     log_info(f"[grillo] Persisted {pending_count} action_exec(s) to DB for activity_id={activity_id}, {fallback_count} to fallback")
                 except Exception as e:
                     log_debug(f"[grillo] create_action_exec failed while persisting proposal: {e}")
-            elif GrilloPlugin and not activity_id:
+            elif grillo_plugin and not activity_id:
                 # DB didn't record activity; write a fallback activity and store action execs there
                 try:
                     activity_obj = {
@@ -639,7 +659,7 @@ async def _grillo_fire_and_forget(bot, message, original_user_message: str, llm_
                         'response_text': None,
                         'metadata': {'suggested_actions': actions},
                     }
-                    fallback_activity_id = await GrilloPlugin._fallback_write_activity(activity_obj)
+                    fallback_activity_id = await (grillo_plugin._fallback_write_activity(activity_obj) if hasattr(grillo_plugin, '_fallback_write_activity') else None)
                     written = 0
                     for idx, a in enumerate(actions):
                         exec_obj = {
@@ -652,7 +672,8 @@ async def _grillo_fire_and_forget(bot, message, original_user_message: str, llm_
                             'result': None,
                             'created_at': None,
                         }
-                        await GrilloPlugin._fallback_write_action_exec(exec_obj)
+                        if hasattr(grillo_plugin, '_fallback_write_action_exec'):
+                            await grillo_plugin._fallback_write_action_exec(exec_obj)
                         written += 1
                     log_info(f"[grillo] Persisted {written} action_exec(s) to fallback for fallback_activity_id={fallback_activity_id}")
                 except Exception as e:

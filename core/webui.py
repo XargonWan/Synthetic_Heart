@@ -940,17 +940,25 @@ class SynthWebUIInterface:
         }
         """
         try:
-            from plugins.emotion_manager import EmotionManager
-            emotion_mgr = EmotionManager()
-            
-            # Get current emotion state with decay applied
-            emotions = await emotion_mgr.get_emotion_state()
-            
+            from core.core_initializer import PLUGIN_REGISTRY
+            emotion_mgr = None
+            try:
+                if isinstance(PLUGIN_REGISTRY, dict):
+                    emotion_mgr = PLUGIN_REGISTRY.get('emotion_manager')
+            except Exception:
+                emotion_mgr = None
+
+            emotions = None
+            if emotion_mgr and hasattr(emotion_mgr, 'get_emotion_state'):
+                emotions = await emotion_mgr.get_emotion_state()
+            else:
+                emotions = {}
+
             # Find dominant emotion (highest intensity)
             dominant = None
             if emotions:
                 dominant = max(emotions.items(), key=lambda x: x[1])[0]
-            
+
             return JSONResponse({
                 "emotions": emotions,
                 "dominant_emotion": dominant,
@@ -1548,14 +1556,8 @@ class SynthWebUIInterface:
                             except Exception:
                                 mgr = None
 
-                            if mgr is None:
-                                try:
-                                    from plugins.emotion_manager import EmotionManager
-                                    mgr = EmotionManager()
-                                except Exception:
-                                    mgr = None
-
-                            if mgr is not None:
+                            # No fallback import of plugin; use the PLUGIN_REGISTRY-provided manager only
+                            if mgr is not None and hasattr(mgr, 'get_emotion_state'):
                                 emotions_raw_maybe = mgr.get_emotion_state()
                                 emotions_raw = await emotions_raw_maybe if asyncio.iscoroutine(emotions_raw_maybe) else emotions_raw_maybe
                                 if isinstance(emotions_raw, dict) and emotions_raw:
@@ -3651,9 +3653,24 @@ class SynthWebUIInterface:
 
             # Attach per-action execs to entries
             try:
-                from plugins.grillo.grillo_impl import GrilloPlugin
+                from core.core_initializer import PLUGIN_REGISTRY
+                grillo_plugin = None
+                try:
+                    if isinstance(PLUGIN_REGISTRY, dict):
+                        grillo_plugin = PLUGIN_REGISTRY.get('grillo_plugin') or PLUGIN_REGISTRY.get('grillo_impl')
+                except Exception:
+                    grillo_plugin = None
+
                 activity_ids = [e['id'] for e in entries]
-                action_map = await GrilloPlugin.fetch_action_execs(activity_ids) if activity_ids else {}
+                action_map = {}
+                if grillo_plugin and hasattr(grillo_plugin, 'fetch_action_execs'):
+                    action_map = await grillo_plugin.fetch_action_execs(activity_ids) if activity_ids else {}
+                else:
+                    try:
+                        from plugins.grillo.grillo_impl import GrilloPlugin
+                        action_map = await GrilloPlugin.fetch_action_execs(activity_ids) if activity_ids else {}
+                    except Exception as e:
+                        log_debug(f"[webui] fetch_action_execs failed: {e}")
                 for e in entries:
                     e['actions'] = action_map.get(e['id'], [])
             except Exception as e:

@@ -1089,10 +1089,20 @@ class PersonaManager(PluginBase):
                         intensity = float(emotion_match.group(2))
                         intensity = max(0.0, min(10.0, intensity))  # Clamp to 0-10 range
 
-                        # Normalize using EmotionManager helper when possible
+                        # Normalize using EmotionManager plugin helper when possible (via PLUGIN_REGISTRY)
                         try:
-                            from plugins.emotion_manager import normalize_emotion_name
-                            normalized = normalize_emotion_name(raw)
+                            from core.core_initializer import PLUGIN_REGISTRY
+                            em_plugin = None
+                            try:
+                                if isinstance(PLUGIN_REGISTRY, dict):
+                                    em_plugin = PLUGIN_REGISTRY.get('emotion_manager')
+                            except Exception:
+                                em_plugin = None
+
+                            if em_plugin and hasattr(em_plugin, 'normalize_emotion_name'):
+                                normalized = em_plugin.normalize_emotion_name(raw)
+                            else:
+                                normalized = raw if raw in VALID_EMOTIONS else None
                         except Exception:
                             normalized = raw if raw in VALID_EMOTIONS else None
 
