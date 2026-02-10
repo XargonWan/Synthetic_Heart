@@ -2,6 +2,8 @@
 """Message plugin for handling text message actions."""
 
 import asyncio
+from datetime import datetime, timezone
+import difflib
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.core_initializer import INTERFACE_REGISTRY
 from core.config_manager import config_registry
@@ -150,11 +152,12 @@ class MessagePlugin:
             send_payload["interface_path"] = rebuilt_interface_path
 
         try:
-            # If this action originates from a Grillo beat, avoid sending if the last message
-            # in the target chat/thread was authored by the synth (to prevent Grillo spamming).
+            # If this action originates from a Grillo beat, avoid sending in noisy/public chats
+            # if the last message was from the synth within a cooldown window, and also
+            # avoid sending content that duplicates recent messages (exact or fuzzy).
             if isinstance(context, dict) and (context.get("grillo_beat") or context.get("activity_log_id") or context.get("grillo_activity_log_id")):
                 try:
-                    # Allow runtime configuration to enable/disable duplicate suppression
+                    # Configuration values
                     try:
                         suppress_enabled = config_registry.get_value(
                             "GRILLO_SUPPRESS_INACTIVE",
@@ -169,7 +172,55 @@ class MessagePlugin:
                     except Exception:
                         suppress_enabled = True
 
-                    from core.chat_history_cache import get_last_message
+                    try:
+                        cooldown_hours = int(config_registry.get_value(
+                            "GRILLO_COOLDOWN_HOURS", 24,
+                            label="Grillo cooldown hours for public chats",
+                            description="Hours to wait after a synth message before allowing Grillo to post in a public chat.",
+                            group="grillo",
+                            component="message_plugin",
+                            value_type=int,
+                        ))
+                    except Exception:
+                        cooldown_hours = 24
+
+                    try:
+                        dup_enabled = bool(config_registry.get_value(
+                            "GRILLO_DUP_SIMILARITY_ENABLED", True,
+                            label="Enable Grillo duplicate similarity suppression",
+                            description="If enabled, Grillo will avoid posting messages that are semantically or textually similar to recent messages.",
+                            group="grillo",
+                            component="message_plugin",
+                            value_type=bool,
+                        ))
+                    except Exception:
+                        dup_enabled = True
+
+                    try:
+                        dup_threshold = float(config_registry.get_value(
+                            "GRILLO_DUP_SIMILARITY_THRESHOLD", 0.8,
+                            label="Grillo duplicate similarity threshold",
+                            description="Similarity ratio (0..1) above which a message is considered duplicate.",
+                            group="grillo",
+                            component="message_plugin",
+                            value_type=float,
+                        ))
+                    except Exception:
+                        dup_threshold = 0.8
+
+                    try:
+                        dup_lookback = int(config_registry.get_value(
+                            "GRILLO_DUP_SIMILARITY_LOOKBACK", 3,
+                            label="Grillo duplicate lookback",
+                            description="Number of recent messages to compare against for duplicate detection.",
+                            group="grillo",
+                            component="message_plugin",
+                            value_type=int,
+                        ))
+                    except Exception:
+                        dup_lookback = 3
+
+                    from core.chat_history_cache import get_last_message, load_chat_history
                     target_interface_path = rebuilt_interface_path or interface_path or f"{interface_name}/{target}"
 
                     # Exempt webui and trainer 1:1 chats from suppression checks (synth should be able to write)
@@ -226,30 +277,125 @@ class MessagePlugin:
                                         sender_name = (last.get("sender_name") or last.get("username") or "").lower()
                                         # Consider 'self' and obvious bot names as synth-origin
                                         if str(sender_id) == "self" or any(k in sender_name for k in ("synth", "bot", "auto_response", "autoreply")):
-                                            if not suppress_enabled:
-                                                log_debug("[message_plugin] Grillo suppression disabled via config 'GRILLO_SUPPRESS_INACTIVE'; allowing send")
-                                            else:
-                                                log_info(f"[message_plugin] Skipping Grillo outbound message to {target_interface_path} because last message was from synth ({sender_name}/{sender_id})")
-                                                # Record suppression in Grillo activity log if available (best-effort)
+                                            # Check time-based cooldown
+                                            if suppress_enabled:
+                                                last_ts = last.get('timestamp')
+                                                last_dt = None
                                                 try:
-                                                    activity_log_id = context.get("activity_log_id") or context.get("grillo_activity_log_id")
-                                                    if activity_log_id:
-                                                        from plugins.grillo.grillo_impl import GrilloPlugin
-                                                        if hasattr(GrilloPlugin, "set_activity_response_text"):
-                                                            await GrilloPlugin.set_activity_response_text(int(activity_log_id), "[suppressed duplicate message by grillo]", append=True)
-                                                        # Increment suppression metric/counter if plugin exposes it
+                                                    if isinstance(last_ts, str):
                                                         try:
-                                                            if hasattr(GrilloPlugin, "record_suppressed_event"):
-                                                                await GrilloPlugin.record_suppressed_event(activity_log_id=activity_log_id, reason="last_message_from_synth")
+                                                            last_dt = datetime.fromisoformat(last_ts.replace('Z', '+00:00'))
+                                                        except Exception:
+                                                            last_dt = None
+                                                    elif isinstance(last_ts, datetime):
+                                                        last_dt = last_ts
+                                                    if last_dt is not None:
+                                                        if last_dt.tzinfo is None:
+                                                            last_dt = last_dt.replace(tzinfo=timezone.utc)
+                                                        else:
+                                                            last_dt = last_dt.astimezone(timezone.utc)
+                                                except Exception:
+                                                    last_dt = None
+
+                                                now_dt = datetime.utcnow().replace(tzinfo=timezone.utc)
+                                                if last_dt is None:
+                                                    # If we can't parse timestamp, fall back to immediate suppression
+                                                    log_info(f"[message_plugin] Skipping Grillo outbound message to {target_interface_path} because last message was from synth ({sender_name}/{sender_id}) and timestamp is unknown")
+                                                    try:
+                                                        activity_log_id = context.get("activity_log_id") or context.get("grillo_activity_log_id")
+                                                        if activity_log_id:
+                                                            from plugins.grillo.grillo_impl import GrilloPlugin
+                                                            if hasattr(GrilloPlugin, "set_activity_response_text"):
+                                                                await GrilloPlugin.set_activity_response_text(int(activity_log_id), "[suppressed: last_message_from_synth_unknown_ts]", append=True)
+                                                            try:
+                                                                if hasattr(GrilloPlugin, "record_suppressed_event"):
+                                                                    await GrilloPlugin.record_suppressed_event(activity_log_id=activity_log_id, reason="last_message_from_synth_unknown_ts")
+                                                            except Exception:
+                                                                pass
+                                                    except Exception:
+                                                        pass
+                                                    return
+
+                                                hours_since = (now_dt - last_dt).total_seconds() / 3600.0
+                                                if hours_since < float(cooldown_hours):
+                                                    log_info(f"[message_plugin] Skipping Grillo outbound message to {target_interface_path} because last message from synth was {hours_since:.2f}h ago (cooldown={cooldown_hours}h)")
+                                                    try:
+                                                        activity_log_id = context.get("activity_log_id") or context.get("grillo_activity_log_id")
+                                                        if activity_log_id:
+                                                            from plugins.grillo.grillo_impl import GrilloPlugin
+                                                            if hasattr(GrilloPlugin, "set_activity_response_text"):
+                                                                await GrilloPlugin.set_activity_response_text(int(activity_log_id), f"[suppressed: cooldown {hours_since:.2f}h<{cooldown_hours}h]", append=True)
+                                                            try:
+                                                                if hasattr(GrilloPlugin, "record_suppressed_event"):
+                                                                    await GrilloPlugin.record_suppressed_event(activity_log_id=activity_log_id, reason="cooldown")
+                                                            except Exception:
+                                                                pass
+                                                    except Exception:
+                                                        pass
+                                                    return
+
+                                            else:
+                                                log_debug("[message_plugin] Grillo suppression disabled via config 'GRILLO_SUPPRESS_INACTIVE'; allowing send")
+
+                                    # Duplicate-similarity suppression
+                                    if dup_enabled:
+                                        try:
+                                            recent = await load_chat_history(target_interface_path)
+                                            # Take most recent messages and compare
+                                            candidates = list(recent)[-dup_lookback:] if recent else []
+                                            for c in reversed(candidates):
+                                                cand_text = c.get('text') if isinstance(c, dict) else None
+                                                if not cand_text:
+                                                    continue
+                                                # Exact match
+                                                if cand_text.strip() == text.strip():
+                                                    log_info(f"[message_plugin] Suppressing Grillo message to {target_interface_path}: exact duplicate of recent message")
+                                                    try:
+                                                        activity_log_id = context.get("activity_log_id") or context.get("grillo_activity_log_id")
+                                                        if activity_log_id:
+                                                            from plugins.grillo.grillo_impl import GrilloPlugin
+                                                            if hasattr(GrilloPlugin, "set_activity_response_text"):
+                                                                await GrilloPlugin.set_activity_response_text(int(activity_log_id), "[suppressed: exact_duplicate]", append=True)
+                                                            try:
+                                                                if hasattr(GrilloPlugin, "record_suppressed_event"):
+                                                                    await GrilloPlugin.record_suppressed_event(activity_log_id=activity_log_id, reason="exact_duplicate")
+                                                            except Exception:
+                                                                pass
+                                                    except Exception:
+                                                        pass
+                                                    return
+
+                                                # Fuzzy match (difflib)
+                                                try:
+                                                    import difflib
+                                                    ratio = difflib.SequenceMatcher(None, cand_text, text).ratio()
+                                                    if ratio >= float(dup_threshold):
+                                                        log_info(f"[message_plugin] Suppressing Grillo message to {target_interface_path}: fuzzy duplicate (ratio={ratio:.2f})")
+                                                        try:
+                                                            activity_log_id = context.get("activity_log_id") or context.get("grillo_activity_log_id")
+                                                            if activity_log_id:
+                                                                from plugins.grillo.grillo_impl import GrilloPlugin
+                                                                if hasattr(GrilloPlugin, "set_activity_response_text"):
+                                                                    await GrilloPlugin.set_activity_response_text(int(activity_log_id), f"[suppressed: fuzzy_duplicate ratio={ratio:.2f}>", append=True)
+                                                                try:
+                                                                    if hasattr(GrilloPlugin, "record_suppressed_event"):
+                                                                        await GrilloPlugin.record_suppressed_event(activity_log_id=activity_log_id, reason="fuzzy_duplicate")
+                                                                except Exception:
+                                                                    pass
                                                         except Exception:
                                                             pass
+                                                        return
                                                 except Exception:
+                                                    # If similarity check fails, continue
                                                     pass
-                                                return
+
+                                        except Exception as e:
+                                            log_debug(f"[message_plugin] Failed to evaluate duplicate similarity suppression: {e}")
                     except Exception as e:
                         log_debug(f"[message_plugin] Failed to evaluate grillo duplicate suppression: {e}")
                 except Exception as e:
                     log_debug(f"[message_plugin] Failed to evaluate grillo duplicate suppression: {e}")
+
             await handler.send_message(send_payload, original_message)
             log_info(
                 f"[message_plugin] Message successfully sent to {target} (thread: {thread_id}, reply_to: {reply_to})"
