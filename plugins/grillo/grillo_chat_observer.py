@@ -309,6 +309,70 @@ class GrilloChatObserverPlugin:
                     break
                 chat_path = recent_chats.get_chat_path(chat_id) or f"telegram_bot/{chat_id}"
                 try:
+                    # Respect cooldown: skip public chats where last message from synth is within cooldown
+                    try:
+                        cooldown_hours = int(config_registry.get_value(
+                            "GRILLO_COOLDOWN_HOURS", 24,
+                            label="Grillo cooldown hours for public chats",
+                            description="Hours to wait after a synth message before allowing Grillo to consider the chat.",
+                            group="grillo",
+                            component="grillo_chat_observer",
+                            value_type=int,
+                        ))
+                    except Exception:
+                        cooldown_hours = 24
+
+                    from core.chat_history_cache import get_last_message
+                    last_msg = await get_last_message(chat_path)
+                    if last_msg:
+                        sender_id = last_msg.get('sender_id') or ""
+                        sender_name = (last_msg.get('sender_name') or "").lower()
+                        parts = chat_path.split('/')
+                        maybe_interface = parts[0] if parts else None
+                        maybe_chat_id = parts[1] if len(parts) > 1 else None
+                        is_public = False
+                        try:
+                            if maybe_interface == 'telegram_bot' and maybe_chat_id:
+                                try:
+                                    cid = int(maybe_chat_id)
+                                    if cid < 0:
+                                        is_public = True
+                                except Exception:
+                                    is_public = False
+                            elif maybe_interface in ('discord', 'reddit', 'matrix') and maybe_chat_id:
+                                is_public = True
+                        except Exception:
+                            is_public = False
+
+                        if is_public and (str(sender_id) == 'self' or any(k in sender_name for k in ("synth", "bot", "auto_response", "autoreply"))):
+                            last_ts = last_msg.get('timestamp')
+                            last_dt = None
+                            try:
+                                if isinstance(last_ts, str):
+                                    try:
+                                        last_dt = datetime.fromisoformat(str(last_ts).replace('Z', '+00:00'))
+                                    except Exception:
+                                        last_dt = None
+                                elif isinstance(last_ts, datetime):
+                                    last_dt = last_ts
+                                if last_dt is not None:
+                                    if last_dt.tzinfo is None:
+                                        last_dt = last_dt.replace(tzinfo=timezone.utc)
+                                    else:
+                                        last_dt = last_dt.astimezone(timezone.utc)
+                            except Exception:
+                                last_dt = None
+
+                            if last_dt is None:
+                                # unknown timestamp -> skip conservatively
+                                log_debug(f"[grillo_chat_observer] Skipping chat {chat_path} because last message appears to be from synth and timestamp unknown")
+                                continue
+
+                            hours_since = (datetime.utcnow().replace(tzinfo=timezone.utc) - last_dt).total_seconds() / 3600.0
+                            if hours_since < float(cooldown_hours):
+                                log_debug(f"[grillo_chat_observer] Skipping chat {chat_path}: last synth message {hours_since:.2f}h ago < cooldown {cooldown_hours}h")
+                                continue
+
                     messages = await load_chat_history(chat_path)
                     # take up to 2 recent messages per chat
                     taken = 0
@@ -378,6 +442,14 @@ class GrilloChatObserverPlugin:
             "Think like a helpful human reading these snippets: which message(s) would you naturally reply to, and what would you say? "
             "Do NOT address or mention the WebUI or any system/internal labels (for example: 'webui' or 'system'); write as if speaking directly to the human participant(s) in the conversation."
         )
+
+        # Instruct the LLM to avoid suggesting messages that merely repeat the content
+        # or concepts already present in the snippets. If a snippet already contains
+        # the essential content, skip proposing a reply for that snippet or suggest
+        # a substantially different angle; do not produce paraphrases that add no
+        # substantive value.
+        propose_clause += " Do NOT propose messages that are conceptually duplicate of the snippets above; avoid paraphrasing or repeating ideas that are already present. If a snippet already contains the key content, either skip proposing a reply or suggest a substantially new angle."
+
         if self.propose_only:
             propose_clause += " Suggested actions should be proposals only (do NOT assume automatic execution)."
         propose_clause += " Return ONLY a JSON object with an 'actions' array (see examples below)."

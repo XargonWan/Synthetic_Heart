@@ -69,6 +69,17 @@ DIARY_HISTORY_DAYS = config_registry.get_var(
     value_type=int,
 )
 
+# Include local time in prompts (human-readable HH:MM, no TZ name or UTC)
+INCLUDE_LOCAL_TIME_IN_PROMPTS = config_registry.get_var(
+    "INCLUDE_LOCAL_TIME_IN_PROMPTS",
+    True,
+    label="Include Local Time in Prompts",
+    description="When enabled, add structured local time fields (local_time, local_hour, time_of_day, local_date) to the prompt payload. Does NOT include timezone names or offsets.",
+    group="core",
+    component="prompt_engine",
+    value_type=bool,
+)
+
 # Preflight memory search toggle (free-text search run before building prompt)
 MEMORY_SEARCH_PREFLIGHT = config_registry.get_var(
     "MEMORY_SEARCH_PREFLIGHT",
@@ -833,6 +844,64 @@ async def build_json_prompt(message, context_memory, interface_name: str | None 
                 "usertag": f"@{reply_username}" if reply_username else "(no tag)",
             },
         }
+
+    # Inject local time fields (human-readable HH:MM, no timezone names or UTC markers)
+    try:
+        include_local = bool(config_registry.get_value("INCLUDE_LOCAL_TIME_IN_PROMPTS", True, value_type=bool))
+    except Exception:
+        include_local = True
+
+    if include_local:
+        try:
+            # Resolve message datetime (fallbacks handled below)
+            dt_msg = getattr(message, "date", None)
+            # If missing, use current UTC
+            if dt_msg is None:
+                from datetime import datetime as _dt
+
+                dt_msg = _dt.utcnow()
+
+            # Try session override timezone if available
+            tz_name = None
+            try:
+                if interface_path:
+                    from core.session_meta import get_session_meta
+
+                    meta = await get_session_meta(interface_path)
+                    if isinstance(meta, dict):
+                        tz_name = meta.get("timezone") or meta.get("tz") or meta.get("timezone_name")
+            except Exception:
+                tz_name = None
+
+            # Convert to local aware dt
+            if tz_name:
+                try:
+                    from zoneinfo import ZoneInfo
+
+                    if dt_msg.tzinfo is None:
+                        dt_msg = dt_msg.replace(tzinfo=ZoneInfo("UTC"))
+                    dt_local = dt_msg.astimezone(ZoneInfo(tz_name))
+                except Exception as e:  # pragma: no cover - defensive
+                    log_debug(f"[json_prompt] session tz '{tz_name}' invalid: {e}; falling back to server TZ")
+                    from core.time_zone_utils import utc_to_local
+
+                    dt_local = utc_to_local(dt_msg)
+            else:
+                from core.time_zone_utils import utc_to_local
+
+                dt_local = utc_to_local(dt_msg)
+
+            local_time = dt_local.strftime("%H:%M")
+            local_hour = int(dt_local.hour)
+            from core.time_zone_utils import get_time_of_day_label
+
+            time_of_day = get_time_of_day_label(dt_local)
+            input_payload["local_time"] = local_time
+            input_payload["local_hour"] = local_hour
+            input_payload["time_of_day"] = time_of_day
+            input_payload["local_date"] = dt_local.strftime("%Y-%m-%d")
+        except Exception as e:
+            log_debug(f"[json_prompt] local time injection failed: {e}")
 
     input_section = {
         "type": "message",
