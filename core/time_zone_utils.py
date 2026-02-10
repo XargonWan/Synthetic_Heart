@@ -122,3 +122,38 @@ def get_suggested_locations() -> list:
             locations.add(location)
     
     return sorted(list(locations))
+
+
+def get_time_of_day_label(dt_or_hour) -> str:
+    """Return a normalized time-of-day label for a datetime or hour integer.
+
+    Labels (hour ranges inclusive):
+    - night: 0..3
+    - early_morning: 4..5
+    - morning: 6..11
+    - afternoon: 12..17
+    - evening: 18..21
+    - late_evening: 22..23
+
+    Accepts either a datetime (uses .hour) or an integer hour (0-23).
+    """
+    try:
+        if hasattr(dt_or_hour, "hour"):
+            hour = int(dt_or_hour.hour)
+        else:
+            hour = int(dt_or_hour)
+    except Exception:
+        # Fallback to 0 if input is invalid
+        hour = 0
+
+    if hour >= 0 and hour <= 3:
+        return "night"
+    if hour >= 4 and hour <= 5:
+        return "early_morning"
+    if hour >= 6 and hour <= 11:
+        return "morning"
+    if hour >= 12 and hour <= 17:
+        return "afternoon"
+    if hour >= 18 and hour <= 21:
+        return "evening"
+    return "late_evening"
