@@ -8,7 +8,7 @@ from core.db import get_due_events
 from core import message_queue
 from core.logging_utils import log_debug, log_warning
 import time
-from plugins.event_plugin import EventPlugin
+from core.core_initializer import PLUGIN_REGISTRY
 
 # Track events currently dispatched to prevent duplicate processing
 _processing_events: dict[int, float] = {}
@@ -40,7 +40,14 @@ async def dispatch_pending_events(bot):
 
     log_debug(f"[event_dispatcher] Retrieved {len(events)} events from the database")
     dispatched = 0
-    event_plugin = EventPlugin()
+    # Prefer plugin instance from PLUGIN_REGISTRY; fallback to None
+    try:
+        event_plugin = PLUGIN_REGISTRY.get('event') if isinstance(PLUGIN_REGISTRY, dict) else None
+        if event_plugin is None:
+            event_plugin = PLUGIN_REGISTRY.get('event_plugin') if isinstance(PLUGIN_REGISTRY, dict) else None
+    except Exception:
+        event_plugin = None
+
     for ev in events:
         ev_id = ev.get("id")
         # Skip events already being processed recently
@@ -64,7 +71,21 @@ async def dispatch_pending_events(bot):
         except Exception:
             scheduled_dt = datetime.now(timezone.utc)
 
-        prompt = event_plugin._create_event_prompt(ev)
+        # Build prompt using plugin helper if available
+        prompt = None
+        try:
+            if event_plugin and hasattr(event_plugin, '_create_event_prompt'):
+                prompt = event_plugin._create_event_prompt(ev)
+        except Exception:
+            prompt = None
+
+        if prompt is None:
+            # Fallback: construct a minimal prompt from event data
+            prompt = {
+                'instructions': str(ev.get('description', 'Event')),
+                'payload': ev,
+            }
+
         old_instructions = prompt.get("instructions", "")
         prompt["instructions"] = "🕒 Event Dispatcher\n\n" + old_instructions
 
