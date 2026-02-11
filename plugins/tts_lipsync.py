@@ -49,6 +49,32 @@ register_exposed_var(
     advanced=True,
 )
 
+# Expose an enable switch for WebUI configuration
+register_exposed_var(
+    "TTS_ENABLED",
+    label="TTS Enabled",
+    default=False,
+    value_type=bool,
+    ui_type="boolean",
+    description="Enable or disable TTS feature from the WebUI.",
+    scope="plugins",
+    component="tts_lipsync",
+    advanced=False,
+)
+
+# Expose fallback behaviour for text-only fallback when TTS generation fails
+register_exposed_var(
+    "TTS_FALLBACK_TO_TEXT",
+    label="TTS Fallback to Text",
+    default=True,
+    value_type=bool,
+    ui_type="boolean",
+    description="If true, on TTS generation failure the system will send a text-only fallback.",
+    scope="plugins",
+    component="tts_lipsync",
+    advanced=False,
+)
+
 
 class TTSLipSyncPlugin(AIPluginBase):
     display_name = "TTS Lip Sync"
@@ -101,24 +127,75 @@ class TTSLipSyncPlugin(AIPluginBase):
         register_plugin("tts_lipsync", self)
         log_info("[tts_lipsync] Plugin initialized")
 
-        self.endpoints = self._load_endpoints()
-        self.timeout_s = config_registry.get_value(
-            "TTS_TIMEOUT_SECONDS",
-            60,
-            value_type=int,
-            group="plugins",
-            component="tts_lipsync",
-        )
-        self.output_dir = Path(
-            config_registry.get_value(
-                "TTS_OUTPUT_DIR",
-                "res/synth_webui/static/audio/tts",
+        # Load runtime config and set internal attributes
+        self.refresh_config()
+
+    def refresh_config(self):
+        """Read exposed variables from the config registry and update internal state.
+        This allows WebUI changes to take effect without plugin reloads (best-effort).
+        """
+        try:
+            # Read enabled flag first
+            enabled = config_registry.get_value(
+                "TTS_ENABLED",
+                False,
+                value_type=bool,
+                group="plugins",
+                component="tts_lipsync",
+            )
+
+            # Read endpoints and parse
+            raw_endpoints = config_registry.get_value(
+                "TTS_ENDPOINTS",
+                "",
                 value_type=str,
                 group="plugins",
                 component="tts_lipsync",
             )
-        )
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+            endpoints = [e.strip() for e in str(raw_endpoints).split(",") if e.strip()] if raw_endpoints else []
+
+            # Read timeout and output dir
+            timeout_s = config_registry.get_value(
+                "TTS_TIMEOUT_SECONDS",
+                60,
+                value_type=int,
+                group="plugins",
+                component="tts_lipsync",
+            )
+            output_dir = Path(
+                config_registry.get_value(
+                    "TTS_OUTPUT_DIR",
+                    "res/synth_webui/static/audio/tts",
+                    value_type=str,
+                    group="plugins",
+                    component="tts_lipsync",
+                )
+            )
+
+            fallback_to_text = config_registry.get_value(
+                "TTS_FALLBACK_TO_TEXT",
+                True,
+                value_type=bool,
+                group="plugins",
+                component="tts_lipsync",
+            )
+
+            self.endpoints = endpoints
+            # Plugin considered enabled only when user enabled AND endpoints configured
+            self.enabled = bool(enabled) and bool(endpoints)
+            self.timeout_s = int(timeout_s)
+            self.output_dir = output_dir
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            self.fallback_to_text = bool(fallback_to_text)
+
+            if not self.endpoints:
+                log_info("[tts_lipsync] No TTS endpoints configured")
+
+            if not bool(enabled):
+                log_info("[tts_lipsync] TTS disabled via WebUI (TTS_ENABLED=False)")
+
+        except Exception as e:
+            log_warning(f"[tts_lipsync] Failed to refresh config: {e}")
 
     async def execute_action(self, action: dict, context: dict, bot, original_message):
         """Execute TTS action and optionally dispatch to interface."""
@@ -153,6 +230,14 @@ class TTSLipSyncPlugin(AIPluginBase):
                 )
                 return {"status": "skipped", "reason": "internal_confirmation"}
 
+        # Refresh configuration (in case WebUI changed settings)
+        self.refresh_config()
+
+        # If plugin is not enabled (either user disabled or no endpoints configured), skip TTS entirely
+        if not getattr(self, "enabled", False):
+            log_info("[tts_lipsync] TTS is disabled (TTS_ENABLED=False or no endpoints); skipping TTS execution")
+            return {"status": "skipped", "reason": "tts_disabled"}
+
         # 1. Generate Audio via standard handler
         result = await self.handle_custom_action(action.get("type"), payload)
 
@@ -163,7 +248,7 @@ class TTSLipSyncPlugin(AIPluginBase):
 
             # If we have merged text from a message action, send it as text-only
             merged_text = payload.get("__merged_text")
-            if merged_text:
+            if merged_text and getattr(self, "fallback_to_text", True):
                 log_info(
                     f"[tts_lipsync] Sending text-only fallback (TTS failed): '{merged_text[:50]}...'"
                 )
@@ -370,13 +455,10 @@ class TTSLipSyncPlugin(AIPluginBase):
         if raw:
             endpoints = [e.strip() for e in str(raw).split(",") if e.strip()]
 
-        # If empty (either raw was None/empty OR it parsed to empty list), use defaults
+        # If empty (either raw was None/empty OR it parsed to empty list), do NOT use defaults
         if not endpoints:
-            log_info("[tts_lipsync] No custom endpoints configured, using defaults")
-            return [
-                "http://192.168.1.6:8001/tts_stream",
-                "http://192.168.1.69:8001/tts_stream",
-            ]
+            log_info("[tts_lipsync] No custom endpoints configured")
+            return []
 
         return endpoints
 

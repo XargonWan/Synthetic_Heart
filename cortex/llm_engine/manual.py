@@ -3,7 +3,7 @@
 # Copied from llm_engines/manual.py
 
 from plugins.message_map import MessageMapPlugin, init_message_map_table, store_message_mapping, get_original_message, cleanup_old_mappings
-from core import say_proxy
+# say_proxy removed: /say command deprecated
 import asyncio
 from core.config import get_trainer_id
 from core.ai_plugin_base import AIPluginBase
@@ -134,14 +134,7 @@ class ManualAIPlugin(AIPluginBase):
             log_debug(f"[manual] Message received in manual mode from chat_id={message.chat_id}")
             _last_manual_log_time = now
 
-        target_chat = say_proxy.get_target(user_id)
-        if target_chat and target_chat != "EXPIRED":
-            log_debug(f"[manual] Invio da /say: chat_id={target_chat}")
-            for i in range(0, len(text), 4000):
-                chunk = text[i:i+4000]
-                await safe_send(bot, target_chat, chunk)
-            say_proxy.clear(user_id)
-            return
+        # /say support removed — no interactive trainer forwarding (previously forwarded trainer text to target chat)
 
         import json
 

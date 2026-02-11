@@ -140,8 +140,14 @@ async def enqueue(
 
             if is_awake:
                 if not directed:
-                    directed = True
-                    reason = "awake_state"
+                    # When a chat is awake, do NOT automatically treat every message as
+                    # directed to the bot. Only mark as directed if the message has an
+                    # explicit trigger (e.g., @mention, reply to bot, DM or the interface
+                    # has explicitly flagged this message as an explicit trigger).
+                    if getattr(message, "is_explicit_trigger", False):
+                        directed = True
+                        reason = "explicit_trigger_awake"
+                # If already directed, leave intact.
             else:
                 if directed and not explicit_trigger:
                     directed = False

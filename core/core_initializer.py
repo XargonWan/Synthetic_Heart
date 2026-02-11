@@ -1297,6 +1297,12 @@ class CoreInitializer:
         log_debug("[core_initializer] Starting plugin loop")
         for name, plugin in PLUGIN_REGISTRY.items():
             log_debug(f"[core_initializer] Processing plugin: {name}")
+            # Skip plugins that expose an `enabled` attribute and are currently disabled
+            if hasattr(plugin, "enabled") and not getattr(plugin, "enabled"):
+                log_debug(
+                    f"[core_initializer] Plugin {name} has `enabled=False`, skipping action registration"
+                )
+                continue
             if not hasattr(plugin, "get_supported_actions"):
                 log_debug(
                     f"[core_initializer] Plugin {name} does not have get_supported_actions method"

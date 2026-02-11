@@ -1,4 +1,4 @@
-from core import response_proxy, say_proxy
+from core import response_proxy
 import core.plugin_instance as plugin_instance
 import traceback
 from core.logging_utils import log_debug, log_warning, log_error
@@ -224,7 +224,7 @@ def detect_media_type(message):
 def extract_response_target(message, user_id):
     log_debug(f"Extracting target for user_id={user_id}")
 
-    # 1. Check via proxy (e.g. /photo, /say...)
+    # 1. Check via proxy (e.g. /photo...)
     target = response_proxy.get_target(user_id)
     log_debug(f"Initial target from proxy: {target}")
 
@@ -248,16 +248,7 @@ def extract_response_target(message, user_id):
                         "type": detect_media_type(message),
                     }
 
-    # 3. Fallback from /say
-    if not target:
-        chat_id = say_proxy.get_target(user_id)
-        log_debug(f"Fallback target from /say: {chat_id}")
-        if chat_id and chat_id != "EXPIRED":
-            return {
-                "chat_id": chat_id,
-                "message_id": None,
-                "type": detect_media_type(message),
-            }
+
 
     log_debug(f"Final target = {target}")
     return target

@@ -1,22 +1,18 @@
-import time
-
-_say_targets = {}
-EXPIRE_SECONDS = 120
-
+# Deprecated: /say command and proxy removed.
+# The module is kept as a noop compatibility shim in case any
+# external code imports it. Functions are no-ops and return
+# neutral values.
 
 def set_target(user_id, chat_id):
-    _say_targets[user_id] = {"chat_id": chat_id, "ts": time.time()}
+    """No-op: /say functionality removed."""
+    return None
 
 
 def get_target(user_id):
-    data = _say_targets.get(user_id)
-    if not data:
-        return None
-    if time.time() - data["ts"] > EXPIRE_SECONDS:
-        clear(user_id)
-        return "EXPIRED"
-    return data["chat_id"]
+    """No-op: always return None (no active target)."""
+    return None
 
 
 def clear(user_id):
-    _say_targets.pop(user_id, None)
+    """No-op: nothing to clear."""
+    return None

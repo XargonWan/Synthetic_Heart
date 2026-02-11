@@ -183,6 +183,35 @@ async def is_message_for_bot(
         log_debug(f"[mention] Error checking private chat: {e}")
         return False, "error_checking_private"
 
+    # Priority 1.5: Check chat awake/asleep state
+    try:
+        # Import locally to avoid circular import at module import time.
+        from core.chat_attention import get_attention, evaluate_triggers
+
+        chat_id = getattr(message.chat, "id", None)
+        is_awake = get_attention(chat_id)
+        if not is_awake:
+            # If the chat is asleep, only wake commands should be considered.
+            # evaluate_triggers returns (should_sleep, should_wake, is_wake_sleep_command)
+            should_sleep, should_wake, _ = evaluate_triggers(
+                message_text.lower() if message_text else ""
+            )
+            if not should_wake:
+                # Log explicit, user-friendly message as requested.
+                log_debug(
+                    "SyntH is asleep, message is not a wake command so is not considered a message for bot"
+                )
+                return False, "chat_asleep"
+            else:
+                log_debug(
+                    "[mention] Wake command detected in asleep chat - treating as message for bot"
+                )
+                return True, None
+    except Exception as e:
+        log_debug(f"[mention] Error checking chat attention: {e}")
+        # Defer to normal behavior on errors checking attention.
+        # Continue processing other checks rather than failing hard.
+
     # Priority 2: Check for reply to bot message
     if hasattr(message, "reply_to_message") and message.reply_to_message:
         reply_sender = getattr(message.reply_to_message, "from_user", None)

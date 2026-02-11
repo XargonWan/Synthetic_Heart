@@ -28,7 +28,6 @@ from core.interfaces_registry import get_interface_registry
 # from core import blocklist, response_proxy, say_proxy, recent_chats  # Moved to plugins
 from plugins.blocklist import block_user, unblock_user, get_blocked_users
 from core import recent_chats  # For command functions only, not for tracking
-from core import say_proxy
 from core.auto_response import request_llm_delivery
 from core.core_initializer import register_interface, core_initializer
 
@@ -81,7 +80,6 @@ API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 SESSION = os.getenv("SESSION", "synth_userbot")
 
-say_sessions = {}
 context_memory = {}
 last_selected_chat = {}
 message_id = None
@@ -211,9 +209,7 @@ async def help_command(event):
         f"🧞‍♀️ *synth – Available Commands*\n\n"
         "*🧠 Context Mode*\n"
         f"`.context` – Toggle history in forwarded messages, currently *{context_status}*\n\n"
-        "*✏️ .say Command*\n"
-        "`.say` – Select a chat from recent ones\n"
-        "`.say <id> <message>` – Send a message directly to a chat\n\n"
+
         "*🧩 Manual Mode*\n"
         "Reply to a forwarded message with text or content (stickers, photos, audio, files, etc.)\n"
         "`.cancel` – Cancel a pending send\n\n"
@@ -259,34 +255,7 @@ async def llm_command(event):
         await event.reply(f"❌ Error changing LLM: {e}")
 
 
-@optional_on(events.NewMessage(pattern=r"\.say(?: (\d+) (.+))?"))
-async def say_command(event):
-    if not is_trainer(event.sender_id):
-        return
-    args = event.pattern_match.groups()
-    # Case 1: .say <chat_id> <message>
-    if args[0] and args[1]:
-        try:
-            chat_id = int(args[0])
-            text = args[1]
-            await client.send_message(chat_id, text)
-            await event.reply("✅ Message sent.")
-        except Exception as e:
-            log_error(f"Direct .say error: {repr(e)}", e)
-            await event.reply("❌ Error during sending.")
-        return
-    # Case 2: .say (no arguments)
-    entries = await recent_chats.get_last_active_chats_verbose(10, client)
-    if not entries:
-        await event.reply("⚠️ No recent chat found.")
-        return
-    numbered = "\n".join(
-        f"{i + 1}. {name} — `{cid}`" for i, (cid, name) in enumerate(entries)
-    )
-    numbered += "\n\n✏️ Reply with the number to choose the chat."
-    say_proxy.clear(event.sender_id)
-    say_sessions[event.sender_id] = entries
-    await event.reply(numbered)
+# .say command removed — interactive forward-to-chat functionality deprecated.
 
 
 @optional_on(events.NewMessage())
@@ -298,23 +267,7 @@ async def handle_message(event):
         return
     user_id = message.sender_id
     text = message.message or ""
-    # Interactive /say step
-    if is_trainer(user_id) and user_id in say_sessions:
-        stripped = text.strip()
-        if stripped.isdigit():
-            index = int(stripped) - 1
-            choices = say_sessions[user_id]
-            if 0 <= index < len(choices):
-                selected_chat_id = choices[index][0]
-                say_proxy.set_target(user_id, selected_chat_id)
-                del say_sessions[user_id]
-                await event.reply(
-                    "✅ Chat selected.\n\nNow send me the *message*, a *photo*, a *file*, *audio* or any other content to forward.",
-                    parse_mode="md",
-                )
-                return
-        await event.reply("❌ Invalid selection. Send a correct number.")
-        return
+
 
     # Trainer reply to forwarded message
     if is_trainer(user_id) and message.is_reply:

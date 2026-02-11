@@ -1,6 +1,8 @@
 import pytest
 
 from core.mention_utils import is_message_for_bot
+import core.chat_attention as chat_attention
+
 
 
 class DummyChat:
@@ -90,3 +92,31 @@ async def test_missing_human_count_returns_reason():
     directed, reason = await is_message_for_bot(msg, bot, human_count=None)
     assert directed is False
     assert reason == "missing_human_count"
+
+
+@pytest.mark.asyncio
+async def test_chat_asleep_non_wake_message(caplog):
+    msg = DummyMessage(text="hello", chat=DummyChat(type="group", id=9999))
+    bot = DummyBot()
+    # Set chat to asleep
+    chat_attention.set_attention(9999, False)
+    caplog.set_level("DEBUG")
+    directed, reason = await is_message_for_bot(msg, bot)
+    assert directed is False
+    assert reason == "chat_asleep"
+    assert "SyntH is asleep, message is not a wake command so is not considered a message for bot" in caplog.text
+    # Restore attention for isolation
+    chat_attention.set_attention(9999, True)
+
+
+@pytest.mark.asyncio
+async def test_chat_asleep_wake_message(monkeypatch):
+    msg = DummyMessage(text="please wake", chat=DummyChat(type="group", id=9998))
+    bot = DummyBot()
+    chat_attention.set_attention(9998, False)
+    # Ensure 'wake' is a configured wake trigger
+    monkeypatch.setattr("core.chat_attention.get_wake_triggers", lambda: ["wake"])
+    directed, reason = await is_message_for_bot(msg, bot)
+    assert directed is True
+    # Restore attention for isolation
+    chat_attention.set_attention(9998, True)

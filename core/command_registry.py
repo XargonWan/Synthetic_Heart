@@ -99,12 +99,9 @@ async def help_command() -> str:
         "🧞‍♀️ *synth – Available Commands*\n\n"
         "*🧠 Context Mode*\n"
         f"`/context` – Enable/disable history in forwarded messages, currently *{context_status}*\n\n"
-        "*✏️ /say Command*\n"
-        "`/say` – Select a chat from recent ones\n"
-        "`/say <id> <message>` – Send a message directly to a chat\n\n"
         "*🧩 Manual Mode*\n"
         "Reply to a forwarded message with text or content (stickers, photos, audio, files, etc.)\n"
-        "`/cancel` – Cancel a pending send\n\n"
+        "`/cancel` – Cancel a pending operation\n\n"
         "*🧱 User Management*\n"
         "`/block <user_id>` – Block a user\n"
         "`/unblock <user_id>` – Unblock a user\n"
@@ -538,80 +535,7 @@ register_command("block_list", block_list_command)
 register_command("purge_map", purge_map_command)
 
 
-async def say_command(*args, interface_context=None) -> str:
-    """Send a message to a chat. Interface-agnostic implementation."""
-    if not interface_context:
-        return "💬 `/say` command usage:\n`/say <chat_id> <message>` - Send message directly to chat ID\n\nNote: Interactive features require interface context."
-
-    # Get interface-specific objects
-    update = interface_context.get("update")
-    context = interface_context.get("context")
-    bot = interface_context.get("bot")
-
-    if not all([update, context, bot]):
-        return "❌ Missing interface context for `/say` command"
-
-    if len(args) >= 2:
-        # Direct send: /say <chat_id> <message>
-        try:
-            chat_id = int(args[0])
-            message_text = " ".join(args[1:])
-
-            # Use generic interface send function
-            try:
-                # Get the current interface's send function dynamically
-                interface_name = getattr(
-                    context.get("bot"), "get_interface_id", lambda: "unknown"
-                )()
-
-                if hasattr(context.get("bot"), "send_message"):
-                    await context.get("bot").send_message(
-                        chat_id=chat_id, text=message_text
-                    )
-                else:
-                    # Fallback: try to find appropriate send function
-                    send_func = getattr(context.get("bot"), "send", None) or getattr(
-                        context.get("bot"), "send_text", None
-                    )
-                    if send_func:
-                        await send_func(chat_id, message_text)
-                    else:
-                        return f"❌ No send function available for interface {interface_name}"
-
-                return "✅ Message sent."
-            except Exception as e:
-                return f"❌ Error sending message: {e}"
-
-        except ValueError:
-            # Could be username format
-            if args[0].startswith("@"):
-                username = args[0]
-                message_text = " ".join(args[1:])
-                try:
-                    chat = await bot.get_chat(username)
-                    if chat.type == "private":
-                        # Use generic interface send function
-                        if hasattr(bot, "send_message"):
-                            await bot.send_message(chat_id=chat.id, text=message_text)
-                        else:
-                            send_func = getattr(bot, "send", None) or getattr(
-                                bot, "send_text", None
-                            )
-                            if send_func:
-                                await send_func(chat.id, message_text)
-                            else:
-                                return "❌ No send function available"
-                        return f"✅ Message sent to {username}."
-                    else:
-                        return f"❌ Cannot send to {username}. They must start the chat with the bot first."
-                except Exception as e:
-                    return f"❌ Cannot send to {username}: {e}"
-            else:
-                return "❌ Invalid chat ID format"
-
-    # No arguments - show recent chats (simplified version)
-    return "💬 For interactive chat selection, use the interface-specific implementation.\nUse: `/say <chat_id> <message>` or `/say @username <message>`"
-
+# /say command removed from backend registry (function deprecated).
 
 async def logchat_command(*args, interface_context=None) -> str:
     """Set current chat as log chat."""
@@ -662,7 +586,7 @@ async def cancel_command(*args, interface_context=None) -> str:
         return "❌ Missing interface context for `/cancel` command"
 
     try:
-        from core import response_proxy, say_proxy
+        from core import response_proxy
         from core.interfaces_registry import get_interface_registry
 
         # Get user and trainer info
@@ -682,11 +606,9 @@ async def cancel_command(*args, interface_context=None) -> str:
 
         # Check for pending operations
         has_pending_response = response_proxy.has_pending(trainer_id)
-        has_pending_say = say_proxy.get_target(trainer_id) not in [None, "EXPIRED"]
 
-        if has_pending_response or has_pending_say:
+        if has_pending_response:
             response_proxy.clear_target(trainer_id)
-            say_proxy.clear(trainer_id)
             return "❌ Pending operations cancelled."
         else:
             return "⚠️ No active operation to cancel."
@@ -695,6 +617,6 @@ async def cancel_command(*args, interface_context=None) -> str:
         return f"❌ Error cancelling operations: {e}"
 
 
-register_command("say", say_command)
+
 register_command("cancel", cancel_command)
 register_command("logchat", logchat_command)

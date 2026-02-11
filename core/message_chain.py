@@ -752,6 +752,40 @@ async def handle_incoming_message(
                             or tts_already_executed
                         )
 
+                        # Additional check: if TTS endpoints are not configured, skip auto-inject
+                        try:
+                            from core.config_manager import config_registry
+
+                            tts_raw = config_registry.get_value(
+                                "TTS_ENDPOINTS",
+                                "",
+                                value_type=str,
+                                group="plugins",
+                                component="tts_lipsync",
+                            )
+                            tts_enabled = config_registry.get_value(
+                                "TTS_ENABLED",
+                                False,
+                                value_type=bool,
+                                group="plugins",
+                                component="tts_lipsync",
+                            )
+
+                            if not tts_raw:
+                                should_skip_tts = True
+                                log_debug(
+                                    "[message_chain] Skipping TTS auto-inject because TTS_ENDPOINTS is not configured"
+                                )
+
+                            # If TTS is explicitly disabled via WebUI, skip injection
+                            if not bool(tts_enabled):
+                                should_skip_tts = True
+                                log_debug(
+                                    "[message_chain] Skipping TTS auto-inject because TTS_ENABLED is False"
+                                )
+                        except Exception as e:
+                            log_debug(f"[message_chain] Error checking TTS config: {e}")
+
                         if should_skip_tts:
                             skip_reason = []
                             if is_grillo_internal:
@@ -766,6 +800,8 @@ async def handle_incoming_message(
                                 skip_reason.append("autonomous_message")
                             if tts_already_executed:
                                 skip_reason.append("tts_already_executed_in_correction")
+                            if not tts_raw:
+                                skip_reason.append("tts_not_configured")
                             log_debug(
                                 f"[message_chain] Skipping TTS auto-inject: {', '.join(skip_reason)}"
                             )

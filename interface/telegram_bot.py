@@ -35,7 +35,7 @@ from dotenv import load_dotenv  # type: ignore
 from plugins.blocklist import block_user, unblock_user, get_blocked_users
 from plugins.message_map import init_message_map_table, cleanup_old_mappings
 from core import response_proxy
-from core import say_proxy, message_queue
+from core import message_queue
 from core import recent_chats  # For command functions only, not for tracking
 from core.mention_utils import is_message_for_bot
 from core.logging_utils import log_debug, log_info, log_warning, log_error
@@ -158,7 +158,6 @@ class MessageWrapper:
         return getattr(self._message, name)
 
 
-say_sessions = {}
 context_memory = {}
 last_selected_chat = {}
 message_id = None
@@ -457,7 +456,6 @@ async def cancel_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if response_proxy.has_pending(get_trainer_id()):
         response_proxy.clear_target(get_trainer_id())
-        say_proxy.clear(get_trainer_id())
         log_debug("Response sending cancelled.")
         await update.message.reply_text("❌ Sending cancelled.")
     else:
@@ -839,63 +837,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # a 'think' state here, otherwise messages that are ignored/pre-filtered would still
     # trigger UI thinking and can cause duplicates.
 
-    # === PRIORITY 1: Handle /say step (chat selection) ===
-    log_debug(
-        f"🟡 [PRIORITY 1 CHECK] Checking say_step conditions - chat_type: {message.chat.type}, user_id: {user_id}, trainer_id: {get_trainer_id()}, say_choices: {context.user_data.get('say_choices') is not None}"
-    )
-    if (
-        message.chat.type == "private"
-        and user_id == get_trainer_id()
-        and context.user_data.get("say_choices")
-    ):
-        log_debug("🟡 [PRIORITY 1 ACTIVE] Message intercepted by say_step handler")
-        target_chat = say_proxy.get_target(user_id)
+    # /say command removed — interactive send-to-chat feature was intentionally deleted.
 
-        if target_chat == "EXPIRED":
-            await message.reply_text("⏳ Time expired. Use /say again.")
-            return
-
-        # If target not yet chosen, try to interpret text as number
-        if not target_chat and message.text:
-            stripped = message.text.strip()
-            if stripped.isdigit():
-                try:
-                    index = int(stripped) - 1
-                    choices = context.user_data.get("say_choices", [])
-                    if 0 <= index < len(choices):
-                        selected_chat_id = choices[index][0]
-                        say_proxy.set_target(user_id, selected_chat_id)
-                        context.user_data.pop("say_choices", None)
-                        await message.reply_text(
-                            "✅ Chat selected.\n\nNow send me the *message*, a *photo*, a *file*, an *audio* or any other content to forward.",
-                            parse_mode="Markdown",
-                        )
-                        return
-                except Exception:
-                    pass
-
-            await message.reply_text("❌ Invalid selection. Send a correct number.")
-            return
-
-        # Chat selected → forward content through plugin
-        if target_chat:
-            log_debug(
-                f"Forwarding via plugin_instance.handle_incoming_message (chat_id={target_chat})"
-            )
-            try:
-                await plugin_instance.handle_incoming_message(
-                    context.bot, message, context.user_data, "telegram_bot"
-                )
-                response_proxy.clear_target(get_trainer_id())
-                say_proxy.clear(get_trainer_id())
-                return
-            except Exception as e:
-                log_error(
-                    f"Error during plugin_instance.handle_incoming_message in /say: {e}",
-                    e,
-                )
-                await message.reply_text("❌ Error sending message.")
-                return
 
     # === PRIORITY 2: Handle trainer incoming responses (stickers, media with target) ===
     log_debug(
@@ -907,7 +850,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🟠 [PRIORITY 2 ACTIVE] Trainer message detected: media_type={media_type}"
         )
 
-        # Check if there's a target set (from /say or reply)
+        # Check if there's a target set (from reply or other proxies)
         target = response_proxy.get_target(get_trainer_id())
         log_debug(f"Initial target from response_proxy = {target}")
 
@@ -929,16 +872,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"[telegram_bot] Exception while resolving reply target for PRIORITY 2: {e}"
                 )
 
-        # Fallback from /say
-        if not target:
-            fallback = say_proxy.get_target(get_trainer_id())
-            log_debug(f"Fallback from say_proxy = {fallback}")
-            if fallback and fallback != "EXPIRED":
-                target = {"chat_id": fallback, "message_id": None, "type": media_type}
-                log_debug(f"Target set from say_proxy: {target}")
-            elif fallback == "EXPIRED":
-                await message.reply_text("⏳ Timeout expired, run /say again.")
-                return
+
 
         # If we have a target, send the content
         if target:
@@ -959,7 +893,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if success:
                 log_debug("✅ Sending successful. Cleaning proxy.")
                 response_proxy.clear_target(get_trainer_id())
-                say_proxy.clear(get_trainer_id())
             return
 
     log_debug("After trainer-specific checks - continuing to message processing")
@@ -1337,78 +1270,7 @@ async def manage_chat_id_command(update: Update, context: ContextTypes.DEFAULT_T
         )
 
 
-async def say_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_trainer(update.effective_user.id):
-        return
-
-    args = context.args
-    bot = context.bot
-
-    # Case 1: /say <chat_id> <message>
-    if len(args) >= 2:
-        try:
-            chat_id = int(args[0])
-            text = " ".join(args[1:])
-            await safe_send(bot, chat_id=chat_id, text=text)  # [FIX]
-            await update.message.reply_text("✅ Message sent.")
-        except Exception as e:
-            log_error(f"Error /say direct: {repr(e)}", e)
-            await update.message.reply_text("❌ Error sending.")
-        return
-
-    # Case 2: /say @username -> select private chat
-    if len(args) == 1 and args[0].startswith("@"):  # /say @username
-        username = args[0]
-        log_debug(f"Resolving username {username} via bot.get_chat")
-        try:
-            chat = await bot.get_chat(username)
-            log_debug(f"Resolved to chat_id = {chat.id}, type = {chat.type}")
-            if chat.type == "private":
-                say_proxy.set_target(update.effective_user.id, chat.id)
-                context.user_data.pop("say_choices", None)
-                await update.message.reply_text(
-                    f"\u2709\ufe0f What do you want to send to {username}?",
-                    parse_mode="Markdown",
-                )
-            else:
-                await update.message.reply_text(
-                    f"\u274c Cannot send to {username}. They must start the chat with the bot first."
-                )
-        except Exception as e:
-            log_error(f"Error /say @username: {repr(e)}", e)
-            await update.message.reply_text(
-                f"❌ Cannot send to {username}. They must start the chat with the bot first."
-            )
-        return
-
-    # Case 3: /say (no arguments) -> show recent chats
-    all_entries = await recent_chats.get_last_active_chats_verbose(20, bot)
-    entries = all_entries[:10]
-    if not entries:
-        await update.message.reply_text("⚠️ No recent chat found.")
-        return
-
-    # Save list in memory and show options
-    numbered = "\n".join(
-        f"{i + 1}. {escape_markdown(name)} — `{cid}`"
-        for i, (cid, name) in enumerate(entries)
-    )
-
-    # Additional list of recent private chats
-    privates = [(cid, name) for cid, name in all_entries if cid > 0][:5]
-    if privates:
-        private_lines = "\n".join(
-            f"{i + 1}. {escape_markdown(name)} — `{cid}`"
-            for i, (cid, name) in enumerate(privates)
-        )
-        numbered += "\n\n🔒 Recent private chats:\n" + private_lines
-
-    numbered += "\n\n✏️ Reply with the number to choose the chat."
-
-    say_proxy.clear(update.effective_user.id)  # Ensure cleanup before choice
-    context.user_data["say_choices"] = entries
-
-    await update.message.reply_text(numbered, parse_mode="Markdown")
+# /say command removed — use direct message sending via interface-specific tooling.
 
 
 async def llm_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
