@@ -4733,9 +4733,18 @@ class SynthWebUIInterface:
         except Exception as exc:
             log_warning(f"{LOG_PREFIX} unable to list registered engines: {exc}")
         try:
-            engine_names.update(list_available_cortex_engines(None))
+            # Prefer the explicit helper when available; otherwise fall back to
+            # enumerating engines from the CortexRegistry to avoid hard failures
+            # when core.config cannot be imported (e.g., missing optional deps).
+            try:
+                from core.config import list_available_cortex_engines
+                engine_names.update(list_available_cortex_engines(None))
+            except Exception:
+                engine_names.update(cortex_reg.get_available_engines())
         except Exception:
+            # Keep going even if neither method works
             pass
+
         try:
             from core.config import get_active_llm
             active_engine = await get_active_llm()

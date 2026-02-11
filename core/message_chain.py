@@ -142,6 +142,22 @@ def _normalize_message_unknown(actions: list, interface_path: Optional[str]) -> 
     if not correct_action_type:
         return actions
 
+    # Only normalize if the resolved interface-specific action type is actually supported
+    try:
+        # Import dynamically to avoid circular import at module load
+        from core.action_parser import get_supported_action_types
+
+        supported = get_supported_action_types()
+    except Exception:
+        supported = set()
+
+    # Only proceed with normalization if the target action is registered in the system
+    if correct_action_type not in supported:
+        log_debug(
+            f"[message_chain] Skipping normalization to '{correct_action_type}' because it is not in supported action types"
+        )
+        return actions
+
     for action in actions:
         if not isinstance(action, dict):
             continue
@@ -507,6 +523,51 @@ async def handle_incoming_message(
                 # Auto-inject interface_path into message actions that are missing it
                 # This prevents validation failures and avoids costly LLM correction calls
                 actions = _auto_inject_interface_path(actions, ctx_interface_path)
+
+                # --- New: Validate action types early and trigger corrector for unsupported types ---
+                try:
+                    from core.action_parser import get_supported_action_types
+
+                    supported_action_types = get_supported_action_types() or set()
+                except Exception as e:
+                    log_warning(f"[message_chain] Could not load supported action types: {e}")
+                    supported_action_types = set()
+
+                # Only enforce this for LLM-originated responses
+                is_from_llm = source == "llm" or getattr(message, "from_llm", False)
+                if is_from_llm and isinstance(actions, list):
+                    unsupported = []
+                    for idx, act in enumerate(actions):
+                        if not isinstance(act, dict):
+                            continue
+                        atype = act.get("type") or act.get("action")
+                        if not atype or atype not in supported_action_types:
+                            unsupported.append(
+                                {
+                                    "index": idx,
+                                    "action": act,
+                                    "errors": [f"Unsupported type '{atype}' - no plugin or interface found to handle it"],
+                                }
+                            )
+
+                    if unsupported:
+                        log_warning(
+                            f"[message_chain] 🚨 Detected unsupported action types from LLM: {[u['action'].get('type') or u['action'].get('action') for u in unsupported]} - requesting correction"
+                        )
+                        # Attach correction context and force correction path
+                        correction_context = {
+                            "successful_actions": [],
+                            "failed_actions": unsupported,
+                            "had_json_errors": False,
+                            "original_text": text,
+                        }
+                        try:
+                            if hasattr(message, "__dict__"):
+                                message.correction_context = correction_context
+                        except Exception:
+                            pass
+
+                        parsed = None  # Trigger the corrector loop below
 
             # Synthera Emotion Forwarding: copy dominant feeling into tts_speak payload
             if (

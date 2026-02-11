@@ -1201,8 +1201,29 @@ try {
                     const componentsPluginsListEl = document.getElementById('components-plugins-list');
                     if (!componentsLLMListEl || !componentsInterfacesListEl || !componentsPluginsListEl) return;
                     const res = await fetch('/api/components');
-                    if (!res.ok) throw new Error('HTTP ' + res.status);
-                    const data = await res.json();
+                    // Handle non-2xx responses gracefully and display server-provided
+                    // error details in the UI without throwing. This avoids breaking
+                    // the Components tab when the server returns 500 and does not
+                    // require restarting the backend.
+                    let data = null;
+                    if (!res.ok) {
+                        try {
+                            const text = await res.text();
+                            try { data = JSON.parse(text); } catch (e) { data = null; }
+                            const errText = (data && (data.detail || data.error || JSON.stringify(data))) || text || `HTTP ${res.status}`;
+                            console.error('[synth_webui] Components endpoint error:', res.status, errText);
+                            if (componentsLLMListEl) componentsLLMListEl.innerHTML = `<div class="meta">Failed to load components: ${safeEscapeHtml(errText)}</div>`;
+                            if (componentsInterfacesListEl) componentsInterfacesListEl.innerHTML = `<div class="meta">Failed to load components: ${safeEscapeHtml(errText)}</div>`;
+                            if (componentsPluginsListEl) componentsPluginsListEl.innerHTML = `<div class="meta">Failed to load components: ${safeEscapeHtml(errText)}</div>`;
+                        } catch (e) {
+                            console.error('[synth_webui] Failed to read components error body', e);
+                            if (componentsLLMListEl) componentsLLMListEl.innerHTML = '<div class="meta">Failed to load components.</div>';
+                            if (componentsInterfacesListEl) componentsInterfacesListEl.innerHTML = '<div class="meta">Failed to load components.</div>';
+                            if (componentsPluginsListEl) componentsPluginsListEl.innerHTML = '<div class="meta">Failed to load components.</div>';
+                        }
+                        return;
+                    }
+                    data = await res.json();
 
                     // Cortex summary (backward-compatible with previous LLM payload)
                     if (componentsLLMSummaryEl && data.cortex) {

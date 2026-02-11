@@ -13,7 +13,16 @@ except Exception:  # pragma: no cover - fallback when dotenv not installed
 
 
 from core.db import get_conn_ctx
-import aiomysql
+# aiomysql is optional at import time — make the import lazy/fail-safe so
+# importing core.config doesn't raise in environments where aiomysql isn't
+# installed (e.g., lightweight tests or build-time checks). Modules that need
+# aiomysql at runtime should check `aiomysql` is not None and raise a clear
+# error if necessary.
+try:
+    import aiomysql
+except Exception:
+    aiomysql = None
+
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.config_manager import config_registry
 
