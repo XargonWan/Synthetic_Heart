@@ -229,9 +229,9 @@ async def wake_command(interface_context=None) -> str:
     if chat_id is None:
         return "⚠️ Unable to determine chat."
     try:
-        from interface.telegram_bot import chat_attention_state
+        from core.chat_attention import set_attention
 
-        chat_attention_state[chat_id] = True
+        set_attention(chat_id, True)
     except Exception as exc:
         log_debug(f"[command_registry] Failed to set wake state: {exc}")
         return "❌ Failed to set awake state."
@@ -247,9 +247,9 @@ async def sleep_command(interface_context=None) -> str:
     if chat_id is None:
         return "⚠️ Unable to determine chat."
     try:
-        from interface.telegram_bot import chat_attention_state
+        from core.chat_attention import set_attention
 
-        chat_attention_state[chat_id] = False
+        set_attention(chat_id, False)
     except Exception as exc:
         log_debug(f"[command_registry] Failed to set sleep state: {exc}")
         return "❌ Failed to set sleep state."
@@ -265,9 +265,9 @@ async def status_command(interface_context=None) -> str:
     if chat_id is None:
         return "⚠️ Unable to determine chat."
     try:
-        from interface.telegram_bot import chat_attention_state
+        from core.chat_attention import get_attention
 
-        is_awake = chat_attention_state.get(chat_id, True)
+        is_awake = get_attention(chat_id, True)
     except Exception as exc:
         log_debug(f"[command_registry] Failed to read status: {exc}")
         return "❌ Failed to read status."
@@ -278,6 +278,7 @@ async def status_command(interface_context=None) -> str:
 
 
 register_command("wake", wake_command)
+register_command("awake", wake_command)
 register_command("sleep", sleep_command)
 register_command("status", status_command)
 

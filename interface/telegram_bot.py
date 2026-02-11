@@ -39,6 +39,7 @@ from core import say_proxy, message_queue
 from core import recent_chats  # For command functions only, not for tracking
 from core.mention_utils import is_message_for_bot
 from core.logging_utils import log_debug, log_info, log_warning, log_error
+from core.chat_attention import set_attention, get_attention, evaluate_triggers
 from interface.message_send_utils import (
     safe_send,
     send_with_thread_fallback,
@@ -69,9 +70,6 @@ _interface_registry = get_interface_registry()
 
 # Load environment variables
 load_dotenv()
-
-# Global state for chat attention (wake/sleep)
-chat_attention_state = {}
 
 # Register exposed variable for WebUI
 register_exposed_var(
@@ -163,7 +161,6 @@ class MessageWrapper:
 say_sessions = {}
 context_memory = {}
 last_selected_chat = {}
-chat_attention_state = {}
 message_id = None
 
 # Throttling for bot None lookup warnings
@@ -989,33 +986,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Wake/sleep gating: awake follows normal routing, sleep ignores non-command messages.
     chat_id = message.chat.id
-    if chat_id not in chat_attention_state:
-        # Default to awake for private chats, sleep for groups
-        chat_attention_state[chat_id] = message.chat.type == "private"
-
-    is_awake = chat_attention_state.get(chat_id, (message.chat.type == "private"))
+    # Read current awake state (default True)
+    is_awake = get_attention(chat_id, True)
 
     # Check for state change triggers
     text_lower = text.lower().strip()
 
-    # Sleep triggers
-    sleep_triggers = [
-        "bye 2b",
-        "bye b",
-        "goodnight 2b",
-        "gn 2b",
-        "cya 2b",
-        "shut up 2b",
-    ]
-    should_sleep = any(t in text_lower for t in sleep_triggers)
+    # Centralized trigger evaluation handled by core.chat_attention
+    should_sleep, is_wake_word, is_wake_sleep_command = evaluate_triggers(text_lower)
 
-    # Wake triggers
-    # Note: "2b" is in "bye 2b", so we must ensure sleep takes priority
-    wake_triggers = ["hey 2b", "hey b", "2b", "yo 2b", "hi 2b"]
-    is_wake_word = any(t in text_lower for t in wake_triggers)
+    # For compatibility, keep original variable names
+    # should_sleep: True if sleep trigger matched
+    # is_wake_word: True if wake trigger matched
+    # is_wake_sleep_command: True if either matched
 
-    # Flag for prompt engine to skip aggressive memory search on wake/sleep commands
-    is_wake_sleep_command = should_sleep or is_wake_word
 
     # Mentions also wake up
     is_mention = False
@@ -1029,9 +1013,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log_info(
                 f"[telegram_bot] Putting chat {chat_id} to sleep due to trigger in '{text}'"
             )
-            chat_attention_state[chat_id] = False
+            set_attention(chat_id, False)
             # We set local is_awake to True one last time to allow the "bye" message to be processed
-            # The NEXT message will check chat_attention_state and find it False.
+            # The next message will check chat attention and find it False.
             is_awake = True
             try:
                 # Add sleep reaction
@@ -1046,7 +1030,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log_info(
                 f"[telegram_bot] Waking up chat {chat_id} due to trigger in '{text}'"
             )
-            chat_attention_state[chat_id] = True
+            set_attention(chat_id, True)
             is_awake = True
             try:
                 # Add wake reaction
@@ -1075,15 +1059,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         is_awake = True
 
+    # Only allow trainer direct messages (private chat) to bypass sleep; group trainer messages do NOT bypass
     if not is_awake and not should_wake and not should_sleep:
-        log_debug(f"[telegram_bot] Chat {chat_id} is asleep; ignoring message")
-        return
-
-    # Re-evaluate effective awake status for THIS message processing
-    # If is_awake is True, we process.
-    if not is_awake and not should_wake and not should_sleep:
-        log_debug(f"[telegram_bot] Chat {chat_id} is asleep; ignoring message")
-        return
+        if is_trainer(user_id) and message.chat.type == "private":
+            log_info(
+                f"[telegram_bot] Chat {chat_id} is asleep but trainer {user_id} direct message will be processed"
+            )
+            # fall through and process the message
+        else:
+            log_debug(f"[telegram_bot] Chat {chat_id} is asleep; ignoring message")
+            return
 
     # Avoid single-human fallback in group/supergroup chats to prevent false positives.
     if message.chat.type in ["group", "supergroup"]:
