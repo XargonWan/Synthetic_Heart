@@ -186,6 +186,13 @@ class CoreInitializer:
                 "[core_initializer] ✅ _register_component_validation_rules() completed"
             )
 
+            # 2.6. Start any async plugins that were deferred due to no running event loop
+            try:
+                await self.start_pending_async_plugins()
+                log_debug("[core_initializer] start_pending_async_plugins completed")
+            except Exception as e:
+                log_warning(f"[core_initializer] start_pending_async_plugins failed: {e}")
+
             # 3. Load core actions (like chat_link) if not already loaded
             log_debug("[core_initializer] 🔍 About to call _ensure_core_actions()")
             self._ensure_core_actions()
