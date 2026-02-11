@@ -12,6 +12,7 @@ except Exception:  # pragma: no cover - graceful fallback for tests without inst
 
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.mention_utils import is_message_for_bot
+from core.chat_attention import set_attention, get_attention, evaluate_triggers
 from core.transport_layer import universal_send
 from core.core_initializer import register_interface
 from core.command_registry import execute_command
@@ -31,11 +32,10 @@ class DiscordInterface:
 
     display_name = "Discord Interface"
 
-    chat_attention_state = {}
+    # Chat attention state is centralized in core.chat_attention
 
     def __init__(self, bot_token: str):
-        # Ensure instance-level state is initialized immediately
-        self.chat_attention_state = {}
+        # Chat attention is centralized in core.chat_attention; no per-instance store required
 
         self.bot_token = bot_token.strip() if bot_token else ""
         self.is_enabled = True
@@ -704,9 +704,7 @@ class DiscordInterface:
 
     async def _process_message(self, message):
         """Handle incoming Discord messages."""
-        # Defensive check for state
-        if not hasattr(self, "chat_attention_state"):
-            self.chat_attention_state = {}
+        # Chat attention is handled centrally via core.chat_attention; no per-instance state required
 
         try:
             if self.client and message.author == getattr(self.client, "user", None):
@@ -882,9 +880,9 @@ class DiscordInterface:
             # Prepare simplified message for core queue
             # Detect wake/sleep commands early for flagging
             text_lower_check = content.lower()
-            is_wake_sleep_cmd = (
-                "hey 2b" in text_lower_check or "bye 2b" in text_lower_check
-            )
+            _, _, is_wake_sleep_cmd = evaluate_triggers(text_lower_check)
+
+
 
             wrapped = SimpleNamespace(
                 message_id=getattr(message, "id", None),
@@ -925,22 +923,21 @@ class DiscordInterface:
 
             # === Wake/Sleep & Attention Logic ===
             text_lower = content.lower()
-            is_wake_command = "hey 2b" in text_lower
-            is_sleep_command = "bye 2b" in text_lower
+            is_sleep_command, is_wake_command, _ = evaluate_triggers(text_lower)
 
             chat_scope_id = thread_id if thread_id else channel_id
             if is_wake_command:
-                self.chat_attention_state[chat_scope_id] = True
+                set_attention(chat_scope_id, True)
                 log_debug(
                     f"[discord_interface] Wake command detected in chat {chat_scope_id}"
                 )
             elif is_sleep_command:
-                self.chat_attention_state[chat_scope_id] = False
+                set_attention(chat_scope_id, False)
                 log_debug(
                     f"[discord_interface] Sleep command detected in chat {chat_scope_id}"
                 )
 
-            is_awake = self.chat_attention_state.get(chat_scope_id, False)
+            # Default to awake (True) when not explicitly set
             is_explicit_trigger = is_wake_command or is_sleep_command
             if not is_explicit_trigger:
                 if "@" in content:
@@ -953,25 +950,8 @@ class DiscordInterface:
                     ):
                         is_explicit_trigger = True
 
-            directed, reason = await is_message_for_bot(wrapped, self.client)
-
-            if is_awake:
-                if not directed:
-                    directed = True
-                    reason = "awake_state"
-            else:
-                if directed and not is_explicit_trigger:
-                    directed = False
-                    reason = "asleep_state_no_trigger"
-                    log_debug(
-                        f"[discord_interface] Suppressed message due to Asleep state: {content}"
-                    )
-                elif not directed and is_explicit_trigger:
-                    directed = True
-                    reason = "explicit_trigger_asleep"
-
-            if not directed:
-                return
+            # Attach explicit trigger flag so the core can enforce attention rules
+            wrapped.is_explicit_trigger = is_explicit_trigger
 
             try:
                 await message_queue.enqueue(
@@ -979,7 +959,7 @@ class DiscordInterface:
                     wrapped,
                     interface_id="discord_bot",
                     original_message=message,
-                    skip_mention_check=True,
+                    skip_mention_check=False,
                 )
             except Exception as e:  # pragma: no cover - queue errors
                 log_error(f"[discord_interface] message_queue enqueue failed: {e}")

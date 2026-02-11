@@ -129,6 +129,31 @@ async def enqueue(
             f"[QUEUE] DEBUG: is_message_for_bot returned directed={directed}, reason='{reason}'"
         )
 
+        # === CENTRALIZED ATTENTION (wake/sleep) HANDLING ===
+        try:
+            # Lazy import to avoid cycles
+            from core.chat_attention import get_attention
+
+            chat_scope = getattr(message, "chat_id", None)
+            is_awake = get_attention(chat_scope, True)
+            explicit_trigger = getattr(message, "is_explicit_trigger", False)
+
+            if is_awake:
+                if not directed:
+                    directed = True
+                    reason = "awake_state"
+            else:
+                if directed and not explicit_trigger:
+                    directed = False
+                    reason = "asleep_state_no_trigger"
+                    log_debug(f"[QUEUE] Suppressed message due to Asleep state: {getattr(message, 'text', '')}")
+                elif not directed and explicit_trigger:
+                    directed = True
+                    reason = "explicit_trigger_asleep"
+        except Exception:
+            # If anything goes wrong, fall back to original directed decision
+            pass
+
         if not directed:
             log_debug("[QUEUE] DEBUG: Message not directed to bot - ignoring")
             if reason == "missing_human_count":
