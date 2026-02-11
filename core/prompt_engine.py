@@ -1429,8 +1429,12 @@ def load_unminified_chat_instruction(interface_name: str | None = None) -> str:
     )
 
     base = """
+CONCISE RULES (DEFAULT):
+- Keep user-facing messages short and to the point. Default to a single short paragraph or a one-line reply when possible.
+- Expand only when the user explicitly requests more detail or context.
+
 NARRATIVE STYLE & VERBOSITY:
-- BALANCED DEPTH: Aim for 1-2 medium paragraphs per response. 
+- BALANCED DEPTH: When expansion is required, aim for 1-2 medium paragraphs per response. 
 - GROUNDED DESCRIPTION: Be descriptive and evocative, but avoid 'purple prose' or overly long internal monologues. Focus on the immediate physical environment and the interaction.
 - MATCH THE MOMENT: If the user is brief, stay lean. If the user is descriptive, expand your imagery to match, but never exceed two paragraphs unless a massive scene shift is occurring.
 
