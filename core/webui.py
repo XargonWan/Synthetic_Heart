@@ -4689,24 +4689,36 @@ class SynthWebUIInterface:
         try:
             from core.core_initializer import PLUGIN_REGISTRY, INTERFACE_REGISTRY, core_initializer
             from core.cortex_registry import get_cortex_registry
-            from core.config import (
-                list_available_cortexs,
-                list_available_cortex_engines,
-                get_active_cortex,
-                get_active_cortex_engine,
-            )
         except Exception as exc:  # pragma: no cover - defensive
             log_error(f"{LOG_PREFIX} component inspection import failure: {exc}")
             raise HTTPException(status_code=500, detail="Unable to inspect components") from exc
 
         available_cortexs = []
         try:
-            available_cortexs = list_available_cortexs()
+            # Derive available cortex kinds from the CortexRegistry metadata to avoid
+            # importing wider config helpers (more robust in environments where
+            # core.config may transiently fail to import).
+            reg = get_cortex_registry()
+            available_cortexs = sorted({meta.get('cortex', 'llm') for meta in reg._engine_meta.values()})
+            if not available_cortexs:
+                available_cortexs = ['llm']
         except Exception as exc:
             log_warning(f"{LOG_PREFIX} unable to list available cortex kinds: {exc}")
 
         try:
-            active_cortex = await get_active_cortex()
+            # Resolve active engine via the legacy ACTIVE_LLM configuration where
+            # present, then map that engine to its cortex kind using the registry.
+            try:
+                from core.config import get_active_llm
+                active_engine_temp = await get_active_llm()
+            except Exception:
+                active_engine_temp = None
+
+            try:
+                reg = get_cortex_registry()
+                active_cortex = reg._engine_meta.get(active_engine_temp, {}).get('cortex') if active_engine_temp else None
+            except Exception:
+                active_cortex = None
         except Exception as exc:
             log_error(f"{LOG_PREFIX} unable to resolve active cortex: {exc}")
             active_cortex = None
@@ -4725,7 +4737,8 @@ class SynthWebUIInterface:
         except Exception:
             pass
         try:
-            active_engine = await get_active_cortex_engine()
+            from core.config import get_active_llm
+            active_engine = await get_active_llm()
         except Exception:
             active_engine = None
         if active_engine:

@@ -446,6 +446,75 @@ def list_available_llms():
     )
 
 
+# --- Compatibility helpers for Cortex (used by WebUI components tab)
+# These functions provide a backward-compatible shim for older WebUI code
+# that expects simple helpers in core.config. They delegate to the
+# CortexRegistry where possible to avoid duplicating discovery logic.
+
+def list_available_cortexs():
+    """Return a sorted list of known cortex kinds (e.g., 'llm', 'live', 'agent').
+
+    This is a synchronous helper kept for backward compatibility with
+    existing WebUI code that imports it directly from core.config.
+    """
+    try:
+        from core.cortex_registry import get_cortex_registry
+
+        reg = get_cortex_registry()
+        kinds = {meta.get("cortex", "llm") for meta in reg._engine_meta.values()}
+        if not kinds:
+            return ["llm"]
+        return sorted(kinds)
+    except Exception:
+        return ["llm"]
+
+
+def list_available_cortex_engines(kind: str | None = None):
+    """Return available engine names for a given cortex kind.
+
+    If kind is None or 'llm' this will fall back to legacy LLM discovery.
+    """
+    try:
+        if kind is None or kind == "llm":
+            return list_available_llms()
+        from core.cortex_registry import get_cortex_registry
+
+        reg = get_cortex_registry()
+        return reg.get_available_engines(kind)
+    except Exception:
+        return []
+
+
+async def get_active_cortex_engine():
+    """Async helper to get the currently active cortex engine.
+
+    For now this delegates to the legacy ACTIVE_LLM config to preserve
+    existing behaviour until Cortex-wide configuration is introduced.
+    """
+    try:
+        return await get_active_llm()
+    except Exception:
+        # Fallback: return the default LLM
+        return "manual"
+
+
+async def get_active_cortex():
+    """Return the cortex kind for the active engine (async).
+
+    This inspects the CortexRegistry metadata for the configured engine
+    and returns its declared cortex kind, defaulting to 'llm'.
+    """
+    try:
+        engine = await get_active_cortex_engine()
+        from core.cortex_registry import get_cortex_registry
+
+        reg = get_cortex_registry()
+        meta = reg._engine_meta.get(engine, {})
+        return meta.get("cortex", "llm")
+    except Exception:
+        return "llm"
+
+
 # Make ACTIVE_LLM visible in the Settings UI as a choice/combo, synced with available engines
 # We cannot re-register the key (it already exists), so update the internal definition if present.
 try:
