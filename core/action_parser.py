@@ -554,10 +554,13 @@ def _plugins_for(action_type: str) -> List[Any]:
                     log_debug(
                         f"[action_parser] ✅ Plugin {plugin.__class__.__name__} supports {action_type} (via action_types)"
                     )
-                    # Optimization: Stop searching for message actions after first match
-                    if action_type.startswith("message_"):
-                        log_debug(f"[action_parser] ⚡ Optimization: Stopping search for message action {action_type} after first match")
-                        break
+                    # Optimization: Stop searching for user-facing message actions after first match
+                    try:
+                        if _is_interface_message_action(action_type):
+                            log_debug(f"[action_parser] ⚡ Optimization: Stopping search for user-facing action {action_type} after first match")
+                            break
+                    except Exception:
+                        pass
                     continue
 
             if hasattr(plugin, "get_supported_actions"):
@@ -570,10 +573,13 @@ def _plugins_for(action_type: str) -> List[Any]:
                     log_debug(
                         f"[action_parser] ✅ Plugin {plugin.__class__.__name__} supports {action_type} (via actions_dict)"
                     )
-                    # Optimization: Stop searching for message actions after first match
-                    if action_type.startswith("message_"):
-                        log_debug(f"[action_parser] ⚡ Optimization: Stopping search for message action {action_type} after first match")
-                        break
+                    # Optimization: Stop searching for user-facing message actions after first match
+                    try:
+                        if _is_interface_message_action(action_type):
+                            log_debug(f"[action_parser] ⚡ Optimization: Stopping search for user-facing action {action_type} after first match")
+                            break
+                    except Exception:
+                        pass
                     continue
 
         except Exception as e:
@@ -614,10 +620,13 @@ def _plugins_for(action_type: str) -> List[Any]:
                     log_debug(
                         f"[action_parser] ✅ Interface {name} supports {action_type} (via action_types)"
                     )
-                    # Optimization: Stop searching for message actions after first match
-                    if action_type.startswith("message_"):
-                        log_debug(f"[action_parser] ⚡ Optimization: Stopping search for message action {action_type} after first match")
-                        break
+                    # Optimization: Stop searching for user-facing message actions after first match
+                    try:
+                        if _is_interface_message_action(action_type):
+                            log_debug(f"[action_parser] ⚡ Optimization: Stopping search for user-facing action {action_type} after first match")
+                            break
+                    except Exception:
+                        pass
                     continue
 
             if hasattr(iface, "get_supported_actions"):
@@ -630,10 +639,13 @@ def _plugins_for(action_type: str) -> List[Any]:
                     log_debug(
                         f"[action_parser] ✅ Interface {name} supports {action_type} (via actions_dict)"
                     )
-                    # Optimization: Stop searching for message actions after first match
-                    if action_type.startswith("message_"):
-                        log_debug(f"[action_parser] ⚡ Optimization: Stopping search for message action {action_type} after first match")
-                        break
+                    # Optimization: Stop searching for user-facing message actions after first match
+                    try:
+                        if _is_interface_message_action(action_type):
+                            log_debug(f"[action_parser] ⚡ Optimization: Stopping search for user-facing action {action_type} after first match")
+                            break
+                    except Exception:
+                        pass
                     continue
 
             log_debug(
@@ -665,6 +677,56 @@ def set_available_plugins(interfaces, llm_engine, plugins):
     log_info("[action_parser] Available plugins set.")
 
 
+def _is_interface_message_action(action_type: str) -> bool:
+    """Return True if the given action_type is a registered interface action that
+    represents a user-facing message (i.e., capable of sending textual messages).
+
+    This function inspects the registered interfaces, preferring the interface's
+    explicit metadata rather than hard-coded name checks.
+    """
+    try:
+        # Map action to interface name
+        iface_name = _load_interface_actions().get(action_type)
+        if not iface_name:
+            return False
+
+        from core.core_initializer import INTERFACE_REGISTRY
+        iface = INTERFACE_REGISTRY.get(iface_name)
+        if not iface:
+            return False
+
+        # If the interface exposes a send_message method, it's likely a user-facing
+        # messaging interface; verify that the action belongs to the interface's
+        # supported actions to avoid false positives.
+        if hasattr(iface, "send_message"):
+            # Check that the action_type is indeed listed by the interface
+            if hasattr(iface, "get_supported_actions"):
+                supported = iface.get_supported_actions() or {}
+                if action_type in supported:
+                    return True
+            if hasattr(iface, "get_supported_action_types"):
+                action_types = iface.get_supported_action_types() or []
+                if action_type in action_types:
+                    return True
+
+        # Fallback: examine the action metadata for a 'text' required/optional field
+        if hasattr(iface, "get_supported_actions"):
+            supported = iface.get_supported_actions() or {}
+            meta = supported.get(action_type, {})
+            if isinstance(meta, dict):
+                req = meta.get("required_fields") or meta.get("required_params") or []
+                opt = meta.get("optional_fields") or meta.get("optional_params") or []
+                if isinstance(req, (list, set)) and "text" in req:
+                    return True
+                if isinstance(opt, (list, set)) and "text" in opt:
+                    return True
+
+    except Exception:
+        return False
+
+    return False
+
+
 # Variables to store the state
 ACTIVE_INTERFACES = set()
 ACTIVE_LLM_ENGINE = None
@@ -691,10 +753,14 @@ async def _handle_plugin_action(
         iface_name = iface_target or _load_interface_actions().get(action_type)
         
         # If interface not found, try to refresh the interface actions cache
-        if not iface_name and action_type.startswith("message_"):
-            global _INTERFACE_ACTIONS
-            _INTERFACE_ACTIONS = None  # Force refresh
-            iface_name = _load_interface_actions().get(action_type)
+        if not iface_name:
+            try:
+                if _is_interface_message_action(action_type):
+                    global _INTERFACE_ACTIONS
+                    _INTERFACE_ACTIONS = None  # Force refresh
+                    iface_name = _load_interface_actions().get(action_type)
+            except Exception:
+                pass
 
         try:
             from core.core_initializer import INTERFACE_REGISTRY
@@ -1296,7 +1362,7 @@ async def _create_diary_entry_for_actions(processed_actions, context, original_m
             action_type = action.get("type", "")
             payload = action.get("payload", {})
             
-            if action_type.startswith("message_"):
+            if _is_interface_message_action(action_type):
                 text = payload.get("text", "")
                 if text:
                     synth_response_parts.append(text)
@@ -1708,6 +1774,32 @@ async def corrector_orchestrator(text: str, context: dict, bot, message, max_ret
         if not actions:
             log_info("[corrector_orchestrator] All actions were already completed - nothing to regenerate")
             return True
+
+        # If the parsed LLM JSON contains extra top-level keys (other than
+        # 'actions'), treat each unregistered key as an invalid action. This
+        # keeps validation strictly aligned to the registry of actions and
+        # avoids hard-coded key checks. Components may register allowed
+        # response metadata keys via the validation registry.
+        try:
+            if isinstance(parsed, dict):
+                from core.validation_registry import get_validation_registry
+
+                allowed_metadata = get_validation_registry().get_response_metadata_keys()
+                extra_keys = [k for k in parsed.keys() if k != "actions" and k not in allowed_metadata]
+
+                if extra_keys:
+                    synthetic_actions = []
+                    for key in extra_keys:
+                        value = parsed.get(key)
+                        payload = value if isinstance(value, dict) else {"value": value}
+                        synthetic_actions.append({"type": key, "payload": payload})
+
+                    actions.extend(synthetic_actions)
+                    log_info(
+                        f"[corrector_orchestrator] Added {len(synthetic_actions)} synthetic actions for unregistered top-level keys: {', '.join(extra_keys)}"
+                    )
+        except Exception as _e:
+            log_debug(f"[corrector_orchestrator] Error while processing top-level keys: {_e}")
 
         try:
             result = await run_actions(actions, context, bot, message)

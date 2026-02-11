@@ -58,6 +58,8 @@ class ValidationRegistry:
     def __init__(self):
         self._rules: Dict[str, List[ValidationRule]] = {}
         self._registered_components: Set[str] = set()
+        self._response_metadata_keys: Set[str] = set()
+        self._response_metadata_by_component: Dict[str, Set[str]] = {}
         # Alias mapping: alias_name -> resolver(payload) -> Optional[canonical_action_type]
         # Resolvers are callables that receive the action payload and return a
         # canonical action_type (string) or None if they cannot resolve.
@@ -132,6 +134,11 @@ class ValidationRegistry:
 
         self._registered_components.discard(component_name)
 
+        # Remove response metadata keys registered by this component
+        if component_name in self._response_metadata_by_component:
+            keys = self._response_metadata_by_component.pop(component_name, set())
+            self._response_metadata_keys.difference_update(keys)
+
     def get_validation_rules(self, action_type: str) -> List[ValidationRule]:
         """Get all validation rules for an action type."""
         return self._rules.get(action_type, [])
@@ -157,10 +164,37 @@ class ValidationRegistry:
         """Get all registered component names."""
         return self._registered_components.copy()
 
+    def register_response_metadata_keys(self, component_name: str, keys: List[str]) -> None:
+        """Register allowed top-level response metadata keys for a component.
+
+        These keys are permitted in LLM JSON responses alongside "actions" and
+        will not be treated as invalid actions.
+        """
+        if not keys:
+            return
+        normalized = {str(k) for k in keys if str(k).strip()}
+        if not normalized:
+            return
+
+        existing = self._response_metadata_by_component.get(component_name, set())
+        existing.update(normalized)
+        self._response_metadata_by_component[component_name] = existing
+        self._response_metadata_keys.update(normalized)
+
+        log_debug(
+            f"[ValidationRegistry] Registered response metadata keys for '{component_name}': {sorted(normalized)}"
+        )
+
+    def get_response_metadata_keys(self) -> Set[str]:
+        """Return the union of allowed top-level response metadata keys."""
+        return set(self._response_metadata_keys)
+
     def clear(self):
         """Clear all registered rules (for testing)."""
         self._rules.clear()
         self._registered_components.clear()
+        self._response_metadata_keys.clear()
+        self._response_metadata_by_component.clear()
 
 
 # Global validation registry instance

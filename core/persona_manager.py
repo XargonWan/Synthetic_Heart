@@ -611,6 +611,17 @@ class PersonaManager(PluginBase):
         from core.core_initializer import register_plugin
         register_plugin("persona_manager", self)
         log_info("[persona_manager] PersonaManager initialized and registered")
+
+        # Register allowed top-level LLM response metadata handled by persona_manager
+        try:
+            from core.validation_registry import get_validation_registry
+
+            get_validation_registry().register_response_metadata_keys(
+                "persona_manager",
+                ["feelings"],
+            )
+        except Exception:
+            pass
     
     async def async_init(self):
         """Async initialization - load the default persona from config."""

@@ -96,8 +96,18 @@ def _auto_inject_interface_path(actions: list, interface_path: Optional[str]) ->
         if not isinstance(action, dict):
             continue
         action_type = action.get("type") or action.get("action")
-        # Only process message_* action types
-        if not action_type or not action_type.startswith("message_"):
+        # Only process registered interface message action types (no hard-coded checks)
+        if not action_type:
+            continue
+        try:
+            # Import helper from action_parser to determine if this action_type
+            # is a user-facing message action according to registered interfaces
+            from core.action_parser import _is_interface_message_action
+
+            if not _is_interface_message_action(action_type):
+                continue
+        except Exception:
+            # Fallback: if helper unavailable, skip injection to avoid false positives
             continue
 
         payload = action.get("payload")
