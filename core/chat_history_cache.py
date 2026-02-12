@@ -9,10 +9,9 @@ cached in a database table and limited to the configured CHAT_HISTORY_LIMIT.
 """
 
 from datetime import datetime
-import json
 from collections import deque
 from core.db import get_conn_ctx
-from core.logging_utils import log_debug, log_error, log_info, log_warning
+from core.logging_utils import log_debug, log_error, log_info
 from core.config_manager import config_registry
 
 
@@ -60,10 +59,10 @@ async def save_chat_message(
     message_text: str,
     sender_name: str = None,
     sender_id: str = None,
-    timestamp: datetime = None
-    ) -> bool:
+    timestamp: datetime = None,
+) -> bool:
     """Save a message to the chat history cache.
-    
+
     Args:
         interface_path: The interface path (e.g., telegram_bot/123456/2)
         message_text: The message text
@@ -75,17 +74,17 @@ async def save_chat_message(
     """
     if not interface_path or not message_text:
         return False
-    
+
     try:
         from datetime import timezone
-        
+
         # Parse timestamp if it's a string
         if timestamp and isinstance(timestamp, str):
             try:
-                timestamp = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
             except Exception:
                 timestamp = None
-        
+
         # Convert timestamp to UTC for storage
         if timestamp:
             if timestamp.tzinfo is None:
@@ -93,28 +92,41 @@ async def save_chat_message(
                 timestamp = timestamp.replace(tzinfo=timezone.utc)
             # Convert to UTC if in different timezone
             timestamp = timestamp.astimezone(timezone.utc)
-        
+
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
                 history_limit = _get_history_limit(10)
                 # Insert message with timestamp (always in UTC)
                 if timestamp:
-                    await cur.execute("""
+                    await cur.execute(
+                        """
                         INSERT INTO chat_history_cache 
                         (interface_path, sender_name, sender_id, message_text, timestamp)
                         VALUES (%s, %s, %s, %s, %s)
                         ON DUPLICATE KEY UPDATE timestamp=VALUES(timestamp)
-                    """, (interface_path, sender_name, sender_id, message_text, timestamp))
+                    """,
+                        (
+                            interface_path,
+                            sender_name,
+                            sender_id,
+                            message_text,
+                            timestamp,
+                        ),
+                    )
                 else:
-                    await cur.execute("""
+                    await cur.execute(
+                        """
                         INSERT INTO chat_history_cache 
                         (interface_path, sender_name, sender_id, message_text, timestamp)
                         VALUES (%s, %s, %s, %s, UTC_TIMESTAMP())
                         ON DUPLICATE KEY UPDATE timestamp=UTC_TIMESTAMP()
-                    """, (interface_path, sender_name, sender_id, message_text))
-                
+                    """,
+                        (interface_path, sender_name, sender_id, message_text),
+                    )
+
                 # Clean up old messages beyond CHAT_HISTORY_LIMIT
-                await cur.execute("""
+                await cur.execute(
+                    """
                     DELETE FROM chat_history_cache
                     WHERE interface_path = %s
                     AND id NOT IN (
@@ -125,43 +137,49 @@ async def save_chat_message(
                             LIMIT %s
                         ) AS temp
                     )
-                """, (interface_path, interface_path, history_limit))
-                
-                log_debug(f"[chat_history_cache] Saved message for interface_path {interface_path}, sender={sender_name}, timestamp={timestamp}")
+                """,
+                    (interface_path, interface_path, history_limit),
+                )
+
+                log_debug(
+                    f"[chat_history_cache] Saved message for interface_path {interface_path}, sender={sender_name}, timestamp={timestamp}"
+                )
                 return True
     except Exception as e:
         log_debug(f"[chat_history_cache] Failed to save message: {e}")
         return False
 
 
-
 async def load_chat_history(interface_path: str) -> deque:
     """Load chat history from cache for a specific interface path.
-    
+
     Args:
         interface_path: The interface path (e.g., telegram_bot/123456/2)
-        
+
     Returns:
         deque of message objects in chronological order
     """
     if not interface_path:
         return deque()
-    
+
     try:
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
                 history_limit = _get_history_limit(10)
                 # Load messages in chronological order
-                await cur.execute("""
+                await cur.execute(
+                    """
                     SELECT sender_name, sender_id, message_text, timestamp, interface_path
                     FROM chat_history_cache
                     WHERE interface_path = %s
                     ORDER BY timestamp ASC
                     LIMIT %s
-                """, (interface_path, history_limit))
-                
+                """,
+                    (interface_path, history_limit),
+                )
+
                 rows = await cur.fetchall()
-                
+
                 # Convert rows to message objects
                 messages = deque()
                 for row in rows:
@@ -172,20 +190,30 @@ async def load_chat_history(interface_path: str) -> deque:
                             "sender_name": sender_name,
                             "sender_id": sender_id,
                             "text": message_text,
-                            "timestamp": timestamp.isoformat() if isinstance(timestamp, datetime) else str(timestamp),
+                            "timestamp": timestamp.isoformat()
+                            if isinstance(timestamp, datetime)
+                            else str(timestamp),
                             "interface_path": ipath,
                         }
                         messages.append(msg)
                     except Exception as e:
-                        log_debug(f"[chat_history_cache] Error parsing message row: {e}")
-                
-                log_debug(f"[chat_history_cache] Loaded {len(messages)} messages for interface_path {interface_path}")
+                        log_debug(
+                            f"[chat_history_cache] Error parsing message row: {e}"
+                        )
+
+                log_debug(
+                    f"[chat_history_cache] Loaded {len(messages)} messages for interface_path {interface_path}"
+                )
                 for msg in messages:
-                    log_debug(f"[chat_history_cache]   - {msg.get('timestamp')}: {msg.get('sender_name')} [{msg.get('sender_id')}]: {msg.get('text')[:50]}...")
+                    log_debug(
+                        f"[chat_history_cache]   - {msg.get('timestamp')}: {msg.get('sender_name')} [{msg.get('sender_id')}]: {msg.get('text')[:50]}..."
+                    )
                 return messages
-                
+
     except Exception as e:
-        log_error(f"[chat_history_cache] Failed to load chat history for {interface_path}: {e}")
+        log_error(
+            f"[chat_history_cache] Failed to load chat history for {interface_path}: {e}"
+        )
         return deque()
 
 
@@ -221,14 +249,20 @@ async def load_global_chat_history(limit: int = 10) -> deque:
                             "sender_name": sender_name,
                             "sender_id": sender_id,
                             "text": message_text,
-                            "timestamp": timestamp.isoformat() if isinstance(timestamp, datetime) else str(timestamp),
+                            "timestamp": timestamp.isoformat()
+                            if isinstance(timestamp, datetime)
+                            else str(timestamp),
                             "interface_path": ipath,
                         }
                         messages.append(msg)
                     except Exception as e:
-                        log_debug(f"[chat_history_cache] Error parsing global message row: {e}")
+                        log_debug(
+                            f"[chat_history_cache] Error parsing global message row: {e}"
+                        )
 
-                log_debug(f"[chat_history_cache] Loaded {len(messages)} global messages")
+                log_debug(
+                    f"[chat_history_cache] Loaded {len(messages)} global messages"
+                )
                 return messages
     except Exception as e:
         log_error(f"[chat_history_cache] Failed to load global chat history: {e}")
@@ -237,25 +271,32 @@ async def load_global_chat_history(limit: int = 10) -> deque:
 
 async def clear_chat_history(interface_path: str) -> None:
     """Clear all messages for a specific interface path.
-    
+
     Args:
         interface_path: The interface path to clear (e.g., telegram_bot/123456/2)
     """
     if not interface_path:
         return
-    
+
     try:
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
-                await cur.execute("DELETE FROM chat_history_cache WHERE interface_path = %s", (interface_path,))
-                log_info(f"[chat_history_cache] Cleared chat history for {interface_path}")
+                await cur.execute(
+                    "DELETE FROM chat_history_cache WHERE interface_path = %s",
+                    (interface_path,),
+                )
+                log_info(
+                    f"[chat_history_cache] Cleared chat history for {interface_path}"
+                )
     except Exception as e:
-        log_error(f"[chat_history_cache] Failed to clear chat history for {interface_path}: {e}")
+        log_error(
+            f"[chat_history_cache] Failed to clear chat history for {interface_path}: {e}"
+        )
 
 
 async def get_cache_stats() -> dict:
     """Get statistics about the chat history cache.
-    
+
     Returns:
         dict with cache statistics
     """
@@ -266,11 +307,13 @@ async def get_cache_stats() -> dict:
                 # Total messages in cache
                 await cur.execute("SELECT COUNT(*) FROM chat_history_cache")
                 total_messages = (await cur.fetchone())[0]
-                
+
                 # Number of unique interface paths
-                await cur.execute("SELECT COUNT(DISTINCT interface_path) FROM chat_history_cache")
+                await cur.execute(
+                    "SELECT COUNT(DISTINCT interface_path) FROM chat_history_cache"
+                )
                 unique_paths = (await cur.fetchone())[0]
-                
+
                 # Oldest and newest messages
                 await cur.execute("""
                     SELECT MIN(timestamp), MAX(timestamp) FROM chat_history_cache
@@ -285,7 +328,7 @@ async def get_cache_stats() -> dict:
                     "newest": newest.isoformat() if newest else None,
                     "history_limit": history_limit,
                 }
-                
+
                 return {
                     "total_messages": total_messages,
                     "unique_interface_paths": unique_paths,
@@ -319,24 +362,33 @@ async def get_last_message(interface_path: str):
                 return last
             # Otherwise try to extract common fields from message-like object
             try:
-                text = getattr(last, 'text', None) or (last.get('text') if isinstance(last, dict) else None)
-                user = getattr(last, 'from_user', None) or (last.get('from_user') if isinstance(last, dict) else None)
+                text = getattr(last, "text", None) or (
+                    last.get("text") if isinstance(last, dict) else None
+                )
+                user = getattr(last, "from_user", None) or (
+                    last.get("from_user") if isinstance(last, dict) else None
+                )
                 sender_name = None
                 sender_id = None
                 if user:
-                    sender_name = getattr(user, 'username', None) or getattr(user, 'full_name', None)
-                    sender_id = getattr(user, 'id', None)
+                    sender_name = getattr(user, "username", None) or getattr(
+                        user, "full_name", None
+                    )
+                    sender_id = getattr(user, "id", None)
                 # Fallback fields
                 if not sender_name and isinstance(last, dict):
-                    sender_name = last.get('sender_name') or last.get('username')
-                    sender_id = sender_id or last.get('sender_id') or last.get('user_id')
+                    sender_name = last.get("sender_name") or last.get("username")
+                    sender_id = (
+                        sender_id or last.get("sender_id") or last.get("user_id")
+                    )
 
                 return {
-                    'sender_name': sender_name,
-                    'sender_id': sender_id,
-                    'text': text,
-                    'timestamp': getattr(last, 'timestamp', None) or (last.get('timestamp') if isinstance(last, dict) else None),
-                    'interface_path': interface_path,
+                    "sender_name": sender_name,
+                    "sender_id": sender_id,
+                    "text": text,
+                    "timestamp": getattr(last, "timestamp", None)
+                    or (last.get("timestamp") if isinstance(last, dict) else None),
+                    "interface_path": interface_path,
                 }
             except Exception:
                 pass

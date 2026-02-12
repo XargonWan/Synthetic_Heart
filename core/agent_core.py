@@ -186,6 +186,7 @@ class AgentLoopManager:
 
     async def _run_loop_background(self, task_id: int, engine: str, input_payload: Dict[str, Any], context: Dict[str, Any], max_iterations: int) -> None:
         await self._update_agent_task_status(task_id, "running")
+
         output = None
         try:
             for i in range(1, max_iterations + 1):
@@ -227,6 +228,7 @@ class AgentLoopManager:
                     },
                     "system_message": {"type": "agent_iteration", "task_id": task_id, "iteration": i, "engine": engine},
                 }
+
 
                 log_debug(f"[agent_core] Running iteration {i} for task {task_id} using engine={engine}")
 
@@ -352,10 +354,10 @@ class AgentCore:
 
     async def attach_to_active_engine(self) -> None:
         try:
-            from core.config import get_active_llm
-            from core.llm_registry import get_llm_registry
-            name = await get_active_llm()
-            reg = get_llm_registry()
+            from core.config import get_active_cortex_engine
+            from core.cortex_registry import get_cortex_registry
+            name = await get_active_cortex_engine()
+            reg = get_cortex_registry()
             engine = None
             if hasattr(reg, 'get_engine'):
                 engine = reg.get_engine(name)

@@ -10,11 +10,12 @@ API compatibility:
 - At import time the module will run the explicit `register_all()` to
   populate known variables (same behavior as the previous pair of files).
 """
+
 from typing import Any, Callable, Dict, Optional, Iterable
 import re
 
 from core.config_manager import config_registry
-from core.logging_utils import log_debug, log_info, log_warning, log_error
+from core.logging_utils import log_info, log_warning, log_error
 from core.time_zone_utils import get_suggested_locations
 
 # Base profile template (shared with persona_manager.py)
@@ -100,7 +101,9 @@ class ExposedVarDefinition:
                 # Attempt simple cast for primitives
                 _ = self.value_type(value)
             except Exception as e:
-                raise ValidationError(f"Value for {self.key} must be {self.value_type}: {e}")
+                raise ValidationError(
+                    f"Value for {self.key} must be {self.value_type}: {e}"
+                )
 
         # Validator can be a dict describing rules or a callable
         if self.validator is None:
@@ -117,18 +120,22 @@ class ExposedVarDefinition:
         # Dict-based validators
         if isinstance(self.validator, dict):
             v = self.validator
-            if 'regex' in v:
-                if not re.match(v['regex'], str(value)):
-                    raise ValidationError(f"Value for {self.key} does not match pattern")
-            if 'min' in v:
-                if float(value) < float(v['min']):
+            if "regex" in v:
+                if not re.match(v["regex"], str(value)):
+                    raise ValidationError(
+                        f"Value for {self.key} does not match pattern"
+                    )
+            if "min" in v:
+                if float(value) < float(v["min"]):
                     raise ValidationError(f"Value for {self.key} below min {v['min']}")
-            if 'max' in v:
-                if float(value) > float(v['max']):
+            if "max" in v:
+                if float(value) > float(v["max"]):
                     raise ValidationError(f"Value for {self.key} above max {v['max']}")
-            if 'choices' in v:
-                if value not in v['choices']:
-                    raise ValidationError(f"Value for {self.key} not in allowed choices")
+            if "choices" in v:
+                if value not in v["choices"]:
+                    raise ValidationError(
+                        f"Value for {self.key} not in allowed choices"
+                    )
 
 
 class ExposedVariableRegistry:
@@ -143,14 +150,16 @@ class ExposedVariableRegistry:
         exists, `config_registry` will take precedence.
         """
         if definition.key in self._defs:
-            log_warning(f"[exposed_vars] Overwriting existing definition for {definition.key}")
+            log_warning(
+                f"[exposed_vars] Overwriting existing definition for {definition.key}"
+            )
         self._defs[definition.key] = definition
 
         # Register in config_registry so UI and persistence work uniformly.
         try:
             # Map basic ui types to config_registry value_type when reasonable
             value_type = definition.value_type
-            tags = list(definition.tags) + ['exposed']
+            tags = list(definition.tags) + ["exposed"]
             # Use get_var to register and ensure the config machinery knows about it
             # Use the component name supplied by the exposed var definition if present
             # so the UI can attribute exposed variables to their owning plugin/interface
@@ -162,7 +171,7 @@ class ExposedVariableRegistry:
                 description=definition.description,
                 value_type=value_type,
                 group=definition.scope,
-                component=definition.component or 'exposed',
+                component=definition.component or "exposed",
                 readonly=definition.readonly,
                 advanced=definition.advanced,
                 tags=tags,
@@ -171,7 +180,9 @@ class ExposedVariableRegistry:
             )
             log_info(f"[exposed_vars] Registered exposed var {definition.key}")
         except Exception as e:
-            log_error(f"[exposed_vars] Failed to register {definition.key} in config_registry: {e}")
+            log_error(
+                f"[exposed_vars] Failed to register {definition.key} in config_registry: {e}"
+            )
 
     def get_definition(self, key: str) -> Optional[ExposedVarDefinition]:
         return self._defs.get(key)
@@ -394,9 +405,11 @@ def register_all():
         default="suggest",
         value_type=str,
         ui_type="combobox",
-        description=("Autonomy level: 'passive' (respond only), 'suggest' (propose actions), "
-                     "'whitelisted' (automatically execute ONLY actions listed in AUTONOMY_ALLOWED_ACTIONS), "
-                     "'autonomous' (full autonomy — executes actions without whitelist restrictions; use with caution)."),
+        description=(
+            "Autonomy level: 'passive' (respond only), 'suggest' (propose actions), "
+            "'whitelisted' (automatically execute ONLY actions listed in AUTONOMY_ALLOWED_ACTIONS), "
+            "'autonomous' (full autonomy — executes actions without whitelist restrictions; use with caution)."
+        ),
         scope="synth",
         component="persona",
         options=["passive", "suggest", "whitelisted", "autonomous"],
@@ -447,7 +460,9 @@ def register_all():
         default="trainer_only",
         value_type=str,
         ui_type="select",
-        description=("Controls who can send images, audio, video, and other sensitive content to the LLM: 'off' (everyone), 'trainer_only' (only trainer), 'deny_all' (nobody)"),
+        description=(
+            "Controls who can send images, audio, video, and other sensitive content to the LLM: 'off' (everyone), 'trainer_only' (only trainer), 'deny_all' (nobody)"
+        ),
         scope="core",
         component="core",
         tags=["access_control"],
@@ -468,7 +483,7 @@ def register_all():
     except Exception as e:
         log_error(f"[variables_engine] Error getting suggested locations: {e}")
         locs = []
-    
+
     register_exposed_var(
         "PROMPT_LOCATION",
         label="Location",
@@ -482,8 +497,8 @@ def register_all():
         validator={
             "type": "custom",
             "pattern": r"^(.+),(.+)$|^$",
-            "message": "Location must be in format 'City,Country' (separated by comma) or leave empty"
-        }
+            "message": "Location must be in format 'City,Country' (separated by comma) or leave empty",
+        },
     )
 
     # --- Database connection settings (advanced) ---
@@ -759,8 +774,10 @@ def register_all():
         default="👀",
         value_type=str,
         ui_type="string",
-        description=("Emoji to use as reaction when bot is mentioned. Leave empty to disable. "
-                     "⚠️ Note: Some interfaces or servers/channels may not support all emojis as reactions."),
+        description=(
+            "Emoji to use as reaction when bot is mentioned. Leave empty to disable. "
+            "⚠️ Note: Some interfaces or servers/channels may not support all emojis as reactions."
+        ),
         scope="core",
         component="reactions",
     )

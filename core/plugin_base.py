@@ -26,7 +26,7 @@ class PluginBase:
         """Return plugin metadata such as name, description and version."""
         raise NotImplementedError("get_metadata must be implemented by the plugin")
 
-    def get_history_contributions(self, **kwargs) -> List['HistoryContribution']:
+    def get_history_contributions(self, **kwargs) -> List["HistoryContribution"]:
         """Optional: provide history contributions for prompt context.
 
         Plugins can override this to return one or more contributions. The core

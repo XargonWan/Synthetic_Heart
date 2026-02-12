@@ -11,6 +11,11 @@ from zoneinfo import ZoneInfo
 try:
     # load_dotenv is optional; don't crash if package is missing
     from dotenv import load_dotenv
+
+    # Support both local development (cwd) and Docker (/app/.env)
+    # The default find_dotenv() logic works well for local dev
+    load_dotenv(override=False)
+    # Explicitly check /app/.env for Docker if not found above or for extra safety
     load_dotenv(dotenv_path="/app/.env", override=False)
 except Exception:
     pass
@@ -32,7 +37,9 @@ _LEVELS = {
 }
 
 # Global variables for logging configuration
-_LOGGING_LEVEL = os.getenv("LOGGING_LEVEL", "INFO").upper()  # Default to INFO or env value
+_LOGGING_LEVEL = os.getenv(
+    "LOGGING_LEVEL", "INFO"
+).upper()  # Default to INFO or env value
 _LOGGING_LOGCHAT_LEVEL = "ERROR"
 
 
@@ -57,11 +64,11 @@ class TimeZoneFormatter(logging.Formatter):
 
 def _register_logging_config():
     """Register logging configuration with config_registry.
-    
+
     This is called lazily to avoid circular imports.
     """
     global _LOGGING_LEVEL, _LOGGING_LOGCHAT_LEVEL
-    
+
     try:
         # If environment variables are present, honor them first to avoid
         # connecting to DB during early startup (DB might not be available).
@@ -112,7 +119,9 @@ def _register_logging_config():
                     constraints={"choices": ["DEBUG", "INFO", "WARNING", "ERROR"]},
                     tags=["logs_only"],
                 ).upper()
-                config_registry.add_listener("LOGGING_LOGCHAT_LEVEL", _update_logchat_level)
+                config_registry.add_listener(
+                    "LOGGING_LOGCHAT_LEVEL", _update_logchat_level
+                )
     except ImportError:
         # If config_manager is not available yet, use defaults
         pass
@@ -120,7 +129,7 @@ def _register_logging_config():
 
 def _write_to_separate_log(level: str, message: str, log_file: str) -> None:
     """Write log message to a separate log file.
-    
+
     Args:
         level: Log level string
         message: Message to log
@@ -128,28 +137,34 @@ def _write_to_separate_log(level: str, message: str, log_file: str) -> None:
     """
     try:
         separate_log_path = os.path.join(_LOG_DIR, f"{log_file}.log")
-        
+
         # Crea logger separato per questo file se non esiste
         logger_name = f"synth_{log_file}"
         separate_logger = logging.getLogger(logger_name)
-        
+
         # Setup solo se non ha già handler
         if not separate_logger.handlers:
             separate_logger.setLevel(_LEVELS.get(_LOGGING_LEVEL, logging.ERROR))
             separate_logger.propagate = False
-            
+
             formatter = TimeZoneFormatter(
                 "[%(asctime)s] [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s",
                 "%Y-%m-%d %H:%M:%S",
             )
-            
+
+            # Rotate at 1MB, keep 9999 backups (effectively never delete)
             fh = RotatingFileHandler(
-                separate_log_path, maxBytes=1_000_000, backupCount=3, encoding="utf-8"
+                separate_log_path,
+                maxBytes=1_000_000,
+                backupCount=9999,
+                encoding="utf-8",
             )
             fh.setFormatter(formatter)
             separate_logger.addHandler(fh)
-        
-        separate_logger.log(_LEVELS.get(level.upper(), logging.INFO), message, stacklevel=4)
+
+        separate_logger.log(
+            _LEVELS.get(level.upper(), logging.INFO), message, stacklevel=4
+        )
     except Exception:
         # Silent failure - non bloccare il logging principale
         pass
@@ -184,32 +199,46 @@ def setup_logging() -> logging.Logger:
         # Try to add a file handler. If the file handler can't be created
         # due to permission errors or other IO problems, fallback to stream
         # logging so the application can still start and emit useful logs.
+        # NOTE: backupCount=9999 means files rotate at 1MB but never auto-delete
         try:
             fh = RotatingFileHandler(
-                _LOG_FILE, maxBytes=1_000_000, backupCount=3, encoding="utf-8"
+                _LOG_FILE, maxBytes=1_000_000, backupCount=9999, encoding="utf-8"
             )
             fh.setFormatter(formatter)
             logger.addHandler(fh)
         except Exception as e:  # pragma: no cover - environment dependent
             # If file handler fails, write a warning to stdout via stream handler
             try:
-                logger.warning(f"[logging_utils] Could not open log file '{_LOG_FILE}': {e}. Falling back to stdout")
+                logger.warning(
+                    f"[logging_utils] Could not open log file '{_LOG_FILE}': {e}. Falling back to stdout"
+                )
             except Exception:
                 # As a last resort print to stdout directly
-                print(f"[logging_utils] Could not open log file '{_LOG_FILE}': {e}. Falling back to stdout", file=sys.stderr)
+                print(
+                    f"[logging_utils] Could not open log file '{_LOG_FILE}': {e}. Falling back to stdout",
+                    file=sys.stderr,
+                )
 
     _logger = logger
     # Log effective logging configuration at startup
     try:
-        logger.log(_LEVELS.get(_LOGGING_LEVEL, logging.INFO), f"[logging_utils] Started synth logger with level={_LOGGING_LEVEL}, log_file={_LOG_FILE}")
+        logger.log(
+            _LEVELS.get(_LOGGING_LEVEL, logging.INFO),
+            f"[logging_utils] Started synth logger with level={_LOGGING_LEVEL}, log_file={_LOG_FILE}",
+        )
     except Exception:
         pass
     return logger
 
 
-def _log(level: str, message: str, exc: Optional[Exception] = None, log_file: Optional[str] = None) -> None:
+def _log(
+    level: str,
+    message: str,
+    exc: Optional[Exception] = None,
+    log_file: Optional[str] = None,
+) -> None:
     """Log a message to the specified log file or default synth.log.
-    
+
     Args:
         level: Log level (DEBUG, INFO, WARNING, ERROR)
         message: Message to log
@@ -220,7 +249,7 @@ def _log(level: str, message: str, exc: Optional[Exception] = None, log_file: Op
     level = level.upper()
     if exc is not None:
         message = f"{message}\n{''.join(traceback.format_exception(exc))}".rstrip()
-    
+
     # Se specificato un log_file separato, scrivi SOLO lì
     if log_file:
         _write_to_separate_log(level, message, log_file)
@@ -228,36 +257,50 @@ def _log(level: str, message: str, exc: Optional[Exception] = None, log_file: Op
         # Altrimenti scrivi nel log principale
         logger = setup_logging()
         logger.log(_LEVELS.get(level, logging.INFO), message, stacklevel=3)
-    
+
     # Skip notification for interface errors and transport errors to avoid recursion
-    if ("Failed to send message" in message or 
-        "Unknown channel" in message or
-        "interface" in message.lower() or
-        "transport" in message):
+    if (
+        "Failed to send message" in message
+        or "Unknown channel" in message
+        or "interface" in message.lower()
+        or "transport" in message
+    ):
         return
-    
+
     # Check if this level should trigger notifications
     logchat_threshold = _LEVELS.get(_LOGGING_LOGCHAT_LEVEL, logging.ERROR)
     current_level = _LEVELS.get(level, logging.INFO)
-    
+
     if current_level >= logchat_threshold:
         try:
-            from core.config import get_log_chat_id_sync, get_log_chat_thread_id_sync, get_log_chat_interface_sync, get_trainer_id
+            from core.config import (
+                get_log_chat_id_sync,
+                get_log_chat_thread_id_sync,
+                get_log_chat_interface_sync,
+            )
             from core.core_initializer import INTERFACE_REGISTRY
             import asyncio
-            
+
             notification_message = f"[{level}] {message}"
-            
+
             # Try LogChat first - use the specific interface saved in DB
             log_chat_id = get_log_chat_id_sync()
             log_chat_interface = get_log_chat_interface_sync()
-            
-            if log_chat_id and log_chat_interface and log_chat_interface in INTERFACE_REGISTRY:
+
+            if (
+                log_chat_id
+                and log_chat_interface
+                and log_chat_interface in INTERFACE_REGISTRY
+            ):
                 iface = INTERFACE_REGISTRY.get(log_chat_interface)
-                if iface and hasattr(iface, 'send_message'):
+                if iface and hasattr(iface, "send_message"):
+
                     async def send_to_logchat():
                         try:
-                            message_data = {"text": notification_message, "target": log_chat_id}
+                            message_data = {
+                                "text": notification_message,
+                                "target": log_chat_id,
+                            }
                             thread_id = get_log_chat_thread_id_sync()
                             if thread_id:
                                 message_data["thread_id"] = thread_id
@@ -280,9 +323,9 @@ def _log(level: str, message: str, exc: Optional[Exception] = None, log_file: Op
                     except RuntimeError:
                         pass  # No event loop available in this context
                     return
-            
+
             # No fallback to trainer here to prevent error spam. Configure LogChat if needed.
-                        
+
         except Exception:
             # Silent failure - no recursive logging
             pass
@@ -290,7 +333,7 @@ def _log(level: str, message: str, exc: Optional[Exception] = None, log_file: Op
 
 def log_debug(msg: str, log_file: Optional[str] = None) -> None:
     """Log debug message.
-    
+
     Args:
         msg: Message to log
         log_file: Optional separate log file name (without extension)
@@ -300,7 +343,7 @@ def log_debug(msg: str, log_file: Optional[str] = None) -> None:
 
 def log_info(msg: str, log_file: Optional[str] = None) -> None:
     """Log info message.
-    
+
     Args:
         msg: Message to log
         log_file: Optional separate log file name (without extension)
@@ -310,7 +353,7 @@ def log_info(msg: str, log_file: Optional[str] = None) -> None:
 
 def log_warning(msg: str, log_file: Optional[str] = None) -> None:
     """Log warning message.
-    
+
     Args:
         msg: Message to log
         log_file: Optional separate log file name (without extension)
@@ -318,9 +361,11 @@ def log_warning(msg: str, log_file: Optional[str] = None) -> None:
     _log("WARNING", msg, log_file=log_file)
 
 
-def log_error(msg: str, exc: Optional[Exception] = None, log_file: Optional[str] = None) -> None:
+def log_error(
+    msg: str, exc: Optional[Exception] = None, log_file: Optional[str] = None
+) -> None:
     """Log error message.
-    
+
     Args:
         msg: Message to log
         exc: Optional exception to include

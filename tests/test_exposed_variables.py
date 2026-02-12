@@ -19,7 +19,7 @@ async def test_corrector_retries_dynamic_update():
 
     # Try importing plugin that references the value; skip if deps missing
     try:
-        event_plugin = importlib.import_module('plugins.event_plugin')
+        event_plugin = importlib.import_module("plugins.event_plugin")
     except Exception:
         pytest.skip("plugins.event_plugin not importable in test environment")
     assert int(event_plugin.CORRECTOR_RETRIES) == 5
@@ -65,5 +65,6 @@ def test_system_reply_timeout_from_config():
 
     # Set to a custom value and verify getter returns it
     import asyncio
-    asyncio.run(config_registry.set_value('AWAIT_RESPONSE_TIMEOUT', 123))
+
+    asyncio.run(config_registry.set_value("AWAIT_RESPONSE_TIMEOUT", 123))
     assert _get_system_reply_timeout() == 123

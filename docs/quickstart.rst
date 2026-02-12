@@ -91,6 +91,6 @@ SyntH uses a zero-configuration approach where components are automatically disc
 
 - **Interfaces**: Chat platforms like Telegram, Discord, Reddit
 - **Plugins**: Action providers like terminal access, weather, file operations
-- **LLM Engines**: AI backends like ChatGPT (via Selenium), Gemini, Grok (experimental), or manual input. **Note: Only Selenium ChatGPT (Legacy) is currently fully functional.**
+- **Cortex Engines**: categories of runtime engines (kinds: ``llm``, ``live``, ``agent``) such as ChatGPT (via Selenium), Gemini Live or Agent-based engines. Each engine can provide a short human-readable label at registration time (``ENGINE_LABEL`` or registry ``label``) to explain its intended use. **Note: Only Selenium ChatGPT (Legacy) is currently fully functional.**
 
 Simply place compatible Python files in the appropriate directories and restart - no manual registration required. This modular architecture ensures that functionality can be added or removed without modifying the core system.

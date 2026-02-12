@@ -58,7 +58,9 @@ class XInterface:
             },
         }
 
-    async def send_message(self, payload: Dict[str, Any], original_message: Any | None = None) -> None:
+    async def send_message(
+        self, payload: Dict[str, Any], original_message: Any | None = None
+    ) -> None:
         """Format and log a message post."""
 
         text = payload.get("text", "")
@@ -73,10 +75,12 @@ class XInterface:
         # Check if this is an autonomous posting (no original_message) that should use auto-response
         if original_message is None and payload.get("autonomous", False):
             # This would be for future autonomous X posting features
-            log_debug("[x_interface] Autonomous posting detected, using auto-response system")
+            log_debug(
+                "[x_interface] Autonomous posting detected, using auto-response system"
+            )
             # For now, just log. Future implementation could create a synthetic message
             # and route through request_llm_delivery for LLM-mediated posting decisions
-        
+
         log_info(f"[x_interface] Message posted: {text}")
 
     async def _read_timeline(self) -> List[str]:
@@ -93,7 +97,9 @@ class XInterface:
         def fetch() -> List[str]:
             tweets = []
             try:
-                for idx, tweet in enumerate(sntwitter.TwitterUserScraper(self.username).get_items()):
+                for idx, tweet in enumerate(
+                    sntwitter.TwitterUserScraper(self.username).get_items()
+                ):
                     if idx >= 5:
                         break
                     tweets.append(tweet.content)
@@ -119,7 +125,9 @@ class XInterface:
         def fetch() -> List[str]:
             results = []
             try:
-                for idx, tweet in enumerate(sntwitter.TwitterSearchScraper(query).get_items()):
+                for idx, tweet in enumerate(
+                    sntwitter.TwitterSearchScraper(query).get_items()
+                ):
                     if idx >= 5:
                         break
                     results.append(tweet.content)
@@ -132,7 +140,9 @@ class XInterface:
             log_info(f"[x_interface] {r}")
         return results
 
-    async def execute_action(self, action: dict, context: dict, bot: Any, original_message: dict):
+    async def execute_action(
+        self, action: dict, context: dict, bot: Any, original_message: dict
+    ):
         """Execute actions using this interface."""
 
         action_type = action.get("type")
@@ -151,15 +161,13 @@ class XInterface:
     @staticmethod
     def get_interface_instructions() -> str:
         """Return specific usage instructions for the X interface."""
-        return (
-            "Use interface: x to post or retrieve data from X. For direct messages or mentions, set 'target_user'."
-        )
+        return "Use interface: x to post or retrieve data from X. For direct messages or mentions, set 'target_user'."
 
     @staticmethod
     def validate_payload(action_type: str, payload: dict) -> list:
         """Validate payload for X actions."""
         errors = []
-        
+
         if action_type == "message_x":
             if not payload.get("text"):
                 errors.append("text is required for message_x")
@@ -167,7 +175,7 @@ class XInterface:
             if not payload.get("query"):
                 errors.append("query is required for x_search")
         # x_timeline_read requires no specific fields
-        
+
         return errors
 
     @staticmethod
@@ -177,25 +185,33 @@ class XInterface:
             return {
                 "description": "Send a message or reply on X.",
                 "payload": {
-                    "text": {"type": "string", "example": "Hello X!", "description": "The message text to send."},
-                    "target_user": {"type": "string", "example": "@example", "description": "The username of the recipient."},
-                    "reply_to_message_id": {"type": "string", "example": "1234567890", "description": "Optional ID of the message to reply to", "optional": True},
+                    "text": {
+                        "type": "string",
+                        "example": "Hello X!",
+                        "description": "The message text to send.",
+                    },
+                    "target_user": {
+                        "type": "string",
+                        "example": "@example",
+                        "description": "The username of the recipient.",
+                    },
+                    "reply_to_message_id": {
+                        "type": "string",
+                        "example": "1234567890",
+                        "description": "Optional ID of the message to reply to",
+                        "optional": True,
+                    },
                 },
             }
         elif action_name == "x_timeline_read":
             return {
                 "description": "Read latest posts from authenticated user's timeline",
-                "payload": {
-                    "interface": "x"
-                }
+                "payload": {"interface": "x"},
             }
         elif action_name == "x_search":
             return {
                 "description": "Search public posts on X",
-                "payload": {
-                    "query": "search terms",
-                    "interface": "x"
-                }
+                "payload": {"query": "search terms", "interface": "x"},
             }
         return {}
 

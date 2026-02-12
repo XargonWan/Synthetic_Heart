@@ -2,11 +2,11 @@
 
 from core.db import get_conn_ctx
 from datetime import datetime, timedelta, timezone
-from core.logging_utils import log_debug, log_info, log_warning, log_error
-import aiomysql
+from core.logging_utils import log_debug, log_error
 
 # Observation interval to evaluate whether the emotion is reinforced or softened
 LOOKBACK_MINUTES = 30
+
 
 async def process_triggers_for_emotion(emotion: dict) -> int:
     """

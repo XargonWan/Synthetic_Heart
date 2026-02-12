@@ -8,8 +8,6 @@ internal responsibilities further.
 # Import original module content from top-level to avoid duplication in this patch
 # We will keep a copy of the plugin here to be used as main implementation
 
-from typing import Any
-
 try:
     from plugins.grillo.grillo_impl import GrilloPlugin  # type: ignore
 except Exception:

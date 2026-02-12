@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import List, Dict, Any
+from typing import List
 
 from core.core_initializer import register_plugin
 from core.logging_utils import log_info, log_error
@@ -53,7 +53,9 @@ def _resolve_log_path(filename: str) -> str:
     # Join and normalize
     path = os.path.normpath(os.path.join(LOG_DIR, filename))
     # Ensure it resides in LOG_DIR
-    if not path.startswith(os.path.normpath(LOG_DIR) + os.sep) and path != os.path.normpath(LOG_DIR):
+    if not path.startswith(
+        os.path.normpath(LOG_DIR) + os.sep
+    ) and path != os.path.normpath(LOG_DIR):
         raise ValueError("Invalid log path")
     return path
 
@@ -71,7 +73,7 @@ def _tail_lines(path: str, lines: int) -> List[str]:
             except OSError:
                 f.seek(0)
             data = f.read().decode(errors="replace")
-    except Exception as e:
+    except Exception:
         raise
     all_lines = data.splitlines()
     if len(all_lines) <= lines:
@@ -79,7 +81,9 @@ def _tail_lines(path: str, lines: int) -> List[str]:
     return all_lines[-lines:]
 
 
-def _search_in_lines(lines: List[str], queries: List[str], regex: bool, context: int = 0) -> List[str]:
+def _search_in_lines(
+    lines: List[str], queries: List[str], regex: bool, context: int = 0
+) -> List[str]:
     matches = []
     if regex:
         patterns = [re.compile(q) for q in queries]
@@ -128,7 +132,6 @@ class CheckLogsPlugin:
                 "required_fields": [],
                 "optional_fields": ["file", "lines"],
             },
-
             "search_logs": {
                 "description": "Search logs for keywords or regular expressions",
                 "required_fields": ["queries"],
@@ -145,7 +148,12 @@ class CheckLogsPlugin:
         if action_name == "search_logs":
             return {
                 "description": "Search logs for keywords or regular expressions",
-                "payload": {"file": "synth.log", "queries": ["error", "exception"], "regex": False, "lines": 500},
+                "payload": {
+                    "file": "synth.log",
+                    "queries": ["error", "exception"],
+                    "regex": False,
+                    "lines": 500,
+                },
             }
         return {}
 
@@ -183,7 +191,9 @@ class CheckLogsPlugin:
             except Exception as e:
                 log_error(f"[check_logs] failed to read file {path}: {e}")
                 try:
-                    bot.send_message(original_message.chat_id, f"Failed to read log file: {e}")
+                    bot.send_message(
+                        original_message.chat_id, f"Failed to read log file: {e}"
+                    )
                 except Exception:
                     pass
 
@@ -191,7 +201,9 @@ class CheckLogsPlugin:
             queries = payload.get("queries")
             if not queries:
                 try:
-                    bot.send_message(original_message.chat_id, "No queries provided for search_logs")
+                    bot.send_message(
+                        original_message.chat_id, "No queries provided for search_logs"
+                    )
                 except Exception:
                     pass
                 return
@@ -214,7 +226,9 @@ class CheckLogsPlugin:
                 msg = f"Search results in {file} for {queries}:\n```\n{body}\n```"
                 bot.send_message(original_message.chat_id, msg)
             except re.error as e:
-                bot.send_message(original_message.chat_id, f"Invalid regular expression: {e}")
+                bot.send_message(
+                    original_message.chat_id, f"Invalid regular expression: {e}"
+                )
             except Exception as e:
                 log_error(f"[check_logs] search failed: {e}")
                 try:

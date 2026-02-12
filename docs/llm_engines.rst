@@ -270,6 +270,18 @@ LLM engines are automatically discovered through the core initializer:
 4. **Capability Indexing**: Engine capabilities are indexed for runtime selection
 5. **Dynamic Loading**: Engines can be loaded/unloaded without system restart
 
+Labeling engines for the WebUI
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Engines may provide a short, human-readable label used by the WebUI to help operators
+choose the right engine for a task. Provide a label by either:
+
+- exporting ``ENGINE_LABEL = "short description"`` in the engine module, or
+- defining ``engine_label = "short description"`` on ``PLUGIN_CLASS``
+- or passing ``label="short description"`` to ``CortexRegistry.register_engine_module``
+
+These labels are surfaced in the Components page under "Cortex Engines" and are intended
+to be brief and informative (one sentence).
+
 Developing LLM Engines
 ----------------------
 
@@ -398,22 +410,33 @@ Suggested hooks for engines:
 Engines must not raise exceptions if the Agent plugin is absent; calls should be
 protected and degrade safely.
 
-Engine Integration
-------------------
+Engine Integration (Cortex)
+----------------------------
 
-Once created, register your engine with the LLM registry:
+Engines are now organized under the new **Cortex** abstraction. A cortex has a *kind* (e.g., ``llm``, ``live``, ``agent``) and one or more registered engines. Engines should register themselves with the Cortex registry.
 
 .. code-block:: python
 
-   from core.llm_registry import get_llm_registry
-   get_llm_registry().register_engine_module("my_engine", "llm_engines.my_engine")
+   from core.cortex_registry import get_cortex_registry
+   cortex = get_cortex_registry()
+   # Register an LLM engine (cortex='llm') or a live engine (cortex='live')
+   cortex.register_engine_module("my_engine", "cortex.llm_engine.my_engine", cortex='llm')
 
-Switch to your engine at runtime:
+Switch to a cortex engine at runtime using the Components tab in the WebUI
+or via the CLI/commands (the UI now asks for the *cortex kind* first, then an engine):
 
 .. code-block:: text
 
-   /llm my_engine
+   # Select cortex kind (e.g., llm)
+   /components set_active_cortex llm
 
+   # Select specific engine for the cortex
+   /components set_active_cortex_engine my_engine
+
+Notes
+-----
+- Use the Cortex registry helpers to discover engines and their capabilities: ``get_cortex_registry().get_available_engines(cortex)``.
+- Engines may optionally declare capability flags (vision, audio, actions, bidi, low_latency) when registered; these are used to choose the best engine for a given task.
 Engine Capabilities
 -------------------
 
@@ -642,7 +665,7 @@ user can authenticate via the service's web interface.
 
 Endpoint:
 
-``POST /api/components/llm/login``
+``POST /api/components/cortex/login``
 
 Request JSON:
 

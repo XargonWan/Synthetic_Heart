@@ -3,15 +3,29 @@
 import os
 import json
 import asyncio
+
 try:
     from dotenv import load_dotenv  # type: ignore
 except Exception:  # pragma: no cover - fallback when dotenv not installed
+
     def load_dotenv(*args, **kwargs):
         return False
+
+
 from core.db import get_conn_ctx
-import aiomysql
+# aiomysql is optional at import time — make the import lazy/fail-safe so
+# importing core.config doesn't raise in environments where aiomysql isn't
+# installed (e.g., lightweight tests or build-time checks). Modules that need
+# aiomysql at runtime should check `aiomysql` is not None and raise a clear
+# error if necessary.
+try:
+    import aiomysql
+except Exception:
+    aiomysql = None
+
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.config_manager import config_registry
+
 """
 notify_trainer(chat_id: int, message: str) -> None
 Send a notification to the trainer via the centralized logic in core/notifier.py.
@@ -31,7 +45,6 @@ def _parse_trainer_ids(raw_value: str) -> dict[str, int]:
             interface_name, trainer_id = entry.split(":", 1)
             mapping[interface_name.strip()] = int(trainer_id.strip())
     return mapping
-
 
 
 def _parse_trainer_ids(raw_value: str) -> dict[str, int]:
@@ -113,9 +126,10 @@ ACTIVE_LLM = config_registry.get_var(
     hidden=True,  # Temporarily hidden until we re-register with choices
 )
 
+
 async def get_active_llm():
     """Get the currently active LLM engine from config registry.
-    
+
     This function ensures the value is loaded from the database if available,
     not just the default value that was set during module import.
     """
@@ -123,16 +137,17 @@ async def get_active_llm():
         # Force retrieval from config registry to get the most up-to-date value
         # This ensures we load from DB even if called before load_all_from_db()
         current_value = config_registry.get_value("ACTIVE_LLM", "selenium_chatgpt")
-        
+
         # Check for None, empty string, or literal "None" string
         if current_value and current_value != "" and current_value != "None":
             log_debug(f"[config] 🧠 Active LLM: {current_value}")
             return current_value
     except Exception as e:
         log_error(f"[config] ❌ Error reading ACTIVE_LLM: {repr(e)}")
-    
+
     # Default fallback
     return "selenium_chatgpt"
+
 
 async def set_active_llm(name: str):
     """Save the active LLM engine to config registry and database."""
@@ -142,6 +157,7 @@ async def set_active_llm(name: str):
     except Exception as e:
         log_error(f"[config] ❌ Error saving ACTIVE_LLM to database: {repr(e)}")
         raise
+
 
 async def switch_active_llm(name: str, use_hot_swap: bool = True):
     """
@@ -154,13 +170,16 @@ async def switch_active_llm(name: str, use_hot_swap: bool = True):
 
     available = list_available_llms()
     if name not in available:
-        raise ValueError(f"LLM '{name}' is not available. Available: {', '.join(available)}")
+        raise ValueError(
+            f"LLM '{name}' is not available. Available: {', '.join(available)}"
+        )
 
     current = await get_active_llm()
 
     def _get_loaded_plugin_name() -> str | None:
         try:
             from core import plugin_instance
+
             loaded = getattr(plugin_instance, "plugin", None)
             if loaded is None:
                 return None
@@ -170,7 +189,9 @@ async def switch_active_llm(name: str, use_hot_swap: bool = True):
 
     loaded_name = _get_loaded_plugin_name()
     if name == current and loaded_name == name:
-        log_debug(f"[config] 🔄 LLM already active and loaded: {name}, no switch needed.")
+        log_debug(
+            f"[config] 🔄 LLM already active and loaded: {name}, no switch needed."
+        )
         return
 
     # Ensure only one LLM switch runs at a time
@@ -181,7 +202,9 @@ async def switch_active_llm(name: str, use_hot_swap: bool = True):
         current = await get_active_llm()
         loaded_name = _get_loaded_plugin_name()
         if name == current and loaded_name == name:
-            log_debug(f"[config] 🔄 LLM already active and loaded under lock: {name}, no switch needed.")
+            log_debug(
+                f"[config] 🔄 LLM already active and loaded under lock: {name}, no switch needed."
+            )
             return
 
         # Persist the new LLM choice to config
@@ -203,30 +226,39 @@ async def switch_active_llm(name: str, use_hot_swap: bool = True):
             if use_hot_swap:
                 # Hot-swap: direct plugin reload and ensure plugin start succeeds
                 from core.plugin_instance import load_plugin
+
                 await load_plugin(name, ensure_started=True, start_timeout=30.0)
                 log_info(f"[config] ✅ LLM hot-swapped to {name}")
                 # Notify trainer about successful change
                 try:
                     from core.notifier import notify_trainer
+
                     notify_trainer(f"✅ LLM mode dynamically updated to `{name}`.")
                 except Exception as e:  # pragma: no cover - best-effort notify
-                    log_warning(f"[config] Failed to notify trainer about LLM change: {e}")
+                    log_warning(
+                        f"[config] Failed to notify trainer about LLM change: {e}"
+                    )
             else:
                 # Full reinitialization
                 from core.core_initializer import core_initializer
+
                 await core_initializer.initialize_all()
                 log_info(f"[config] ✅ LLM switched to {name} (full reinitialization)")
                 # Notify trainer about successful change
                 try:
                     from core.notifier import notify_trainer
+
                     notify_trainer(f"✅ LLM mode dynamically updated to `{name}`.")
                 except Exception as e:  # pragma: no cover - best-effort notify
-                    log_warning(f"[config] Failed to notify trainer about LLM change: {e}")
+                    log_warning(
+                        f"[config] Failed to notify trainer about LLM change: {e}"
+                    )
         except Exception as e:
             # Log with traceback and notify trainer about failure
             log_error(f"[config] ❌ Failed to switch LLM to {name}: {e}", exc=e)
             try:
                 from core.notifier import notify_trainer
+
                 notify_trainer(f"❌ Failed to switch LLM to `{name}`: {e}")
             except Exception:
                 pass
@@ -235,9 +267,11 @@ async def switch_active_llm(name: str, use_hot_swap: bool = True):
         finally:
             log_debug(f"[config] 🔓 Released LLM switch lock for '{name}'")
 
+
 _log_chat_id: int | None = None  # cached log chat ID
 _log_chat_thread_id: int | None = None  # cached log chat thread ID
 _log_chat_interface: str | None = None  # cached log chat interface
+
 
 async def get_log_chat_id() -> int | None:
     """Return the configured log chat ID, if any."""
@@ -283,11 +317,13 @@ async def get_log_chat_interface() -> str | None:
                 log_error(f"[config] ❌ Error in get_log_chat_interface(): {repr(e)}")
     return _log_chat_interface
 
+
 async def set_log_chat_id(chat_id: int) -> None:
     """Persist and cache the log chat ID."""
     global _log_chat_id
     _log_chat_id = chat_id
     from core.db import ensure_core_tables
+
     await ensure_core_tables()
     async with get_conn_ctx() as conn:
         try:
@@ -297,11 +333,10 @@ async def set_log_chat_id(chat_id: int) -> None:
                     ("log_chat", str(chat_id)),
                 )
                 await conn.commit()
-                log_debug(
-                    f"[config] 💾 Saved log_chat in DB: {chat_id}"
-                )
+                log_debug(f"[config] 💾 Saved log_chat in DB: {chat_id}")
         except Exception as e:
             log_error(f"[config] ❌ Error in set_log_chat_id(): {repr(e)}")
+
 
 async def get_log_chat_thread_id() -> int | None:
     """Return the configured log chat thread ID, if any."""
@@ -326,13 +361,17 @@ async def get_log_chat_thread_id() -> int | None:
                 log_error(f"[config] ❌ Error in get_log_chat_thread_id(): {repr(e)}")
     return _log_chat_thread_id
 
-async def set_log_chat_id_and_thread(chat_id: int, thread_id: int | None = None, interface: str = "webui") -> None:
+
+async def set_log_chat_id_and_thread(
+    chat_id: int, thread_id: int | None = None, interface: str = "webui"
+) -> None:
     """Persist and cache the log chat ID, thread ID, and interface."""
     global _log_chat_id, _log_chat_thread_id, _log_chat_interface
     _log_chat_id = chat_id
     _log_chat_thread_id = thread_id
     _log_chat_interface = interface
     from core.db import ensure_core_tables
+
     await ensure_core_tables()
     async with get_conn_ctx() as conn:
         try:
@@ -361,6 +400,7 @@ async def set_log_chat_id_and_thread(chat_id: int, thread_id: int | None = None,
                 )
         except Exception as e:
             log_error(f"[config] ❌ Error in set_log_chat_id_and_thread(): {repr(e)}")
+
 
 def get_log_chat_id_sync() -> int | None:
     """Synchronous helper to fetch cached log chat ID, loading from DB if needed."""
@@ -391,6 +431,7 @@ def get_log_chat_interface_sync() -> str | None:
         return _log_chat_interface
     return asyncio.run(get_log_chat_interface())
 
+
 def get_log_chat_thread_id_sync() -> int | None:
     """Synchronous helper to fetch cached log chat thread ID."""
     global _log_chat_thread_id
@@ -404,6 +445,7 @@ def get_log_chat_thread_id_sync() -> int | None:
         return _log_chat_thread_id
     return asyncio.run(get_log_chat_thread_id())
 
+
 def list_available_llms():
     engines_dir = os.path.join(os.path.dirname(__file__), "../llm_engines")
     return sorted(
@@ -412,15 +454,87 @@ def list_available_llms():
         if fname.endswith(".py") and not fname.startswith("__")
     )
 
+
+# --- Compatibility helpers for Cortex (used by WebUI components tab)
+# These functions provide a backward-compatible shim for older WebUI code
+# that expects simple helpers in core.config. They delegate to the
+# CortexRegistry where possible to avoid duplicating discovery logic.
+
+def list_available_cortexs():
+    """Return a sorted list of known cortex kinds (e.g., 'llm', 'live', 'agent').
+
+    This is a synchronous helper kept for backward compatibility with
+    existing WebUI code that imports it directly from core.config.
+    """
+    try:
+        from core.cortex_registry import get_cortex_registry
+
+        reg = get_cortex_registry()
+        kinds = {meta.get("cortex", "llm") for meta in reg._engine_meta.values()}
+        if not kinds:
+            return ["llm"]
+        return sorted(kinds)
+    except Exception:
+        return ["llm"]
+
+
+def list_available_cortex_engines(kind: str | None = None):
+    """Return available engine names for a given cortex kind.
+
+    If kind is None or 'llm' this will fall back to legacy LLM discovery.
+    """
+    try:
+        if kind is None or kind == "llm":
+            return list_available_llms()
+        from core.cortex_registry import get_cortex_registry
+
+        reg = get_cortex_registry()
+        return reg.get_available_engines(kind)
+    except Exception:
+        return []
+
+
+async def get_active_cortex_engine():
+    """Async helper to get the currently active cortex engine.
+
+    For now this delegates to the legacy ACTIVE_LLM config to preserve
+    existing behaviour until Cortex-wide configuration is introduced.
+    """
+    try:
+        return await get_active_llm()
+    except Exception:
+        # Fallback: return the default LLM
+        return "manual"
+
+
+async def get_active_cortex():
+    """Return the cortex kind for the active engine (async).
+
+    This inspects the CortexRegistry metadata for the configured engine
+    and returns its declared cortex kind, defaulting to 'llm'.
+    """
+    try:
+        engine = await get_active_cortex_engine()
+        from core.cortex_registry import get_cortex_registry
+
+        reg = get_cortex_registry()
+        meta = reg._engine_meta.get(engine, {})
+        return meta.get("cortex", "llm")
+    except Exception:
+        return "llm"
+
+
 # Make ACTIVE_LLM visible in the Settings UI as a choice/combo, synced with available engines
 # We cannot re-register the key (it already exists), so update the internal definition if present.
 try:
     choices = list_available_llms()
-    existing = config_registry._definitions.get('ACTIVE_LLM')
+    existing = config_registry._definitions.get("ACTIVE_LLM")
     if existing:
         existing.hidden = False
-        existing.description = "The currently active LLM engine. Synced with the Components tab."
-        existing.constraints = {'choices': choices}
+        existing.description = (
+            "The currently active LLM engine. Synced with the Components tab."
+        )
+        existing.constraints = {"choices": choices}
 except Exception as e:
     log_warning(f"[config] Could not populate ACTIVE_LLM choices: {e}")
 
@@ -430,6 +544,7 @@ MODEL_FILE = os.path.join(os.path.dirname(__file__), "model_config.json")
 # Lock used to serialize concurrent LLM switches to avoid races
 _llm_switch_lock = asyncio.Lock()
 
+
 def get_current_model():
     if os.path.exists(MODEL_FILE):
         try:
@@ -438,6 +553,7 @@ def get_current_model():
         except Exception:
             return None
     return None
+
 
 def set_current_model(model: str):
     try:

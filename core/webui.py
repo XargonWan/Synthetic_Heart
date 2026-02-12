@@ -410,9 +410,10 @@ class SynthWebUIInterface:
         # Debug endpoints (only enabled when WEB_DEBUG=1)
         self.app.get("/api/debug/db_pool")(self.db_pool_debug)
         self.app.post("/api/config")(self.update_config_entry)
-        self.app.post("/api/components/llm")(self.set_llm_engine)
-        # Login control for Selenium-based LLM engines
-        self.app.post("/api/components/llm/login")(self.llm_login)
+        # Cortex-aware endpoints
+        self.app.post("/api/components/cortex")(self.set_cortex_engine)
+        # Login control for Selenium-based engines
+        self.app.post("/api/components/cortex/login")(self.cortex_login)
         # Run component actions on demand (e.g., Run Now button)
         self.app.post("/api/components/run")(self.run_component)
         self.app.get("/api/logchat/info")(self.get_logchat_info)
@@ -939,17 +940,25 @@ class SynthWebUIInterface:
         }
         """
         try:
-            from plugins.emotion_manager import EmotionManager
-            emotion_mgr = EmotionManager()
-            
-            # Get current emotion state with decay applied
-            emotions = await emotion_mgr.get_emotion_state()
-            
+            from core.core_initializer import PLUGIN_REGISTRY
+            emotion_mgr = None
+            try:
+                if isinstance(PLUGIN_REGISTRY, dict):
+                    emotion_mgr = PLUGIN_REGISTRY.get('emotion_manager')
+            except Exception:
+                emotion_mgr = None
+
+            emotions = None
+            if emotion_mgr and hasattr(emotion_mgr, 'get_emotion_state'):
+                emotions = await emotion_mgr.get_emotion_state()
+            else:
+                emotions = {}
+
             # Find dominant emotion (highest intensity)
             dominant = None
             if emotions:
                 dominant = max(emotions.items(), key=lambda x: x[1])[0]
-            
+
             return JSONResponse({
                 "emotions": emotions,
                 "dominant_emotion": dominant,
@@ -1008,12 +1017,12 @@ class SynthWebUIInterface:
         components_count = 0
         try:
             from core.core_initializer import PLUGIN_REGISTRY, INTERFACE_REGISTRY
-            from core.llm_registry import get_llm_registry
+            from core.cortex_registry import get_cortex_registry
 
             components_count += len(PLUGIN_REGISTRY)
             components_count += len(INTERFACE_REGISTRY)
             try:
-                components_count += len(get_llm_registry().get_available_engines())
+                components_count += len(get_cortex_registry().get_available_engines())
             except Exception:
                 pass
         except Exception:
@@ -1547,14 +1556,8 @@ class SynthWebUIInterface:
                             except Exception:
                                 mgr = None
 
-                            if mgr is None:
-                                try:
-                                    from plugins.emotion_manager import EmotionManager
-                                    mgr = EmotionManager()
-                                except Exception:
-                                    mgr = None
-
-                            if mgr is not None:
+                            # No fallback import of plugin; use the PLUGIN_REGISTRY-provided manager only
+                            if mgr is not None and hasattr(mgr, 'get_emotion_state'):
                                 emotions_raw_maybe = mgr.get_emotion_state()
                                 emotions_raw = await emotions_raw_maybe if asyncio.iscoroutine(emotions_raw_maybe) else emotions_raw_maybe
                                 if isinstance(emotions_raw, dict) and emotions_raw:
@@ -2436,7 +2439,7 @@ class SynthWebUIInterface:
         unsafe_actions = set()
         try:
             from core.core_initializer import PLUGIN_REGISTRY, INTERFACE_REGISTRY
-            from core.llm_registry import get_llm_registry
+            from core.cortex_registry import get_cortex_registry
             # Plugins
             for plugin in PLUGIN_REGISTRY.values():
                 try:
@@ -2459,10 +2462,10 @@ class SynthWebUIInterface:
                     pass
             # LLM engines
             try:
-                llmreg = get_llm_registry()
-                for name in llmreg.get_available_engines():
+                cortex_reg = get_cortex_registry()
+                for name in cortex_reg.get_available_engines():
                     try:
-                        inst = llmreg.get_engine(name)
+                        inst = cortex_reg.get_engine(name)
                         if inst and hasattr(inst, 'get_supported_actions'):
                             sup = inst.get_supported_actions() or {}
                             for k, v in sup.items():
@@ -2477,12 +2480,12 @@ class SynthWebUIInterface:
 
         loaded_llm_engines = set()
         try:
-            from core.llm_registry import get_llm_registry
+            from core.cortex_registry import get_cortex_registry
 
-            llmreg = get_llm_registry()
-            for name in llmreg.get_available_engines():
+            cortex_reg = get_cortex_registry()
+            for name in cortex_reg.get_available_engines():
                 try:
-                    if llmreg.get_engine(name) is not None:
+                    if cortex_reg.get_engine(name) is not None:
                         loaded_llm_engines.add(name)
                 except Exception:
                     pass
@@ -3650,9 +3653,24 @@ class SynthWebUIInterface:
 
             # Attach per-action execs to entries
             try:
-                from plugins.grillo.grillo_impl import GrilloPlugin
+                from core.core_initializer import PLUGIN_REGISTRY
+                grillo_plugin = None
+                try:
+                    if isinstance(PLUGIN_REGISTRY, dict):
+                        grillo_plugin = PLUGIN_REGISTRY.get('grillo_plugin') or PLUGIN_REGISTRY.get('grillo_impl')
+                except Exception:
+                    grillo_plugin = None
+
                 activity_ids = [e['id'] for e in entries]
-                action_map = await GrilloPlugin.fetch_action_execs(activity_ids) if activity_ids else {}
+                action_map: dict[int, list] = {}
+                if grillo_plugin and hasattr(grillo_plugin, 'fetch_action_execs'):
+                    action_map = await grillo_plugin.fetch_action_execs(activity_ids) if activity_ids else {}
+                else:
+                    try:
+                        from plugins.grillo.grillo_impl import GrilloPlugin
+                        action_map = await GrilloPlugin.fetch_action_execs(activity_ids) if activity_ids else {}
+                    except Exception as exc:
+                        log_debug(f"[webui] fetch_action_execs failed: {exc}")
                 for e in entries:
                     e['actions'] = action_map.get(e['id'], [])
             except Exception as e:
@@ -4670,39 +4688,76 @@ class SynthWebUIInterface:
     async def components_summary(self):
         try:
             from core.core_initializer import PLUGIN_REGISTRY, INTERFACE_REGISTRY, core_initializer
-            from core.llm_registry import get_llm_registry
-            from core.config import list_available_llms, get_active_llm
+            from core.cortex_registry import get_cortex_registry
         except Exception as exc:  # pragma: no cover - defensive
             log_error(f"{LOG_PREFIX} component inspection import failure: {exc}")
             raise HTTPException(status_code=500, detail="Unable to inspect components") from exc
 
-        available_llms = []
+        available_cortexs = []
         try:
-            available_llms = list_available_llms()
+            # Derive available cortex kinds from the CortexRegistry metadata to avoid
+            # importing wider config helpers (more robust in environments where
+            # core.config may transiently fail to import).
+            reg = get_cortex_registry()
+            available_cortexs = sorted({meta.get('cortex', 'llm') for meta in reg._engine_meta.values()})
+            if not available_cortexs:
+                available_cortexs = ['llm']
         except Exception as exc:
-            log_warning(f"{LOG_PREFIX} unable to list available LLMs: {exc}")
+            log_warning(f"{LOG_PREFIX} unable to list available cortex kinds: {exc}")
 
         try:
-            active_llm = await get_active_llm()
-        except Exception as exc:
-            log_error(f"{LOG_PREFIX} unable to resolve active LLM: {exc}")
-            active_llm = None
+            # Resolve active engine via the legacy ACTIVE_LLM configuration where
+            # present, then map that engine to its cortex kind using the registry.
+            try:
+                from core.config import get_active_llm
+                active_engine_temp = await get_active_llm()
+            except Exception:
+                active_engine_temp = None
 
-        llm_registry = get_llm_registry()
+            try:
+                reg = get_cortex_registry()
+                active_cortex = reg._engine_meta.get(active_engine_temp, {}).get('cortex') if active_engine_temp else None
+            except Exception:
+                active_cortex = None
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} unable to resolve active cortex: {exc}")
+            active_cortex = None
+
+        cortex_reg = get_cortex_registry()
         engine_names = set()
         try:
-            engine_names.update(llm_registry.get_available_engines())
+            if active_cortex:
+                engine_names.update(cortex_reg.get_available_engines(active_cortex))
+            else:
+                engine_names.update(cortex_reg.get_available_engines())
         except Exception as exc:
-            log_warning(f"{LOG_PREFIX} unable to list registered LLM engines: {exc}")
-        engine_names.update(available_llms)
-        if active_llm:
-            engine_names.add(active_llm)
+            log_warning(f"{LOG_PREFIX} unable to list registered engines: {exc}")
+        try:
+            # Prefer the explicit helper when available; otherwise fall back to
+            # enumerating engines from the CortexRegistry to avoid hard failures
+            # when core.config cannot be imported (e.g., missing optional deps).
+            try:
+                from core.config import list_available_cortex_engines
+                engine_names.update(list_available_cortex_engines(None))
+            except Exception:
+                engine_names.update(cortex_reg.get_available_engines())
+        except Exception:
+            # Keep going even if neither method works
+            pass
+
+        try:
+            from core.config import get_active_llm
+            active_engine = await get_active_llm()
+        except Exception:
+            active_engine = None
+        if active_engine:
+            engine_names.add(active_engine)
 
         llm_engines: List[dict] = []
         for engine_name in sorted(engine_names):
             instance = None
             try:
-                instance = llm_registry.get_engine(engine_name)
+                instance = cortex_reg.get_engine(engine_name)
             except Exception as exc:
                 log_warning(f"{LOG_PREFIX} unable to retrieve engine {engine_name}: {exc}")
             actions = []
@@ -4743,18 +4798,19 @@ class SynthWebUIInterface:
                 {
                     "name": engine_name,
                     "display_name": self._get_display_name(engine_name, instance),
-                    "active": engine_name == active_llm,
+                    "active": engine_name == active_engine,
                     "loaded": instance is not None,
                     "description": self._extract_description(instance),
+                    "label": cortex_reg._engine_meta.get(engine_name, {}).get("label", ""),
                     "status": meta["status"],
                     "details": meta["details"],
                     "error": meta["error"],
                     "login_state": login_state,
                     "logged_in": logged_in,
                     "actions": actions,
+                    "cortex": cortex_reg._engine_meta.get(engine_name, {}).get("cortex", "llm"),
                 }
             )
-
         interfaces_data: List[dict] = []
         for name, interface in sorted(INTERFACE_REGISTRY.items()):
             description = ""
@@ -4892,10 +4948,27 @@ class SynthWebUIInterface:
         except Exception as exc:
             log_warning(f"{LOG_PREFIX} unable to check dev components status: {exc}")
 
+        # Provide both backward-compatible LLM view and Cortex-native view
+        # Build a cortex -> engines mapping for the UI
+        by_cortex: dict[str, list[dict]] = {}
+        try:
+            for e in llm_engines:
+                k = e.get('cortex', 'llm')
+                by_cortex.setdefault(k, []).append(e)
+        except Exception:
+            by_cortex = {}
+
         payload = {
+            "cortex": {
+                "available_kinds": available_cortexs,
+                "active_kind": active_cortex,
+                "active_engine": active_engine,
+                "engines": llm_engines,
+                "by_cortex": by_cortex,
+            },
             "llm": {
-                "active": active_llm,
-                "available": available_llms,
+                "active": active_engine,
+                "available": list_available_cortex_engines('llm'),
                 "engines": llm_engines,
             },
             "interfaces": interfaces_data,
@@ -4916,21 +4989,28 @@ class SynthWebUIInterface:
             raise HTTPException(status_code=400, detail="Missing 'name'")
 
         try:
-            from core.config import switch_active_llm
-        except Exception as exc:  # pragma: no cover - defensive
-            log_error(f"{LOG_PREFIX} unable to import LLM configuration helpers: {exc}")
-            raise HTTPException(status_code=500, detail="Unable to access LLM configuration") from exc
+            # Prefer cortex-aware switch (supports llm/live/agent engines). Fall back
+            # to legacy switch_active_llm when cortex helpers aren't available.
+            from core.config import switch_active_cortex_engine as switch_engine
+        except Exception:
+            try:
+                from core.config import switch_active_llm as switch_engine
+            except Exception as exc:  # pragma: no cover - defensive
+                log_error(f"{LOG_PREFIX} unable to import engine switching helpers: {exc}")
+                raise HTTPException(status_code=500, detail="Unable to access engine configuration") from exc
 
         try:
             # Use the centralized switch function with hot-swap
-            await switch_active_llm(name, use_hot_swap=True)
-            log_info(f"{LOG_PREFIX} Successfully switched LLM to {name}")
+            await switch_engine(name, use_hot_swap=True)
+            log_info(f"{LOG_PREFIX} Successfully switched active engine to {name}")
         except ValueError as exc:
-            log_warning(f"{LOG_PREFIX} LLM not available: {exc}")
+            log_warning(f"{LOG_PREFIX} Engine not available: {exc}")
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except Exception as exc:
-            log_error(f"{LOG_PREFIX} failed to switch LLM to {name}: {exc}")
-            raise HTTPException(status_code=500, detail=f"Failed to activate LLM '{name}'") from exc
+            # Log and return a useful error message to help debugging switch failures
+            log_error(f"{LOG_PREFIX} failed to switch active engine to {name}: {exc}")
+            # Include exception message in the HTTP response for easier debugging in dev environments
+            raise HTTPException(status_code=500, detail=f"Failed to activate engine '{name}': {exc}") from exc
 
         return JSONResponse({"status": "ok", "active": name})
 
@@ -4949,8 +5029,8 @@ class SynthWebUIInterface:
             raise HTTPException(status_code=400, detail="Missing 'name'")
 
         try:
-            from core.llm_registry import get_llm_registry
-            registry = get_llm_registry()
+            from core.cortex_registry import get_cortex_registry
+            registry = get_cortex_registry()
             engine = registry.get_engine(name)
         except Exception as exc:
             log_error(f"{LOG_PREFIX} unable to access LLM registry: {exc}")
@@ -4992,6 +5072,24 @@ class SynthWebUIInterface:
         except Exception as exc:
             log_error(f"{LOG_PREFIX} Failed to start login flow for '{name}': {exc}")
             raise HTTPException(status_code=500, detail=f"Failed to start login flow for '{name}': {exc}") from exc
+
+    # Backwards-compatible cortex endpoints
+    async def set_cortex_engine(self, request: Request):
+        """Compatibility handler for `/api/components/cortex`.
+
+        Delegates to the existing `set_llm_engine` implementation which is
+        already cortex-aware internally (supports llm/live/agent switching).
+        """
+        return await self.set_llm_engine(request)
+
+    async def cortex_login(self, request: Request):
+        """Compatibility handler for `/api/components/cortex/login`.
+
+        Delegates to `llm_login` which validates Selenium-based engines and
+        starts the login flow. Kept for compatibility so clients can call the
+        more explicit cortex path.
+        """
+        return await self.llm_login(request)
 
     async def run_component(self, request: Request):
         """Run a component/plugin action on demand.
@@ -5062,7 +5160,7 @@ class SynthWebUIInterface:
 
         try:
             from core.core_initializer import PLUGIN_REGISTRY, INTERFACE_REGISTRY
-            from core.llm_registry import get_llm_registry
+            from core.cortex_registry import get_cortex_registry
         except Exception as exc:
             log_error(f"{LOG_PREFIX} unable to import registries: {exc}")
             raise HTTPException(status_code=500, detail="Unable to access component registries") from exc
@@ -5103,21 +5201,21 @@ class SynthWebUIInterface:
                 return JSONResponse({"status": "ok", "message": f"Plugin '{component_name}' configuration updated"})
             
             elif component_type == "llm":
-                # Reload LLM engine
-                llm_registry = get_llm_registry()
-                
+                # Reload cortex engine (legacy term 'llm' accepted)
+                cortex_registry = get_cortex_registry()
+
                 # Check if engine exists
-                if component_name not in llm_registry.get_available_engines():
-                    raise HTTPException(status_code=404, detail=f"LLM engine '{component_name}' not found")
-                
+                if component_name not in cortex_registry.get_available_engines():
+                    raise HTTPException(status_code=404, detail=f"Engine '{component_name}' not found")
+
                 # Unload current instance if exists
-                current_instance = llm_registry.get_engine(component_name)
+                current_instance = cortex_registry.get_engine(component_name)
                 if current_instance:
-                    log_info(f"{LOG_PREFIX} Unloading LLM engine '{component_name}'...")
-                    llm_registry.unload_engine(component_name)
-                
+                    log_info(f"{LOG_PREFIX} Unloading engine '{component_name}'...")
+                    cortex_registry.unload_engine(component_name)
+
                 # Reload the engine
-                log_info(f"{LOG_PREFIX} Reloading LLM engine '{component_name}'...")
+                log_info(f"{LOG_PREFIX} Reloading engine '{component_name}'...")
                 try:
                     new_instance = llm_registry.load_engine(component_name)
                     log_info(f"{LOG_PREFIX} LLM engine '{component_name}' reloaded successfully")

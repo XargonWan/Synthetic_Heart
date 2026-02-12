@@ -17,7 +17,9 @@ class DummyUser:
 
 
 class DummyMessage:
-    def __init__(self, text=None, caption=None, chat=None, from_user=None, reply_to_message=None):
+    def __init__(
+        self, text=None, caption=None, chat=None, from_user=None, reply_to_message=None
+    ):
         self.text = text
         self.caption = caption
         self.chat = chat or DummyChat()
@@ -77,7 +79,9 @@ async def test_caption_alias():
 async def test_reply_matches_bot_by_id_even_without_username():
     reply_from = DummyUser(username=None, id=999)
     reply_msg = DummyMessage(text="original", from_user=reply_from)
-    msg = DummyMessage(text="replying", reply_to_message=reply_msg, chat=DummyChat(type="group"))
+    msg = DummyMessage(
+        text="replying", reply_to_message=reply_msg, chat=DummyChat(type="group")
+    )
     bot = DummyBot(username="bot", id=999)
     directed, _ = await is_message_for_bot(msg, bot, bot_username=None)
     assert directed is True
@@ -94,11 +98,12 @@ async def test_persona_name_substring_triggers(monkeypatch):
         def get_current_persona(self):
             return FakePersona("rekku")
 
-    monkeypatch.setattr('core.persona_manager.get_persona_manager', lambda: FakePM())
+    monkeypatch.setattr("core.persona_manager.get_persona_manager", lambda: FakePM())
     msg = DummyMessage(text="Ciao rekkucina, sei qui?", chat=DummyChat(type="group"))
     bot = DummyBot()
     # Sanity check: ensure our monkeypatch worked
     import core.persona_manager as pm
+
     # Replace the global manager instance so mention_utils will see it
     pm._persona_manager_instance = FakePM()
     pm_instance = pm.get_persona_manager()

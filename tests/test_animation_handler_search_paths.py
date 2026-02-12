@@ -15,15 +15,19 @@ def test_search_path_precedence(tmp_path: Path):
     (p2 / "think").mkdir(parents=True)
 
     (p1 / "think" / "a.fbx").write_text("FBX")
-    write_json(p1 / "think" / "a.fbx.json", {"loop": {"start_frame": 0, "end_frame": 10}})
+    write_json(
+        p1 / "think" / "a.fbx.json", {"loop": {"start_frame": 0, "end_frame": 10}}
+    )
 
     (p2 / "think" / "b.fbx").write_text("FBX")
-    write_json(p2 / "think" / "b.fbx.json", {"loop": {"start_frame": 0, "end_frame": 10}})
+    write_json(
+        p2 / "think" / "b.fbx.json", {"loop": {"start_frame": 0, "end_frame": 10}}
+    )
 
     handler = get_animation_handler()
     handler.set_animation_search_paths([p1, p2])
 
-    variants = handler.get_animation_variants('think')
+    variants = handler.get_animation_variants("think")
     # p1 should be searched before p2, so a.fbx should be found
-    assert 'a.fbx' in variants['loop']
-    assert ('b.fbx' in variants['loop']) or ('b.fbx' not in variants['loop'])
+    assert "a.fbx" in variants["loop"]
+    assert ("b.fbx" in variants["loop"]) or ("b.fbx" not in variants["loop"])

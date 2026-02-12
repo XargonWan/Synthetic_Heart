@@ -1,30 +1,60 @@
 import asyncio
 import json
-import pymysql
 import time
-
-DB_HOST = 'synth-db'
-DB_USER = 'synth'
-DB_PASS = 'DigiHeart01'
-DB_NAME = 'synth'
+from typing import Any, Tuple
+from core.db import get_conn_ctx
 
 age_days = 60
 
-def insert_rows(conn):
-    with conn.cursor() as cur:
-        # Insert two untagged legacy-like diary entries older than age_days
-        cur.execute("INSERT INTO ai_diary (content, personal_thought, emotions, interaction_summary, timestamp, interface, chat_id, thread_id, user_message, context_tags, involved_users) VALUES (%s, %s, %s, %s, DATE_SUB(NOW(), INTERVAL %s DAY), %s, %s, %s, %s, %s, %s)",
-                    ("Legacy entry A", None, '[]', None, age_days + 1, 'webui', 'cA', None, None, None, '[]'))
-        cur.execute("INSERT INTO ai_diary (content, personal_thought, emotions, interaction_summary, timestamp, interface, chat_id, thread_id, user_message, context_tags, involved_users) VALUES (%s, %s, %s, %s, DATE_SUB(NOW(), INTERVAL %s DAY), %s, %s, %s, %s, %s, %s)",
-                    ("Legacy entry B", None, '[]', None, age_days + 1, 'webui', 'cB', None, None, None, '[]'))
-        # Insert two tagged entries older than age_days
-        cur.execute("INSERT INTO ai_diary (content, personal_thought, emotions, interaction_summary, timestamp, interface, chat_id, thread_id, user_message, context_tags, involved_users) VALUES (%s, %s, %s, %s, DATE_SUB(NOW(), INTERVAL %s DAY), %s, %s, %s, %s, %s, %s)",
-                    ("Tagged entry A about food", None, '[]', None, age_days + 1, 'webui', 'cF1', None, None, json.dumps(['food']), '[]'))
-        cur.execute("INSERT INTO ai_diary (content, personal_thought, emotions, interaction_summary, timestamp, interface, chat_id, thread_id, user_message, context_tags, involved_users) VALUES (%s, %s, %s, %s, DATE_SUB(NOW(), INTERVAL %s DAY), %s, %s, %s, %s, %s, %s)",
-                    ("Tagged entry B about food and pizza", None, '[]', None, age_days + 1, 'webui', 'cF2', None, None, json.dumps(['food', 'pizza']), '[]'))
-        conn.commit()
+async def insert_rows_async() -> None:
+    async with get_conn_ctx() as conn:
+        async with conn.cursor() as cur:
+            # Insert two untagged legacy-like diary entries older than age_days
+            await cur.execute("INSERT INTO ai_diary (content, personal_thought, emotions, interaction_summary, timestamp, interface, chat_id, thread_id, user_message, context_tags, involved_users) VALUES (%s, %s, %s, %s, DATE_SUB(NOW(), INTERVAL %s DAY), %s, %s, %s, %s, %s, %s)",
+                        ("Legacy entry A", None, '[]', None, age_days + 1, 'webui', 'cA', None, None, None, '[]'))
+            await cur.execute("INSERT INTO ai_diary (content, personal_thought, emotions, interaction_summary, timestamp, interface, chat_id, thread_id, user_message, context_tags, involved_users) VALUES (%s, %s, %s, %s, DATE_SUB(NOW(), INTERVAL %s DAY), %s, %s, %s, %s, %s, %s)",
+                        ("Legacy entry B", None, '[]', None, age_days + 1, 'webui', 'cB', None, None, None, '[]'))
+            # Insert two tagged entries older than age_days
+            await cur.execute("INSERT INTO ai_diary (content, personal_thought, emotions, interaction_summary, timestamp, interface, chat_id, thread_id, user_message, context_tags, involved_users) VALUES (%s, %s, %s, %s, DATE_SUB(NOW(), INTERVAL %s DAY), %s, %s, %s, %s, %s, %s)",
+                        ("Tagged entry A about food", None, '[]', None, age_days + 1, 'webui', 'cF1', None, None, json.dumps(['food']), '[]'))
+            await cur.execute("INSERT INTO ai_diary (content, personal_thought, emotions, interaction_summary, timestamp, interface, chat_id, thread_id, user_message, context_tags, involved_users) VALUES (%s, %s, %s, %s, DATE_SUB(NOW(), INTERVAL %s DAY), %s, %s, %s, %s, %s, %s)",
+                        ("Tagged entry B about food and pizza", None, '[]', None, age_days + 1, 'webui', 'cF2', None, None, json.dumps(['food', 'pizza']), '[]'))
+            # Commit is handled by the connection context manager where applicable
 
-async def run_compactor(dry_run=True, marker=None):
+async def query_counts_async() -> Tuple[int, int, int, int]:
+    async with get_conn_ctx() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute('SELECT COUNT(*) FROM ai_diary')
+            total_diary = (await cur.fetchone())[0]
+            await cur.execute('SELECT COUNT(*) FROM ai_diary_archive')
+            archived = (await cur.fetchone())[0]
+            await cur.execute('SELECT COUNT(*) FROM archived_memories')
+            comp = (await cur.fetchone())[0]
+            await cur.execute('SELECT COUNT(*) FROM memories')
+            mems = (await cur.fetchone())[0]
+    return total_diary, archived, comp, mems
+
+if __name__ == '__main__':
+    print('Inserting test rows into ai_diary...')
+    asyncio.run(insert_rows_async())
+    print('Done. Sleeping 1s to allow DB to settle...')
+    time.sleep(1)
+
+    print('\n--- Dry-run (should propose clusters for tagged entries) ---')
+    asyncio.run(run_compactor(dry_run=True))
+
+    print('\n--- Persist run (will archive sources and insert compacted memory) ---')
+    # Ensure archived_memories table exists for this test — leave to DB migration scripts in prod
+    asyncio.run(run_compactor(dry_run=False))
+
+    print('\n--- Querying DB counts ---')
+    total_diary, archived, comp, mems = asyncio.run(query_counts_async())
+    print('ai_diary total:', total_diary)
+    print('ai_diary_archive total:', archived)
+    print('archived_memories total:', comp)
+    print('memories total:', mems)
+
+async def run_compactor(dry_run: bool = True, marker: Any = None) -> Any:
     # Ensure active LLM is set to 'manual' in this process and hot-swapped
     try:
         from core.config import switch_active_llm
@@ -56,9 +86,9 @@ async def run_compactor(dry_run=True, marker=None):
     # Force the active LLM to 'manual' for E2E testing so we use the bundled manual engine
     try:
         import core.config as _conf
-        async def _fake_get_active_llm():
+        async def _fake_get_active_cortex_engine():
             return 'manual'
-        _conf.get_active_llm = _fake_get_active_llm
+        _conf.get_active_cortex_engine = _fake_get_active_cortex_engine
     except Exception:
         pass
     GrilloCompactorPlugin = getattr(mod, 'GrilloCompactorPlugin')
@@ -66,12 +96,12 @@ async def run_compactor(dry_run=True, marker=None):
     # Ensure registry has a usable engine for 'selenium_chatgpt' by loading 'manual' and mapping it
     try:
         import importlib
-        m = importlib.import_module('llm_engines.manual')
+        m = importlib.import_module('cortex.llm_engine.manual')
         engine = getattr(m, 'PLUGIN_CLASS')()
-        from core.llm_registry import get_llm_registry
-        reg = get_llm_registry()
+        from core.cortex_registry import get_cortex_registry
+        reg = get_cortex_registry()
         reg._engines['selenium_chatgpt'] = engine
-        reg._engine_modules['selenium_chatgpt'] = 'llm_engines.manual'
+        reg._engine_modules['selenium_chatgpt'] = 'cortex.llm_engine.manual'
     except Exception as e:
         print('Failed to map selenium_chatgpt -> manual:', e)
         pass
@@ -123,70 +153,18 @@ async def run_compactor(dry_run=True, marker=None):
     except Exception as e:
         print('Failed binding fake clusterer:', e)
         pass
-    # Patch get_active_llm to return 'manual' at runtime to ensure the plugin loads a usable engine
+    # Patch get_active_cortex_engine to return 'manual' at runtime to ensure the plugin loads a usable engine
     try:
         import core.config as _conf
-        async def _fake_get_active_llm2():
+        async def _fake_get_active_engine2():
             return 'manual'
-        _conf.get_active_llm = _fake_get_active_llm2
-        print('Patched core.config.get_active_llm to return manual')
+        _conf.get_active_cortex_engine = _fake_get_active_engine2
+        print('Patched core.config.get_active_cortex_engine to return manual')
     except Exception as e:
-        print('Failed patch get_active_llm:', e)
+        print('Failed patch get_active_cortex_engine:', e)
         pass
     res = await p.run_action('compact_now', payload={'cycles':1, 'dry_run': dry_run, 'marker': marker})
     print('run_action result:', res)
     return res
 
 
-def query_counts(conn):
-    with conn.cursor() as cur:
-        cur.execute('SELECT COUNT(*) FROM ai_diary')
-        total_diary = cur.fetchone()[0]
-        cur.execute('SELECT COUNT(*) FROM ai_diary_archive')
-        archived = cur.fetchone()[0]
-        cur.execute('SELECT COUNT(*) FROM archived_memories')
-        comp = cur.fetchone()[0]
-        cur.execute('SELECT COUNT(*) FROM memories')
-        mems = cur.fetchone()[0]
-    return total_diary, archived, comp, mems
-
-if __name__ == '__main__':
-    conn = pymysql.connect(host=DB_HOST, user=DB_USER, password=DB_PASS, db=DB_NAME)
-    print('Inserting test rows into ai_diary...')
-    insert_rows(conn)
-    print('Done. Sleeping 1s to allow DB to settle...')
-    time.sleep(1)
-
-    print('\n--- Dry-run (should propose clusters for tagged entries) ---')
-    asyncio.run(run_compactor(dry_run=True))
-
-    print('\n--- Persist run (will archive sources and insert compacted memory) ---')
-    # Ensure archived_memories table exists for this test
-    with conn.cursor() as cur:
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS archived_memories (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                tag TEXT,
-                summary TEXT,
-                source_ids TEXT,
-                source_count INT,
-                llm_model VARCHAR(255),
-                confidence VARCHAR(50),
-                notes TEXT,
-                compaction_level INT,
-                total_source_chars INT,
-                summary_chars INT,
-                created_by VARCHAR(255),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-        ''')
-        conn.commit()
-    asyncio.run(run_compactor(dry_run=False))
-
-    print('\n--- Querying DB counts ---')
-    total_diary, archived, comp, mems = query_counts(conn)
-    print('ai_diary total:', total_diary)
-    print('ai_diary_archive total:', archived)
-    print('archived_memories total:', comp)
-    print('memories total:', mems)
-    conn.close()

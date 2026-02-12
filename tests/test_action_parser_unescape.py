@@ -5,7 +5,9 @@ from core.action_parser import _maybe_unescape_text_in_payload, _handle_plugin_a
 
 def test_maybe_unescape_text_in_payload_decodes_double_escaped():
     # Use double-escaped sequences so the python literal contains the backslashes
-    payload = {"text": "Oh, Jay! Che bella domanda \\u2728\\n\\nHai perfettamente ragione"}
+    payload = {
+        "text": "Oh, Jay! Che bella domanda \\u2728\\n\\nHai perfettamente ragione"
+    }
     # initial contains literal backslashes, not real newline or emoji
     assert "\\n\\n" in payload["text"]
     # Literal \u2728 sequence should be present in the original string
@@ -39,7 +41,10 @@ async def test_handle_plugin_action_forwards_unescaped_text_to_interface(monkeyp
     action = {
         "type": "message_test_iface",
         "interface": "test_iface",
-        "payload": {"text": "Hello \\u2728\\n\\nWorld", "interface_path": "test_iface/1/0"},
+        "payload": {
+            "text": "Hello \\u2728\\n\\nWorld",
+            "interface_path": "test_iface/1/0",
+        },
     }
 
     # Call handler

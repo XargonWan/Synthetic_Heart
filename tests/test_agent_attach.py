@@ -16,9 +16,9 @@ class FakeEngine:
 
 async def test_agent_attaches_to_engine(monkeypatch):
     # Create fake registry with a loaded engine
-    from core.llm_registry import get_llm_registry
+    from core.cortex_registry import get_cortex_registry
 
-    registry = get_llm_registry()
+    registry = get_cortex_registry()
 
     # Ensure no engine with name 'fakeengine' is present
     registry._engines.pop('fakeengine', None)
@@ -32,7 +32,7 @@ async def test_agent_attaches_to_engine(monkeypatch):
     async def fake_get_active():
         return 'fakeengine'
 
-    monkeypatch.setattr(conf, 'get_active_llm', fake_get_active)
+    monkeypatch.setattr(conf, 'get_active_cortex_engine', fake_get_active)
 
     # Instantiate plugin - attach happens async, wait a short tick
     plugin = AgentPlugin(notify_fn=lambda m: None)

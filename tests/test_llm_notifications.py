@@ -7,10 +7,11 @@ import asyncio
 async def test_switch_active_llm_notifies_on_success():
     from core.config import switch_active_llm
 
-    with patch("core.config.set_active_llm", new=AsyncMock()) as mock_set_active, \
-         patch("core.plugin_instance.load_plugin", new=AsyncMock()) as mock_load_plugin, \
-         patch("core.notifier.notify_trainer") as mock_notify:
-
+    with (
+        patch("core.config.set_active_llm", new=AsyncMock()) as mock_set_active,
+        patch("core.plugin_instance.load_plugin", new=AsyncMock()) as mock_load_plugin,
+        patch("core.notifier.notify_trainer") as mock_notify,
+    ):
         await switch_active_llm("manual", use_hot_swap=True)
 
         # Ensure we attempted to persist change and load plugin
@@ -27,10 +28,14 @@ async def test_switch_active_llm_notifies_on_success():
 async def test_switch_active_llm_notifies_on_failure():
     from core.config import switch_active_llm
 
-    with patch("core.config.set_active_llm", new=AsyncMock()) as mock_set_active, \
-         patch("core.plugin_instance.load_plugin", new=AsyncMock(side_effect=Exception("boom"))) as mock_load_plugin, \
-         patch("core.notifier.notify_trainer") as mock_notify:
-
+    with (
+        patch("core.config.set_active_llm", new=AsyncMock()) as mock_set_active,
+        patch(
+            "core.plugin_instance.load_plugin",
+            new=AsyncMock(side_effect=Exception("boom")),
+        ) as mock_load_plugin,
+        patch("core.notifier.notify_trainer") as mock_notify,
+    ):
         # Kick off two concurrent switches to exercise the lock; both should
         # propagate the error from the plugin loader.
         task1 = asyncio.create_task(switch_active_llm("manual", use_hot_swap=True))
@@ -75,7 +80,9 @@ async def test_switch_active_llm_notifies_on_start_failure(monkeypatch):
     mock_plugin.start = failing_start
     mock_registry.load_engine = Mock(return_value=mock_plugin)
 
-    monkeypatch.setattr("core.plugin_instance.get_llm_registry", Mock(return_value=mock_registry))
+    monkeypatch.setattr(
+        "core.plugin_instance.get_llm_registry", Mock(return_value=mock_registry)
+    )
 
     with patch("core.notifier.notify_trainer") as mock_notify:
         with pytest.raises(Exception):
@@ -87,7 +94,9 @@ async def test_switch_active_llm_notifies_on_start_failure(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_switch_active_llm_reloads_when_config_matches_but_plugin_differs(monkeypatch):
+async def test_switch_active_llm_reloads_when_config_matches_but_plugin_differs(
+    monkeypatch,
+):
     from core.config import switch_active_llm
     import core.plugin_instance as plugin_instance
 
@@ -108,7 +117,9 @@ async def test_switch_active_llm_reloads_when_config_matches_but_plugin_differs(
         called["count"] += 1
         assert name == "manual"
         # emulate successful load
-        plugin_instance.plugin = type("Dummy", (), {"__module__": "llm_engines.manual"})()
+        plugin_instance.plugin = type(
+            "Dummy", (), {"__module__": "llm_engines.manual"}
+        )()
 
     monkeypatch.setattr("core.config.set_active_llm", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("core.plugin_instance.load_plugin", fake_load_plugin)
@@ -135,10 +146,13 @@ async def test_load_plugin_ensures_start_propagates(monkeypatch):
     mock_plugin.start = failing_start
     mock_registry.load_engine = Mock(return_value=mock_plugin)
 
-    monkeypatch.setattr("core.plugin_instance.get_llm_registry", Mock(return_value=mock_registry))
+    monkeypatch.setattr(
+        "core.plugin_instance.get_llm_registry", Mock(return_value=mock_registry)
+    )
 
     # Ensure global plugin is reset to avoid interference from other tests
     import core.plugin_instance as plugin_module
+
     plugin_module.plugin = None
 
     with pytest.raises(Exception):

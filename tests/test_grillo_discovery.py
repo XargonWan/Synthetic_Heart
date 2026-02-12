@@ -1,5 +1,4 @@
 import asyncio
-import types
 import pytest
 
 
@@ -16,6 +15,7 @@ async def test_grillo_discovers_beat_plugin(monkeypatch):
             return "fake prompt"
 
     from core.core_initializer import PLUGIN_REGISTRY
+
     # Insert our fake plugin into the registry (remember previous if exists)
     prev = PLUGIN_REGISTRY.get("fake_beat")
     PLUGIN_REGISTRY["fake_beat"] = FakeBeat()

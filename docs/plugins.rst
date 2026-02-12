@@ -199,6 +199,10 @@ The emotional state is exposed to the WebUI for real-time visualization and can 
 * ``time_plugin`` – Inject current time and location (no configuration).
 * ``weather_plugin`` – Provide weather info as static context. Optional ``WEATHER_FETCH_TIME`` sets refresh interval. Daily announcements can be enabled with ``WEATHER_DAILY_REPORT_ENABLED`` and targeted via ``WEATHER_DAILY_REPORT_INTERFACE`` (default: ``synth_webui``). Manual reports use action ``trigger_weather_report`` with ``interface_id`` or ``interface_path``.
 * ``tts_lipsync`` – Generate speech audio from external TTS endpoints and broadcast ``synth:tts-play`` to the WebUI. Configure ``TTS_ENDPOINTS`` and optional ``TTS_TIMEOUT_SECONDS`` / ``TTS_OUTPUT_DIR``.
+  - Additional WebUI-configurable exposed variables:
+    - ``TTS_ENABLED`` (boolean): enable/disable TTS plugin from the WebUI
+    - ``TTS_FALLBACK_TO_TEXT`` (boolean): when true, sends a text-only fallback if TTS generation fails
+
 
 Recent Chats Plugin
 -------------------

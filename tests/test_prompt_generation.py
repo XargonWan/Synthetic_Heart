@@ -5,14 +5,15 @@ import unittest
 import sys
 import os
 import json
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Mock environment variables
-os.environ.setdefault('BOTFATHER_TOKEN', 'test_token')
-os.environ.setdefault('OPENAI_API_KEY', 'test_key')
+os.environ.setdefault("BOTFATHER_TOKEN", "test_token")
+os.environ.setdefault("OPENAI_API_KEY", "test_key")
+
 
 class TestPromptGeneration(unittest.TestCase):
     """Test that prompts are generated correctly with proper JSON structure."""
@@ -24,41 +25,43 @@ class TestPromptGeneration(unittest.TestCase):
             "message_telegram_bot": {
                 "description": "Send a message via Telegram",
                 "required_fields": ["text", "target"],
-                "optional_fields": ["parse_mode"]
+                "optional_fields": ["parse_mode"],
             },
             "terminal_bash": {
                 "description": "Execute a shell command",
                 "required_fields": ["command"],
-                "optional_fields": ["timeout"]
-            }
+                "optional_fields": ["timeout"],
+            },
         }
 
-    @patch('core.prompt_engine.build_full_json_instructions')
+    @patch("core.prompt_engine.build_full_json_instructions")
     async def test_prompt_includes_available_actions(self, mock_build_instructions):
         """Test that prompts include all available actions."""
         from core.prompt_engine import build_prompt
 
         # Mock the instructions builder
-        mock_build_instructions.return_value = json.dumps({
-            "available_actions": self.mock_actions,
-            "response_format": {
-                "type": "json",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "type": {"type": "string"},
-                        "payload": {"type": "object"}
-                    }
-                }
+        mock_build_instructions.return_value = json.dumps(
+            {
+                "available_actions": self.mock_actions,
+                "response_format": {
+                    "type": "json",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string"},
+                            "payload": {"type": "object"},
+                        },
+                    },
+                },
             }
-        })
+        )
 
         # Build prompt using correct API
         prompt = await build_prompt(
             user_text="Hello",
             identity_prompt="",
             extract_tags_fn=MagicMock(),
-            search_memories_fn=MagicMock()
+            search_memories_fn=MagicMock(),
         )
 
         # Verify prompt contains actions (mocked)
@@ -69,7 +72,7 @@ class TestPromptGeneration(unittest.TestCase):
         from core.prompt_engine import build_full_json_instructions
 
         # Mock core_initializer to provide actions
-        with patch('core.core_initializer.core_initializer') as mock_core_init:
+        with patch("core.core_initializer.core_initializer") as mock_core_init:
             mock_core_init.actions_block = {"available_actions": self.mock_actions}
 
             instructions = build_full_json_instructions()
@@ -85,7 +88,7 @@ class TestPromptGeneration(unittest.TestCase):
             self.assertIn("message_telegram_bot", actions)
             self.assertIn("terminal_bash", actions)
 
-    @patch('core.core_initializer.core_initializer.actions_block')
+    @patch("core.core_initializer.core_initializer.actions_block")
     def test_actions_block_population(self, mock_actions_block):
         """Test that the actions block is properly populated."""
         from core.core_initializer import core_initializer
@@ -108,7 +111,7 @@ class TestPromptGeneration(unittest.TestCase):
             user_text=user_text,
             identity_prompt="Test context",
             extract_tags_fn=MagicMock(),
-            search_memories_fn=MagicMock()
+            search_memories_fn=MagicMock(),
         )
 
         # Should not crash and should contain the content
@@ -119,14 +122,14 @@ class TestPromptGeneration(unittest.TestCase):
         from core.prompt_engine import build_prompt
 
         # Mock empty actions
-        with patch('core.core_initializer.core_initializer') as mock_core_init:
+        with patch("core.core_initializer.core_initializer") as mock_core_init:
             mock_core_init.actions_block = {"available_actions": {}}
 
             prompt = await build_prompt(
                 user_text="Hello",
                 identity_prompt="",
                 extract_tags_fn=MagicMock(),
-                search_memories_fn=MagicMock()
+                search_memories_fn=MagicMock(),
             )
 
             # Should still generate a valid prompt
@@ -143,12 +146,12 @@ class TestPromptGeneration(unittest.TestCase):
             user_text=large_text,
             identity_prompt="",
             extract_tags_fn=MagicMock(),
-            search_memories_fn=MagicMock()
+            search_memories_fn=MagicMock(),
         )
 
         # Should still work (implementation should handle large inputs)
         self.assertIsInstance(prompt, list)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

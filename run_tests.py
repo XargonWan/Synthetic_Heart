@@ -10,7 +10,6 @@ from __future__ import annotations
 import logging
 import os
 import sys
-import subprocess
 
 
 def main() -> int:
@@ -31,18 +30,20 @@ def main() -> int:
             "-v",
             "--tb=short",
             "--strict-markers",
-            "--disable-warnings"
+            "--disable-warnings",
         ]
 
         if is_github:
             # Create test results directory
             os.makedirs("test-results", exist_ok=True)
-            pytest_args.extend([
-                "--junitxml=test-results/junit.xml",
-                "--cov=core",
-                "--cov-report=xml:coverage.xml",
-                "--cov-report=term-missing"
-            ])
+            pytest_args.extend(
+                [
+                    "--junitxml=test-results/junit.xml",
+                    "--cov=core",
+                    "--cov-report=xml:coverage.xml",
+                    "--cov-report=term-missing",
+                ]
+            )
 
         # Run pytest
         result = pytest.main(pytest_args)

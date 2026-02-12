@@ -1,4 +1,3 @@
-import asyncio
 from datetime import datetime
 import pytest
 
@@ -22,13 +21,20 @@ async def test_observer_logs_activity(caplog, monkeypatch):
     async def fake_create_activity_log(*args, **kwargs):
         return 999
 
-    async def fake_enqueue_low_priority(bot, message, context_memory=None, interface_id=None, original_message=None):
+    async def fake_enqueue_low_priority(
+        bot, message, context_memory=None, interface_id=None, original_message=None
+    ):
         return True
 
     monkeypatch.setattr("core.db.execute_query", fake_execute_query)
     monkeypatch.setattr(observer, "_collect_recent_snippets", fake_collect)
-    monkeypatch.setattr("plugins.grillo.grillo_impl.GrilloPlugin.create_activity_log", fake_create_activity_log)
-    monkeypatch.setattr("core.message_queue.enqueue_low_priority", fake_enqueue_low_priority)
+    monkeypatch.setattr(
+        "plugins.grillo.grillo_impl.GrilloPlugin.create_activity_log",
+        fake_create_activity_log,
+    )
+    monkeypatch.setattr(
+        "core.message_queue.enqueue_low_priority", fake_enqueue_low_priority
+    )
 
     # Run observer once
     await observer._run_observer()
@@ -51,12 +57,19 @@ async def test_dream_logs_activity(caplog, monkeypatch):
     async def fake_create_activity_log(*args, **kwargs):
         return 4242
 
-    async def fake_enqueue_low_priority(bot, message, context_memory=None, interface_id=None, original_message=None):
+    async def fake_enqueue_low_priority(
+        bot, message, context_memory=None, interface_id=None, original_message=None
+    ):
         return True
 
     monkeypatch.setattr(dream, "_collect_fragments", fake_collect)
-    monkeypatch.setattr("plugins.grillo.grillo_impl.GrilloPlugin.create_activity_log", fake_create_activity_log)
-    monkeypatch.setattr("core.message_queue.enqueue_low_priority", fake_enqueue_low_priority)
+    monkeypatch.setattr(
+        "plugins.grillo.grillo_impl.GrilloPlugin.create_activity_log",
+        fake_create_activity_log,
+    )
+    monkeypatch.setattr(
+        "core.message_queue.enqueue_low_priority", fake_enqueue_low_priority
+    )
 
     await dream._generate_dream()
 

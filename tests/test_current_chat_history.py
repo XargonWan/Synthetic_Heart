@@ -3,7 +3,6 @@ from datetime import datetime, timezone, timedelta
 from collections import deque
 from types import SimpleNamespace
 
-import pytest
 
 from core import prompt_engine
 
@@ -45,7 +44,11 @@ def test_format_current_chat_history(monkeypatch):
         date=now,
     )
 
-    res = asyncio.run(prompt_engine.build_json_prompt(message, context_memory, interface_name="telegram"))
+    res = asyncio.run(
+        prompt_engine.build_json_prompt(
+            message, context_memory, interface_name="telegram"
+        )
+    )
     assert "history_current_chat" in res["context"]
     entries = res["context"]["history_current_chat"]
     assert isinstance(entries, list)
@@ -57,7 +60,10 @@ def test_format_current_chat_history(monkeypatch):
 def test_current_chat_history_respects_last_n(monkeypatch):
     monkeypatch.setattr("core.action_parser.gather_static_injections", _dummy_gather)
     # Set global verbosity to 1
-    monkeypatch.setattr("core.history_engine._get_int", lambda key, default: 1 if key == "CONTEXT_VERBOSITY" else default)
+    monkeypatch.setattr(
+        "core.history_engine._get_int",
+        lambda key, default: 1 if key == "CONTEXT_VERBOSITY" else default,
+    )
 
     now = datetime.utcnow().replace(tzinfo=timezone.utc)
     msg1 = _make_msg("Alice", "Old", now - timedelta(minutes=10))
@@ -82,7 +88,11 @@ def test_current_chat_history_respects_last_n(monkeypatch):
         date=now,
     )
 
-    res = asyncio.run(prompt_engine.build_json_prompt(message, context_memory, interface_name="telegram"))
+    res = asyncio.run(
+        prompt_engine.build_json_prompt(
+            message, context_memory, interface_name="telegram"
+        )
+    )
     entries = res["context"].get("history_current_chat", [])
     assert len(entries) == 1
     assert "Bob" in entries[0]
@@ -105,7 +115,11 @@ def test_no_duplication_with_history_recent(monkeypatch):
         date=now,
     )
 
-    res = asyncio.run(prompt_engine.build_json_prompt(message, context_memory, interface_name="telegram"))
+    res = asyncio.run(
+        prompt_engine.build_json_prompt(
+            message, context_memory, interface_name="telegram"
+        )
+    )
     current_entries = res["context"].get("history_current_chat", [])
     recent_entries = res["context"].get("history_recent", [])
     assert any("Carol" in e for e in current_entries)

@@ -17,9 +17,7 @@ Context Mode
 Messaging
 ---------
 
-* ``/say`` – Choose a chat from recent ones and send a message.
-* ``/say <id> <message>`` – Send a message directly to a chat.
-* ``/cancel`` – Cancel a pending send started with ``/say``.
+* ``/cancel`` – Cancel a pending operation.
 
 User Management
 ---------------

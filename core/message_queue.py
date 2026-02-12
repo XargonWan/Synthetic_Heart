@@ -14,7 +14,10 @@ from core.reaction_handler import react_when_mentioned, get_reaction_emoji
 from core.core_initializer import INTERFACE_REGISTRY
 from core.interfaces_registry import get_interface_registry
 from core.chat_context_manager import get_context_memory
-from core.session_meta import set_session_meta as set_session_meta_fn, get_session_meta as get_session_meta_fn
+from core.session_meta import (
+    set_session_meta as set_session_meta_fn,
+    get_session_meta as get_session_meta_fn,
+)
 from plugins.blocklist import is_user_blocked
 from plugins.chat_link import ChatLinkStore
 from core.user_utils import ensure_message_user_fields
@@ -22,7 +25,9 @@ from core.user_utils import ensure_message_user_fields
 # Use a priority queue so events can be processed before regular messages
 HIGH_PRIORITY = 0
 NORMAL_PRIORITY = 1
-LOW_PRIORITY = 2  # For autonomous beats (G.R.I.L.L.O.) - processed only when queue is idle
+LOW_PRIORITY = (
+    2  # For autonomous beats (G.R.I.L.L.O.) - processed only when queue is idle
+)
 
 _queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
 _lock = asyncio.Lock()
@@ -51,7 +56,15 @@ async def _delayed_put(item: dict, delay: float) -> None:
     await _queue.put((priority, _counter, item))
 
 
-async def enqueue(bot, message, context_memory=None, priority: bool = False, interface_id: str = None, skip_mention_check: bool = False, original_message=None) -> None:
+async def enqueue(
+    bot,
+    message,
+    context_memory=None,
+    priority: bool = False,
+    interface_id: str = None,
+    skip_mention_check: bool = False,
+    original_message=None,
+) -> None:
     """Enqueue a message for serialized processing with rate limiting.
 
     Args:
@@ -71,41 +84,84 @@ async def enqueue(bot, message, context_memory=None, priority: bool = False, int
         ensure_message_user_fields(message)
     except Exception:
         # Don't block enqueue if normalization fails - keep behavior safe
-        log_debug('[QUEUE] Failed to normalise message.user for incoming message')
+        log_debug("[QUEUE] Failed to normalise message.user for incoming message")
 
-    message_text = getattr(message, 'text', '')
-    user_id = getattr(message.from_user, 'id', 'unknown') if message.from_user else 'unknown'
-    chat_id = getattr(message, 'chat_id', 'unknown')
-    log_debug(f"[QUEUE] DEBUG: enqueue() called with interface_id='{interface_id}', skip_mention_check={skip_mention_check}, message='{message_text}', user_id={user_id}, chat_id={chat_id}")
-    log_debug(f"[QUEUE] Processing message: '{message_text}' from user {user_id} in chat {chat_id}")
-    
+    message_text = getattr(message, "text", "")
+    user_id = (
+        getattr(message.from_user, "id", "unknown") if message.from_user else "unknown"
+    )
+    chat_id = getattr(message, "chat_id", "unknown")
+    log_debug(
+        f"[QUEUE] DEBUG: enqueue() called with interface_id='{interface_id}', skip_mention_check={skip_mention_check}, message='{message_text}', user_id={user_id}, chat_id={chat_id}"
+    )
+    log_debug(
+        f"[QUEUE] Processing message: '{message_text}' from user {user_id} in chat {chat_id}"
+    )
+
     # Check if message is directed to bot (skip for 1:1 interfaces like ollama, webui)
     if not skip_mention_check:
-        log_debug(f"[QUEUE] DEBUG: Checking if message is for bot - calling is_message_for_bot")
-        
+        log_debug(
+            "[QUEUE] DEBUG: Checking if message is for bot - calling is_message_for_bot"
+        )
+
         human_count = getattr(message, "human_count", None)
         if human_count is None and hasattr(message, "chat"):
             human_count = getattr(message.chat, "human_count", None)
 
-        log_debug(f"[QUEUE] DEBUG: human_count={human_count}, message.chat.type={getattr(message.chat, 'type', 'unknown')}")
-        
+        log_debug(
+            f"[QUEUE] DEBUG: human_count={human_count}, message.chat.type={getattr(message.chat, 'type', 'unknown')}"
+        )
+
         # Get bot username for mention detection
         bot_username = None
         try:
-            if bot and hasattr(bot, 'get_me'):
+            if bot and hasattr(bot, "get_me"):
                 bot_info = await bot.get_me()
                 bot_username = bot_info.username if bot_info else None
                 log_debug(f"[QUEUE] Bot username: {bot_username}")
         except Exception as e:
             log_debug(f"[QUEUE] Error getting bot username: {e}")
-        
+
         directed, reason = await is_message_for_bot(
             message, bot, bot_username=bot_username, human_count=human_count
         )
-        log_debug(f"[QUEUE] DEBUG: is_message_for_bot returned directed={directed}, reason='{reason}'")
-        
+        log_debug(
+            f"[QUEUE] DEBUG: is_message_for_bot returned directed={directed}, reason='{reason}'"
+        )
+
+        # === CENTRALIZED ATTENTION (wake/sleep) HANDLING ===
+        try:
+            # Lazy import to avoid cycles
+            from core.chat_attention import get_attention
+
+            chat_scope = getattr(message, "chat_id", None)
+            is_awake = get_attention(chat_scope, True)
+            explicit_trigger = getattr(message, "is_explicit_trigger", False)
+
+            if is_awake:
+                if not directed:
+                    # When a chat is awake, do NOT automatically treat every message as
+                    # directed to the bot. Only mark as directed if the message has an
+                    # explicit trigger (e.g., @mention, reply to bot, DM or the interface
+                    # has explicitly flagged this message as an explicit trigger).
+                    if getattr(message, "is_explicit_trigger", False):
+                        directed = True
+                        reason = "explicit_trigger_awake"
+                # If already directed, leave intact.
+            else:
+                if directed and not explicit_trigger:
+                    directed = False
+                    reason = "asleep_state_no_trigger"
+                    log_debug(f"[QUEUE] Suppressed message due to Asleep state: {getattr(message, 'text', '')}")
+                elif not directed and explicit_trigger:
+                    directed = True
+                    reason = "explicit_trigger_asleep"
+        except Exception:
+            # If anything goes wrong, fall back to original directed decision
+            pass
+
         if not directed:
-            log_debug(f"[QUEUE] DEBUG: Message not directed to bot - ignoring")
+            log_debug("[QUEUE] DEBUG: Message not directed to bot - ignoring")
             if reason == "missing_human_count":
                 log_debug("[QUEUE] DEBUG: Reason: missing_human_count")
             elif reason == "multiple_humans":
@@ -114,9 +170,11 @@ async def enqueue(bot, message, context_memory=None, priority: bool = False, int
                 log_debug(f"[QUEUE] DEBUG: Reason: {reason or 'not directed to bot'}")
             return
 
-        log_debug(f"[QUEUE] DEBUG: Message is directed to bot - continuing processing")
+        log_debug("[QUEUE] DEBUG: Message is directed to bot - continuing processing")
     else:
-        log_debug(f"[QUEUE] DEBUG: skip_mention_check=True - bypassing is_message_for_bot check (1:1 interface)")
+        log_debug(
+            "[QUEUE] DEBUG: skip_mention_check=True - bypassing is_message_for_bot check (1:1 interface)"
+        )
         directed = True
 
     # Add reaction if configured (REACT_WHEN_MENTIONED)
@@ -131,8 +189,12 @@ async def enqueue(bot, message, context_memory=None, priority: bool = False, int
             log_debug(f"[QUEUE] Interface type: {type(interface)}")
             log_debug(f"[QUEUE] original_message is None: {original_message is None}")
             if interface:
-                log_debug(f"[QUEUE] Adding reaction '{emoji}' via interface {interface_id}")
-                await react_when_mentioned(interface, original_message or message, emoji)
+                log_debug(
+                    f"[QUEUE] Adding reaction '{emoji}' via interface {interface_id}"
+                )
+                await react_when_mentioned(
+                    interface, original_message or message, emoji
+                )
             else:
                 log_warning(f"[QUEUE] No interface found for {interface_id}")
         else:
@@ -140,20 +202,24 @@ async def enqueue(bot, message, context_memory=None, priority: bool = False, int
     except Exception as e:
         log_error(f"[QUEUE] Error adding reaction: {e}")
         log_debug(f"[QUEUE] Reaction traceback: {traceback.format_exc()}")
-    
+
     # Check if user is blocked (but allow trainers)
     user_id = message.from_user.id if message.from_user else 0
     registry = get_interface_registry()
     is_trainer = registry.is_trainer(interface_id, user_id) if interface_id else False
-    
-    log_debug(f"[QUEUE] DEBUG: Checking blocklist - user_id={user_id}, interface_id='{interface_id}', is_trainer={is_trainer}")
-    
+
+    log_debug(
+        f"[QUEUE] DEBUG: Checking blocklist - user_id={user_id}, interface_id='{interface_id}', is_trainer={is_trainer}"
+    )
+
     if not is_trainer and await is_user_blocked(user_id):
         log_debug(f"[QUEUE] DEBUG: User {user_id} is blocked - ignoring message")
         return
-    
-    log_debug(f"[QUEUE] DEBUG: User {user_id} is not blocked or is trainer, continuing processing")
-    
+
+    log_debug(
+        f"[QUEUE] DEBUG: User {user_id} is not blocked or is trainer, continuing processing"
+    )
+
     plugin = plugin_instance.get_plugin()
     if not plugin:
         log_error("[QUEUE] No active plugin")
@@ -172,10 +238,18 @@ async def enqueue(bot, message, context_memory=None, priority: bool = False, int
         not is_trainer
         and user_id not in (0, -1)
         and not rate_limit.is_allowed(
-            llm_name, user_id, interface_id or "unknown", max_messages, window_seconds, trainer_fraction, consume=False
+            llm_name,
+            user_id,
+            interface_id or "unknown",
+            max_messages,
+            window_seconds,
+            trainer_fraction,
+            consume=False,
         )
     ):
-        log_debug(f"[RATE LIMIT] Delaying user {user_id} by {delay} seconds (quota exceeded)")
+        log_debug(
+            f"[RATE LIMIT] Delaying user {user_id} by {delay} seconds (quota exceeded)"
+        )
         item = {
             "bot": bot,
             "message": message,
@@ -187,7 +261,7 @@ async def enqueue(bot, message, context_memory=None, priority: bool = False, int
         asyncio.create_task(_delayed_put(item, delay))
         return
 
-    log_debug(f"[QUEUE] Rate limit check passed - continuing to enqueue message")
+    log_debug("[QUEUE] Rate limit check passed - continuing to enqueue message")
 
     async def _broadcast_global_animation_state(state: str) -> None:
         """Best-effort global animation state update (broadcast to all WebUI clients).
@@ -197,7 +271,10 @@ async def enqueue(bot, message, context_memory=None, priority: bool = False, int
         """
         try:
             context_obj = context_memory
-            if isinstance(context_obj, dict) and context_obj.get("core_animation_broadcast") is False:
+            if (
+                isinstance(context_obj, dict)
+                and context_obj.get("core_animation_broadcast") is False
+            ):
                 return
         except Exception:
             pass
@@ -209,7 +286,9 @@ async def enqueue(bot, message, context_memory=None, priority: bool = False, int
             if pm:
                 await pm.set_animation_state(state, session_id=None)
         except Exception as anim_exc:
-            log_debug(f"[QUEUE] Failed to broadcast animation state '{state}': {anim_exc}")
+            log_debug(
+                f"[QUEUE] Failed to broadcast animation state '{state}': {anim_exc}"
+            )
 
     def _resolve_message_animation_state(event: str) -> str:
         """Resolve animation state for message lifecycle events.
@@ -225,7 +304,10 @@ async def enqueue(bot, message, context_memory=None, priority: bool = False, int
         context_obj = context_memory
         if isinstance(context_obj, dict):
             if event == "received":
-                for k in ("message_animation_state_received", "animation_state_on_message_received"):
+                for k in (
+                    "message_animation_state_received",
+                    "animation_state_on_message_received",
+                ):
                     v = context_obj.get(k)
                     if isinstance(v, str) and v.strip():
                         return v.strip()
@@ -255,7 +337,9 @@ async def enqueue(bot, message, context_memory=None, priority: bool = False, int
         return default_state
 
     # Per piano: appena il messaggio viene accettato per processing, entra in THINK.
-    await _broadcast_global_animation_state(_resolve_message_animation_state("received"))
+    await _broadcast_global_animation_state(
+        _resolve_message_animation_state("received")
+    )
 
     meta = message.chat.title or message.chat.username or message.chat.first_name
     # Persist last-active chat, but don't let DB failures abort enqueueing
@@ -266,22 +350,28 @@ async def enqueue(bot, message, context_memory=None, priority: bool = False, int
 
     # Extract thread_id - unified field name, check both Telegram and generic names
     # DEBUG: let's see what telegram message actually contains
-    thread_attrs = [attr for attr in dir(message) if 'thread' in attr.lower()]
+    thread_attrs = [attr for attr in dir(message) if "thread" in attr.lower()]
     log_debug(f"[QUEUE] Available thread attributes in message: {thread_attrs}")
-    
+
     # Check for thread_id, but also check message_thread_id (Telegram's native field)
     # Note: DO NOT set message.thread_id - Message objects are immutable
     thread_id_val = getattr(message, "thread_id", None)
     if thread_id_val is None:
         thread_id_val = getattr(message, "message_thread_id", None)
-    
+
     log_debug(f"[QUEUE] thread_id extracted: {thread_id_val}")
-    
+
     thread_id = thread_id_val
-    interface = interface_id if interface_id else (
-        bot.get_interface_id()
-        if bot and hasattr(bot, "get_interface_id")
-        else bot.__class__.__name__ if bot else None
+    interface = (
+        interface_id
+        if interface_id
+        else (
+            bot.get_interface_id()
+            if bot and hasattr(bot, "get_interface_id")
+            else bot.__class__.__name__
+            if bot
+            else None
+        )
     )
 
     # Resolve chat and thread names automatically
@@ -296,7 +386,9 @@ async def enqueue(bot, message, context_memory=None, priority: bool = False, int
             if names:
                 chat_name = names.get("chat_name")
                 message_thread_name = names.get("message_thread_name")
-                log_debug(f"[QUEUE] Resolved names: chat='{chat_name}', thread='{message_thread_name}'")
+                log_debug(
+                    f"[QUEUE] Resolved names: chat='{chat_name}', thread='{message_thread_name}'"
+                )
             else:
                 log_debug("[QUEUE] Resolver returned no names")
         else:
@@ -322,7 +414,7 @@ async def enqueue(bot, message, context_memory=None, priority: bool = False, int
     _counter += 1
     await _queue.put((priority_val, _counter, item))
     log_debug(f"[QUEUE] Message successfully put in queue with priority {priority_val}")
-    
+
     if priority:
         log_debug(
             f"[QUEUE] High-priority message enqueued from {interface} chat {chat_id}"
@@ -335,7 +427,9 @@ async def enqueue(bot, message, context_memory=None, priority: bool = False, int
         )
 
 
-async def enqueue_low_priority(bot, message, context_memory=None, interface_id: str = None, original_message=None) -> None:
+async def enqueue_low_priority(
+    bot, message, context_memory=None, interface_id: str = None, original_message=None
+) -> None:
     """Enqueue a low-priority (background) message into the global queue.
 
     This is a convenience wrapper for plugins that want to submit background
@@ -350,11 +444,15 @@ async def enqueue_low_priority(bot, message, context_memory=None, interface_id: 
     try:
         ensure_message_user_fields(message)
     except Exception:
-        log_debug('[QUEUE] Failed to normalise message.user for enqueue_low_priority')
+        log_debug("[QUEUE] Failed to normalise message.user for enqueue_low_priority")
 
-    user_id = getattr(message.from_user, 'id', 'unknown') if message.from_user else 'unknown'
-    chat_id = getattr(message, 'chat_id', 'unknown')
-    thread_id = getattr(message, 'thread_id', None) or getattr(message, 'message_thread_id', None)
+    user_id = (
+        getattr(message.from_user, "id", "unknown") if message.from_user else "unknown"
+    )
+    chat_id = getattr(message, "chat_id", "unknown")
+    thread_id = getattr(message, "thread_id", None) or getattr(
+        message, "message_thread_id", None
+    )
 
     # Resolve chat name if possible - best effort
     chat_name = None
@@ -365,29 +463,34 @@ async def enqueue_low_priority(bot, message, context_memory=None, interface_id: 
         if resolver:
             names = await resolver(chat_id, thread_id, bot)
             if names:
-                chat_name = names.get('chat_name')
-                message_thread_name = names.get('message_thread_name')
+                chat_name = names.get("chat_name")
+                message_thread_name = names.get("message_thread_name")
     except Exception:
         pass
 
     item = {
-        'bot': bot,
-        'message': message,
-        'chat_id': chat_id,
-        'thread_id': thread_id,
-        'interface': interface_id or (bot.get_interface_id() if bot and hasattr(bot, 'get_interface_id') else None),
-        'chat_name': chat_name,
-        'message_thread_name': message_thread_name,
-        'timestamp': time.time(),
-        'context': context_memory,
-        'priority': False,
+        "bot": bot,
+        "message": message,
+        "chat_id": chat_id,
+        "thread_id": thread_id,
+        "interface": interface_id
+        or (
+            bot.get_interface_id() if bot and hasattr(bot, "get_interface_id") else None
+        ),
+        "chat_name": chat_name,
+        "message_thread_name": message_thread_name,
+        "timestamp": time.time(),
+        "context": context_memory,
+        "priority": False,
     }
 
     global _counter
     _counter += 1
     # Use explicit LOW_PRIORITY value
     await _queue.put((LOW_PRIORITY, _counter, item))
-    log_debug(f"[QUEUE] Low-priority message enqueued from {item['interface']} chat {chat_id} thread {thread_id}")
+    log_debug(
+        f"[QUEUE] Low-priority message enqueued from {item['interface']} chat {chat_id} thread {thread_id}"
+    )
 
 
 async def compact_similar_messages(first: dict, limit: int = 5) -> list:
@@ -474,7 +577,11 @@ async def _consumer_loop() -> None:
                         user = getattr(msg, "from_user", None)
                         if user:
                             # Prefer @username if present, otherwise prefer full_name
-                            from core.user_utils import get_user_display_name, get_user_usertag
+                            from core.user_utils import (
+                                get_user_display_name,
+                                get_user_usertag,
+                            )
+
                             if getattr(user, "username", None):
                                 name = get_user_usertag(user)
                             elif getattr(user, "full_name", None):
@@ -489,7 +596,9 @@ async def _consumer_loop() -> None:
                         chat_id=getattr(base, "chat_id", None),
                         message_id=getattr(base, "message_id", None),
                         text="\n".join(lines),
-                        from_user=SimpleNamespace(id=0, username="group", full_name="group"),
+                        from_user=SimpleNamespace(
+                            id=0, username="group", full_name="group"
+                        ),
                         date=getattr(base, "date", datetime.utcnow()),
                         thread_id=getattr(base, "thread_id", None),
                         chat=getattr(base, "chat", None),
@@ -512,9 +621,11 @@ async def _consumer_loop() -> None:
                         thread_id=final.get("thread_id"),
                         interface=final.get("interface"),
                         chat_name=chat_name,
-                        message_thread_name=message_thread_name
+                        message_thread_name=message_thread_name,
                     )
-                    log_debug(f"[QUEUE] Updated chat record with names: chat='{chat_name}', thread='{message_thread_name}'")
+                    log_debug(
+                        f"[QUEUE] Updated chat record with names: chat='{chat_name}', thread='{message_thread_name}'"
+                    )
                 except Exception as e:
                     log_warning(f"[QUEUE] Failed to update chat names: {e}")
 
@@ -539,14 +650,17 @@ async def _consumer_loop() -> None:
 
             # Check if user is trainer for this interface
             registry = get_interface_registry()
-            interface_id = getattr(user_msg, 'interface_id', 'unknown')
+            interface_id = getattr(user_msg, "interface_id", "unknown")
             is_trainer = registry.is_trainer(interface_id, user_id)
 
-            if (
-                not is_trainer
-                and not rate_limit.is_allowed(
-                    llm_name, user_id, interface_id, max_messages, window_seconds, trainer_fraction, consume=True
-                )
+            if not is_trainer and not rate_limit.is_allowed(
+                llm_name,
+                user_id,
+                interface_id,
+                max_messages,
+                window_seconds,
+                trainer_fraction,
+                consume=True,
             ):
                 delay = 300
                 log_debug(
@@ -558,52 +672,83 @@ async def _consumer_loop() -> None:
             try:
                 # Get timeout configuration from message_chain module
                 from core.message_chain import RESPONSE_TIMEOUT
+
                 timeout_seconds = int(RESPONSE_TIMEOUT) if RESPONSE_TIMEOUT else 240
-                
+
                 # Check if this is an event prompt
                 if "event_prompt" in final:
                     # Create a mock message object with event_id for events
                     mock_message = SimpleNamespace()
                     mock_message.event_id = final["context"].get("event_id")
-                    mock_message.chat_id = "TARDIS/system/events"  
+                    mock_message.chat_id = "TARDIS/system/events"
                     mock_message.message_id = f"event_{mock_message.event_id}"
-                    
+
                     # Deliver the structured event prompt using the standard pipeline with timeout
                     try:
                         # Set session meta 'processing' True for this chat
                         try:
-                            existing_meta = await get_session_meta_fn(interface_path) or {}
-                            existing_meta['processing'] = True
+                            # Ensure interface_path is defined for events so session meta can be set
+                            interface_path = final.get("interface") or (
+                                bot.__class__.__name__ if bot else "unknown"
+                            )
+                            existing_meta = (
+                                await get_session_meta_fn(interface_path) or {}
+                            )
+                            existing_meta["processing"] = True
                             await set_session_meta_fn(interface_path, existing_meta)
                         except Exception as sm_e:
-                            log_debug(f"[QUEUE] Failed to set processing session meta: {sm_e}")
+                            log_debug(
+                                f"[QUEUE] Failed to set processing session meta: {sm_e}"
+                            )
                         await asyncio.wait_for(
                             plugin_instance.handle_incoming_message(
-                                final["bot"], mock_message, final["event_prompt"], final.get("interface")
+                                final["bot"],
+                                mock_message,
+                                final["event_prompt"],
+                                final.get("interface"),
                             ),
-                            timeout=timeout_seconds
+                            timeout=timeout_seconds,
                         )
                     except asyncio.TimeoutError:
-                        log_error(f"[QUEUE] Event processing timed out after {timeout_seconds}s for event {mock_message.event_id}")
+                        log_error(
+                            f"[QUEUE] Event processing timed out after {timeout_seconds}s for event {mock_message.event_id}"
+                        )
                         # Event timeout - message_chain will have already sent fallback if needed
                 else:
                     # Build interface_path and add to context for prompt_engine to use
                     chat_id = final.get("chat_id")
                     thread_id = final.get("thread_id")
                     interface_id = final.get("interface", "unknown")
-                    
+
                     # Create interface_path and add to context
                     from core.interface_path_utils import build_interface_path
-                    interface_path = build_interface_path(interface_id, str(chat_id), str(thread_id) if thread_id else None)
-                    
+
+                    interface_path = build_interface_path(
+                        interface_id,
+                        str(chat_id),
+                        str(thread_id) if thread_id else None,
+                    )
+
                     # Add interface_path to context dict so prompt_engine can access it
                     context = final.get("context", {})
                     if isinstance(context, dict):
                         context["interface_path"] = interface_path
                         context["thread_id"] = thread_id
-                        log_debug(f"[QUEUE] Added interface_path to context: {interface_path}")
+                        log_debug(
+                            f"[QUEUE] Added interface_path to context: {interface_path}"
+                        )
+                        try:
+                            # Extra debug: log processing context to aid diagnosing timeouts/routing
+                            keys = list(context.keys())
+                        except Exception:
+                            keys = []
+                        log_debug(
+                            f"[QUEUE] PROCESSING CONTEXT: interface={interface_id}, interface_path={interface_path}, chat_id={chat_id}, thread_id={thread_id}, context_keys={keys}, message_preview={(getattr(final.get('message'), 'text', None) or '')[:200]}"
+                        )
                     else:
-                        log_warning(f"[QUEUE] Context is not a dict, cannot add interface_path")
+                        log_warning(
+                            "[QUEUE] Context is not a dict, cannot add interface_path"
+                        )
 
                     async def _call_bot_generation_start() -> None:
                         try:
@@ -614,11 +759,21 @@ async def _consumer_loop() -> None:
                             if fn is None:
                                 return
                             if inspect.iscoroutinefunction(fn):
-                                await fn(interface_path=interface_path, context=context, message=final.get("message"))
+                                await fn(
+                                    interface_path=interface_path,
+                                    context=context,
+                                    message=final.get("message"),
+                                )
                             else:
-                                fn(interface_path=interface_path, context=context, message=final.get("message"))
+                                fn(
+                                    interface_path=interface_path,
+                                    context=context,
+                                    message=final.get("message"),
+                                )
                         except Exception as hook_exc:
-                            log_debug(f"[QUEUE] on_generation_start hook failed for {interface_path}: {hook_exc}")
+                            log_debug(
+                                f"[QUEUE] on_generation_start hook failed for {interface_path}: {hook_exc}"
+                            )
 
                     def _resolve_generation_animation_state(event: str) -> str:
                         """Resolve an animation state name for generation lifecycle.
@@ -637,26 +792,38 @@ async def _consumer_loop() -> None:
                         context_obj = final.get("context")
                         if isinstance(context_obj, dict):
                             if event == "start":
-                                for k in ("generation_animation_state_start", "animation_state_on_generation_start"):
+                                for k in (
+                                    "generation_animation_state_start",
+                                    "animation_state_on_generation_start",
+                                ):
                                     v = context_obj.get(k)
                                     if isinstance(v, str) and v.strip():
                                         return v.strip()
                             else:
-                                for k in ("generation_animation_state_end", "animation_state_on_generation_end"):
+                                for k in (
+                                    "generation_animation_state_end",
+                                    "animation_state_on_generation_end",
+                                ):
                                     v = context_obj.get(k)
                                     if isinstance(v, str) and v.strip():
                                         return v.strip()
 
                         try:
                             iface_id = final.get("interface")
-                            iface = INTERFACE_REGISTRY.get(iface_id) if iface_id else None
+                            iface = (
+                                INTERFACE_REGISTRY.get(iface_id) if iface_id else None
+                            )
                         except Exception:
                             iface = None
 
                         # Optional interface methods (duck-typed)
                         try:
                             if iface is not None:
-                                fn = getattr(iface, "get_animation_state_for_generation_event", None)
+                                fn = getattr(
+                                    iface,
+                                    "get_animation_state_for_generation_event",
+                                    None,
+                                )
                                 if callable(fn):
                                     v = fn(
                                         event=event,
@@ -671,7 +838,9 @@ async def _consumer_loop() -> None:
 
                         try:
                             if iface is not None:
-                                fn = getattr(iface, "get_generation_animation_states", None)
+                                fn = getattr(
+                                    iface, "get_generation_animation_states", None
+                                )
                                 if callable(fn):
                                     res = fn(
                                         interface_path=interface_path,
@@ -701,7 +870,10 @@ async def _consumer_loop() -> None:
                         """
                         # Allow interfaces to disable core broadcast if they manage it themselves.
                         context_obj = final.get("context")
-                        if isinstance(context_obj, dict) and context_obj.get("core_animation_broadcast") is False:
+                        if (
+                            isinstance(context_obj, dict)
+                            and context_obj.get("core_animation_broadcast") is False
+                        ):
                             return
 
                         try:
@@ -711,7 +883,9 @@ async def _consumer_loop() -> None:
                             if pm:
                                 await pm.set_animation_state(state, session_id=None)
                         except Exception as anim_exc:
-                            log_debug(f"[QUEUE] Failed to broadcast animation state '{state}': {anim_exc}")
+                            log_debug(
+                                f"[QUEUE] Failed to broadcast animation state '{state}': {anim_exc}"
+                            )
 
                     async def _call_bot_generation_end(task: asyncio.Task) -> None:
                         try:
@@ -728,18 +902,32 @@ async def _consumer_loop() -> None:
                             except Exception:
                                 success = False
                             if inspect.iscoroutinefunction(fn):
-                                await fn(interface_path=interface_path, success=success, context=context, message=final.get("message"))
+                                await fn(
+                                    interface_path=interface_path,
+                                    success=success,
+                                    context=context,
+                                    message=final.get("message"),
+                                )
                             else:
-                                fn(interface_path=interface_path, success=success, context=context, message=final.get("message"))
+                                fn(
+                                    interface_path=interface_path,
+                                    success=success,
+                                    context=context,
+                                    message=final.get("message"),
+                                )
                         except Exception as hook_exc:
-                            log_debug(f"[QUEUE] on_generation_end hook failed for {interface_path}: {hook_exc}")
-                    
+                            log_debug(
+                                f"[QUEUE] on_generation_end hook failed for {interface_path}: {hook_exc}"
+                            )
+
                     try:
                         # Ensure the message object has normalized user fields and date
                         try:
                             ensure_message_user_fields(final.get("message"))
                         except Exception:
-                            log_debug("[QUEUE] Failed to normalise message fields in consumer loop")
+                            log_debug(
+                                "[QUEUE] Failed to normalise message fields in consumer loop"
+                            )
 
                         # Optional: notify the interface/bot that generation is starting.
                         # This is intentionally duck-typed so the core does not hard-code interface logic.
@@ -747,22 +935,41 @@ async def _consumer_loop() -> None:
 
                         # Global animation flow: when generation starts, switch to an interface-defined
                         # state (default: 'write'). This keeps THINK → (WRITE|TALK|...) consistent.
-                        await _broadcast_global_animation_state(_resolve_generation_animation_state("start"))
+                        await _broadcast_global_animation_state(
+                            _resolve_generation_animation_state("start")
+                        )
 
                         # Run message processing in a Task so we can avoid hard-cancelling long-running
                         # flows (e.g. Selenium-based LLMs). On timeout we keep the task running and
                         # clear the session 'processing' flag when it eventually finishes.
                         processing_task = asyncio.create_task(
                             plugin_instance.handle_incoming_message(
-                                final["bot"], final["message"], context, final.get("interface")
+                                final["bot"],
+                                final["message"],
+                                context,
+                                final.get("interface"),
                             )
+                        )
+                        log_debug(
+                            f"[QUEUE] Dispatched handle_incoming_message task for interface_path={interface_path}, interface={final.get('interface')}"
                         )
                         timed_out = False
                         try:
-                            await asyncio.wait_for(processing_task, timeout=timeout_seconds)
+                            await asyncio.wait_for(
+                                processing_task, timeout=timeout_seconds
+                            )
                         except asyncio.TimeoutError:
                             timed_out = True
-                            log_error(f"[QUEUE] Message processing timed out after {timeout_seconds}s for chat {chat_id}")
+                            log_error(
+                                f"[QUEUE] Message processing timed out after {timeout_seconds}s for chat {chat_id}"
+                            )
+                            # Additional debug to capture routing context when timeouts occur
+                            try:
+                                log_debug(
+                                    f"[QUEUE] TIMEOUT CONTEXT: interface={final.get('interface')}, interface_path={interface_path}, chat_id={chat_id}, thread_id={thread_id}, message_preview={(getattr(final.get('message'), 'text', None) or '')[:200]}"
+                                )
+                            except Exception:
+                                pass
 
                             # Attempt to send a fallback message so the client isn't left waiting.
                             try:
@@ -774,9 +981,13 @@ async def _consumer_loop() -> None:
                                     failure_reason=f"timeout after {timeout_seconds}s",
                                     context=context,
                                 )
-                                log_debug(f"[QUEUE] Sent fallback message due to timeout to {interface_path}")
+                                log_debug(
+                                    f"[QUEUE] Sent fallback message due to timeout to {interface_path}"
+                                )
                             except Exception as send_exc:
-                                log_warning(f"[QUEUE] Failed to send fallback message on timeout for chat {chat_id}: {send_exc}")
+                                log_warning(
+                                    f"[QUEUE] Failed to send fallback message on timeout for chat {chat_id}: {send_exc}"
+                                )
 
                             async def _clear_processing_when_done() -> None:
                                 try:
@@ -784,7 +995,9 @@ async def _consumer_loop() -> None:
                                     try:
                                         exc = processing_task.exception()
                                         if exc is not None:
-                                            log_warning(f"[QUEUE] Background processing task error for chat {chat_id}: {exc}")
+                                            log_warning(
+                                                f"[QUEUE] Background processing task error for chat {chat_id}: {exc}"
+                                            )
                                     except asyncio.CancelledError:
                                         return
                                     except Exception:
@@ -799,28 +1012,51 @@ async def _consumer_loop() -> None:
                                     # Only clear 'processing' if no other messages are pending for this chat
                                     still_pending = False
                                     for prio, _, queued_item in list(_queue._queue):
-                                        item_chat = queued_item.get('chat_id') if isinstance(queued_item, dict) else getattr(queued_item, 'chat_id', None)
+                                        item_chat = (
+                                            queued_item.get("chat_id")
+                                            if isinstance(queued_item, dict)
+                                            else getattr(queued_item, "chat_id", None)
+                                        )
                                         if item_chat == chat_id:
                                             still_pending = True
                                             break
                                     if not still_pending:
                                         try:
-                                            existing_meta = await get_session_meta_fn(interface_path) or {}
-                                            existing_meta['processing'] = False
-                                            await set_session_meta_fn(interface_path, existing_meta)
+                                            existing_meta = (
+                                                await get_session_meta_fn(
+                                                    interface_path
+                                                )
+                                                or {}
+                                            )
+                                            existing_meta["processing"] = False
+                                            await set_session_meta_fn(
+                                                interface_path, existing_meta
+                                            )
                                         except Exception as set_e:
-                                            log_debug(f"[QUEUE] Failed to clear processing session meta (background): {set_e}")
+                                            log_debug(
+                                                f"[QUEUE] Failed to clear processing session meta (background): {set_e}"
+                                            )
 
                                         # Only return to IDLE when no other messages are pending for this chat.
-                                        await _broadcast_global_animation_state(_resolve_generation_animation_state("end"))
+                                        await _broadcast_global_animation_state(
+                                            _resolve_generation_animation_state("end")
+                                        )
                                 except Exception as e:
-                                    log_debug(f"[QUEUE] Error in background completion handler for chat {chat_id}: {e}")
+                                    log_debug(
+                                        f"[QUEUE] Error in background completion handler for chat {chat_id}: {e}"
+                                    )
 
                             # Keep processing in background; clear meta when done.
                             try:
-                                processing_task.add_done_callback(lambda _t: asyncio.create_task(_clear_processing_when_done()))
+                                processing_task.add_done_callback(
+                                    lambda _t: asyncio.create_task(
+                                        _clear_processing_when_done()
+                                    )
+                                )
                             except Exception as cb_e:
-                                log_debug(f"[QUEUE] Failed to attach background completion callback: {cb_e}")
+                                log_debug(
+                                    f"[QUEUE] Failed to attach background completion callback: {cb_e}"
+                                )
                         finally:
                             # If we completed within the timeout (success or error), notify generation end now.
                             if not timed_out:
@@ -836,28 +1072,42 @@ async def _consumer_loop() -> None:
                         try:
                             # If we timed out and left processing running in background,
                             # keep the session marked as processing until the callback clears it.
-                            if 'timed_out' in locals() and timed_out:
+                            if "timed_out" in locals() and timed_out:
                                 still_pending = True
                             else:
-                            # Check for any remaining queued messages for the same chat
+                                # Check for any remaining queued messages for the same chat
                                 still_pending = False
                                 for prio, _, queued_item in list(_queue._queue):
-                                    item_chat = queued_item.get('chat_id') if isinstance(queued_item, dict) else queued_item.chat_id
+                                    item_chat = (
+                                        queued_item.get("chat_id")
+                                        if isinstance(queued_item, dict)
+                                        else queued_item.chat_id
+                                    )
                                     if item_chat == chat_id:
                                         still_pending = True
                                         break
                             if not still_pending:
                                 try:
-                                    existing_meta = await get_session_meta_fn(interface_path) or {}
-                                    existing_meta['processing'] = False
-                                    await set_session_meta_fn(interface_path, existing_meta)
+                                    existing_meta = (
+                                        await get_session_meta_fn(interface_path) or {}
+                                    )
+                                    existing_meta["processing"] = False
+                                    await set_session_meta_fn(
+                                        interface_path, existing_meta
+                                    )
                                 except Exception as set_e:
-                                    log_debug(f"[QUEUE] Failed to clear processing session meta: {set_e}")
+                                    log_debug(
+                                        f"[QUEUE] Failed to clear processing session meta: {set_e}"
+                                    )
 
                                 # Return to IDLE when this chat is done processing.
-                                await _broadcast_global_animation_state(_resolve_generation_animation_state("end"))
+                                await _broadcast_global_animation_state(
+                                    _resolve_generation_animation_state("end")
+                                )
                         except Exception as pending_e:
-                            log_debug(f"[QUEUE] Error checking pending queue for chat {chat_id}: {pending_e}")
+                            log_debug(
+                                f"[QUEUE] Error checking pending queue for chat {chat_id}: {pending_e}"
+                            )
             except Exception as e:  # pragma: no cover - plugin may misbehave
                 log_error(
                     f"[ERROR] Failed to process message from chat {final['chat_id']}: {e}\n{traceback.format_exc()}",
@@ -879,9 +1129,7 @@ async def _consumer_loop() -> None:
                             kwargs["reply_to_message_id"] = reply_id
                         await bot.send_message(**kwargs)
                 except Exception as send_err:  # pragma: no cover - best effort
-                    log_warning(
-                        f"[QUEUE] Failed to send fallback message: {send_err}"
-                    )
+                    log_warning(f"[QUEUE] Failed to send fallback message: {send_err}")
             finally:
                 for _ in batch:
                     _queue.task_done()
@@ -902,7 +1150,9 @@ async def enqueue_event(bot, prompt_data, event_id: int = None) -> None:
     # Check required fields in the payload - adjust for the actual structure
     payload = prompt_data.get("input", {}).get("payload", {})
     if not payload.get("description"):
-        log_error("[QUEUE] Invalid event payload: missing 'description' in input.payload")
+        log_error(
+            "[QUEUE] Invalid event payload: missing 'description' in input.payload"
+        )
         return
 
     item = {
@@ -940,4 +1190,3 @@ async def run() -> None:
 
     _consumer_task = asyncio.create_task(_consumer_loop())
     log_info("[QUEUE] Consumer task started")
-

@@ -4,7 +4,7 @@ import asyncio
 from typing import Optional
 from core.ai_plugin_base import AIPluginBase
 from core.logging_utils import log_debug, log_info, log_warning, log_error
-from core.core_initializer import core_initializer, register_plugin
+from core.core_initializer import register_plugin
 
 # Import config safely - may fail in test environments
 try:
@@ -16,13 +16,16 @@ except Exception:
 try:
     from telegram.constants import ParseMode
 except Exception:
+
     class ParseMode:
         MARKDOWN = "Markdown"
+
 
 # Import notifier safely
 try:
     from core.notifier import notify_trainer
 except Exception:
+
     def notify_trainer(message: str) -> None:
         log_warning("[terminal] notify_trainer not available")
 
@@ -105,9 +108,8 @@ class TerminalPlugin(AIPluginBase):
         return "".join(output_lines).strip()
 
     async def handle_incoming_message(self, bot, message, prompt):
-        cmd = (
-            prompt.get("action", {}).get("input")
-            or prompt.get("message", {}).get("text", "")
+        cmd = prompt.get("action", {}).get("input") or prompt.get("message", {}).get(
+            "text", ""
         )
         log_debug(f"[terminal] Executing: {cmd}")
         output = await self._send_command(cmd)
@@ -115,7 +117,7 @@ class TerminalPlugin(AIPluginBase):
         if bot and message:
             text = output or "(no output)"
             for i in range(0, len(text), 4000):
-                chunk = text[i:i+4000]
+                chunk = text[i : i + 4000]
                 await bot.send_message(
                     chat_id=message.chat_id,
                     text=f"```\n{chunk}\n```",
@@ -186,17 +188,14 @@ class TerminalPlugin(AIPluginBase):
                 },
                 "example": {
                     "type": "terminal",
-                    "payload": {
-                        "command": "df -h",
-                        "persistent_session": True
-                    }
+                    "payload": {"command": "df -h", "persistent_session": True},
                 },
                 "enforcement_rules": [
                     "NEVER generate fake terminal output like 'Output del comando...'",
                     "ALWAYS use the terminal action for shell commands",
                     "Let the system execute commands and provide real output",
-                    "Use persistent_session=true for interactive workflows"
-                ]
+                    "Use persistent_session=true for interactive workflows",
+                ],
             }
         return {}
 
@@ -211,12 +210,19 @@ class TerminalPlugin(AIPluginBase):
         # Try to set animation to 'computer' if WebUI context is available
         try:
             from core.persona_manager import PersonaManager
-            webui_session_id = context.get("webui_session_id") or context.get("session_id")
+
+            webui_session_id = context.get("webui_session_id") or context.get(
+                "session_id"
+            )
             if webui_session_id:
                 persona_manager = PersonaManager.get_instance()
                 if persona_manager:
-                    await persona_manager.set_animation_state("computer", session_id=webui_session_id)
-                    log_debug(f"[terminal] Set avatar animation to 'computer' for WebUI session {webui_session_id}")
+                    await persona_manager.set_animation_state(
+                        "computer", session_id=webui_session_id
+                    )
+                    log_debug(
+                        f"[terminal] Set avatar animation to 'computer' for WebUI session {webui_session_id}"
+                    )
         except Exception as anim_exc:
             log_debug(f"[terminal] Could not set animation: {anim_exc}")
 
@@ -238,29 +244,30 @@ class TerminalPlugin(AIPluginBase):
 
             # Notify trainer about the executed command and its result
             try:
-                notify_trainer(
-                    f"[terminal] Command: {command}\nOutput:\n{output}"
-                )
+                notify_trainer(f"[terminal] Command: {command}\nOutput:\n{output}")
             except Exception as e:
                 log_warning(f"[terminal] Failed to notify trainer: {e}")
 
             # Deliver the output back to the LLM so it can reason about results
-            interface_name = context.get('interface', 'telegram_bot')
-            if interface_name == 'telegram':
-                interface_name = 'telegram_bot'
+            interface_name = context.get("interface", "telegram_bot")
+            if interface_name == "telegram":
+                interface_name = "telegram_bot"
             delivery_context = {
-                'chat_id': getattr(original_message, 'chat_id', context.get('chat_id')),
-                'message_id': getattr(original_message, 'message_id', context.get('message_id')),
-                'interface_name': interface_name,
-                'thread_id': getattr(
-                    original_message, 'thread_id', context.get('thread_id')
+                "chat_id": getattr(original_message, "chat_id", context.get("chat_id")),
+                "message_id": getattr(
+                    original_message, "message_id", context.get("message_id")
+                ),
+                "interface_name": interface_name,
+                "thread_id": getattr(
+                    original_message, "thread_id", context.get("thread_id")
                 ),
             }
-            if delivery_context['chat_id'] is not None:
+            if delivery_context["chat_id"] is not None:
                 try:
                     from core.auto_response import request_llm_delivery
+
                     await request_llm_delivery(
-                        output=output or '(no output)',
+                        output=output or "(no output)",
                         original_context=delivery_context,
                         action_type=action_type,
                         command=command,
@@ -274,26 +281,27 @@ class TerminalPlugin(AIPluginBase):
             return output
 
         except Exception as e:
-            log_error(f"[terminal] Error executing {action_type} command '{command}': {e}")
+            log_error(
+                f"[terminal] Error executing {action_type} command '{command}': {e}"
+            )
 
             try:
-                notify_trainer(
-                    f"[terminal] Error executing: {command}\nError: {e}"
-                )
+                notify_trainer(f"[terminal] Error executing: {command}\nError: {e}")
             except Exception:
                 pass
 
-            if original_message and hasattr(original_message, 'chat_id'):
-                interface_name = context.get('interface', 'telegram_bot')
-                if interface_name == 'telegram':
-                    interface_name = 'telegram_bot'
+            if original_message and hasattr(original_message, "chat_id"):
+                interface_name = context.get("interface", "telegram_bot")
+                if interface_name == "telegram":
+                    interface_name = "telegram_bot"
                 error_context = {
-                    'chat_id': original_message.chat_id,
-                    'message_id': getattr(original_message, 'message_id', None),
-                    'interface_name': interface_name,
+                    "chat_id": original_message.chat_id,
+                    "message_id": getattr(original_message, "message_id", None),
+                    "interface_name": interface_name,
                 }
 
                 from core.auto_response import request_llm_delivery
+
                 await request_llm_delivery(
                     output=f"Error executing command '{command}': {str(e)}",
                     original_context=error_context,
@@ -313,4 +321,3 @@ class TerminalPlugin(AIPluginBase):
 
 
 PLUGIN_CLASS = TerminalPlugin
-

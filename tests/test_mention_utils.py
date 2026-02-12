@@ -1,12 +1,14 @@
-import asyncio
-
 import pytest
 
 from core.mention_utils import is_message_for_bot
+import core.chat_attention as chat_attention
+
 
 
 class DummyChat:
-    def __init__(self, type="group", human_count=None, title=None, username=None, id=123):
+    def __init__(
+        self, type="group", human_count=None, title=None, username=None, id=123
+    ):
         self.type = type
         self.human_count = human_count
         self.title = title
@@ -21,7 +23,9 @@ class DummyUser:
 
 
 class DummyMessage:
-    def __init__(self, text=None, chat=None, from_user=None, reply_to_message=None, caption=None):
+    def __init__(
+        self, text=None, chat=None, from_user=None, reply_to_message=None, caption=None
+    ):
         self.text = text
         self.caption = caption
         self.chat = chat or DummyChat()
@@ -71,7 +75,9 @@ async def test_explicit_at_mention():
 async def test_reply_to_bot_by_username():
     reply_from = DummyUser(username="botname", id=999)
     reply_msg = DummyMessage(text="original", from_user=reply_from)
-    msg = DummyMessage(text="replying", reply_to_message=reply_msg, chat=DummyChat(type="group"))
+    msg = DummyMessage(
+        text="replying", reply_to_message=reply_msg, chat=DummyChat(type="group")
+    )
     bot = DummyBot(username="botname", id=999)
     directed, reason = await is_message_for_bot(msg, bot, bot_username="botname")
     assert directed is True
@@ -79,8 +85,38 @@ async def test_reply_to_bot_by_username():
 
 @pytest.mark.asyncio
 async def test_missing_human_count_returns_reason():
-    msg = DummyMessage(text="just chatting", chat=DummyChat(type="group", human_count=None))
+    msg = DummyMessage(
+        text="just chatting", chat=DummyChat(type="group", human_count=None)
+    )
     bot = DummyBot()
     directed, reason = await is_message_for_bot(msg, bot, human_count=None)
     assert directed is False
     assert reason == "missing_human_count"
+
+
+@pytest.mark.asyncio
+async def test_chat_asleep_non_wake_message(caplog):
+    msg = DummyMessage(text="hello", chat=DummyChat(type="group", id=9999))
+    bot = DummyBot()
+    # Set chat to asleep
+    chat_attention.set_attention(9999, False)
+    caplog.set_level("DEBUG")
+    directed, reason = await is_message_for_bot(msg, bot)
+    assert directed is False
+    assert reason == "chat_asleep"
+    assert "SyntH is asleep, message is not a wake command so is not considered a message for bot" in caplog.text
+    # Restore attention for isolation
+    chat_attention.set_attention(9999, True)
+
+
+@pytest.mark.asyncio
+async def test_chat_asleep_wake_message(monkeypatch):
+    msg = DummyMessage(text="please wake", chat=DummyChat(type="group", id=9998))
+    bot = DummyBot()
+    chat_attention.set_attention(9998, False)
+    # Ensure 'wake' is a configured wake trigger
+    monkeypatch.setattr("core.chat_attention.get_wake_triggers", lambda: ["wake"])
+    directed, reason = await is_message_for_bot(msg, bot)
+    assert directed is True
+    # Restore attention for isolation
+    chat_attention.set_attention(9998, True)

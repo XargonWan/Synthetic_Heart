@@ -8,14 +8,14 @@ async def test_weather_plugin_scheduler_starts(monkeypatch):
 
     plugin = WeatherPlugin()
 
-    calls = {'n': 0}
+    calls = {"n": 0}
 
     async def fake_update():
-        calls['n'] += 1
-        plugin._cached_weather = 'fake-weather'
+        calls["n"] += 1
+        plugin._cached_weather = "fake-weather"
 
     # Replace the real network-bound update with a no-op for test
-    monkeypatch.setattr(plugin, '_update_weather', fake_update)
+    monkeypatch.setattr(plugin, "_update_weather", fake_update)
 
     await plugin.start()
 
@@ -24,6 +24,6 @@ async def test_weather_plugin_scheduler_starts(monkeypatch):
 
     assert plugin._scheduler_task is not None
     assert not plugin._scheduler_task.done()
-    assert calls['n'] >= 1
+    assert calls["n"] >= 1
 
     await plugin.stop()

@@ -1,0 +1,62 @@
+name: PR Guard — Platform scan & smoke tests
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+  push:
+    branches: [ 'windows-automation/**', 'features/**', 'fixes/**' ]
+
+jobs:
+  platform-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run platform scan
+        run: |
+          python tools/scan_platform_issues.py
+
+      - name: Compile all Python files
+        run: |
+          python -m compileall .
+
+      - name: Run imports smoke test
+        run: |
+          python -m pytest tests/test_imports.py -q
+
+  windows-ci:
+    runs-on: windows-latest
+    needs: platform-check
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies (Windows)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Windows-only scan + compile
+        run: |
+          python tools/scan_platform_issues.py
+          python -m compileall .
+
+      - name: Run imports smoke test
+        run: |
+          python -m pytest tests/test_imports.py -q

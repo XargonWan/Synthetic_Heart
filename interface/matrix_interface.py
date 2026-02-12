@@ -72,7 +72,7 @@ def _extract_username(mxid: str) -> str:
 
 class MatrixInterface:
     """Matrix chat interface wrapping matrix-nio."""
-    
+
     display_name = "Matrix Interface"
 
     _current_instance_enabled: bool = False
@@ -119,7 +119,9 @@ class MatrixInterface:
             self._disable("MATRIX_PASSWORD or MATRIX_ACCESS_TOKEN missing")
 
         if self.is_enabled:
-            config = AsyncClientConfig(store_sync_tokens=True) if AsyncClientConfig else None
+            config = (
+                AsyncClientConfig(store_sync_tokens=True) if AsyncClientConfig else None
+            )
             self.client = AsyncClient(
                 self.homeserver,
                 self.user_id,
@@ -137,23 +139,45 @@ class MatrixInterface:
             else:
                 self._logged_in = False
 
-            async def _resolver(room_id: int | str, thread_id: Optional[int | str], bot_instance: Any = None) -> Dict[str, Optional[str]]:
-                instance = bot_instance if isinstance(bot_instance, MatrixInterface) else self
+            async def _resolver(
+                room_id: int | str,
+                thread_id: Optional[int | str],
+                bot_instance: Any = None,
+            ) -> Dict[str, Optional[str]]:
+                instance = (
+                    bot_instance if isinstance(bot_instance, MatrixInterface) else self
+                )
                 client = getattr(instance, "client", None)
                 chat_name = None
                 if client and hasattr(client, "rooms"):
                     room = client.rooms.get(str(room_id))
                     if room:
-                        chat_name = getattr(room, "display_name", None) or getattr(room, "canonical_alias", None) or room.room_id
+                        chat_name = (
+                            getattr(room, "display_name", None)
+                            or getattr(room, "canonical_alias", None)
+                            or room.room_id
+                        )
                 return {"chat_name": chat_name, "message_thread_name": None}
 
             ChatLinkStore.set_name_resolver(INTERFACE_NAME, _resolver)
 
-            if self.client and RoomMessageText and hasattr(self.client, "add_event_callback"):
+            if (
+                self.client
+                and RoomMessageText
+                and hasattr(self.client, "add_event_callback")
+            ):
                 self.client.add_event_callback(self._on_message, RoomMessageText)
-            if self.client and RoomMessageNotice and hasattr(self.client, "add_event_callback"):
+            if (
+                self.client
+                and RoomMessageNotice
+                and hasattr(self.client, "add_event_callback")
+            ):
                 self.client.add_event_callback(self._on_message, RoomMessageNotice)
-            if self.client and InviteMemberEvent and hasattr(self.client, "add_event_callback"):
+            if (
+                self.client
+                and InviteMemberEvent
+                and hasattr(self.client, "add_event_callback")
+            ):
                 self.client.add_event_callback(self._on_invite, InviteMemberEvent)
 
         MatrixInterface._current_instance_enabled = self.is_enabled
@@ -173,10 +197,14 @@ class MatrixInterface:
                     loop = asyncio.get_event_loop()
                     loop.call_soon(lambda: asyncio.create_task(self.start()))
                 except Exception:
-                    log_debug("[matrix_interface] No event loop available; Matrix interface will start during application initialization")
+                    log_debug(
+                        "[matrix_interface] No event loop available; Matrix interface will start during application initialization"
+                    )
         else:
             reason = self.disabled_reason or "missing configuration"
-            log_warning(f"[matrix_interface] Interface loaded in disabled state: {reason}")
+            log_warning(
+                f"[matrix_interface] Interface loaded in disabled state: {reason}"
+            )
 
     def _disable(self, reason: str) -> None:
         self.is_enabled = False
@@ -241,7 +269,9 @@ class MatrixInterface:
         if action_type != ACTION_TYPE:
             return errors
         if not MatrixInterface._current_instance_enabled:
-            errors.append("Matrix interface is disabled - configure credentials to enable messaging")
+            errors.append(
+                "Matrix interface is disabled - configure credentials to enable messaging"
+            )
             return errors
         text = payload.get("text")
         if not isinstance(text, str) or not text.strip():
@@ -310,7 +340,9 @@ class MatrixInterface:
         if not self.password:
             raise RuntimeError("Matrix password not configured")
         try:
-            response = await self.client.login(self.password, device_name=self.device_name)
+            response = await self.client.login(
+                self.password, device_name=self.device_name
+            )
         except LocalProtocolError as exc:  # pragma: no cover - protocol mismatch
             log_error(f"[matrix_interface] Login protocol error: {exc}")
             raise
@@ -330,7 +362,9 @@ class MatrixInterface:
 
     # ------------------------------------------------------------------
     # Matrix event handlers
-    async def _on_invite(self, room: MatrixRoom, event: InviteMemberEvent) -> None:  # pragma: no cover - invite flow requires live homeserver
+    async def _on_invite(
+        self, room: MatrixRoom, event: InviteMemberEvent
+    ) -> None:  # pragma: no cover - invite flow requires live homeserver
         if not self.is_enabled or not self.client or not event:
             return
         try:
@@ -338,12 +372,18 @@ class MatrixInterface:
                 await self.client.join(room.room_id)
                 log_info(f"[matrix_interface] Auto-joined room {room.room_id}")
         except Exception as exc:
-            log_warning(f"[matrix_interface] Failed to join room {getattr(room, 'room_id', '<unknown>')}: {exc}")
+            log_warning(
+                f"[matrix_interface] Failed to join room {getattr(room, 'room_id', '<unknown>')}: {exc}"
+            )
 
-    async def _on_message(self, room: MatrixRoom, event: RoomMessageText | RoomMessageNotice) -> None:
+    async def _on_message(
+        self, room: MatrixRoom, event: RoomMessageText | RoomMessageNotice
+    ) -> None:
         if not self.is_enabled or not room or not event:
             return
-        if getattr(event, "sender", None) == getattr(self.client, "user_id", self.user_id):
+        if getattr(event, "sender", None) == getattr(
+            self.client, "user_id", self.user_id
+        ):
             return
 
         text = getattr(event, "body", "") or ""
@@ -354,8 +394,14 @@ class MatrixInterface:
         if not room_identifier:
             return
 
-        if self.allowed_rooms and room_identifier not in self.allowed_rooms and getattr(room, "canonical_alias", None) not in self.allowed_rooms:
-            log_debug(f"[matrix_interface] Ignoring message from room {room_identifier} (not in allow list)")
+        if (
+            self.allowed_rooms
+            and room_identifier not in self.allowed_rooms
+            and getattr(room, "canonical_alias", None) not in self.allowed_rooms
+        ):
+            log_debug(
+                f"[matrix_interface] Ignoring message from room {room_identifier} (not in allow list)"
+            )
             return
 
         chat_type = "group"
@@ -371,18 +417,26 @@ class MatrixInterface:
 
         # Build interface_path for Matrix
         from core.interface_path_utils import build_interface_path
+
         source = getattr(event, "source", {}) or {}
         content = source.get("content", {})
-        relates_to = content.get("m.relates_to", {}) if isinstance(content, dict) else {}
-        thread_event_id = relates_to.get("event_id") if isinstance(relates_to, dict) else None
-        
+        relates_to = (
+            content.get("m.relates_to", {}) if isinstance(content, dict) else {}
+        )
+        thread_event_id = (
+            relates_to.get("event_id") if isinstance(relates_to, dict) else None
+        )
+
         # Matrix: matrix/room_id/event_id (if threaded)
-        interface_path = build_interface_path('matrix', room_identifier, thread_event_id if thread_event_id else None)
+        interface_path = build_interface_path(
+            "matrix", room_identifier, thread_event_id if thread_event_id else None
+        )
         log_debug(f"[matrix_interface] Generated interface_path: {interface_path}")
 
         # Track context using centralized manager
         # NOTE: chat activity tracking is now centralized in chat_context_manager.add_message_to_context
         from core.chat_context_manager import add_message_to_context
+
         try:
             await add_message_to_context(
                 interface_path=interface_path,
@@ -390,12 +444,14 @@ class MatrixInterface:
                 sender_name=_extract_username(getattr(event, "sender", "")),
                 sender_id=getattr(event, "sender", "unknown"),
                 message_id=getattr(event, "event_id", None),
-                timestamp=date.isoformat() if date else None
+                timestamp=date.isoformat() if date else None,
             )
         except Exception as e:
             log_warning(f"[matrix_interface] Failed to add message to context: {e}")
 
-        reply_payload = relates_to.get("m.in_reply_to", {}) if isinstance(relates_to, dict) else {}
+        reply_payload = (
+            relates_to.get("m.in_reply_to", {}) if isinstance(relates_to, dict) else {}
+        )
         reply_event_id = reply_payload.get("event_id")
 
         reply_to_message = None
@@ -408,7 +464,9 @@ class MatrixInterface:
                 from_user=SimpleNamespace(id=None, username=None, full_name=None),
             )
 
-        room_name = getattr(room, "display_name", None) or getattr(room, "canonical_alias", None)
+        room_name = getattr(room, "display_name", None) or getattr(
+            room, "canonical_alias", None
+        )
 
         wrapped = SimpleNamespace(
             message_id=getattr(event, "event_id", None),
@@ -461,9 +519,13 @@ class MatrixInterface:
 
     # ------------------------------------------------------------------
     # Messaging helpers
-    async def send_message(self, room_id: Optional[str] = None, text: Optional[str] = None, **kwargs) -> None:
+    async def send_message(
+        self, room_id: Optional[str] = None, text: Optional[str] = None, **kwargs
+    ) -> None:
         if not self.is_enabled:
-            log_warning("[matrix_interface] Cannot send message - interface is disabled")
+            log_warning(
+                "[matrix_interface] Cannot send message - interface is disabled"
+            )
             return
         if isinstance(room_id, dict):
             payload = room_id
@@ -478,7 +540,9 @@ class MatrixInterface:
             thread_event_id = payload.get("thread_event_id") or payload.get("thread_id")
 
         if not self.client:
-            log_warning("[matrix_interface] Cannot send message - client not initialized")
+            log_warning(
+                "[matrix_interface] Cannot send message - client not initialized"
+            )
             return
         if not room_id:
             log_warning("[matrix_interface] Cannot send message - room_id missing")
@@ -495,7 +559,9 @@ class MatrixInterface:
                 if hasattr(response, "room_id"):
                     room_id = response.room_id
             except Exception as exc:
-                log_warning(f"[matrix_interface] Failed to resolve alias {room_id}: {exc}")
+                log_warning(
+                    f"[matrix_interface] Failed to resolve alias {room_id}: {exc}"
+                )
 
         await self._send_matrix_message(
             room_id,
@@ -503,15 +569,22 @@ class MatrixInterface:
             reply_to_event_id=reply_to_event_id,
             thread_event_id=thread_event_id,
         )
-        
+
         # Save SyntH's response via core chat_context_manager
         try:
             from core.chat_context_manager import save_response_message
             from core.interface_path_utils import build_interface_path
-            interface_path = build_interface_path('matrix', str(room_id), str(thread_event_id) if thread_event_id else None)
+
+            interface_path = build_interface_path(
+                "matrix",
+                str(room_id),
+                str(thread_event_id) if thread_event_id else None,
+            )
             await save_response_message(interface_path, text)
         except Exception as e:
-            log_debug(f"[matrix_interface] Failed to save response via context_manager: {e}")
+            log_debug(
+                f"[matrix_interface] Failed to save response via context_manager: {e}"
+            )
 
     async def _send_matrix_message(
         self,
@@ -730,9 +803,11 @@ _MATRIX_ALLOWED_ROOMS_RAW = config_registry.get_var(
     component="matrix_chat",
 )
 
+
 def get_matrix_allowed_rooms() -> set[str]:
     """Parse and return the current allowed rooms as a set."""
     return _parse_allowed_rooms(str(_MATRIX_ALLOWED_ROOMS_RAW))
+
 
 MATRIX_TRAINER_ID: Optional[int] = core_get_trainer_id(INTERFACE_NAME)
 
@@ -745,6 +820,8 @@ MATRIX_INTERFACE_INSTANCE = MatrixInterface(
     device_id=MATRIX_DEVICE_ID,
     device_name=MATRIX_DEVICE_NAME,
     store_path=MATRIX_STORE_PATH,
-    allowed_rooms=list(get_matrix_allowed_rooms()) if get_matrix_allowed_rooms() else None,
+    allowed_rooms=list(get_matrix_allowed_rooms())
+    if get_matrix_allowed_rooms()
+    else None,
     trainer_id=MATRIX_TRAINER_ID,
 )

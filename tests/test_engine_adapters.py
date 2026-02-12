@@ -1,7 +1,7 @@
 import asyncio
 import pytest
 
-from llm_engines.gemini_api import PLUGIN_CLASS as GeminiClass
+from cortex.llm_engine.gemini_api import PLUGIN_CLASS as GeminiClass
 from core.core_initializer import PLUGIN_REGISTRY
 from plugins.agent_plugin import AgentPlugin
 

@@ -1,5 +1,3 @@
-import argparse
-import sys
 import json
 import threading
 import queue
@@ -11,6 +9,7 @@ from core.core_initializer import register_interface, core_initializer
 # Register event_type for CLI
 EVENT_TYPE_CLI = "message_cli"
 EVENT_TYPE_CLI_EXEC = "cli_exec"
+
 
 class CLIInterface(PluginBase):
     def __init__(self):
@@ -28,6 +27,7 @@ class CLIInterface(PluginBase):
 
     def _start_server(self, host="127.0.0.1", port=5555):
         import socket
+
         log_info(f"[cli] Starting CLI server on {host}:{port}")
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -86,6 +86,7 @@ class CLIInterface(PluginBase):
     def send_exec(self, command):
         msg = {"type": EVENT_TYPE_CLI_EXEC, "command": command}
         self.queue.put(msg)
+
 
 INTERFACE_CLASS = CLIInterface
 

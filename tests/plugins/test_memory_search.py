@@ -24,7 +24,9 @@ def test_validate_payload_errors():
     p = MemorySearchPlugin()
     assert p.validate_payload({})  # missing mode -> returns errors
     assert p.validate_payload({"payload": {"mode": "tags", "tags": []}})  # missing tags
-    assert p.validate_payload({"payload": {"mode": "free", "query": "   "}})  # empty query
+    assert p.validate_payload(
+        {"payload": {"mode": "free", "query": "   "}}
+    )  # empty query
 
 
 class DummyCursor:
@@ -68,10 +70,12 @@ async def _run_execute(action_payload_rows):
 
     async_called = {"called": False, "action_outputs": None, "original_context": None}
 
-    async def fake_request_llm_delivery(action_outputs=None, original_context=None, action_type=None, **kwargs):
-        async_called['called'] = True
-        async_called['action_outputs'] = action_outputs
-        async_called['original_context'] = original_context
+    async def fake_request_llm_delivery(
+        action_outputs=None, original_context=None, action_type=None, **kwargs
+    ):
+        async_called["called"] = True
+        async_called["action_outputs"] = action_outputs
+        async_called["original_context"] = original_context
         return True
 
     orig_get_conn = db.get_conn_ctx
@@ -87,8 +91,8 @@ async def _run_execute(action_payload_rows):
         res = await p.execute_action(action, ctx, None, orig_msg)
         assert res.get("processed") is True
         assert isinstance(res.get("results"), list)
-        assert async_called['called'] is True
-        assert isinstance(async_called['action_outputs'], list)
+        assert async_called["called"] is True
+        assert isinstance(async_called["action_outputs"], list)
         return res
     finally:
         db.get_conn_ctx = orig_get_conn
@@ -103,7 +107,7 @@ async def test_execute_action_tags_and_return_results():
         ("ai_diary", 2, now, "Diary content found"),
     ]
     res = await _run_execute(rows)
-    assert len(res['results']) == 2
+    assert len(res["results"]) == 2
 
 
 @pytest.mark.asyncio
@@ -118,8 +122,10 @@ async def test_execute_action_free_and_return_results():
 
     async_called = {"called": False}
 
-    async def fake_request_llm_delivery(action_outputs=None, original_context=None, action_type=None, **kwargs):
-        async_called['called'] = True
+    async def fake_request_llm_delivery(
+        action_outputs=None, original_context=None, action_type=None, **kwargs
+    ):
+        async_called["called"] = True
         return True
 
     orig_get_conn = db.get_conn_ctx
@@ -129,13 +135,15 @@ async def test_execute_action_free_and_return_results():
         ar.request_llm_delivery = fake_request_llm_delivery
 
         p = MemorySearchPlugin()
-        action = {"payload": {"mode": "free", "query": "matching tokens", "max_results": 3}}
+        action = {
+            "payload": {"mode": "free", "query": "matching tokens", "max_results": 3}
+        }
         ctx = {"interface": "webui"}
         orig_msg = SimpleNamespace(chat_id=321, interface_path="webui", message_id=55)
         res = await p.execute_action(action, ctx, None, orig_msg)
         assert res.get("processed") is True
-        assert async_called['called'] is True
-        assert len(res['results']) == 1
+        assert async_called["called"] is True
+        assert len(res["results"]) == 1
     finally:
         db.get_conn_ctx = orig_get_conn
         ar.request_llm_delivery = orig_req

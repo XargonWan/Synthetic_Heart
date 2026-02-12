@@ -236,14 +236,14 @@ class AgentCorePlugin(AIPluginBase):
 
         The test will pass a fake `get_active_engine_name_fn` (async) that returns
         the engine name to attach to. The engine instance is looked up via
-        core.llm_registry.get_llm_registry().get_engine(name)
+        core.cortex_registry.get_cortex_registry().get_engine(name)
         """
         try:
             engine_name = await get_active_engine_name_fn()
             if not engine_name:
                 return
-            from core.llm_registry import get_llm_registry
-            registry = get_llm_registry()
+            from core.cortex_registry import get_cortex_registry
+            registry = get_cortex_registry()
             engine = registry.get_engine(engine_name)
             if engine is None:
                 log_debug(f"[agent_core] Engine {engine_name} not loaded; cannot attach")
@@ -285,8 +285,8 @@ class AgentCorePlugin(AIPluginBase):
             engine_name = await get_active_engine_name_fn()
             if not engine_name:
                 return
-            from core.llm_registry import get_llm_registry
-            registry = get_llm_registry()
+            from core.cortex_registry import get_cortex_registry
+            registry = get_cortex_registry()
             engine = registry.get_engine(engine_name)
             if engine is None:
                 return

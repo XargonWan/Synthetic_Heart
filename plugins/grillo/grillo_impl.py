@@ -12,7 +12,7 @@ import asyncio
 import random
 from datetime import datetime
 from types import SimpleNamespace
-from typing import Optional, Any
+from typing import Optional, Any, List, Dict
 
 from core.ai_plugin_base import AIPluginBase
 from core.logging_utils import log_debug, log_info, log_warning, log_error
@@ -195,6 +195,20 @@ class GrilloPlugin(AIPluginBase):
             return True
         except Exception:
             return True
+
+    async def suggest_actions_from_reply(self, llm_reply: str, original_user_message: str, context: dict, message: Any) -> Optional[List[Dict[str, Any]]]:
+        """Ask the Grillo checker to suggest actions based on an LLM reply.
+
+        This wrapper avoids importing plugin internals from core; core should
+        call this method on the Grillo plugin instance when available.
+        """
+        try:
+            from .grillo_action_checker import GrilloActionChecker
+            checker = GrilloActionChecker()
+            return await checker.inspect_reply_and_suggest_actions(llm_reply, original_user_message, context, message)
+        except Exception as e:
+            log_debug(f"[grillo] suggest_actions_from_reply failed: {e}")
+            return None
 
     async def _create_memory_consolidation_prompt(self) -> str:
         # Try to include a short history snippet from evaluator

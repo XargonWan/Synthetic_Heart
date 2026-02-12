@@ -1,53 +1,44 @@
 services:
-
   synth:
     image: xargonwan/synthetic_heart:${IMAGE_VERSION:-latest-develop}
     container_name: synth
     hostname: synthetic-heart
-    # Enable this if you're using a .env file for environment variables
-    # Even in the services below
-    # env_file:
-    #   - .env
+
+    env_file:
+      - .env
+
     ports:
-      # Port used for the Synthetic Heart WebUI
       - "${SYNTH_WEBUI_HTTPS_PORT:-8000}:${SYNTH_WEBUI_HTTPS_PORT:-8000}"
-      # Port used for Selkies (Web Desktop) HTTPS - This is shown via Login button for Selenium based LLMs
-      - "${SELKIES_HTTPS_PORT:-3000}:3001"
-      # Port used for Ollama integration.
-      # NOTE: if you have an ollama server running locally, change this port to avoid conflicts.
+      - "${SELKIES_HTTPS_PORT:-3006}:3001"
       - "${OLLAMA_PORT:-11434}:11434"
+
     volumes:
-      - synth_data:/config  # Persistent data storage
-      # Use a Docker-managed volume for skins so the image-provided skins
-      # are available out-of-the-box. If you want to override with a host
-      # folder, uncomment the bind-mount line below.
-      - synth_skins:/app/skins  # Custom skins (docker volume)
-      # - ./skins:/app/skins  # Custom skins (host bind-mount - optional)
-      # By default use a Docker-managed volume for logs to avoid host
-      # permissions issues on first-run. If you prefer to expose logs on
-      # the host, uncomment the following line and remove the
-      # `synth_logs:/app/logs` entry below.
-      # - ./logs:/app/logs    # Application logs (host bind-mount)
-      - synth_logs:/app/logs # Application logs (docker volume)
+      - synth_data:/config
+      - synth_skins:/app/skins
+
+      # Map local ./logs folder so you can see them
+      - ./logs:/app/logs
+      # - synth_logs:/app/logs
+
+      # Dev mounts (optional, keep if you edit code live)
+      - ./plugins:/app/plugins
+      - ./interface:/app/interface
+
     environment:
-      # Timezone setting, if unset will be UTC and the Synth will think it's UTC
       - TZ=${TZ:-Asia/Tokyo}
-      # This container don't need root access, so we set PUID and PGID to non-root user
       - PUID=${PUID:-1000}
       - PGID=${PGID:-1000}
-      # Database connection (point to the docker service 'synth-db' by default)
+
       - DB_HOST=${DB_HOST:-synth-db}
       - DB_PORT=${DB_PORT:-3306}
       - DB_USER=${DB_USER:-synth}
       - DB_PASS=${DB_PASS:-synth}
       - DB_NAME=${DB_NAME:-synth}
       - DB_ROOT_PASS=${DB_ROOT_PASS:-root}
-      # Web Desktop root credentials
       - ROOT_PASSWORD=${ROOT_PASSWORD:-"password"}
-      # WebUI ports and TLS settings (ensure container listens on the mapped ports)
       - SYNTH_WEBUI_HTTPS_PORT=${SYNTH_WEBUI_HTTPS_PORT:-8000}
       - SYNTH_WEBUI_HTTP_PORT=${SYNTH_WEBUI_HTTP_PORT:-8080}
-      # Optional runtime variables (check wiki for details)
+
     restart: unless-stopped
     stdin_open: true
     tty: true
@@ -60,9 +51,6 @@ services:
     container_name: synth-db
     hostname: synth-db
     image: mariadb:11
-    # Enable this if you're using a .env file for environment variables
-    # env_file:
-    #   - .env
     ports:
       - "${EXT_DB_PORT:-3306}:3306"
     environment:
@@ -82,10 +70,6 @@ services:
   synth-db-backup:
     container_name: synth-db-backup
     image: tiredofit/db-backup
-    platform: ${PLATFORM_BACKUP:-linux/amd64}
-    # Enable this if you're using a .env file for environment variables
-    # env_file:
-    #   - .env
     depends_on:
       - synth-db
     environment:
@@ -111,9 +95,8 @@ volumes:
   synth_logs:
   synth_skins:
 
+
 networks:
   synth_network:
     driver: bridge
     name: synth_network
-
-

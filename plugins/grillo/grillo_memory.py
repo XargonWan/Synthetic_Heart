@@ -5,10 +5,10 @@ Memory Consolidation plugin for G.R.I.L.L.O.
 """
 
 from core.ai_plugin_base import AIPluginBase
-from core.logging_utils import log_debug
 
 display_name = "G.R.I.L.L.O Memory Consolidation"
 BEAT_TYPE = "memory_consolidation"
+
 
 class GrilloMemoryPlugin(AIPluginBase):
     display_name = display_name
@@ -29,5 +29,6 @@ class GrilloMemoryPlugin(AIPluginBase):
             '{"actions": [{"type": "create_personal_diary_entry", "payload": {"content": "your synthesis"}}]}'
         )
         return base
+
 
 PLUGIN_CLASS = GrilloMemoryPlugin

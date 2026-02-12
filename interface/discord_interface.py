@@ -1,17 +1,18 @@
-# interface/discord_interface.py (esempio)
-"""Example Discord interface using the universal transport layer."""
-
-import asyncio
+import os
 from collections import deque
 from types import SimpleNamespace
 from typing import List, Any
 
 try:  # pragma: no cover - import may fail if dependency missing
     import discord  # type: ignore
+    from discord import FFmpegPCMAudio
 except Exception:  # pragma: no cover - graceful fallback for tests without install
     discord = None
+    FFmpegPCMAudio = None
 
 from core.logging_utils import log_debug, log_error, log_info, log_warning
+from core.mention_utils import is_message_for_bot
+from core.chat_attention import set_attention, get_attention, evaluate_triggers
 from core.transport_layer import universal_send
 from core.core_initializer import register_interface
 from core.command_registry import execute_command
@@ -19,6 +20,7 @@ from core import message_queue
 from plugins.chat_link import ChatLinkStore
 from core.config_manager import config_registry
 from core.variables_engine import register_exposed_var
+from core.interfaces_registry import get_interface_registry
 
 
 context_memory: dict[int, deque] = {}
@@ -27,17 +29,29 @@ chat_link_store = ChatLinkStore()
 
 class DiscordInterface:
     """Discord interface mirroring Telegram bot behaviour."""
-    
+
     display_name = "Discord Interface"
 
+    # Chat attention state is centralized in core.chat_attention
+
     def __init__(self, bot_token: str):
+        # Chat attention is centralized in core.chat_attention; no per-instance store required
+
         self.bot_token = bot_token.strip() if bot_token else ""
         self.is_enabled = True
         self.disabled_reason = None
-
         # Register custom validation with the new validation system
         self._register_custom_validation()
-        
+
+        # Register trainer ID if configured
+        try:
+            trainer_id = _parse_trainer_id_from_config()
+            if trainer_id:
+                get_interface_registry().set_trainer_id("discord_bot", trainer_id)
+                log_info(f"[discord_interface] Registered trainer ID: {trainer_id}")
+        except Exception as e:
+            log_warning(f"[discord_interface] Failed to register trainer ID: {e}")
+
         self.client = None
         if discord is not None:  # pragma: no branch
             intents = discord.Intents.default()
@@ -46,11 +60,15 @@ class DiscordInterface:
 
             @self.client.event
             async def on_ready():
-                log_info(f"[discord_interface] Discord client ready as {self.client.user}")
+                log_info(
+                    f"[discord_interface] Discord client ready as {self.client.user}"
+                )
 
             @self.client.event
             async def on_message(message):
-                log_debug(f"[discord_interface] Raw message received: {message.content} from {message.author}")
+                log_debug(
+                    f"[discord_interface] Raw message received: {message.content} from {message.author}"
+                )
                 await self._process_message(message)
 
             async def _resolver(guild_id, channel_id, bot_instance=None):
@@ -67,9 +85,13 @@ class DiscordInterface:
                             guild = getattr(channel, "guild", None)
                             if guild is None and guild_id is not None:
                                 try:
-                                    guild = b.get_guild(int(guild_id)) or await b.fetch_guild(int(guild_id))
+                                    guild = b.get_guild(
+                                        int(guild_id)
+                                    ) or await b.fetch_guild(int(guild_id))
                                 except Exception as e:  # pragma: no cover
-                                    log_warning(f"[discord_interface] guild name lookup failed: {e}")
+                                    log_warning(
+                                        f"[discord_interface] guild name lookup failed: {e}"
+                                    )
                             if guild:
                                 guild_name = getattr(guild, "name", None)
                 except Exception as e:  # pragma: no cover
@@ -82,36 +104,56 @@ class DiscordInterface:
 
         # ALWAYS register, even if disabled
         register_interface("discord_bot", self)
-        
+
         if self.is_enabled:
             log_info("[discord_interface] Discord interface registered and enabled")
-            
-            # Start message_queue consumer
-            try:  # pragma: no cover - if no running loop
-                asyncio.get_event_loop().create_task(message_queue.run())
-            except Exception:
-                pass
+            # Message queue consumer is started by main.py
         else:
             reason = self.disabled_reason or "missing configuration"
-            log_warning(f"[discord_interface] Interface loaded in disabled state: {reason}")
-    
+            log_warning(
+                f"[discord_interface] Interface loaded in disabled state: {reason}"
+            )
+
     def _disable(self, reason: str) -> None:
         """Mark interface as disabled with a reason."""
         self.is_enabled = False
         self.disabled_reason = reason
 
+    def _register_trainer_id(self):
+        """Register the trainer ID from config."""
+        try:
+            # Re-read config to ensure we have the latest value
+            trainer_id = _parse_trainer_id_from_config()
+            log_info(f"[discord_interface] Parsing TRAINER_IDS result: {trainer_id}")
+            if trainer_id:
+                get_interface_registry().set_trainer_id("discord_bot", trainer_id)
+                log_info(
+                    f"[discord_interface] Successfully registered trainer ID: {trainer_id}"
+                )
+            else:
+                log_warning(
+                    "[discord_interface] No trainer ID found for discord_bot in configuration"
+                )
+        except Exception as e:
+            log_warning(f"[discord_interface] Failed to register trainer ID: {e}")
+
     async def start(self):
         """Start the Discord interface."""
         log_info("[discord_interface] Starting Discord interface...")
-        
+
+        # Ensure trainer ID is registered (retrying with fresh config)
+        self._register_trainer_id()
+
         # Update token from config (may have been loaded from DB after __init__)
         self.bot_token = get_discord_token()
-        
+
         if not self.bot_token:
             self._disable("DISCORD_BOT_TOKEN not configured")
-            log_warning("[discord_interface] Discord interface disabled: no token configured")
+            log_warning(
+                "[discord_interface] Discord interface disabled: no token configured"
+            )
             return
-        
+
         # Start the Discord client
         await self._start_discord_client()
         log_info("[discord_interface] Discord interface started successfully")
@@ -119,16 +161,20 @@ class DiscordInterface:
     async def _start_discord_client(self):
         """Start the Discord client with proper error handling."""
         if not self.bot_token or self.bot_token.strip() == "":
-            log_warning("[discord_interface] No valid Discord bot token provided - skipping Discord startup")
+            log_warning(
+                "[discord_interface] No valid Discord bot token provided - skipping Discord startup"
+            )
             return
-            
+
         try:
             log_info("[discord_interface] Starting Discord client...")
             await self.client.start(self.bot_token)
         except Exception as e:  # pragma: no cover - startup errors
             log_error(f"[discord_interface] Failed to start Discord client: {e}")
             if "Improper token" in str(e):
-                log_warning("[discord_interface] Invalid Discord token - Discord interface will remain disabled")
+                log_warning(
+                    "[discord_interface] Invalid Discord token - Discord interface will remain disabled"
+                )
 
     @staticmethod
     def get_interface_id() -> str:
@@ -138,7 +184,7 @@ class DiscordInterface:
     @staticmethod
     def get_action_types() -> list[str]:
         """Return action types supported by this interface."""
-        return ["message_discord_bot"]
+        return ["message_discord_bot", "join_voice_discord", "leave_voice_discord", "audio_discord_bot"]
 
     @staticmethod
     def get_supported_actions() -> dict:
@@ -149,7 +195,22 @@ class DiscordInterface:
                 # Prefer interface_path but accept legacy 'target' (validation handles either)
                 "required_fields": ["text"],
                 "optional_fields": ["interface_path", "target", "reply_to_message_id"],
-            }
+            },
+            "join_voice_discord": {
+                "description": "Join a Discord voice channel.",
+                "required_fields": ["channel_id"],
+                "optional_fields": ["interface_path"],
+            },
+            "leave_voice_discord": {
+                "description": "Leave the current Discord voice channel.",
+                "required_fields": ["guild_id"],
+                "optional_fields": ["interface_path"],
+            },
+            "audio_discord_bot": {
+                "description": "Send audio to Discord. Streams if in voice, otherwise sends as file.",
+                "required_fields": ["audio"],
+                "optional_fields": ["interface_path", "channel_id", "caption"],
+            },
         }
 
     @staticmethod
@@ -158,18 +219,83 @@ class DiscordInterface:
             return {
                 "description": "Send a message to a Discord channel.",
                 "payload": {
-                    "text": {"type": "string", "example": "Hello Discord!", "description": "The message text to send."},
-                    "interface_path": {
-                        "type": "string", 
-                        "example": "discord_bot/1234567890/9876543210",
-                        "description": "REQUIRED. Interface path from input.payload.source.interface_path. Format: 'discord_bot/guild_id/channel_id' or 'discord_bot/guild_id/channel_id/thread_id' or 'discord_bot/user_id' for DM."
+                    "text": {
+                        "type": "string",
+                        "example": "Hello Discord!",
+                        "description": "The message text to send.",
                     },
-                    "reply_to_message_id": {"type": "integer", "example": 987654321, "description": "Optional ID of the message to reply to", "optional": True},
+                    "interface_path": {
+                        "type": "string",
+                        "example": "discord_bot/1234567890/9876543210",
+                        "description": "REQUIRED. Interface path from input.payload.source.interface_path. Format: 'discord_bot/guild_id/channel_id' or 'discord_bot/guild_id/channel_id/thread_id' or 'discord_bot/user_id' for DM.",
+                    },
+                    "reply_to_message_id": {
+                        "type": "integer",
+                        "example": 987654321,
+                        "description": "Optional ID of the message to reply to",
+                        "optional": True,
+                    },
                 },
                 "important_notes": [
                     "CRITICAL: ALWAYS use interface_path from input.payload.source.interface_path to reply in same conversation!",
-                    "Never construct interface_path manually - use the exact value from input.payload.source.interface_path"
-                ]
+                    "Never construct interface_path manually - use the exact value from input.payload.source.interface_path",
+                ],
+            }
+        if action_name == "join_voice_discord":
+            return {
+                "description": "Join a Discord voice channel.",
+                "payload": {
+                    "channel_id": {
+                        "type": "string",
+                        "example": "123456789",
+                        "description": "The ID of the voice channel to join.",
+                    },
+                    "interface_path": {
+                        "type": "string",
+                        "example": "discord_bot/1234567890/9876543210",
+                        "description": "Optional interface path to derive guild/channel.",
+                        "optional": True,
+                    },
+                },
+            }
+        if action_name == "leave_voice_discord":
+            return {
+                "description": "Leave the current Discord voice channel in a guild.",
+                "payload": {
+                    "guild_id": {
+                        "type": "string",
+                        "example": "1234567890",
+                        "description": "The ID of the guild to leave voice in.",
+                    },
+                    "interface_path": {
+                        "type": "string",
+                        "example": "discord_bot/1234567890/9876543210",
+                        "description": "Optional interface path to derive guild.",
+                        "optional": True,
+                    },
+                },
+            }
+        if action_name == "audio_discord_bot":
+            return {
+                "description": "Send audio to Discord. auto-streams if in Voice Channel, else sends file.",
+                "payload": {
+                    "audio": {
+                        "type": "string",
+                        "example": "/path/to/voice.ogg",
+                        "description": "Path to the audio file.",
+                    },
+                    "interface_path": {
+                        "type": "string",
+                        "example": "discord_bot/1234567890/9876543210",
+                        "description": "REQUIRED. Interface path to target.",
+                    },
+                    "caption": {
+                        "type": "string",
+                        "example": "Listen to this!",
+                        "description": "Optional caption (for file messages only).",
+                        "optional": True,
+                    },
+                },
             }
         return {}
 
@@ -177,6 +303,27 @@ class DiscordInterface:
     def validate_payload(action_type: str, payload: dict) -> list:
         """Validate payload for discord actions."""
         errors: list[str] = []
+
+        if action_type == "join_voice_discord":
+            channel_id = payload.get("channel_id")
+            interface_path = payload.get("interface_path")
+            if not channel_id and not interface_path:
+                errors.append("payload.channel_id or payload.interface_path is required")
+            return errors
+
+        if action_type == "leave_voice_discord":
+            guild_id = payload.get("guild_id")
+            interface_path = payload.get("interface_path")
+            if not guild_id and not interface_path:
+                errors.append("payload.guild_id or payload.interface_path is required")
+            return errors
+
+        if action_type == "audio_discord_bot":
+            if not payload.get("audio"):
+                errors.append("payload.audio is required")
+            if not payload.get("interface_path") and not payload.get("channel_id"):
+                errors.append("payload.interface_path or payload.channel_id is required")
+            return errors
 
         if action_type != "message_discord_bot":
             return errors
@@ -190,7 +337,9 @@ class DiscordInterface:
         target = payload.get("target")
 
         if not interface_path and target is None:
-            errors.append("payload.interface_path is required (or payload.target for legacy)")
+            errors.append(
+                "payload.interface_path is required (or payload.target for legacy)"
+            )
 
         if interface_path is not None and not isinstance(interface_path, str):
             errors.append("payload.interface_path must be a string")
@@ -212,14 +361,17 @@ class DiscordInterface:
         - send_message(chat_id=..., text=...)
         - send_message({"interface_path": ..., "text": ...})
         """
+        audio_path = None
         if isinstance(channel_id, dict):
             payload = channel_id
             text = payload.get("text", text)
             interface_path = payload.get("interface_path")
-            
+            audio_path = payload.get("audio") or payload.get("audio_path")
+
             # Extract channel_id from interface_path if provided
             if interface_path:
                 from core.interface_path_utils import parse_interface_path
+
                 # For Discord: interface_path = discord_bot/guild_id/channel_id/thread_id
                 # parse_interface_path returns (interface, [levels...])
                 _, levels = parse_interface_path(interface_path)
@@ -230,7 +382,9 @@ class DiscordInterface:
                     channel_id = levels[1]  # channel_id
                 elif len(levels) >= 1:  # DM style: discord_bot/user_id
                     channel_id = levels[0]  # user_id
-                log_debug(f"[discord_interface] Extracted channel_id={channel_id} from interface_path")
+                log_debug(
+                    f"[discord_interface] Extracted channel_id={channel_id} from interface_path"
+                )
             else:
                 # Fallback for backward compatibility
                 channel_id = (
@@ -248,42 +402,223 @@ class DiscordInterface:
             if text is None:
                 text = kwargs.get("text")
 
-        if channel_id is None or text is None:
-            log_warning("[discord_interface] Missing channel_id or text in send_message")
+            audio_path = kwargs.get("audio") or kwargs.get("audio_path")
+
+        if channel_id is None or (text is None and audio_path is None):
+            log_warning(
+                "[discord_interface] Missing channel_id or contents (text/audio) in send_message"
+            )
             return
 
         try:
             reply_to = kwargs.get("reply_to_message_id")
             # Set temporary attribute so _discord_send can access reply id
             if reply_to is not None:
-                setattr(self, '_last_reply_to_id', reply_to)
-            await universal_send(self._discord_send, channel_id, text=text, reply_to_message_id=reply_to)
+                setattr(self, "_last_reply_to_id", reply_to)
+
+            await universal_send(
+                self._discord_send,
+                channel_id,
+                text=text,
+                reply_to_message_id=reply_to,
+                audio_path=audio_path,
+            )
             # Clear temporary attribute
-            if hasattr(self, '_last_reply_to_id'):
+            if hasattr(self, "_last_reply_to_id"):
                 try:
-                    delattr(self, '_last_reply_to_id')
+                    delattr(self, "_last_reply_to_id")
                 except Exception:
                     try:
                         del self._last_reply_to_id
                     except Exception:
                         pass
-            
+
             # Save SyntH's response via core chat_context_manager
             try:
                 from core.chat_context_manager import save_response_message
                 from core.interface_path_utils import build_interface_path
-                interface_path = build_interface_path('discord_bot', str(channel_id))
+
+                interface_path = build_interface_path("discord_bot", str(channel_id))
                 await save_response_message(interface_path, text)
             except Exception as e:
-                log_debug(f"[discord_interface] Failed to save response via context_manager: {e}")
-            
-            log_debug(f"[discord_interface] Message sent to {channel_id}: {text}")
+                log_debug(
+                    f"[discord_interface] Failed to save response via context_manager: {e}"
+                )
+
+            log_debug(
+                f"[discord_interface] Message sent to {channel_id}: {text[:50] if text else '[Audio]'}"
+            )
         except Exception as e:
             log_error(
                 f"[discord_interface] Failed to send message to {channel_id}: {repr(e)}"
             )
 
-    async def _discord_send(self, channel_id, text, reply_to_message_id=None):
+    async def execute_action(self, action: dict, context: dict, bot, original_message):
+        """Execute non-message actions."""
+        action_type = action.get("type")
+        payload = action.get("payload", {})
+
+        if action_type == "join_voice_discord":
+            channel_id = payload.get("channel_id")
+            interface_path = payload.get("interface_path")
+
+            if not channel_id and interface_path:
+                # Try to extract channel ID from interface path if not explicitly provided
+                try:
+                    from core.interface_path_utils import parse_interface_path
+
+                    _, levels = parse_interface_path(interface_path)
+                    # discord_bot/guild_id/channel_id
+                    if len(levels) >= 2:
+                        channel_id = levels[1]
+                except Exception:
+                    pass
+
+            if not channel_id:
+                return {"status": "failed", "message": "Missing channel_id"}
+
+            return await self._join_voice(channel_id)
+
+        elif action_type == "leave_voice_discord":
+            guild_id = payload.get("guild_id")
+            interface_path = payload.get("interface_path")
+
+            if not guild_id and interface_path:
+                try:
+                    from core.interface_path_utils import parse_interface_path
+
+                    _, levels = parse_interface_path(interface_path)
+                    if len(levels) >= 1:
+                        guild_id = levels[0]
+                except Exception:
+                    pass
+
+            if not guild_id:
+                return {"status": "failed", "message": "Missing guild_id"}
+
+            return await self._leave_voice(guild_id)
+
+        elif action_type == "audio_discord_bot":
+            audio_path = payload.get("audio")
+            channel_id = payload.get("channel_id")
+            interface_path = payload.get("interface_path")
+            caption = payload.get("caption")
+
+            if not channel_id and interface_path:
+                try:
+                    from core.interface_path_utils import parse_interface_path
+
+                    _, levels = parse_interface_path(interface_path)
+                    # discord_bot/guild_id/channel_id
+                    if len(levels) >= 2:
+                        channel_id = levels[1]
+                except Exception:
+                    pass
+
+            # Check if we are in a voice channel in this guild
+            streaming = False
+            if channel_id and self.client:
+                try:
+                    channel = self.client.get_channel(int(channel_id))
+                    if not channel:
+                        channel = await self.client.fetch_channel(int(channel_id))
+                    
+                    if channel and channel.guild and channel.guild.voice_client:
+                        # We are connected to voice in this guild
+                        # Verify if we are in the requested channel OR if the request was just for the guild context
+                        # Actually, if we are in ANY voice channel in this guild, we can stream.
+                        # But typically we want to stream to the channel we are in.
+                        vc = channel.guild.voice_client
+                        if vc.is_connected():
+                            return await self._stream_audio(vc, audio_path)
+                except Exception as e:
+                    log_debug(f"[discord_interface] Voice check failed: {e}")
+
+            # Fallback to sending as file
+            log_debug("[discord_interface] Not in voice or lookup failed, sending as file attachment")
+            await self.send_message(
+                channel_id=channel_id,
+                text=caption,
+                audio=audio_path,
+                interface_path=interface_path
+            )
+            return {"status": "success", "message": "Sent as file"}
+
+        return {"status": "failed", "message": f"Unknown action {action_type}"}
+
+    async def _stream_audio(self, voice_client, audio_path):
+        """Stream audio to voice client."""
+        if not os.path.exists(audio_path):
+            return {"status": "failed", "message": "Audio file not found"}
+        
+        if voice_client.is_playing():
+            voice_client.stop()
+
+        try:
+            # Requires FFmpeg installed
+            source = FFmpegPCMAudio(audio_path)
+            voice_client.play(source)
+            log_info(f"[discord_interface] Streaming audio to voice: {audio_path}")
+            return {"status": "success", "message": "Streaming started"}
+        except Exception as e:
+            log_error(f"[discord_interface] Streaming failed: {e}")
+            return {"status": "failed", "message": str(e)}
+
+    async def _join_voice(self, channel_id):
+        """Join a voice channel."""
+        if not self.client:
+            return {"status": "failed", "message": "Discord client not initialized"}
+
+        try:
+            channel = self.client.get_channel(int(channel_id))
+            if not channel:
+                channel = await self.client.fetch_channel(int(channel_id))
+
+            if not channel:
+                return {"status": "failed", "message": "Channel not found"}
+
+            guild = channel.guild
+            voice_client = guild.voice_client
+
+            if voice_client:
+                if voice_client.channel.id == channel.id:
+                    return {"status": "success", "message": "Already in channel"}
+                await voice_client.move_to(channel)
+                return {"status": "success", "message": f"Moved to {channel.name}"}
+            else:
+                await channel.connect()
+                return {"status": "success", "message": f"Connected to {channel.name}"}
+
+        except Exception as e:
+            log_error(f"[discord_interface] Failed to join voice: {e}")
+            return {"status": "failed", "message": str(e)}
+
+    async def _leave_voice(self, guild_id):
+        """Leave voice channel in a guild."""
+        if not self.client:
+            return {"status": "failed", "message": "Discord client not initialized"}
+
+        try:
+            guild = self.client.get_guild(int(guild_id))
+            if not guild:
+                guild = await self.client.fetch_guild(int(guild_id))
+
+            if not guild:
+                return {"status": "failed", "message": "Guild not found"}
+
+            voice_client = guild.voice_client
+            if voice_client:
+                await voice_client.disconnect()
+                return {"status": "success", "message": "Disconnected from voice"}
+            else:
+                return {"status": "success", "message": "Not in a voice channel"}
+        except Exception as e:
+            log_error(f"[discord_interface] Failed to leave voice: {e}")
+            return {"status": "failed", "message": str(e)}
+
+    async def _discord_send(
+        self, channel_id, text, reply_to_message_id=None, audio_path=None
+    ):
         """Internal Discord send method.
 
         This method is robust: it will try to resolve the provided numeric id
@@ -301,7 +636,9 @@ class DiscordInterface:
                 try:
                     channel = await self.client.fetch_channel(int(channel_id))
                 except Exception as e:  # pragma: no cover - network dependent
-                    log_debug(f"[discord_interface] fetch_channel failed for {channel_id}: {e}")
+                    log_debug(
+                        f"[discord_interface] fetch_channel failed for {channel_id}: {e}"
+                    )
                     channel = None
         except Exception:
             channel = None
@@ -321,34 +658,54 @@ class DiscordInterface:
                     try:
                         user = await self.client.fetch_user(int(channel_id))
                     except Exception as e:  # pragma: no cover - network dependent
-                        log_debug(f"[discord_interface] fetch_user failed for {channel_id}: {e}")
+                        log_debug(
+                            f"[discord_interface] fetch_user failed for {channel_id}: {e}"
+                        )
                         user = None
 
                 if user is not None:
-                    # If replying to a specific message id was requested, we can't easily
-                    # reply in the same way in a DM, so just send a plain DM message.
                     log_debug(f"[discord_interface] Sending DM to user {channel_id}")
-                    await user.send(text)
+
+                    file_obj = None
+                    if audio_path and os.path.exists(audio_path):
+                        file_obj = discord.File(audio_path)
+
+                    if text or file_obj:
+                        await user.send(text or "", file=file_obj)
                     return
             except Exception as e:  # pragma: no cover - network dependent
-                log_debug(f"[discord_interface] DM send attempt failed for {channel_id}: {e}")
+                log_debug(
+                    f"[discord_interface] DM send attempt failed for {channel_id}: {e}"
+                )
 
             # If we reach here, both channel and user resolution failed
             raise RuntimeError(f"Unknown channel or user: {channel_id}")
+
+        # Prepare file object
+        file_obj = None
+        if audio_path:
+            if os.path.exists(audio_path):
+                file_obj = discord.File(audio_path)
+            else:
+                log_warning(f"[discord_interface] Audio file not found: {audio_path}")
 
         # If reply to a specific message was requested, try to fetch and reply
         if reply_to_message_id:
             try:
                 msg = await channel.fetch_message(int(reply_to_message_id))
-                await msg.reply(text)
+                await msg.reply(text or "", file=file_obj)
                 return
             except Exception as e:
-                log_debug(f"[discord_interface] Could not reply to message id {reply_to_message_id}: {e}")
+                log_debug(
+                    f"[discord_interface] Could not reply to message id {reply_to_message_id}: {e}"
+                )
 
-        await channel.send(text)
+        await channel.send(text or "", file=file_obj)
 
     async def _process_message(self, message):
         """Handle incoming Discord messages."""
+        # Chat attention is handled centrally via core.chat_attention; no per-instance state required
+
         try:
             if self.client and message.author == getattr(self.client, "user", None):
                 return
@@ -381,7 +738,11 @@ class DiscordInterface:
                         offset = content.find(mention_text)
                         if offset != -1:
                             entities.append(
-                                SimpleNamespace(type="mention", offset=offset, length=len(mention_text))
+                                SimpleNamespace(
+                                    type="mention",
+                                    offset=offset,
+                                    length=len(mention_text),
+                                )
                             )
                         break
 
@@ -391,9 +752,14 @@ class DiscordInterface:
                 for r in message.role_mentions:
                     role_mentions_ids.append(getattr(r, "id", None))
                     role_name = getattr(r, "name", "")
-                    content = content.replace(f"<@&{getattr(r, 'id', '')}>", f"@{role_name}")
+                    content = content.replace(
+                        f"<@&{getattr(r, 'id', '')}>", f"@{role_name}"
+                    )
             if getattr(getattr(message, "guild", None), "me", None):
-                bot_role_ids = [getattr(r, "id", None) for r in getattr(message.guild.me, "roles", [])]
+                bot_role_ids = [
+                    getattr(r, "id", None)
+                    for r in getattr(message.guild.me, "roles", [])
+                ]
 
             if not entities:
                 entities = None
@@ -402,7 +768,9 @@ class DiscordInterface:
             ping_check_content = content
             if bot_user and getattr(bot_user, "name", None):
                 mention_text = f"@{bot_user.name}"
-                ping_check_content = ping_check_content.replace(mention_text, "").strip()
+                ping_check_content = ping_check_content.replace(
+                    mention_text, ""
+                ).strip()
 
             if ping_check_content.lower() == "ping":
                 await self._discord_send(message.channel.id, "pong")
@@ -435,7 +803,9 @@ class DiscordInterface:
                     try:  # pragma: no cover - network dependent
                         replied = await message.channel.fetch_message(ref.message_id)
                     except Exception as e:
-                        log_debug(f"[discord_interface] Failed to fetch referenced message: {e}")
+                        log_debug(
+                            f"[discord_interface] Failed to fetch referenced message: {e}"
+                        )
                 if replied is not None:
                     reply_to = SimpleNamespace(
                         message_id=getattr(replied, "id", None),
@@ -457,29 +827,40 @@ class DiscordInterface:
             thread_id = None
             parent_channel_id = None
             guild_id = str(message.guild.id) if message.guild else None
-            
-            if hasattr(message, 'channel') and message.channel:
+
+            if hasattr(message, "channel") and message.channel:
                 # In Discord.py, threads have type GUILD_PUBLIC_THREAD, GUILD_PRIVATE_THREAD, etc.
-                channel_type = str(getattr(message.channel, 'type', ''))
-                if '_thread' in channel_type.lower():
+                channel_type = str(getattr(message.channel, "type", ""))
+                if "_thread" in channel_type.lower():
                     # We're in a thread - channel_id is already the thread ID
                     thread_id = channel_id  # Same as message.channel.id
-                    parent_channel_id = getattr(message.channel, 'parent_id', None)
-                    log_debug(f"[discord_interface] Message in thread: {thread_id}, parent: {parent_channel_id}")
+                    parent_channel_id = getattr(message.channel, "parent_id", None)
+                    log_debug(
+                        f"[discord_interface] Message in thread: {thread_id}, parent: {parent_channel_id}"
+                    )
 
             # Build interface_path for Discord
             from core.interface_path_utils import build_interface_path
+
             if guild_id:
                 # Guild message: discord_bot/guild_id/channel_id/thread_id (if in thread)
-                interface_path = build_interface_path('discord_bot', guild_id, str(channel_id), str(thread_id) if thread_id else None)
+                interface_path = build_interface_path(
+                    "discord_bot",
+                    guild_id,
+                    str(channel_id),
+                    str(thread_id) if thread_id else None,
+                )
             else:
                 # DM: discord_bot/user_id
-                interface_path = build_interface_path('discord_bot', str(message.author.id))
+                interface_path = build_interface_path(
+                    "discord_bot", str(message.author.id)
+                )
             log_debug(f"[discord_interface] Generated interface_path: {interface_path}")
 
             # Track context using centralized manager
             # NOTE: chat activity tracking is now centralized in chat_context_manager.add_message_to_context
             from core.chat_context_manager import add_message_to_context
+
             try:
                 await add_message_to_context(
                     interface_path=interface_path,
@@ -487,12 +868,22 @@ class DiscordInterface:
                     sender_name=message.author.display_name or message.author.name,
                     sender_id=str(message.author.id),
                     message_id=message.id,
-                    timestamp=message.created_at.isoformat() if hasattr(message.created_at, 'isoformat') else None
+                    timestamp=message.created_at.isoformat()
+                    if hasattr(message.created_at, "isoformat")
+                    else None,
                 )
             except Exception as e:
-                log_warning(f"[discord_interface] Failed to add message to context: {e}")
+                log_warning(
+                    f"[discord_interface] Failed to add message to context: {e}"
+                )
 
-            # Prepare simplified message for core queue  
+            # Prepare simplified message for core queue
+            # Detect wake/sleep commands early for flagging
+            text_lower_check = content.lower()
+            _, _, is_wake_sleep_cmd = evaluate_triggers(text_lower_check)
+
+
+
             wrapped = SimpleNamespace(
                 message_id=getattr(message, "id", None),
                 chat_id=channel_id,  # In Discord, this is thread ID if in thread, channel ID otherwise
@@ -501,14 +892,21 @@ class DiscordInterface:
                 caption=None,
                 date=getattr(message, "created_at", None),
                 thread_id=thread_id,  # Thread ID if in thread, None if in regular channel
+                is_wake_sleep_command=is_wake_sleep_cmd,  # Flag for prompt engine
                 from_user=SimpleNamespace(
                     id=getattr(message.author, "id", None),
                     username=getattr(message.author, "name", None),
-                    full_name=getattr(message.author, "display_name", getattr(message.author, "name", None)),
+                    full_name=getattr(
+                        message.author,
+                        "display_name",
+                        getattr(message.author, "name", None),
+                    ),
                 ),
                 chat=SimpleNamespace(
                     id=channel_id,
-                    type="private" if getattr(message, "guild", None) is None else "group",
+                    type="private"
+                    if getattr(message, "guild", None) is None
+                    else "group",
                     title=getattr(getattr(message, "channel", None), "name", None),
                     username=None,
                     first_name=None,
@@ -518,25 +916,28 @@ class DiscordInterface:
                 role_mentions=role_mentions_ids or None,
                 bot_roles=bot_role_ids or None,
                 reply_to_message=reply_to,
-                attachments=getattr(message, 'attachments', [])  # Add attachments for image processing
+                attachments=getattr(
+                    message, "attachments", []
+                ),  # Add attachments for image processing
             )
 
             # === Wake/Sleep & Attention Logic ===
             text_lower = content.lower()
-            is_wake_command = "hey 2b" in text_lower
-            is_sleep_command = "bye 2b" in text_lower
-
-            from core.chat_attention import set_attention, get_attention
+            is_sleep_command, is_wake_command, _ = evaluate_triggers(text_lower)
 
             chat_scope_id = thread_id if thread_id else channel_id
             if is_wake_command:
                 set_attention(chat_scope_id, True)
-                log_debug(f"[discord_interface] Wake command detected in chat {chat_scope_id}")
+                log_debug(
+                    f"[discord_interface] Wake command detected in chat {chat_scope_id}"
+                )
             elif is_sleep_command:
                 set_attention(chat_scope_id, False)
-                log_debug(f"[discord_interface] Sleep command detected in chat {chat_scope_id}")
+                log_debug(
+                    f"[discord_interface] Sleep command detected in chat {chat_scope_id}"
+                )
 
-            is_awake = get_attention(chat_scope_id, default=False)
+            # Default to awake (True) when not explicitly set
             is_explicit_trigger = is_wake_command or is_sleep_command
             if not is_explicit_trigger:
                 if "@" in content:
@@ -544,21 +945,13 @@ class DiscordInterface:
                 elif getattr(message, "guild", None) is None:
                     is_explicit_trigger = True
                 elif reply_to and bot_user:
-                    if getattr(reply_to.from_user, "id", None) == getattr(bot_user, "id", None):
+                    if getattr(reply_to.from_user, "id", None) == getattr(
+                        bot_user, "id", None
+                    ):
                         is_explicit_trigger = True
 
-            # Centralize mention detection in core.message_queue - decide whether to skip the
-            # mention check based on the chat's attention state. If the chat is 'awake' we
-            # bypass the mention check so messages are always processed; otherwise we let
-            # the central queue call is_message_for_bot and decide if the message should be handled.
-            skip_mention_check = True if is_awake else False
-
-            if not is_awake and not is_explicit_trigger:
-                # Not awake and no explicit trigger (e.g., not a DM, not a mention, not a reply)
-                # Let the message_queue perform the directed check; if it decides the message
-                # is not directed to the bot it will drop it internally. We proceed to enqueue
-                # with skip_mention_check=False so the central logic runs.
-                pass
+            # Attach explicit trigger flag so the core can enforce attention rules
+            wrapped.is_explicit_trigger = is_explicit_trigger
 
             try:
                 await message_queue.enqueue(
@@ -566,7 +959,7 @@ class DiscordInterface:
                     wrapped,
                     interface_id="discord_bot",
                     original_message=message,
-                    skip_mention_check=skip_mention_check,
+                    skip_mention_check=False,
                 )
             except Exception as e:  # pragma: no cover - queue errors
                 log_error(f"[discord_interface] message_queue enqueue failed: {e}")
@@ -575,11 +968,17 @@ class DiscordInterface:
             log_error(f"[discord_interface] Error processing message: {e}")
 
     async def execute_action(
-        self, action: dict, context: dict, bot: Any, original_message: object | None = None
+        self,
+        action: dict,
+        context: dict,
+        bot: Any,
+        original_message: object | None = None,
     ) -> None:
         """Execute actions for this interface."""
         action_type = action.get("type")
-        log_debug(f"[discord_interface] execute_action called with action_type={action_type}, payload={action.get('payload')}, context_keys={list(context.keys()) if context else []}")
+        log_debug(
+            f"[discord_interface] execute_action called with action_type={action_type}, payload={action.get('payload')}, context_keys={list(context.keys()) if context else []}"
+        )
         if action_type == "message_discord_bot":
             payload = action.get("payload", {})
             target = payload.get("target")
@@ -589,49 +988,81 @@ class DiscordInterface:
             if text and interface_path:
                 try:
                     from core.persona_manager import PersonaManager
-                    webui_session_id = context.get("webui_session_id") or context.get("session_id")
+
+                    webui_session_id = context.get("webui_session_id") or context.get(
+                        "session_id"
+                    )
                     if webui_session_id:
                         persona_manager = PersonaManager.get_instance()
                         if persona_manager:
-                            await persona_manager.set_animation_state("write", session_id=webui_session_id)
-                            log_debug(f"[discord_interface] Set avatar animation to 'write' for WebUI session {webui_session_id}")
+                            await persona_manager.set_animation_state(
+                                "write", session_id=webui_session_id
+                            )
+                            log_debug(
+                                f"[discord_interface] Set avatar animation to 'write' for WebUI session {webui_session_id}"
+                            )
                 except Exception as anim_exc:
-                    log_debug(f"[discord_interface] Could not set animation: {anim_exc}")
+                    log_debug(
+                        f"[discord_interface] Could not set animation: {anim_exc}"
+                    )
 
-                log_debug(f"[discord_interface] Sending message via interface_path={interface_path}")
-                await self.send_message({"interface_path": interface_path, "text": text, "reply_to_message_id": payload.get("reply_to_message_id")})
+                log_debug(
+                    f"[discord_interface] Sending message via interface_path={interface_path}"
+                )
+                await self.send_message(
+                    {
+                        "interface_path": interface_path,
+                        "text": text,
+                        "reply_to_message_id": payload.get("reply_to_message_id"),
+                    }
+                )
             elif text and target is not None:
                 # Try to set animation to 'write' if WebUI context is available
                 # Discord itself doesn't have session_id, but context might have it from WebUI
                 try:
                     from core.persona_manager import PersonaManager
-                    webui_session_id = context.get("webui_session_id") or context.get("session_id")
+
+                    webui_session_id = context.get("webui_session_id") or context.get(
+                        "session_id"
+                    )
                     if webui_session_id:
                         persona_manager = PersonaManager.get_instance()
                         if persona_manager:
-                            await persona_manager.set_animation_state("write", session_id=webui_session_id)
-                            log_debug(f"[discord_interface] Set avatar animation to 'write' for WebUI session {webui_session_id}")
+                            await persona_manager.set_animation_state(
+                                "write", session_id=webui_session_id
+                            )
+                            log_debug(
+                                f"[discord_interface] Set avatar animation to 'write' for WebUI session {webui_session_id}"
+                            )
                 except Exception as anim_exc:
-                    log_debug(f"[discord_interface] Could not set animation: {anim_exc}")
-                
-                log_debug(f"[discord_interface] Sending message via legacy target={target}")
+                    log_debug(
+                        f"[discord_interface] Could not set animation: {anim_exc}"
+                    )
+
+                log_debug(
+                    f"[discord_interface] Sending message via legacy target={target}"
+                )
                 await self.send_message(target, text)
             else:
-                log_warning(f"[discord_interface] message_discord_bot called but no valid routing info (interface_path/target) found in payload: {payload}")
+                log_warning(
+                    f"[discord_interface] message_discord_bot called but no valid routing info (interface_path/target) found in payload: {payload}"
+                )
 
     async def add_reaction(self, message, emoji: str) -> bool:
         """Add a reaction to a message.
-        
+
         Args:
             message: The Discord message object
             emoji: The emoji to use as reaction
-            
+
         Returns:
             bool: True if reaction was added successfully
         """
         try:
             await message.add_reaction(emoji)
-            log_info(f"[discord_interface] Successfully added reaction '{emoji}' to Discord message")
+            log_info(
+                f"[discord_interface] Successfully added reaction '{emoji}' to Discord message"
+            )
             return True
         except Exception as e:
             log_warning(f"[discord_interface] Failed to add reaction '{emoji}': {e}")
@@ -659,11 +1090,11 @@ class DiscordInterface:
         """Register custom validation rules with the new validation system."""
         try:
             from core.validation_registry import ValidationRule, get_validation_registry
-            
+
             def validate_discord_message(payload):
                 """Enhanced validation for Discord message actions."""
                 errors = []
-                
+
                 # Validate text content
                 text = payload.get("text")
                 if text:
@@ -671,13 +1102,15 @@ class DiscordInterface:
                         errors.append("Message text cannot exceed 2000 characters")
                     if not text.strip():
                         errors.append("Message text cannot be empty or only whitespace")
-                
+
                 # Validate target (channel_id)
                 # Validate routing info: prefer interface_path, accept legacy 'target'
                 interface_path = payload.get("interface_path")
                 target = payload.get("target")
                 if not interface_path and target is None:
-                    errors.append("Either payload.interface_path (preferred) or payload.target (legacy) is required")
+                    errors.append(
+                        "Either payload.interface_path (preferred) or payload.target (legacy) is required"
+                    )
                 if interface_path is not None and not isinstance(interface_path, str):
                     errors.append("payload.interface_path must be a string")
                 if target is not None:
@@ -685,32 +1118,37 @@ class DiscordInterface:
                         errors.append("Channel ID must be numeric")
                     elif isinstance(target, int) and target <= 0:
                         errors.append("Channel ID must be positive")
-                
+
                 # Validate reply_to_message_id
                 reply_to = payload.get("reply_to_message_id")
                 if reply_to is not None:
                     if not isinstance(reply_to, int) or reply_to <= 0:
                         errors.append("reply_to_message_id must be a positive integer")
-                
+
                 return errors
-            
+
             # Create custom validation rule
             rule = ValidationRule(
                 action_type="message_discord_bot",
                 # Require text only; custom_validator enforces that either interface_path or legacy 'target' is present
                 required_fields=["text"],
                 custom_validator=validate_discord_message,
-                component_name="discord_interface"
+                component_name="discord_interface",
             )
-            
+
             # Register with validation registry
             registry = get_validation_registry()
             registry.register_component_rules("discord_interface", [rule])
-            
-            log_debug("[discord_interface] Registered custom validation rules with validation registry")
-            
+
+            log_debug(
+                "[discord_interface] Registered custom validation rules with validation registry"
+            )
+
         except Exception as e:
-            log_warning(f"[discord_interface] Failed to register custom validation: {e}")
+            log_warning(
+                f"[discord_interface] Failed to register custom validation: {e}"
+            )
+
 
 # Expose class for dynamic loading
 INTERFACE_CLASS = DiscordInterface
@@ -744,6 +1182,44 @@ DISCORD_BOT_TOKEN = config_registry.get_var(
 discord_interface = None
 
 
+def _parse_trainer_id_from_config() -> int | None:
+    """Extract trainer ID for discord_bot from TRAINER_IDS configuration."""
+    trainer_ids = config_registry.get_var(
+        "TRAINER_IDS",
+        "",
+        label="Trainer IDs",
+        description="Comma-separated list of trainer IDs for each interface (format: interface_name:user_id)",
+        group="core",
+        component="discord_interface",
+    )
+
+    trainer_ids_str = str(trainer_ids) if trainer_ids else ""
+    if not trainer_ids_str:
+        return None
+
+    for trainer_config in trainer_ids_str.split(","):
+        trainer_config = trainer_config.strip()
+        # Accept both 'discord_bot:' (primary) and 'discord:' (short alias)
+        if trainer_config.startswith("discord_bot:"):
+            try:
+                return int(trainer_config.split(":")[1])
+            except (ValueError, IndexError):
+                log_warning(
+                    f"[discord_interface] Invalid trainer ID format in TRAINER_IDS: {trainer_config}"
+                )
+                return None
+        elif trainer_config.startswith("discord:"):
+            try:
+                return int(trainer_config.split(":")[1])
+            except (ValueError, IndexError):
+                log_warning(
+                    f"[discord_interface] Invalid trainer ID format in TRAINER_IDS: {trainer_config}"
+                )
+                return None
+
+    return None
+
+
 def get_discord_token() -> str:
     """Get the Discord bot token as a string."""
     return str(DISCORD_BOT_TOKEN) if DISCORD_BOT_TOKEN else ""
@@ -754,50 +1230,3 @@ def get_discord_token() -> str:
 log_info("[discord_interface] Creating Discord interface instance...")
 discord_interface = DiscordInterface(get_discord_token())
 log_info("[discord_interface] Discord interface instance created and registered")
-
-# --- Automatic reload/start support ---------------------------------
-# Ensure that when DISCORD_BOT_TOKEN is loaded/changed (e.g., from DB), the
-# Discord interface will attempt to start without requiring a container restart.
-try:
-    def _on_discord_token_change(value):
-        """Called when DISCORD_BOT_TOKEN changes. Schedule start if token present."""
-        try:
-            if value:
-                import asyncio
-                try:
-                    loop = asyncio.get_running_loop()
-                    # schedule start in event loop
-                    loop.create_task(discord_interface.start())
-                except RuntimeError:
-                    # no loop available at import time; core will start interfaces later
-                    pass
-        except Exception as e:
-            from core.logging_utils import log_warning
-            log_warning(f"[discord_interface] Token change handler failed: {e}")
-
-    # Register listener so notify_all_listeners() will trigger startup when DB values are loaded
-    config_registry.add_listener("DISCORD_BOT_TOKEN", _on_discord_token_change)
-
-    def reload_interface():
-        """Reload/start the Discord interface with updated configuration.
-
-        This is used by the CoreInitializer reload handler when a config with
-        needs_component_reload=True is changed via UI/API.
-        """
-        from core.logging_utils import log_info
-        log_info("[discord_interface] Reloading Discord interface...")
-        try:
-            import asyncio
-            loop = asyncio.get_running_loop()
-            loop.create_task(discord_interface.start())
-        except RuntimeError:
-            log_info("[discord_interface] No running event loop: reload scheduled for when loop is available")
-        return True
-except Exception:
-    # Defensive: do not let listener setup crash imports
-    pass
-
-# --------------------------------------------------------------------
-
-
-
