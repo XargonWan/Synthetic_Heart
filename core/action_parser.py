@@ -1585,73 +1585,94 @@ def get_action_plugin_instructions() -> dict[str, dict]:
     return instructions
 
 
-async def gather_static_injections(message=None, context_memory=None) -> dict:
-    """Collect static injections from plugins supporting the ``static_inject`` action.
-
-    Parameters
-    ----------
-    message : optional
-        The original message associated with the prompt. Passed to plugins that
-        accept it for participant resolution.
-    context_memory : optional
-        Memory structure containing recent chat messages. Also passed to
-        plugins if they accept it.
-    """
-
-    injections: dict = {}
-    log_debug(f"[action_parser] 🔍 gather_static_injections() CALLED")
-    try:
-        plugins_list = _load_action_plugins()
-        log_debug(f"[action_parser] Found {len(list(plugins_list))} plugins to check for static_inject")
-        plugins_list = _load_action_plugins()  # Reload since we consumed it in len()
-        
-        for plugin in plugins_list:
-            try:
-                supported = False
-                if hasattr(plugin, "get_supported_action_types"):
-                    types = plugin.get_supported_action_types()
-                    if types and "static_inject" in types:
-                        supported = True
-                elif hasattr(plugin, "get_supported_actions"):
-                    acts = plugin.get_supported_actions()
-                    if isinstance(acts, dict):
-                        supported = "static_inject" in acts
-                    elif isinstance(acts, (list, set, tuple)):
-                        supported = "static_inject" in acts
-                
-                has_method = hasattr(plugin, "get_static_injection")
-                log_debug(f"[action_parser] Plugin {plugin.__class__.__name__}: supported={supported}, has_method={has_method}")
-                
-                if not supported or not has_method:
-                    continue
-
-                log_debug(f"[action_parser] 🎯 Calling get_static_injection() on {plugin.__class__.__name__}")
-                
-                # Pass message and context_memory if the plugin expects them
-                try:
-                    result = plugin.get_static_injection(message, context_memory)
-                except TypeError:
-                    try:
-                        result = plugin.get_static_injection()
-                    except Exception as inner_e:
-                        log_error(f"[action_parser] Error calling get_static_injection() on {plugin.__class__.__name__}: {inner_e}")
-                        continue
-
-                if inspect.iscoroutine(result):
-                    result = await result
-                    
-                log_debug(f"[action_parser] ✅ Got result from {plugin.__class__.__name__}: {list(result.keys()) if isinstance(result, dict) else type(result)}")
-                
-                if isinstance(result, dict):
-                    injections.update(result)
-            except Exception as e:
-                log_error(
-                    f"[action_parser] Error gathering static injection from {plugin.__class__.__name__}: {e}"
-                )
-    except Exception as e:
-        log_error(f"[action_parser] Error collecting static injections: {e}")
+async def gather_static_injections(message, context_memory):
+    """Gathers static contextual data from all plugins that support 'static_inject'.
     
-    log_info(f"[action_parser] 📊 gather_static_injections() returning {len(injections)} keys: {list(injections.keys())}")
+    This is used to build the context for every prompt with information like
+    date, time, weather, persona, etc.
+    """
+    injections = {}
+    loaded_plugins = _load_action_plugins()
+    log_info(
+        f"[action_parser] gather_static_injections: Querying {len(loaded_plugins)} plugins"
+    )
+
+    tasks = []
+    plugin_names = []
+
+    for plugin in loaded_plugins:
+        try:
+            supported = False
+            if hasattr(plugin, "get_supported_action_types"):
+                supported = "static_inject" in (plugin.get_supported_action_types() or [])
+            if not supported and hasattr(plugin, "get_supported_actions"):
+                actions = plugin.get_supported_actions()
+                supported = isinstance(actions, dict) and "static_inject" in actions
+
+            has_method = hasattr(plugin, "get_static_injection")
+            
+            if not supported or not has_method:
+                continue
+
+            # Wrapper to handle both sync/async and different signatures
+            async def _run_injection(p=plugin):
+                name = p.__class__.__name__
+                start = time.time()
+                try:
+                    # Enforce a strict timeout per-plugin to prevent hangs
+                    async def _inner():
+                        # Try with arguments first
+                        try:
+                            res = p.get_static_injection(message, context_memory)
+                        except TypeError:
+                            # Fallback to no arguments
+                            res = p.get_static_injection()
+                        
+                        if inspect.iscoroutine(res):
+                            res = await res
+                        return res
+
+                    try:
+                        res = await asyncio.wait_for(_inner(), timeout=5.0)
+                    except asyncio.TimeoutError:
+                        log_error(f"[action_parser] ⏰ get_static_injection() on {name} timed out after 5s")
+                        return {}
+                        
+                    duration = time.time() - start
+                    if duration > 0.1:
+                        log_info(f"[action_parser] ⚠️ get_static_injection() on {name} took {duration:.3f}s")
+                    else:
+                        log_debug(f"[action_parser] ✅ get_static_injection() on {name} took {duration:.3f}s")
+                    
+                    return res if isinstance(res, dict) else {}
+                except Exception as e:
+                    log_error(f"[action_parser] Error in get_static_injection() on {name}: {e}")
+                    return {}
+
+            tasks.append(_run_injection())
+            plugin_names.append(plugin.__class__.__name__)
+
+        except Exception as e:
+            log_error(f"[action_parser] Error preparing injection for {plugin}: {e}")
+
+    if not tasks:
+        # Return empty dict if no injections
+        return {}
+
+    log_debug(f"[action_parser] Running {len(tasks)} injections in parallel: {plugin_names}")
+    try:
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for res in results:
+            if isinstance(res, dict):
+                injections.update(res)
+            elif isinstance(res, Exception):
+                log_error(f"[action_parser] asyncio.gather task raised exception: {res}")
+    except Exception as e:
+        log_error(f"[action_parser] Error in asyncio.gather results: {e}")
+
+    log_info(
+        f"[action_parser] 📊 gather_static_injections() returning {len(injections)} keys: {list(injections.keys())}"
+    )
     return injections
 
 
