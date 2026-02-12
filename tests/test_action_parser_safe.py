@@ -41,10 +41,28 @@ async def test_llm_action_safe_false_blocked_by_default(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_llm_action_safe_true_blocked_in_suggest_mode(monkeypatch):
+async def test_llm_action_safe_true_allowed_in_suggest_mode_if_low(monkeypatch):
+    # With new security-level default=low, LLM-originated low-security actions should be allowed
     await config_registry.set_value("SYNTH_AUTONOMY_MODE", "suggest")
     original_message = SimpleNamespace()
     original_message.from_llm = True
+
+    executed = {}
+
+    class FakeDiary:
+        @staticmethod
+        def execute_action(action, context, bot, original_message):
+            executed["ok"] = True
+
+        @staticmethod
+        def get_supported_action_types():
+            return ["create_personal_diary_entry"]
+
+    # Monkeypatch plugin discovery to return our fake diary for create_personal_diary_entry
+    import core.action_parser as ap
+
+    ap._ACTION_PLUGINS = [FakeDiary()]
+    ap.get_supported_action_types = lambda: set(["create_personal_diary_entry"])
 
     action = {
         "type": "create_personal_diary_entry",
@@ -52,18 +70,13 @@ async def test_llm_action_safe_true_blocked_in_suggest_mode(monkeypatch):
         "safe": True,
     }
 
-    import core.action_parser as ap
-
-    ap._ACTION_PLUGINS = []
-    ap.get_supported_action_types = lambda: set(["create_personal_diary_entry"])
-
     res = await run_actions(
         [action], context={}, bot=None, original_message=original_message
     )
-    # In 'suggest' mode we still treat proposals as not auto-executed
-    assert res["processed"] == []
-    assert len(res["failed_actions"]) == 1
-    assert "proposal" in res["failed_actions"][0]["errors"][0].lower()
+    # With default low-security, action should be executed even in 'suggest' mode
+    assert executed.get("ok", False) is True
+    assert len(res["failed_actions"]) == 0
+    assert len(res["processed"]) == 1
 
 
 @pytest.mark.asyncio

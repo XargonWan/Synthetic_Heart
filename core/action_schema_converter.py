@@ -91,6 +91,9 @@ def normalize_action_schema(
                 "examples": examples,
             },
             "source": action_def.get("source", "unknown"),
+            # Propagate optional security metadata if present in legacy definition
+            "security_level": action_def.get("security_level"),
+            "external_effects": action_def.get("external_effects"),
         }
 
         return normalized

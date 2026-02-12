@@ -1152,30 +1152,19 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
             is_from_llm = (hasattr(original_message, 'from_llm') and getattr(original_message, 'from_llm')) or context.get('from_llm', False)
             if is_from_llm:
                 try:
-                    # Read relevant runtime config
-                    synth_mode = str(config_registry.get_value('SYNTH_AUTONOMY_MODE', 'suggest') or 'suggest').lower()
-                    llm_unsafe_override = bool(config_registry.get_value('LLM_AUTO_EXECUTE_UNSAFE_ACTIONS', False))
-                    allowed_autonomy = config_registry.get_value('AUTONOMY_ALLOWED_ACTIONS', []) or []
+                    # Centralized safety decision
+                    from core.action_safety import is_action_allowed_for_execution
 
-                    safe_flag = action.get('safe', True)
-
-                    # If action flagged unsafe and no global override, block
-                    if safe_flag is False and not llm_unsafe_override:
-                        error_msg = f"Action '{action.get('type')}' blocked: flagged as unsafe (requires human approval)"
-                        log_warning(f"[action_parser] {error_msg}")
-                        collected_errors.append(error_msg)
-                        failed_actions.append({"index": idx, "action": action, "errors": [error_msg]})
-                        continue
-
-                    # If synth is in 'suggest' mode, do not auto-execute LLM-proposed actions
-                    if synth_mode == 'suggest':
-                        error_msg = f"Action '{action.get('type')}' originated from LLM while synth in 'suggest' mode; proposal-only"
+                    allowed, reason, meta = is_action_allowed_for_execution(action, context or {}, original_message)
+                    if not allowed:
+                        # Maintain previous behavior: collect as failed action and continue
+                        error_msg = f"Action '{action.get('type')}' blocked by safety policy: {reason}"
                         log_info(f"[action_parser] {error_msg}")
                         collected_errors.append(error_msg)
-                        failed_actions.append({"index": idx, "action": action, "errors": [error_msg]})
+                        failed_actions.append({"index": idx, "action": action, "errors": [error_msg], "safety_meta": meta})
                         continue
 
-                    # Special-case: heuristic-recovered actions must not be auto-executed
+                    # Special-case: heuristic-recovered actions must not be auto-executed even if allowed
                     if action.get('metadata', {}).get('heuristic_recovery'):
                         error_msg = f"Action '{action.get('type')}' flagged as heuristic recovery and requires human validation; quarantined"
                         log_warning(f"[action_parser] {error_msg}")
@@ -1183,19 +1172,6 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
                         failed_actions.append({"index": idx, "action": action, "errors": [error_msg]})
                         continue
 
-                    # If synth is in 'whitelisted' mode, only execute actions present in AUTONOMY_ALLOWED_ACTIONS
-                    if synth_mode == 'whitelisted':
-                        if allowed_autonomy and action.get('type') not in allowed_autonomy:
-                            error_msg = f"Action '{action.get('type')}' is not whitelisted for autonomous execution"
-                            log_warning(f"[action_parser] {error_msg}")
-                            collected_errors.append(error_msg)
-                            failed_actions.append({"index": idx, "action": action, "errors": [error_msg]})
-                            continue
-
-                    # If synth is in 'autonomous' mode, allow unrestricted execution (no whitelist checks)
-                    if synth_mode == 'autonomous':
-                        # unrestricted - nothing to check here (still respect 'safe' and global overrides)
-                        pass
                 except Exception as e:
                     log_warning(f"[action_parser] Safety/autonomy checks failed: {e}")
                     # On error, be conservative and treat as proposal-only
