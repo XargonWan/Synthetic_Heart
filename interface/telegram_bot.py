@@ -1027,13 +1027,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_debug(f"[telegram_bot] Reaction add skipped/failed: {e}")
 
     if is_awake and not directed:
-        # If we are awake (attention locked), treat ALL messages from this chat as directed
-        # UNLESS it's a sleep trigger that we just processed (we don't want to reply to "bye" twice if logic differs)
-        # But generally, if we are awake, we listen to everything.
+        # Respect centralized attention logic: do NOT force every message to be treated as directed.
+        # The centralized queue (core.message_queue) will only process messages when there is an
+        # explicit trigger or when is_message_for_bot returned True. Keeping this consistent
+        # avoids the bot responding to all messages in an awake chat unexpectedly.
         log_debug(
-            "[telegram_bot] Chat is AWAKE - forcing directed=True for continuous interaction"
+            "[telegram_bot] Chat is AWAKE but message not directed; leaving directed=False to respect centralized attention rules"
         )
-        directed = True
+        # Intentionally not setting directed = True here
 
     if not directed:
         log_debug("[telegram_bot] DEBUG: Message not directed to bot - ignoring")
