@@ -1264,26 +1264,35 @@ async def free_memory_search(query: str, limit: int = 5):
         except Exception:
             pass
 
-    # Try acquiring a connection and executing the query with retries to tolerate transient DB unavailability
+    # Try acquiring a connection and executing the query with retries up to 2 attempts
     rows = []
-    max_attempts = 3
+    max_attempts = 2
+    start_time = time.time()
     for attempt in range(1, max_attempts + 1):
         try:
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
-                    await cur.execute(union_q, params)
-                    rows = await cur.fetchall()
+                    # Enforce a 10s timeout per attempt
+                    await asyncio.wait_for(cur.execute(union_q, params), timeout=10.0)
+                    rows = await asyncio.wait_for(cur.fetchall(), timeout=5.0)
             break
+        except asyncio.TimeoutError:
+            log_warning(f"[free_memory_search] DB attempt {attempt} timed out after 10s")
+            if attempt < max_attempts:
+                continue
+            else:
+                log_error(f"[free_memory_search] Query timed out after {max_attempts} attempts")
+                return []
         except Exception as e:
             log_warning(f"[free_memory_search] DB attempt {attempt} failed: {e}")
             if attempt < max_attempts:
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)
                 continue
             else:
-                log_error(
-                    f"[free_memory_search] Query failed after {max_attempts} attempts: {e}"
-                )
+                log_error(f"[free_memory_search] Query failed after {max_attempts} attempts: {e}")
                 return []
+
+    log_info(f"[free_memory_search] Query completed in {time.time() - start_time:.3f}s")
 
     for r in rows:
         src, _id, ts, content = r
