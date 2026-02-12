@@ -375,7 +375,7 @@ class HistoryEngine:
                     from core.chat_history_cache import load_global_chat_history
 
                     db_history = await load_global_chat_history(
-                        limit=verbosity * 2 if verbosity > 0 else 20
+                        limit=verbosity * 5 if verbosity > 0 else 100
                     )
                     unified_candidates.extend(list(db_history))
                 except Exception as db_e:
@@ -384,7 +384,22 @@ class HistoryEngine:
                     )
 
                 if isinstance(chat_map, dict):
-                    for q in chat_map.values():
+                    for k, q in chat_map.items():
+                        # Skip metadata keys
+                        if isinstance(k, str) and k in (
+                            "interface_path",
+                            "chat_id",
+                            "thread_id",
+                            "system_message",
+                            "user_id",
+                            "username",
+                        ):
+                            continue
+
+                        # Skip invalid types
+                        if isinstance(q, (str, dict)):
+                            continue
+
                         if isinstance(q, (list, tuple)) or hasattr(q, "__iter__"):
                             unified_candidates.extend(list(q))
 
@@ -409,10 +424,59 @@ class HistoryEngine:
                 if unified_candidates:
                     unified_candidates.sort(key=_uni_sort_key)
 
+                    # Filter out internal system messages (e.g. Grillo tags, Pattern Analysis)
+                    # These typically appear on '.../-1' as self-monologues.
+                    # We preserve actual chat on '/-1' (valid WebUI sessions).
+                    def _is_internal_noise(m: dict) -> bool:
+                        path = str(m.get("interface_path", "") or "")
+                        if not path.endswith("/-1"):
+                            return False
+
+                        txt = m.get("text") or m.get("message_text") or ""
+                        if not txt:
+                            return False
+
+                        # Heuristics for non-chat system monologues
+                        if "G.R.I.L.L.O." in txt:
+                            return True
+                        if txt.startswith("Pattern analysis"):
+                            return True
+                        if txt.startswith("Reflecting on"):
+                            return True
+                        # Grillo memory consolidation / diary reflection patterns
+                        if txt.startswith("Recent cycles"):
+                            return True
+                        if txt.startswith("Analysis of recent"):
+                            return True
+                        if txt.startswith("Recent interaction patterns"):
+                            return True
+                        if txt.startswith("Relationship Reflection:"):
+                            return True
+                        # Messages from 'self' on /-1 are almost always system monologues
+                        sender = str(m.get("sender_name", "") or "")
+                        if sender.lower() == "self":
+                            return True
+                        return False
+
+                    unified_candidates = [
+                        m for m in unified_candidates if not _is_internal_noise(m)
+                    ]
+
                 history_current_chat = []
                 seen_history = set()
 
+                # Filter out the current inbound message to avoid duplication
+                # with input.payload.text in the prompt
+                input_text = (text or "").strip()
+
                 for m in unified_candidates[-verbosity:] if verbosity > 0 else []:
+                    # Skip if this entry's text matches the current input
+                    entry_text = (
+                        m.get("text") or m.get("message_text") or ""
+                    ).strip() if isinstance(m, dict) else ""
+                    if input_text and entry_text == input_text:
+                        continue
+
                     line = _entry_to_text_with_source(
                         m, current_interface_path=interface_path
                     )
@@ -552,9 +616,10 @@ class HistoryEngine:
                     if t:
                         thoughts.append(t)
 
-        # If diary is thoughts-only, derive thoughts from the diary plugin contribution (if any)
-        if enable_thoughts and enable_diary and not diary_full:
-            # Pull diary entries again from contributions for thoughts extraction
+        # Extract personal_thought from diary contributions for the thoughts array.
+        # This runs regardless of diary_full — personal thoughts are always valuable
+        # context for the LLM, separate from the full diary entries in history_recent.
+        if enable_thoughts and enable_diary:
             diary_entries: List[dict[str, Any]] = []
             for c in contributions:
                 if c.name != "ai_diary":

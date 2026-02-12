@@ -15,7 +15,7 @@ from core.logging_utils import log_debug, log_error, log_info
 from core.config_manager import config_registry
 
 
-def _get_history_limit(default: int = 10) -> int:
+def _get_history_limit(default: int = 50) -> int:
     """Return the unified history limit.
 
     Prefers the new global `CONTEXT_VERBOSITY` setting; falls back to legacy
@@ -57,9 +57,9 @@ async def init_chat_history_table() -> None:
 async def save_chat_message(
     interface_path: str,
     message_text: str,
-    sender_name: str = None,
-    sender_id: str = None,
-    timestamp: datetime = None,
+    sender_name: str | None = None,
+    sender_id: str | None = None,
+    timestamp: datetime | None = None,
 ) -> bool:
     """Save a message to the chat history cache.
 
@@ -95,7 +95,29 @@ async def save_chat_message(
 
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
-                history_limit = _get_history_limit(10)
+                history_limit = _get_history_limit(50)
+
+                # Deduplication: Check for identical message text within last 5 seconds for this interface
+                # This prevents double-logging from different pipeline stages (e.g. generation vs dispatch)
+                try:
+                    await cur.execute(
+                        """
+                        SELECT id FROM chat_history_cache 
+                        WHERE interface_path = %s 
+                        AND message_text = %s 
+                        AND timestamp > DATE_SUB(UTC_TIMESTAMP(), INTERVAL 5 SECOND)
+                        LIMIT 1
+                        """,
+                        (interface_path, message_text),
+                    )
+                    if await cur.fetchone():
+                        log_debug(
+                            f"[chat_history_cache] Skipping duplicate message for {interface_path}: {message_text[:30]}..."
+                        )
+                        return True
+                except Exception as e:
+                    log_debug(f"[chat_history_cache] Deduplication check failed: {e}")
+
                 # Insert message with timestamp (always in UTC)
                 if timestamp:
                     await cur.execute(
@@ -238,7 +260,7 @@ async def load_global_chat_history(limit: int = 10) -> deque:
                     """,
                     (limit,),
                 )
-                rows = await cur.fetchall()
+                rows = list(await cur.fetchall())
                 rows.reverse()
 
                 messages = deque()
@@ -327,14 +349,6 @@ async def get_cache_stats() -> dict:
                     "oldest": oldest.isoformat() if oldest else None,
                     "newest": newest.isoformat() if newest else None,
                     "history_limit": history_limit,
-                }
-
-                return {
-                    "total_messages": total_messages,
-                    "unique_interface_paths": unique_paths,
-                    "oldest_message": oldest.isoformat() if oldest else None,
-                    "newest_message": newest.isoformat() if newest else None,
-                    "history_limit": CHAT_HISTORY_LIMIT,
                 }
     except Exception as e:
         log_error(f"[chat_history_cache] Failed to get cache stats: {e}")
