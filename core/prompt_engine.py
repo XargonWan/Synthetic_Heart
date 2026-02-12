@@ -521,6 +521,210 @@ async def build_json_prompt(
     return prompt_with_instructions
 
 
+async def search_memories(tags=None, scope=None, limit=5):
+    if not tags:
+        return []
+
+    # Build OR conditions using JSON_CONTAINS to check if any tag exists in the JSON array
+    conditions = " OR ".join(["JSON_CONTAINS(tags, %s)"] * len(tags))
+
+    query = f"""
+        SELECT DISTINCT content
+        FROM memories
+        WHERE json_valid(tags)
+          AND ({conditions})
+    """
+
+    # Parameters: each tag encoded as a JSON string for JSON_CONTAINS
+    params = [json_dumps(tag) for tag in tags]
+
+    if scope:
+        query += " AND scope = %s"
+        params.append(scope)
+
+    query += " ORDER BY timestamp DESC LIMIT %s"
+    params.append(limit)
+
+    log_debug("Query:")
+    log_debug(query)
+    log_debug(f"Parameters: {params}")
+
+    async with get_conn_ctx() as conn:
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(query, params)
+                rows = await cur.fetchall()
+                # Truncate each memory to max 400 chars to keep JSON payload lightweight
+                memories = []
+                for row in rows:
+                    mem = row[0]
+                    if isinstance(mem, str) and len(mem) > 400:
+                        mem = mem[:400] + "..."
+                    memories.append(mem)
+
+                # Also search ai_diary for context_tags to include diary entries in memories
+                try:
+                    diary_query = f"SELECT DISTINCT content FROM ai_diary WHERE json_valid(context_tags) AND ({conditions}) ORDER BY timestamp DESC LIMIT %s"
+                    diary_params = [json_dumps(tag) for tag in tags]
+                    diary_params.append(limit)
+                    await cur.execute(diary_query, diary_params)
+                    rows2 = await cur.fetchall()
+                    for r in rows2:
+                        mem = r[0]
+                        if isinstance(mem, str) and len(mem) > 400:
+                            mem = mem[:400] + "..."
+                        memories.append(mem)
+                except Exception:
+                    # If ai_diary search fails, ignore and continue with memories only
+                    pass
+
+                log_debug(
+                    f"[search_memories] Retrieved {len(memories)} memories, ~{sum(len(str(m)) for m in memories)} chars total"
+                )
+                return memories
+        except Exception as e:
+            log_error(f"Query failed: {repr(e)}")
+            return []
+
+
+async def free_memory_search(query: str, limit: int = 5):
+    """Perform a free-text memory search over `memories` and `ai_diary` tables and
+    return a list of snippet strings (max 400 chars each). This mirrors the plugin's
+    mode='free' behavior but does not request LLM delivery, it just returns results.
+    """
+    if not query or not isinstance(query, str) or not query.strip():
+        return []
+
+    tokens = [q.strip() for q in query.split() if q.strip()]
+    if not tokens:
+        return []
+
+    params = []
+    token_clauses = []
+    for tok in tokens:
+        like = "%" + tok + "%"
+        token_clauses.append("content LIKE %s")
+        params.append(like)
+
+    where_mem = "(" + " OR ".join(token_clauses) + ")"
+
+    diary_token_clauses = []
+    for tok in tokens:
+        like = "%" + tok + "%"
+        diary_token_clauses.append("content LIKE %s")
+        params.append(like)
+        diary_token_clauses.append("personal_thought LIKE %s")
+        params.append(like)
+        diary_token_clauses.append("interaction_summary LIKE %s")
+        params.append(like)
+        diary_token_clauses.append("user_message LIKE %s")
+        params.append(like)
+
+    where_diary = "(" + " OR ".join(diary_token_clauses) + ")"
+
+    queries = []
+    queries.append(
+        f"SELECT 'memories' AS source, id, timestamp, content FROM memories WHERE {where_mem}"
+    )
+    queries.append(
+        f"SELECT 'ai_diary' AS source, id, timestamp, content FROM ai_diary WHERE {where_diary}"
+    )
+
+    # Fetch a larger pool if configured (useful when randomizing results)
+    try:
+        pool_max = int(
+            config_registry.get_value(
+                "MEMORY_SEARCH_PREFLIGHT_POOL_MAX", 100, value_type=int
+            )
+            or 100
+        )
+    except Exception:
+        pool_max = 100
+
+    union_q = " UNION ALL ".join(queries) + " ORDER BY timestamp DESC LIMIT %s"
+    params.append(pool_max)
+
+    log_debug(f"[free_memory_search] Executing query: {union_q} params={params}")
+
+    results = []
+    # Provide more helpful debug: print the DB target being used (if available)
+    try:
+        from core.db import _read_db_config
+    except Exception:
+        _read_db_config = None
+
+    if _read_db_config:
+        try:
+            db_host, db_port, db_user, db_pass, db_name = _read_db_config()
+            log_debug(
+                f"[free_memory_search] DB target: {db_user}@{db_host}:{db_port}/{db_name}"
+            )
+        except Exception:
+            pass
+
+    # Try acquiring a connection and executing the query with retries up to 2 attempts
+    rows = []
+    max_attempts = 2
+    start_time = time.time()
+    for attempt in range(1, max_attempts + 1):
+        try:
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    # Enforce a 10s timeout per attempt
+                    await asyncio.wait_for(cur.execute(union_q, params), timeout=10.0)
+                    rows = await asyncio.wait_for(cur.fetchall(), timeout=5.0)
+            break
+        except asyncio.TimeoutError:
+            log_warning(f"[free_memory_search] DB attempt {attempt} timed out after 10s")
+            if attempt < max_attempts:
+                continue
+            else:
+                log_error(f"[free_memory_search] Query timed out after {max_attempts} attempts")
+                return []
+        except Exception as e:
+            log_warning(f"[free_memory_search] DB attempt {attempt} failed: {e}")
+            if attempt < max_attempts:
+                await asyncio.sleep(0.5)
+                continue
+            else:
+                log_error(f"[free_memory_search] Query failed after {max_attempts} attempts: {e}")
+                return []
+
+    log_info(f"[free_memory_search] Query completed in {time.time() - start_time:.3f}s")
+
+    for r in rows:
+        src, _id, ts, content = r
+        snippet = content if isinstance(content, str) else str(content)
+        if len(snippet) > 400:
+            snippet = snippet[:400] + "..."
+        results.append(snippet)
+
+    log_debug(
+        f"[free_memory_search] Retrieved {len(results)} snippets (pool_max={pool_max})"
+    )
+    try:
+        log_info(
+            f"[json_prompt][preflight_summary] strategy=free_db snippets={len(results)} pool_max={pool_max}"
+        )
+    except Exception:
+        pass
+
+    try:
+        randomize = bool(
+            config_registry.get_value(
+                "MEMORY_SEARCH_PREFLIGHT_RANDOMIZE", False, value_type=bool
+            )
+        )
+    except Exception:
+        randomize = False
+
+    # If there are more results than the desired limit and randomization is enabled,
+    # shuffle and then return the desired number of results. Otherwise, return the
+    # top `limit` results by timestamp (already ordered DESC).
+    if len(results) > limit and randomize:
+        random.shuffle(results)
+
+    return results[:limit]
 async def build_prompt(
     user_text: str,
     identity_prompt: str = "",
