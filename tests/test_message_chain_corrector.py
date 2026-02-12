@@ -63,6 +63,60 @@ async def test_message_chain_triggers_corrector_for_unregistered_action(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_message_chain_triggers_corrector_for_unregistered_top_level_key(monkeypatch):
+    # Simulate LLM output with a valid actions array, but an unregistered top-level key "message".
+    # This should be compared against the registry-driven allowed metadata keys and trigger correction.
+    called = {"count": 0}
+
+    async def fake_corrector(text, bot=None, context=None, chat_id=None, thread_id=None):
+        called["count"] += 1
+        return None
+
+    async def fake_extract_json(text, return_metadata=False):
+        parsed = {
+            "actions": [
+                {
+                    "type": "create_personal_diary_entry",
+                    "payload": {"interaction_summary": "x"},
+                }
+            ],
+            "message": "ciao",
+            # feelings is allowed metadata (registered by persona_manager)
+            "feelings": {"happy": 5.0},
+        }
+        return (parsed, {})
+
+    # Supported actions do not include bare 'message'
+    monkeypatch.setattr(
+        action_parser,
+        "get_supported_action_types",
+        lambda: set(["create_personal_diary_entry", "message_telegram_bot", "message_discord_bot", "use_animation"]),
+    )
+
+    monkeypatch.setattr(
+        "core.transport_layer.run_corrector_middleware",
+        fake_corrector,
+    )
+    monkeypatch.setattr(
+        "core.transport_layer.extract_json_from_text",
+        fake_extract_json,
+    )
+
+    msg = SimpleNamespace(chat_id=123, interface_path="telegram_bot/123", from_llm=True)
+
+    result = await message_chain.handle_incoming_message(
+        bot=None,
+        message=msg,
+        text='{"actions": [{"type": "create_personal_diary_entry", "payload": {"interaction_summary": "x"}}], "message": "ciao"}',
+        source="llm",
+        context={},
+    )
+
+    assert called["count"] >= 1
+    assert msg.correction_context is not None
+
+
+@pytest.mark.asyncio
 async def test_normalize_message_unknown_obeys_supported_actions(monkeypatch):
     # If the interface-specific action is supported, normalization should occur
     monkeypatch.setattr(

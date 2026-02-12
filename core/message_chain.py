@@ -545,6 +545,45 @@ async def handle_incoming_message(
             # Normalize any 'message_unknown' or other fabricated message types
             # to the correct interface-specific action type before execution
             if actions:
+                # --- New: treat unregistered top-level JSON keys as invalid actions (registry-driven) ---
+                # Some LLMs return a response object like:
+                # {"actions": [...], "message": "...", "feelings": {...}}
+                # We already allow certain metadata keys (e.g. "feelings") via the validation registry.
+                # Any other top-level key is treated as an invalid action type so the corrector
+                # can regenerate the response using only registered actions.
+                is_from_llm = source == "llm" or getattr(message, "from_llm", False)
+                if is_from_llm and isinstance(parsed, dict):
+                    try:
+                        from core.validation_registry import get_validation_registry
+
+                        allowed_metadata = (
+                            get_validation_registry().get_response_metadata_keys() or set()
+                        )
+                        extra_keys = [
+                            k
+                            for k in parsed.keys()
+                            if k != "actions" and k not in allowed_metadata
+                        ]
+                        if extra_keys:
+                            synthetic_actions = []
+                            for key in extra_keys:
+                                value = parsed.get(key)
+                                payload = (
+                                    value
+                                    if isinstance(value, dict)
+                                    else {"value": value}
+                                )
+                                synthetic_actions.append({"type": key, "payload": payload})
+
+                            actions.extend(synthetic_actions)
+                            log_info(
+                                f"[message_chain] Added {len(synthetic_actions)} synthetic action(s) for unregistered top-level key(s): {', '.join(extra_keys)}"
+                            )
+                    except Exception as e:
+                        log_debug(
+                            f"[message_chain] Failed to process top-level metadata keys for correction: {e}"
+                        )
+
                 ctx_interface_path = ctx.get("interface_path") if ctx else None
                 actions = _normalize_message_unknown(actions, ctx_interface_path)
                 # Auto-inject interface_path into message actions that are missing it
@@ -561,7 +600,6 @@ async def handle_incoming_message(
                     supported_action_types = set()
 
                 # Only enforce this for LLM-originated responses
-                is_from_llm = source == "llm" or getattr(message, "from_llm", False)
                 if is_from_llm and isinstance(actions, list):
                     unsupported = []
                     for idx, act in enumerate(actions):
