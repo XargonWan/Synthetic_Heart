@@ -722,6 +722,44 @@ async def build_json_prompt(
         log_debug(
             f"[json_prompt] ⏱️ Loaded {len(memories)} memories from tags in {time.time() - start_time:.2f}s"
         )
+    else:
+        # No hashtag-like tags found — fallback to free-text keyword search
+        # so that memories can be injected for natural conversational messages.
+        # Filter to meaningful keywords to avoid massive/slow SQL queries.
+        try:
+            from core.history_engine import _get_int as _history_get_int
+
+            mem_limit = int(_history_get_int("CONTEXT_VERBOSITY", 10))
+        except Exception:
+            mem_limit = 10
+        try:
+            # Extract meaningful keywords (skip stop words and short tokens)
+            _stop_words = {
+                "i", "me", "my", "am", "is", "are", "was", "were", "be", "been",
+                "the", "a", "an", "and", "or", "but", "in", "on", "at", "to",
+                "for", "of", "it", "its", "do", "did", "has", "had", "have",
+                "this", "that", "with", "from", "not", "no", "so", "if", "as",
+                "by", "up", "he", "she", "we", "you", "your", "our", "they",
+                "can", "will", "just", "than", "then", "too", "very",
+                "what", "when", "where", "how", "who", "all", "each",
+            }
+            words = [w.strip(".,!?;:'\"") for w in text.split()]
+            keywords = [w for w in words if len(w) >= 4 and w.lower() not in _stop_words]
+            if not keywords:
+                # Fallback: use the 3 longest words from the message
+                keywords = sorted(words, key=len, reverse=True)[:3]
+            # Limit to 8 keywords to keep the SQL query manageable
+            search_query = " ".join(keywords[:8])
+
+            if search_query.strip():
+                fallback_memories = await free_memory_search(search_query, limit=max(1, mem_limit))
+                if fallback_memories:
+                    memories.extend(fallback_memories)
+                    log_info(
+                        f"[json_prompt] ⏱️ Loaded {len(fallback_memories)} memories via free-text fallback in {time.time() - start_time:.2f}s"
+                    )
+        except Exception as e:
+            log_debug(f"[json_prompt] Free-text memory fallback failed: {e}")
 
     # Optionally run a preflight memory search and merge results (configurable)
     try:
