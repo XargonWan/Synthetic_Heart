@@ -953,6 +953,38 @@ async def _consumer_loop() -> None:
                         log_debug(
                             f"[QUEUE] Dispatched handle_incoming_message task for interface_path={interface_path}, interface={final.get('interface')}"
                         )
+
+                        # If this is a low-priority item, do not await it - run in background
+                        # so long-running background beats (e.g., G.R.I.L.L.O.) do not block
+                        # processing of regular user messages.
+                        if priority == LOW_PRIORITY:
+                            log_debug(
+                                f"[QUEUE] Low-priority task scheduled as background for interface_path={interface_path}; not awaiting"
+                            )
+
+                            # Ensure generation_end hook is called when background task completes
+                            processing_task.add_done_callback(
+                                lambda t: asyncio.create_task(_call_bot_generation_end(t))
+                            )
+
+                            # Log any exceptions when done
+                            def _bg_done_cb(t: asyncio.Task) -> None:
+                                try:
+                                    exc = t.exception()
+                                    if exc is not None:
+                                        log_warning(
+                                            f"[QUEUE] Background task for {interface_path} raised: {exc}"
+                                        )
+                                except asyncio.CancelledError:
+                                    pass
+                                except Exception:
+                                    pass
+
+                            processing_task.add_done_callback(_bg_done_cb)
+
+                            # Continue to next queued item without waiting
+                            continue
+
                         timed_out = False
                         try:
                             await asyncio.wait_for(
