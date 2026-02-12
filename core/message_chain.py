@@ -238,14 +238,31 @@ async def send_llm_fallback_message(
 
         # Get the send_message method from the bot (interface)
         if bot and hasattr(bot, "send_message"):
-            await universal_send(
-                bot.send_message,
-                chat_id,
-                text=fallback_text,
-                interface_path=interface_path,
-                thread_id=thread_id,
-                is_llm_response=True,  # Mark as LLM response so interface handles normally
-            )
+            try:
+                # First attempt: prefer interface-friendly args (message_thread_id is commonly used)
+                await universal_send(
+                    bot.send_message,
+                    chat_id,
+                    text=fallback_text,
+                    interface_path=interface_path,
+                    thread_id=thread_id,
+                    is_llm_response=True,  # Mark as LLM response so interface handles normally
+                )
+            except TypeError as te:
+                # Some bots (or test fakes) don't accept 'message_thread_id'.
+                # Retry without mapping thread id to message_thread_id.
+                try:
+                    log_warning(f"[message_chain] send_message TypeError, retrying without message_thread_id: {te}")
+                    await universal_send(
+                        bot.send_message,
+                        chat_id,
+                        text=fallback_text,
+                        interface_path=interface_path,
+                        is_llm_response=True,
+                    )
+                except Exception as e:
+                    # If retry fails, surface the error but continue gracefully
+                    log_error(f"[message_chain] Failed to send fallback message after retry: {e} (original: {te})")
         else:
             log_warning(
                 "[message_chain] Bot does not have send_message method, cannot send fallback"
