@@ -1399,13 +1399,8 @@ class DiaryPlugin:
             },
         }
 
-    def get_static_injection(self, message=None, context_memory=None) -> dict:
-        """Get recent diary entries for static injection. Returns empty dict if plugin disabled.
-
-        NOTE: This method now returns the RAW diary entries. The decision of whether to include
-        them in the prompt is made by prompt_engine.py based on available space. This method
-        just provides the data.
-        """
+    async def get_static_injection(self, message=None, context_memory=None) -> dict:
+        """Get recent diary entries for static injection. Returns empty dict if plugin disabled."""
         global PLUGIN_ENABLED
 
         log_debug(
@@ -1416,6 +1411,8 @@ class DiaryPlugin:
             log_debug("[ai_diary] Plugin is disabled, returning empty entries")
             return {"latest_diary_entries": []}
 
+        import time
+        start = time.time()
         try:
             # Get diary history days from config_registry
             try:
@@ -1433,24 +1430,35 @@ class DiaryPlugin:
             # Get recent entries with generous limit - prompt_engine will trim if needed
             log_debug(f"[ai_diary] Getting recent entries for {diary_days} days")
 
-            # Don't limit characters here - let prompt_engine.py decide based on actual prompt size
-            recent_entries = get_recent_entries(days=diary_days, max_chars=None)
-
-            log_debug(
-                f"[ai_diary] Retrieved {len(recent_entries)} diary entries for injection"
+            # Let's call the internal fetcher directly if we can
+            cutoff_date = datetime.now() - timedelta(days=diary_days)
+            recent_entries = await _fetchall(
+                """
+                SELECT id, content, personal_thought, timestamp, context_tags, involved_users, 
+                       emotions, interface, chat_id, thread_id, interaction_summary, user_message
+                FROM ai_diary
+                WHERE timestamp >= %s
+                ORDER BY timestamp DESC
+                """,
+                (cutoff_date,),
             )
+            
+            # Process entries
+            for entry in recent_entries:
+                if isinstance(entry.get("context_tags"), str):
+                    entry["context_tags"] = json.loads(entry["context_tags"] or "[]")
+                if isinstance(entry.get("involved_users"), str):
+                    entry["involved_users"] = json.loads(entry["involved_users"] or "[]")
+                if isinstance(entry.get("emotions"), str):
+                    entry["emotions"] = json.loads(entry["emotions"] or "[]")
+                if entry.get("timestamp") and hasattr(entry["timestamp"], "isoformat"):
+                    entry["timestamp"] = entry["timestamp"].isoformat()
+
+            duration = time.time() - start
+            if duration > 0.1:
+                log_info(f"[ai_diary] get_static_injection took {duration:.3f}s")
 
             if recent_entries:
-                # Log first few entries for debugging
-                for i, entry in enumerate(recent_entries[:3]):
-                    if isinstance(entry, dict):
-                        log_debug(
-                            f"[ai_diary] Entry {i + 1}: content='{entry.get('content', '')[:50]}...', involved_users={entry.get('involved_users', [])}, interaction_summary='{entry.get('interaction_summary', '')}'"
-                        )
-                    else:
-                        log_debug(
-                            f"[ai_diary] Entry {i + 1}: WARNING - not a dict, type={type(entry)}"
-                        )
                 log_info(
                     f"[ai_diary] Returning {len(recent_entries)} diary entries for injection"
                 )
