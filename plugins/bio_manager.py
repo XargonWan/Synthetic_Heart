@@ -1030,33 +1030,49 @@ class BioPlugin:
         if not participants:
             return {}
 
-        data = []
         now = datetime.utcnow().isoformat()
-        for p in participants:
-            bio = await _get_bio_light_async(p["id"])  # Use async version
-            # Ensure bio is always a dict to prevent 'str' object has no attribute 'get' error
-            if not isinstance(bio, dict):
-                log_warning(
-                    f"[bio_manager] _get_bio_light_async returned non-dict for user {p['id']}: {type(bio)} - {bio}"
-                )
-                bio = {}
-            short_info = bio.get("information", "")[:200]
 
-            entry = {
-                "id": p["id"],
-                "usertag": p.get("usertag"),
-                "nicknames": bio.get("known_as", []),
-                "short_bio": short_info,
-                "feelings": bio.get("feelings", []),
-            }
-            data.append(entry)
+        async def _fetch_and_format(p):
             try:
-                await _update_last_accessed_async(p["id"], now)
+                bio = await _get_bio_light_async(p["id"])
+                if not isinstance(bio, dict):
+                    log_warning(f"[bio_manager] _get_bio_light_async returned non-dict for user {p['id']}: {type(bio)}")
+                    bio = {}
+                
+                short_info = bio.get("information", "")[:200]
+                entry = {
+                    "id": p["id"],
+                    "usertag": p.get("usertag"),
+                    "nicknames": bio.get("known_as", []),
+                    "short_bio": short_info,
+                    "feelings": bio.get("feelings", []),
+                }
+                
+                # Update last_accessed in parallel too
+                try:
+                    await _update_last_accessed_async(p["id"], now)
+                except Exception as e:
+                    log_warning(f"[bio_manager] Failed to update last_accessed for user {p['id']}: {e}")
+                
+                return entry
             except Exception as e:
-                log_warning(
-                    f"[bio_manager] Failed to update last_accessed for user {p['id']}: {e}"
-                )
-                # Continue without failing the entire injection
+                log_error(f"[bio_manager] Error fetching bio for {p['id']}: {e}")
+                return {
+                    "id": p["id"],
+                    "usertag": p.get("usertag"),
+                    "nicknames": [],
+                    "short_bio": "",
+                    "feelings": [],
+                }
+
+        results = await asyncio.gather(*[_fetch_and_format(p) for p in participants], return_exceptions=True)
+        
+        data = []
+        for res in results:
+            if isinstance(res, dict):
+                data.append(res)
+            elif isinstance(res, Exception):
+                log_error(f"[bio_manager] asyncio.gather returned exception: {res}")
 
         return {"participants": data}
 
