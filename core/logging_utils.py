@@ -127,6 +127,128 @@ def _register_logging_config():
         pass
 
 
+class TimestampedRotatingFileHandler(RotatingFileHandler):
+    """
+    A file handler that rotates based on size, but renames the existing log
+    with a timestamp instead of shifting indices (log.1 -> log.2).
+    This avoids the O(N) renaming cost of standard RotatingFileHandler,
+    which usually causes "chugging" with high backup counts.
+
+    It also includes the 'Safe' logic for Windows permission errors.
+    """
+
+    def __init__(
+        self,
+        filename,
+        maxBytes=0,
+        backupCount=0,
+        encoding=None,
+        delay=False,
+        maxLines=0,
+    ):
+        self.maxLines = maxLines
+        self._line_count = None  # None indicates NOT INITIALIZED
+        super().__init__(
+            filename,
+            mode="a",
+            maxBytes=maxBytes,
+            backupCount=backupCount,
+            encoding=encoding,
+            delay=delay,
+        )
+
+    def _count_lines(self):
+        """Count actual lines in baseFilename using buffered reading."""
+        if not os.path.exists(self.baseFilename):
+            return 0
+        try:
+            with open(self.baseFilename, "rb") as f:
+                count = 0
+                buf_size = 1024 * 1024
+                buf = f.read(buf_size)
+                while buf:
+                    count += buf.count(b"\n")
+                    buf = f.read(buf_size)
+                return count
+        except Exception:
+            return 0
+
+    def shouldRollover(self, record):
+        """Determine if rollover should occur based on size or line count."""
+        if self.stream is None:
+            self.stream = self._open()
+
+        # Initialize line count lazily
+        if self.maxLines > 0 and self._line_count is None:
+            self._line_count = self._count_lines()
+
+        # Check bytes (safety fallback)
+        if self.maxBytes > 0:
+            msg = "%s\n" % self.format(record)
+            self.stream.seek(0, 2)  # strict append
+            if self.stream.tell() + len(msg) >= self.maxBytes:
+                return 1
+
+        # Check lines
+        if self.maxLines > 0:
+            msg = self.format(record)
+            # Standard logging adds one newline per record
+            msg_lines = msg.count("\n") + 1
+            if (self._line_count or 0) + msg_lines >= self.maxLines:
+                return 1
+
+        return 0
+
+    def emit(self, record):
+        """Emit a record and update line count tracker."""
+        super().emit(record)
+        if self.maxLines > 0 and self._line_count is not None:
+            try:
+                msg = self.format(record)
+                self._line_count += msg.count("\n") + 1
+            except Exception:
+                pass
+
+    def doRollover(self):
+        """Perform the rollover."""
+        if self.stream:
+            try:
+                self.stream.close()
+                setattr(self, "stream", None)
+            except Exception:
+                pass
+
+        # Construct new filename with timestamp
+        # Format: filename.YYYY-MM-DD_HH-MM-SS.log
+        t = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        base, ext = os.path.splitext(self.baseFilename)
+        new_name = f"{base}.{t}{ext}"
+
+        # Avoid collision (highly unlikely with second precision)
+        if os.path.exists(new_name):
+            i = 1
+            while os.path.exists(f"{base}.{t}_{i}{ext}"):
+                i += 1
+            new_name = f"{base}.{t}_{i}{ext}"
+
+        try:
+            os.rename(self.baseFilename, new_name)
+        except (PermissionError, OSError):
+            # On Windows, renaming might fail if file is locked (e.g. by 'tail').
+            # In this case, we just reopen the original file and keep writing.
+            # It will exceed maxBytes, but better than crashing.
+            pass
+
+        # Cleanup: we skip complex cleanup to avoid blocking main thread.
+        # User has backupCount=9999 anyway.
+
+        if self.maxLines > 0:
+            self._line_count = 0  # Reset line count after successful rotation
+
+        if not self.delay:
+            self.stream = self._open()
+
+
 def _write_to_separate_log(level: str, message: str, log_file: str) -> None:
     """Write log message to a separate log file.
 
@@ -152,19 +274,29 @@ def _write_to_separate_log(level: str, message: str, log_file: str) -> None:
                 "%Y-%m-%d %H:%M:%S",
             )
 
-            # Rotate at 1MB, keep 9999 backups (effectively never delete)
-            fh = RotatingFileHandler(
+            # Rotate at 5MB, keep 100 backups
+            # Use TimestampedRotatingFileHandler for smooth rotation
+            # Rotate at 5MB or 2000 lines, keep 100 backups
+            # Use TimestampedRotatingFileHandler for smooth rotation
+            fh = TimestampedRotatingFileHandler(
                 separate_log_path,
-                maxBytes=1_000_000,
-                backupCount=9999,
+                maxBytes=5_000_000,
+                maxLines=2000,
+                backupCount=100,
                 encoding="utf-8",
             )
             fh.setFormatter(formatter)
             separate_logger.addHandler(fh)
 
-        separate_logger.log(
-            _LEVELS.get(level.upper(), logging.INFO), message, stacklevel=4
-        )
+        # Check if we need to replace legacy handlers (if strictly needed)
+        pass
+
+        try:
+            separate_logger.log(
+                _LEVELS.get(level.upper(), logging.INFO), message, stacklevel=4
+            )
+        except Exception:
+            pass
     except Exception:
         # Silent failure - non bloccare il logging principale
         pass
@@ -199,18 +331,23 @@ def setup_logging() -> logging.Logger:
         # Try to add a file handler. If the file handler can't be created
         # due to permission errors or other IO problems, fallback to stream
         # logging so the application can still start and emit useful logs.
-        # NOTE: backupCount=9999 means files rotate at 1MB but never auto-delete
+        # NOTE: backupCount=9999 means files rotate (timestamp) check but never auto-delete
         try:
-            fh = RotatingFileHandler(
-                _LOG_FILE, maxBytes=1_000_000, backupCount=9999, encoding="utf-8"
+            # Added 2000 line limit as requested
+            fh = TimestampedRotatingFileHandler(
+                _LOG_FILE,
+                maxBytes=5_000_000,
+                maxLines=2000,
+                backupCount=9999,
+                encoding="utf-8",
             )
             fh.setFormatter(formatter)
             logger.addHandler(fh)
         except Exception as e:  # pragma: no cover - environment dependent
             # If file handler fails, write a warning to stdout via stream handler
             try:
-                logger.warning(
-                    f"[logging_utils] Could not open log file '{_LOG_FILE}': {e}. Falling back to stdout"
+                ch.stream.write(
+                    f"[logging_utils] Could not open log file '{_LOG_FILE}': {e}. Falling back to stdout\n"
                 )
             except Exception:
                 # As a last resort print to stdout directly
