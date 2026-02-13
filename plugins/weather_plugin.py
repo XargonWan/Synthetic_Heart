@@ -75,6 +75,7 @@ class WeatherPlugin:
         log_info("[weather_plugin] Registered WeatherPlugin")
         self._cached_weather: Optional[str] = None
         self._last_fetch: float = 0.0
+        self._update_task: Optional[asyncio.Task] = None
 
         # Register configuration with config_registry
         self.fetch_minutes = config_registry.get_value(
@@ -206,11 +207,19 @@ class WeatherPlugin:
         is_stale = not self._cached_weather or (now - self._last_fetch > timeout_sec)
         
         if is_stale:
-            log_debug("[weather_plugin] Weather data is stale or missing, triggering background update")
-            # Trigger background update without awaiting it
-            asyncio.create_task(self._update_weather())
-            
-        return {"weather": self._cached_weather or "Weather data gathering in progress..."}
+            if self._update_task and not self._update_task.done():
+                # Update already in progress, just return cached message
+                pass
+            else:
+                log_debug(
+                    "[weather_plugin] Weather data is stale or missing, triggering background update"
+                )
+                # Trigger background update without awaiting it
+                asyncio.create_task(self._update_weather())
+
+        return {
+            "weather": self._cached_weather or "Weather data gathering in progress..."
+        }
 
     async def _ensure_weather(self) -> None:
         now = time.time()
@@ -218,6 +227,28 @@ class WeatherPlugin:
             await self._update_weather()
 
     async def _update_weather(self) -> None:
+        """Coordinating method to ensure only one fetch runs at a time."""
+        if self._update_task and not self._update_task.done():
+            # Join existing task
+            try:
+                await self._update_task
+            except asyncio.CancelledError:
+                pass
+            return
+
+        # Start new task
+        try:
+            loop = asyncio.get_running_loop()
+            self._update_task = loop.create_task(self._fetch_weather_data())
+            await self._update_task
+        except RuntimeError:
+            # If no running loop, just return (likely shutdown)
+            pass
+        except Exception as e:
+            log_error(f"[weather_plugin] Error in update coordination: {e}")
+
+    async def _fetch_weather_data(self) -> None:
+        """Actual worker method to fetch weather from wttr.in."""
         location = get_local_location()
         encoded = urllib.parse.quote(location)
         url = f"https://wttr.in/{encoded}?format=j1"
