@@ -191,7 +191,9 @@ class CoreInitializer:
                 await self.start_pending_async_plugins()
                 log_debug("[core_initializer] start_pending_async_plugins completed")
             except Exception as e:
-                log_warning(f"[core_initializer] start_pending_async_plugins failed: {e}")
+                log_warning(
+                    f"[core_initializer] start_pending_async_plugins failed: {e}"
+                )
 
             # 3. Load core actions (like chat_link) if not already loaded
             log_debug("[core_initializer] 🔍 About to call _ensure_core_actions()")
@@ -462,7 +464,7 @@ class CoreInitializer:
         name: str,
         component_type: str,
         status: ComponentStatus = ComponentStatus.LOADING,
-        actions: List[str] = None,
+        actions: list[str] | None = None,
         error: str = "",
         details: str = "",
     ):
@@ -480,7 +482,7 @@ class CoreInitializer:
         )
 
     def mark_component_success(
-        self, name: str, actions: List[str] = None, details: str = ""
+        self, name: str, actions: list[str] | None = None, details: str = ""
     ):
         """Mark a component as successfully loaded."""
         if name in self.components:
@@ -1193,238 +1195,246 @@ class CoreInitializer:
 
     async def _build_actions_block(self):
         """Collect and validate action schemas from all plugins and interfaces."""
-        # TEMPORARILY DISABLE FLAG FOR TESTING
-        # if self._building_actions_block:
-        #     log_debug("[core_initializer] Already building actions block, skipping to prevent loop")
-        #     return
+        if self._building_actions_block:
+            log_debug(
+                "[core_initializer] Already building actions block, skipping to prevent loop"
+            )
+            return
 
         log_debug("[core_initializer] Starting _build_actions_block")
 
         self._building_actions_block = True
-        log_debug("[core_initializer] Starting _build_actions_block")
-        from core.core_initializer import PLUGIN_REGISTRY, INTERFACE_REGISTRY
+        try:
+            from core.core_initializer import PLUGIN_REGISTRY, INTERFACE_REGISTRY
 
-        available_actions = {}
-        log_debug("[core_initializer] Initialized available_actions dict")
+            available_actions = {}
+            log_debug("[core_initializer] Initialized available_actions dict")
 
-        def _register(action_type: str, owner: str, schema: dict, instr_fn):
-            from core.action_schema_converter import normalize_action_schema
+            def _register(action_type: str, owner: str, schema: dict, instr_fn):
+                from core.action_schema_converter import normalize_action_schema
 
-            # Normalize schema to new format (handles both old and new formats)
-            normalized = normalize_action_schema(action_type, schema)
+                # Normalize schema to new format (handles both old and new formats)
+                normalized = normalize_action_schema(action_type, schema)
 
-            # Extract required/optional fields from normalized schema
-            required = list(normalized.get("schema", {}).get("required", []))
-            optional = list(
-                set(normalized.get("schema", {}).get("properties", {}).keys())
-                - set(required)
-            )
-
-            if not isinstance(required, list) or not isinstance(optional, list):
-                raise ValueError(f"Invalid schema for {action_type} in {owner}")
-
-            # Track which component declares each action
-            self.interface_actions.setdefault(owner, set()).add(action_type)
-
-            # Simplified structure: no more nested interfaces
-            if action_type in available_actions:
-                log_debug(
-                    f"[core_initializer] Updating existing declaration for {action_type}"
-                )
-                # Merge required_fields and optional_fields
-                existing = available_actions[action_type]
-
-                # Get existing schema info (for backward compat)
-                existing_required = set(existing.get("schema", {}).get("required", []))
-                existing_optional = (
-                    set(existing.get("schema", {}).get("properties", {}).keys())
-                    - existing_required
+                # Extract required/optional fields from normalized schema
+                required = list(normalized.get("schema", {}).get("required", []))
+                optional = list(
+                    set(normalized.get("schema", {}).get("properties", {}).keys())
+                    - set(required)
                 )
 
-                new_required = set(required)
-                new_optional = set(optional)
+                if not isinstance(required, list) or not isinstance(optional, list):
+                    raise ValueError(f"Invalid schema for {action_type} in {owner}")
 
-                # Merge fields, giving priority to required over optional
-                merged_required = list(existing_required.union(new_required))
-                merged_optional = list(
-                    (existing_optional.union(new_optional)) - set(merged_required)
-                )
+                # Track which component declares each action
+                self.interface_actions.setdefault(owner, set()).add(action_type)
 
-                # Keep track of original source, append new sources
-                existing_source = existing.get("source", "")
-                new_source = f"{existing_source}, {owner}" if existing_source else owner
-
-                # Update schema with merged properties
-                merged_properties = {}
-                for field in merged_required + merged_optional:
-                    merged_properties[field] = {
-                        "type": "string",
-                        "description": f"Field: {field}",
-                    }
-
-                normalized["schema"]["properties"] = merged_properties
-                normalized["schema"]["required"] = merged_required
-                normalized["source"] = new_source
-
-                available_actions[action_type] = normalized
-                log_info(
-                    f"[core_initializer] Merged {action_type} fields: required={merged_required}, optional={merged_optional}, source={new_source}"
-                )
-            else:
-                # Add source to normalized schema
-                normalized["source"] = owner
-                available_actions[action_type] = normalized
-
-            # Get and add instructions (from plugin's get_prompt_instructions method)
-            instr = instr_fn(action_type) if instr_fn else None
-            if instr is None:
-                log_debug(f"Missing prompt instructions for {action_type}")
-                instr = {}
-            if not isinstance(instr, dict):
-                log_warning(
-                    f"Prompt instructions for {action_type} must be a dict, got {type(instr)}"
-                )
-                instr = {}
-
-            # Add instructions to examples section if not already present
-            if "examples" not in available_actions[action_type]:
-                available_actions[action_type]["examples"] = {}
-
-            if instr:
-                available_actions[action_type]["examples"]["instructions"] = instr
-
-        # --- Load action plugins from registry ---
-        log_debug(
-            f"[core_initializer] Loading actions from {len(PLUGIN_REGISTRY)} plugins: {list(PLUGIN_REGISTRY.keys())}"
-        )
-        log_debug("[core_initializer] Starting plugin loop")
-        for name, plugin in PLUGIN_REGISTRY.items():
-            log_debug(f"[core_initializer] Processing plugin: {name}")
-            # Skip plugins that expose an `enabled` attribute and are currently disabled
-            if hasattr(plugin, "enabled") and not getattr(plugin, "enabled"):
-                log_debug(
-                    f"[core_initializer] Plugin {name} has `enabled=False`, skipping action registration"
-                )
-                continue
-            if not hasattr(plugin, "get_supported_actions"):
-                log_debug(
-                    f"[core_initializer] Plugin {name} does not have get_supported_actions method"
-                )
-                continue
-            try:
-                supported = plugin.get_supported_actions()
-                if not isinstance(supported, dict):
-                    raise ValueError(
-                        f"Plugin {name} must return dict from get_supported_actions"
+                # Simplified structure: no more nested interfaces
+                if action_type in available_actions:
+                    log_debug(
+                        f"[core_initializer] Updating existing declaration for {action_type}"
                     )
-                log_debug(
-                    f"[core_initializer] Plugin {name} declares actions: {list(supported.keys())}"
-                )
-                for act, schema in supported.items():
-                    _register(
-                        act,
-                        name,
-                        schema,
-                        getattr(plugin, "get_prompt_instructions", None),
-                    )
-            except Exception as e:
-                log_error(f"[core_initializer] Error processing plugin {name}: {e}")
+                    # Merge required_fields and optional_fields
+                    existing = available_actions[action_type]
 
-        # --- Load interface actions from registry ---
-        log_debug("[core_initializer] Starting interface loop")
-        for name, iface in INTERFACE_REGISTRY.items():
-            log_debug(f"[core_initializer] Processing interface: {name}")
-            if not hasattr(iface, "get_supported_actions"):
-                continue
-            try:
-                supported = iface.get_supported_actions()
-                if not isinstance(supported, dict):
-                    raise ValueError(
-                        f"Interface {name} must return dict from get_supported_actions"
+                    # Get existing schema info (for backward compat)
+                    existing_required = set(
+                        existing.get("schema", {}).get("required", [])
                     )
-                instr_fn = getattr(iface, "get_prompt_instructions", None)
-                for act, schema in supported.items():
-                    _register(act, name, schema, instr_fn)
-            except Exception as e:
-                log_error(f"[core_initializer] Error processing interface {name}: {e}")
+                    existing_optional = (
+                        set(existing.get("schema", {}).get("properties", {}).keys())
+                        - existing_required
+                    )
 
-        # --- Collect static context from registry members ---
-        log_debug("[core_initializer] Starting static context collection")
-        static_context = {}
-        log_debug("[core_initializer] Starting static injection from plugins")
-        for plugin in PLUGIN_REGISTRY.values():
-            log_debug(
-                f"[core_initializer] Checking static injection for plugin: {plugin.__class__.__name__}"
-            )
-            if hasattr(plugin, "get_static_injection"):
-                try:
-                    data = plugin.get_static_injection()
-                except TypeError:
-                    # Plugin requires parameters; skip during startup
-                    continue
-                except Exception as e:
+                    new_required = set(required)
+                    new_optional = set(optional)
+
+                    # Merge fields, giving priority to required over optional
+                    merged_required = list(existing_required.union(new_required))
+                    merged_optional = list(
+                        (existing_optional.union(new_optional)) - set(merged_required)
+                    )
+
+                    # Keep track of original source, append new sources
+                    existing_source = existing.get("source", "")
+                    new_source = (
+                        f"{existing_source}, {owner}" if existing_source else owner
+                    )
+
+                    # Update schema with merged properties
+                    merged_properties = {}
+                    for field in merged_required + merged_optional:
+                        merged_properties[field] = {
+                            "type": "string",
+                            "description": f"Field: {field}",
+                        }
+
+                    normalized["schema"]["properties"] = merged_properties
+                    normalized["schema"]["required"] = merged_required
+                    normalized["source"] = new_source
+
+                    available_actions[action_type] = normalized
+                    log_info(
+                        f"[core_initializer] Merged {action_type} fields: required={merged_required}, optional={merged_optional}, source={new_source}"
+                    )
+                else:
+                    # Add source to normalized schema
+                    normalized["source"] = owner
+                    available_actions[action_type] = normalized
+
+                # Get and add instructions (from plugin's get_prompt_instructions method)
+                instr = instr_fn(action_type) if instr_fn else None
+                if instr is None:
+                    log_debug(f"Missing prompt instructions for {action_type}")
+                    instr = {}
+                if not isinstance(instr, dict):
                     log_warning(
-                        f"[core_initializer] Errore static injection da plugin {plugin}: {e}"
+                        f"Prompt instructions for {action_type} must be a dict, got {type(instr)}"
+                    )
+                    instr = {}
+
+                # Add instructions to examples section if not already present
+                if "examples" not in available_actions[action_type]:
+                    available_actions[action_type]["examples"] = {}
+
+                if instr:
+                    available_actions[action_type]["examples"]["instructions"] = instr
+
+            # --- Load action plugins from registry ---
+            log_debug(
+                f"[core_initializer] Loading actions from {len(PLUGIN_REGISTRY)} plugins: {list(PLUGIN_REGISTRY.keys())}"
+            )
+            log_debug("[core_initializer] Starting plugin loop")
+            for name, plugin in PLUGIN_REGISTRY.items():
+                log_debug(f"[core_initializer] Processing plugin: {name}")
+                # Skip plugins that expose an `enabled` attribute and are currently disabled
+                if hasattr(plugin, "enabled") and not getattr(plugin, "enabled"):
+                    log_debug(
+                        f"[core_initializer] Plugin {name} has `enabled=False`, skipping action registration"
                     )
                     continue
-                if inspect.isawaitable(data):
-                    try:
-                        # Add timeout to prevent hanging
-                        data = await asyncio.wait_for(data, timeout=5.0)
-                    except asyncio.TimeoutError:
-                        log_warning(
-                            f"[core_initializer] Timeout waiting for static injection from {plugin.__class__.__name__}"
+                if not hasattr(plugin, "get_supported_actions"):
+                    log_debug(
+                        f"[core_initializer] Plugin {name} does not have get_supported_actions method"
+                    )
+                    continue
+                try:
+                    supported = plugin.get_supported_actions()
+                    if not isinstance(supported, dict):
+                        raise ValueError(
+                            f"Plugin {name} must return dict from get_supported_actions"
                         )
+                    log_debug(
+                        f"[core_initializer] Plugin {name} declares actions: {list(supported.keys())}"
+                    )
+                    for act, schema in supported.items():
+                        _register(
+                            act,
+                            name,
+                            schema,
+                            getattr(plugin, "get_prompt_instructions", None),
+                        )
+                except Exception as e:
+                    log_error(f"[core_initializer] Error processing plugin {name}: {e}")
+
+            # --- Load interface actions from registry ---
+            log_debug("[core_initializer] Starting interface loop")
+            for name, iface in INTERFACE_REGISTRY.items():
+                log_debug(f"[core_initializer] Processing interface: {name}")
+                if not hasattr(iface, "get_supported_actions"):
+                    continue
+                try:
+                    supported = iface.get_supported_actions()
+                    if not isinstance(supported, dict):
+                        raise ValueError(
+                            f"Interface {name} must return dict from get_supported_actions"
+                        )
+                    instr_fn = getattr(iface, "get_prompt_instructions", None)
+                    for act, schema in supported.items():
+                        _register(act, name, schema, instr_fn)
+                except Exception as e:
+                    log_error(
+                        f"[core_initializer] Error processing interface {name}: {e}"
+                    )
+
+            # --- Collect static context from registry members ---
+            log_debug("[core_initializer] Starting static context collection")
+            static_context = {}
+            log_debug("[core_initializer] Starting static injection from plugins")
+            for plugin in PLUGIN_REGISTRY.values():
+                log_debug(
+                    f"[core_initializer] Checking static injection for plugin: {plugin.__class__.__name__}"
+                )
+                if hasattr(plugin, "get_static_injection"):
+                    try:
+                        data = plugin.get_static_injection()
+                    except TypeError:
+                        # Plugin requires parameters; skip during startup
                         continue
                     except Exception as e:
                         log_warning(
-                            f"[core_initializer] Error awaiting static injection from {plugin.__class__.__name__}: {e}"
+                            f"[core_initializer] Errore static injection da plugin {plugin}: {e}"
                         )
                         continue
-                if data:
-                    static_context.update(data)
-        for iface in INTERFACE_REGISTRY.values():
-            if hasattr(iface, "get_static_injection"):
-                try:
-                    data = iface.get_static_injection()
                     if inspect.isawaitable(data):
                         try:
                             # Add timeout to prevent hanging
                             data = await asyncio.wait_for(data, timeout=5.0)
                         except asyncio.TimeoutError:
                             log_warning(
-                                f"[core_initializer] Timeout waiting for static injection from {iface.__class__.__name__}"
+                                f"[core_initializer] Timeout waiting for static injection from {plugin.__class__.__name__}"
                             )
                             continue
                         except Exception as e:
                             log_warning(
-                                f"[core_initializer] Error awaiting static injection from {iface.__class__.__name__}: {e}"
+                                f"[core_initializer] Error awaiting static injection from {plugin.__class__.__name__}: {e}"
                             )
                             continue
                     if data:
                         static_context.update(data)
-                except Exception as e:
-                    log_warning(
-                        f"[core_initializer] Errore static injection da interfaccia {iface}: {e}"
-                    )
+            for iface in INTERFACE_REGISTRY.values():
+                if hasattr(iface, "get_static_injection"):
+                    try:
+                        data = iface.get_static_injection()
+                        if inspect.isawaitable(data):
+                            try:
+                                # Add timeout to prevent hanging
+                                data = await asyncio.wait_for(data, timeout=5.0)
+                            except asyncio.TimeoutError:
+                                log_warning(
+                                    f"[core_initializer] Timeout waiting for static injection from {iface.__class__.__name__}"
+                                )
+                                continue
+                            except Exception as e:
+                                log_warning(
+                                    f"[core_initializer] Error awaiting static injection from {iface.__class__.__name__}: {e}"
+                                )
+                                continue
+                        if data:
+                            static_context.update(data)
+                    except Exception as e:
+                        log_warning(
+                            f"[core_initializer] Errore static injection da interfaccia {iface}: {e}"
+                        )
 
-        self.actions_block = {
-            "available_actions": available_actions,
-            "static_context": static_context,
-        }
-        log_debug(
-            f"[core_initializer] Actions block built with {len(available_actions)} action types, static_context: {list(static_context.keys())}"
-        )
-        log_debug(
-            f"[core_initializer] Available action types: {sorted(available_actions.keys())}"
-        )
-        log_debug("[core_initializer] About to reset _building_actions_block flag")
+            self.actions_block = {
+                "available_actions": available_actions,
+                "static_context": static_context,
+            }
+            log_debug(
+                f"[core_initializer] Actions block built with {len(available_actions)} action types, static_context: {list(static_context.keys())}"
+            )
+            log_debug(
+                f"[core_initializer] Available action types: {sorted(available_actions.keys())}"
+            )
+        finally:
+            log_debug("[core_initializer] About to reset _building_actions_block flag")
 
-        # Reset the flag
-        self._building_actions_block = False
-        log_debug(
-            "[core_initializer] _building_actions_block flag reset, exiting _build_actions_block()"
-        )
+            # Reset the flag
+            self._building_actions_block = False
+            log_debug(
+                "[core_initializer] _building_actions_block flag reset, exiting _build_actions_block()"
+            )
 
     def _display_startup_summary(self):
         """Display a comprehensive startup summary."""
