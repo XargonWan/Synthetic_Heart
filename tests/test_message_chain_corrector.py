@@ -1,4 +1,3 @@
-import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -20,7 +19,9 @@ async def test_message_chain_triggers_corrector_for_unregistered_action(monkeypa
     # Simulate LLM output containing an unregistered action type 'message'
     called = {"count": 0, "args": None}
 
-    async def fake_corrector(text, bot=None, context=None, chat_id=None, thread_id=None):
+    async def fake_corrector(
+        text, bot=None, context=None, chat_id=None, thread_id=None
+    ):
         called["count"] += 1
         called["args"] = {"text": text, "context": context, "chat_id": chat_id}
         # Simulate no correction returned
@@ -28,7 +29,20 @@ async def test_message_chain_triggers_corrector_for_unregistered_action(monkeypa
 
     async def fake_extract_json(text, return_metadata=False):
         # Return parsed JSON and empty metadata
-        return ({"actions": [{"type": "message", "payload": {"text": "hello", "interface_path": "telegram_bot/123"}}]}, {})
+        return (
+            {
+                "actions": [
+                    {
+                        "type": "message",
+                        "payload": {
+                            "text": "hello",
+                            "interface_path": "telegram_bot/123",
+                        },
+                    }
+                ]
+            },
+            {},
+        )
 
     # Ensure supported types do NOT include bare 'message'
     monkeypatch.setattr(
@@ -53,7 +67,11 @@ async def test_message_chain_triggers_corrector_for_unregistered_action(monkeypa
 
     # Call the message chain as if the source was LLM
     result = await message_chain.handle_incoming_message(
-        bot=None, message=msg, text='{"actions":[{"type":"message","payload":{"text":"hello","interface_path":"telegram_bot/123"}}]}', source='llm', context={}
+        bot=None,
+        message=msg,
+        text='{"actions":[{"type":"message","payload":{"text":"hello","interface_path":"telegram_bot/123"}}]}',
+        source="llm",
+        context={},
     )
 
     # Our fake corrector should have been called at least once

@@ -9,7 +9,7 @@ engine in a standardized way.
 
 from typing import Any, Optional, Dict
 import asyncio
-from core.logging_utils import log_debug, log_info, log_warning, log_error
+from core.logging_utils import log_debug, log_info, log_warning
 
 CAPABILITIES = {
     "vision": True,
@@ -18,6 +18,7 @@ CAPABILITIES = {
     "bidi": True,
     "low_latency": True,
 }
+
 
 class GeminiLivePlugin:
     display_name = "Gemini Live (Prototype)"
@@ -30,7 +31,9 @@ class GeminiLivePlugin:
         self.running = False
         log_info("[gemini_live] Initialized Gemini Live prototype plugin")
 
-    async def start_live_session(self, session_metadata: Optional[Dict[str, Any]] = None) -> None:
+    async def start_live_session(
+        self, session_metadata: Optional[Dict[str, Any]] = None
+    ) -> None:
         """Start a live session (connect to Gemini Live bidi API in a real impl)."""
         if self.running:
             log_debug("[gemini_live] Live session already running")
@@ -45,7 +48,9 @@ class GeminiLivePlugin:
         self.running = False
         log_info("[gemini_live] Live session stopped (prototype)")
 
-    async def bidi_stream_send(self, vision: Optional[bytes] = None, audio: Optional[bytes] = None) -> None:
+    async def bidi_stream_send(
+        self, vision: Optional[bytes] = None, audio: Optional[bytes] = None
+    ) -> None:
         """Send vision/audio chunks to the engine (non-blocking)."""
         try:
             if vision:

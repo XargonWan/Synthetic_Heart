@@ -202,15 +202,19 @@ class WeatherPlugin:
         # Check if update is needed based on fetch_minutes config
         now = time.time()
         timeout_sec = self.fetch_minutes * 60
-        
+
         is_stale = not self._cached_weather or (now - self._last_fetch > timeout_sec)
-        
+
         if is_stale:
-            log_debug("[weather_plugin] Weather data is stale or missing, triggering background update")
+            log_debug(
+                "[weather_plugin] Weather data is stale or missing, triggering background update"
+            )
             # Trigger background update without awaiting it
             asyncio.create_task(self._update_weather())
-            
-        return {"weather": self._cached_weather or "Weather data gathering in progress..."}
+
+        return {
+            "weather": self._cached_weather or "Weather data gathering in progress..."
+        }
 
     async def _ensure_weather(self) -> None:
         now = time.time()

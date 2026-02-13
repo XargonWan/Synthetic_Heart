@@ -546,11 +546,17 @@ class MemorySearchPlugin:
                 async with get_conn_ctx() as conn:
                     async with conn.cursor() as cur:
                         # Enforce a client-side timeout since MariaDB session timeout might not be supported/working
-                        await asyncio.wait_for(cur.execute(union_q, params), timeout=15.0)
+                        await asyncio.wait_for(
+                            cur.execute(union_q, params), timeout=15.0
+                        )
                         rows = await asyncio.wait_for(cur.fetchall(), timeout=5.0)
-                log_info(f"[memory_search] Query executed in {time.time() - query_start:.3f}s")
+                log_info(
+                    f"[memory_search] Query executed in {time.time() - query_start:.3f}s"
+                )
             except asyncio.TimeoutError:
-                log_error(f"[memory_search] ⏰ Query timed out after {time.time() - query_start:.1f}s")
+                log_error(
+                    f"[memory_search] ⏰ Query timed out after {time.time() - query_start:.1f}s"
+                )
                 return {"processed": True, "results": [], "error": "Query timed out"}
             except Exception as e:
                 log_error(f"[memory_search] Query error: {e}")
@@ -559,9 +565,7 @@ class MemorySearchPlugin:
             for r in rows:
                 src, _id, ts, content = r
                 try:
-                    ts_iso = (
-                        ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
-                    )
+                    ts_iso = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
                 except Exception:
                     ts_iso = str(ts)
                 snippet = content if isinstance(content, str) else str(content)

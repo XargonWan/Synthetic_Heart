@@ -1,9 +1,7 @@
-import asyncio
 import pytest
 
 from cortex.llm_engine.gemini_api import PLUGIN_CLASS as GeminiClass
 from core.core_initializer import PLUGIN_REGISTRY
-from plugins.agent_plugin import AgentPlugin
 
 
 @pytest.mark.asyncio
@@ -13,14 +11,16 @@ async def test_gemini_agent_adapter(monkeypatch):
 
     class FakeAgent:
         async def execute_action(self, action, context, bot, original_message):
-            called['action'] = action
-            return {'status': 'executed', 'action': action}
+            called["action"] = action
+            return {"status": "executed", "action": action}
 
-    PLUGIN_REGISTRY['agent'] = FakeAgent()
+    PLUGIN_REGISTRY["agent"] = FakeAgent()
 
     gem = GeminiClass()
     # agent_execute should delegate and return a dict
-    res = gem.agent_execute({'type': 'propose_action', 'payload': {'command': 'echo hi'}})
+    res = gem.agent_execute(
+        {"type": "propose_action", "payload": {"command": "echo hi"}}
+    )
     assert isinstance(res, dict)
     # If delegation returned async marker, status may be pending_async or executed
 
@@ -33,11 +33,11 @@ def test_selenium_agent_adapter(monkeypatch):
     # Register fake agent plugin with sync execute_action
     class FakeAgentSync:
         def execute_action(self, action, context, bot, original_message):
-            return {'status': 'executed', 'action': action}
+            return {"status": "executed", "action": action}
 
-    PLUGIN_REGISTRY['agent'] = FakeAgentSync()
+    PLUGIN_REGISTRY["agent"] = FakeAgentSync()
 
-    res = s.agent_execute({'type': 'terminal', 'payload': {'command': 'echo hi'}})
+    res = s.agent_execute({"type": "terminal", "payload": {"command": "echo hi"}})
     assert isinstance(res, dict)
     # Since called outside loop, agent_execute will have executed synchronously
-    assert res.get('status') in ('executed', 'ok', 'unsupported', 'error', 'scheduled')
+    assert res.get("status") in ("executed", "ok", "unsupported", "error", "scheduled")

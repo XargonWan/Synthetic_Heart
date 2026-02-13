@@ -540,7 +540,9 @@ async def handle_incoming_message(
 
                     supported_action_types = get_supported_action_types() or set()
                 except Exception as e:
-                    log_warning(f"[message_chain] Could not load supported action types: {e}")
+                    log_warning(
+                        f"[message_chain] Could not load supported action types: {e}"
+                    )
                     supported_action_types = set()
 
                 # Only enforce this for LLM-originated responses
@@ -556,7 +558,9 @@ async def handle_incoming_message(
                                 {
                                     "index": idx,
                                     "action": act,
-                                    "errors": [f"Unsupported type '{atype}' - no plugin or interface found to handle it"],
+                                    "errors": [
+                                        f"Unsupported type '{atype}' - no plugin or interface found to handle it"
+                                    ],
                                 }
                             )
 

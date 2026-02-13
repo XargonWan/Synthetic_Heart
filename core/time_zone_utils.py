@@ -195,7 +195,9 @@ async def get_local_time_fields(dt=None, interface_path: str | None = None) -> d
 
             meta = await get_session_meta(interface_path)
             if isinstance(meta, dict):
-                tz_name = meta.get("timezone") or meta.get("tz") or meta.get("timezone_name")
+                tz_name = (
+                    meta.get("timezone") or meta.get("tz") or meta.get("timezone_name")
+                )
         except Exception:
             tz_name = None
 
@@ -217,4 +219,9 @@ async def get_local_time_fields(dt=None, interface_path: str | None = None) -> d
     time_of_day = get_time_of_day_label(local_dt)
     local_date = local_dt.strftime("%Y-%m-%d")
 
-    return {"local_time": local_time, "local_hour": local_hour, "time_of_day": time_of_day, "local_date": local_date}
+    return {
+        "local_time": local_time,
+        "local_hour": local_hour,
+        "time_of_day": time_of_day,
+        "local_date": local_date,
+    }

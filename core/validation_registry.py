@@ -164,7 +164,9 @@ class ValidationRegistry:
         """Get all registered component names."""
         return self._registered_components.copy()
 
-    def register_response_metadata_keys(self, component_name: str, keys: List[str]) -> None:
+    def register_response_metadata_keys(
+        self, component_name: str, keys: List[str]
+    ) -> None:
         """Register allowed top-level response metadata keys for a component.
 
         These keys are permitted in LLM JSON responses alongside "actions" and

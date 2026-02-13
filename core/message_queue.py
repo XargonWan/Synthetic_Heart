@@ -152,7 +152,9 @@ async def enqueue(
                 if directed and not explicit_trigger:
                     directed = False
                     reason = "asleep_state_no_trigger"
-                    log_debug(f"[QUEUE] Suppressed message due to Asleep state: {getattr(message, 'text', '')}")
+                    log_debug(
+                        f"[QUEUE] Suppressed message due to Asleep state: {getattr(message, 'text', '')}"
+                    )
                 elif not directed and explicit_trigger:
                     directed = True
                     reason = "explicit_trigger_asleep"

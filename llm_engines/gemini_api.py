@@ -286,18 +286,31 @@ class GeminiAPIPlugin(AIPluginBase):
         try:
             # Lazy import to avoid cycles
             from core.core_initializer import PLUGIN_REGISTRY
-            agent_plugin = PLUGIN_REGISTRY.get('agent') if isinstance(PLUGIN_REGISTRY, dict) else None
-            if agent_plugin and hasattr(agent_plugin, 'execute_action'):
+
+            agent_plugin = (
+                PLUGIN_REGISTRY.get("agent")
+                if isinstance(PLUGIN_REGISTRY, dict)
+                else None
+            )
+            if agent_plugin and hasattr(agent_plugin, "execute_action"):
                 # execute_action may be async; try to call safely
-                res = agent_plugin.execute_action(action_dict, context or {}, None, None)
+                res = agent_plugin.execute_action(
+                    action_dict, context or {}, None, None
+                )
                 # If coroutine, return a placeholder since engine API is sync in some callers
-                if hasattr(res, '__await__'):
+                if hasattr(res, "__await__"):
                     # Can't await here; indicate async and let callers handle it
-                    return {'status': 'pending_async', 'note': 'Agent plugin returned coroutine'}
-                return res or {'status': 'ok'}
+                    return {
+                        "status": "pending_async",
+                        "note": "Agent plugin returned coroutine",
+                    }
+                return res or {"status": "ok"}
         except Exception as e:
             log_warning(f"[gemini_api] agent_execute adapter failed: {e}")
-        return {"status": "unsupported", "reason": "agent plugin not available or execution failed"}
+        return {
+            "status": "unsupported",
+            "reason": "agent plugin not available or execution failed",
+        }
 
     def attach_agent(self, agent_plugin) -> None:
         """Attach an Agent plugin instance to the engine.
@@ -702,13 +715,13 @@ class GeminiAPIPlugin(AIPluginBase):
                         prompt_to_redact = None
                 except Exception:
                     prompt_to_redact = None
-            
+
             if prompt_to_redact:
                 prompt_redacted = self._copy_and_redact_data(prompt_to_redact)
                 # Regenerate prompt_text from reduced version
                 prompt_text = json.dumps(prompt_redacted, indent=2, ensure_ascii=False)
                 if len(prompt_text) < len(str(prompt)):
-                     log_debug(
+                    log_debug(
                         f"[gemini_api] Redacted heavy data from prompt: {len(str(prompt))} -> {len(prompt_text)} chars"
                     )
 

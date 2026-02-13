@@ -6,6 +6,7 @@ from plugins.message_map import (
     get_original_message,
     cleanup_old_mappings,
 )
+
 # say_proxy removed: /say command deprecated
 import asyncio
 from core.config import get_trainer_id
