@@ -26,6 +26,7 @@ getting started.
    quickstart
    commands
    features
+   recon_debrief_hooks
    architecture
    event_id_flow
    auto_response

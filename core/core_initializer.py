@@ -705,6 +705,9 @@ class CoreInitializer:
 
                 plugin_class = getattr(module, "PLUGIN_CLASS")
 
+                if plugin_class is None:
+                    continue
+
                 if not (
                     hasattr(plugin_class, "get_supported_action_types")
                     or hasattr(plugin_class, "get_supported_actions")

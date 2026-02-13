@@ -339,10 +339,22 @@ async def handle_incoming_message(
     ctx["original_text"] = (
         text  # Track original text in context, not on message (for consistency with immutable Telegram Message objects)
     )
+    if not ctx.get("original_user_message"):
+        try:
+            ctx["original_user_message"] = getattr(message, "text", "") or ""
+        except Exception:
+            ctx["original_user_message"] = ""
 
     # Mark LLM-origin in context (not on message object, as Telegram Message objects are immutable)
     is_from_llm = True if source == "llm" else ctx.get("from_llm", False)
     ctx["from_llm"] = is_from_llm
+
+    # Preserve raw LLM response text for Debrief/intent-recovery plugins
+    if is_from_llm:
+        try:
+            ctx["llm_response_text"] = text or ""
+        except Exception:
+            ctx["llm_response_text"] = ""
 
     # Also set on message object if possible (for corrector_orchestrator and action_parser detection)
     try:

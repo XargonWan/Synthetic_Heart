@@ -1,3 +1,10 @@
+import pytest
+
+pytest.skip(
+    "Legacy check_logs plugin removed (Recon log reader replaces it)",
+    allow_module_level=True,
+)
+
 from plugins.check_logs import CheckLogsPlugin, _tail_lines
 
 

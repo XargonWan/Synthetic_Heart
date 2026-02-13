@@ -1,14 +1,12 @@
 # core/prompt_engine.py
 
 from core.synth_tagging import extract_tags, expand_tags
-from core.db import get_conn_ctx
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.json_utils import dumps as json_dumps
 from core.config_manager import config_registry
 from core.user_utils import get_user_display_name, get_user_usertag
 from datetime import datetime
 import os
-import random
 import asyncio
 
 # Default maximum prompt characters (CHARACTERS, NOT TOKENS)
@@ -50,581 +48,6 @@ DIARY_HISTORY_DAYS = config_registry.get_var(
     value_type=int,
 )
 
-# Preflight memory search toggle (free-text search run before building prompt)
-MEMORY_SEARCH_PREFLIGHT = config_registry.get_var(
-    "MEMORY_SEARCH_PREFLIGHT",
-    True,
-    label="Enable Memory Search Preflight",
-    description="If True, run a free-text memory_search before building prompts and include results.",
-    group="core",
-    component="memory_search",
-    value_type=bool,
-)
-
-MEMORY_SEARCH_PREFLIGHT_MAX_RESULTS = config_registry.get_var(
-    "MEMORY_SEARCH_PREFLIGHT_MAX_RESULTS",
-    10,
-    label="Memory Search Preflight Max Results",
-    description="Maximum number of results returned by preflight free search",
-    group="core",
-    component="memory_search",
-    value_type=int,
-)
-
-# If there are a lot of matches, we may want to pull a larger pool and then
-# optionally randomize results before selecting the final subset.
-MEMORY_SEARCH_PREFLIGHT_RANDOMIZE = config_registry.get_var(
-    "MEMORY_SEARCH_PREFLIGHT_RANDOMIZE",
-    True,
-    label="Randomize Preflight Results",
-    description="If True and more matches are available than the max results, randomize the pool and return a random subset.",
-    group="core",
-    component="memory_search",
-    value_type=bool,
-)
-
-MEMORY_SEARCH_PREFLIGHT_POOL_MAX = config_registry.get_var(
-    "MEMORY_SEARCH_PREFLIGHT_POOL_MAX",
-    100,
-    label="Memory Search Preflight Pool Max",
-    description="Number of candidate results to retrieve from DB before sampling (used when randomization is enabled)",
-    group="core",
-    component="memory_search",
-    value_type=int,
-)
-
-# How long to wait for preflight memory searches before proceeding without memories
-MEMORY_SEARCH_PREFLIGHT_TIMEOUT = config_registry.get_var(
-    "MEMORY_SEARCH_PREFLIGHT_TIMEOUT",
-    180,
-    label="Memory Search Preflight Timeout (s)",
-    description="Timeout in seconds to wait for the LLM-driven preflight memory_search or DB free search before proceeding without memories.",
-    group="core",
-    component="memory_search",
-    value_type=int,
-)
-
-# Preflight strategy:
-# - 'llm_action': ask the active LLM to emit a `memory_search` action with keywords/tags,
-#                 execute it and inject results into the final prompt context.
-# - 'free_db': use the legacy DB-only free search (free_memory_search)
-MEMORY_SEARCH_PREFLIGHT_STRATEGY = config_registry.get_var(
-    "MEMORY_SEARCH_PREFLIGHT_STRATEGY",
-    "llm_action",
-    label="Memory Search Preflight Strategy",
-    description="Preflight strategy: 'llm_action' asks the LLM to emit memory_search action; 'free_db' uses DB-only free search.",
-    group="core",
-    component="memory_search",
-    value_type=str,
-)
-
-
-async def llm_memory_search_preflight(
-    *,
-    text: str,
-    interface_name: str | None,
-    original_message,
-    max_results: int,
-) -> list[str]:
-    """Run a minimal, action-only LLM preflight to retrieve relevant memories.
-
-    This asks the currently active LLM engine to output ONLY one action:
-    `{"actions": [{"type": "memory_search", "payload": {...}}]}`.
-    The resulting action is executed (with context preflight flag) and the snippets
-    are returned as a list of strings to be merged into prompt `memories`.
-
-    If the active engine cannot be used (e.g. manual mode) or the LLM output is invalid,
-    this returns an empty list and callers may fallback to DB-only free search.
-    """
-
-    if not text or not isinstance(text, str) or not text.strip():
-        return []
-
-    # Do not run LLM preflight for manual mode (it would spam the trainer)
-    active_llm = None
-    engine = None
-    try:
-        from core.config import get_active_llm
-        from core.llm_registry import get_llm_registry
-
-        active_llm = await get_active_llm()
-        if active_llm and str(active_llm).lower() == "manual":
-            return []
-
-        registry = get_llm_registry()
-        engine = registry.get_engine(active_llm)
-        if not engine:
-            engine = registry.load_engine(active_llm)
-
-        if not engine or not hasattr(engine, "generate_response"):
-            return []
-    except Exception as e:
-        log_debug(
-            f"[json_prompt] LLM preflight: unable to load active engine ({active_llm}): {e}"
-        )
-        return []
-
-    # Try to include only the memory_search schema so the model stays on-rails
-    memory_search_schema = None
-    try:
-        from core.core_initializer import core_initializer
-
-        full_actions = (core_initializer.actions_block or {}).get(
-            "available_actions", {}
-        )
-        memory_search_schema = full_actions.get("memory_search")
-    except Exception:
-        memory_search_schema = None
-
-    schema_hint = ""
-    try:
-        if isinstance(memory_search_schema, dict):
-            schema_hint = (
-                f"\nSchema for memory_search: {json_dumps(memory_search_schema)}\n"
-            )
-    except Exception:
-        schema_hint = ""
-
-    system_prompt = (
-        "You are running a MEMORY SEARCH PREFLIGHT. "
-        "Your job is to decide the best search keywords/tags and return ONLY a JSON action that triggers memory_search. "
-        'Return ONLY valid JSON, with exactly this structure: {"actions": [{...}]}. '
-        "Do not add explanations, markdown, or extra keys. "
-        "Choose mode='tags' with 2-6 short tags whenever possible. "
-        "If tags are not appropriate, use mode='free' with payload.keywords as a JSON array of 2-6 short keywords. "
-        "Do NOT use payload.query for mode='free' (keywords only). "
-        'Example for free mode: {"type":"memory_search","payload":{"mode":"free","keywords":["Funko","Prop","Jay"],"max_results":5}} '
-        f"Set payload.max_results to {int(max_results)}." + schema_hint
-    )
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": text.strip()},
-    ]
-
-    llm_text = None
-    try:
-        llm_text = await engine.generate_response(messages)
-    except Exception as e:
-        log_warning(
-            f"[json_prompt] LLM preflight: engine.generate_response failed: {e}"
-        )
-        return []
-
-    if not llm_text or not isinstance(llm_text, str):
-        return []
-
-    # Parse JSON from model output
-    try:
-        from core.transport_layer import extract_json_from_text
-
-        parsed = extract_json_from_text(llm_text, return_metadata=False)
-    except Exception as e:
-        log_debug(f"[json_prompt] LLM preflight: failed to parse JSON: {e}")
-        # Attempt a single corrector pass if the output looks JSON-like (contains brackets)
-        try:
-            if isinstance(llm_text, str) and ("{" in llm_text or "[" in llm_text):
-                log_info(
-                    "[json_prompt] LLM preflight: attempting corrector middleware on malformed JSON output"
-                )
-                try:
-                    from core.transport_layer import run_corrector_middleware
-
-                    # Build a minimal context/message for the corrector to have reference
-                    corrected = await run_corrector_middleware(
-                        llm_text,
-                        bot=None,
-                        context={
-                            "interface": interface_name,
-                            "original_text": llm_text,
-                        },
-                        chat_id=getattr(original_message, "chat_id", None),
-                    )
-                    if corrected and isinstance(corrected, str):
-                        try:
-                            parsed = extract_json_from_text(
-                                corrected, return_metadata=False
-                            )
-                            # replace llm_text with corrected for telemetry/logging
-                            llm_text = corrected
-                        except Exception as e2:
-                            log_debug(
-                                f"[json_prompt] LLM preflight: corrected text still invalid JSON: {e2}"
-                            )
-                except Exception as e1:
-                    log_debug(
-                        f"[json_prompt] LLM preflight: corrector middleware failed: {e1}"
-                    )
-        except Exception:
-            pass
-
-        if not parsed:
-            return []
-
-    # Accept either {"actions": [...]} or a single action object {"type":..., "payload":...}
-    actions_list = None
-    if isinstance(parsed, dict) and isinstance(parsed.get("actions"), list):
-        actions_list = parsed.get("actions")
-    elif (
-        isinstance(parsed, dict)
-        and parsed.get("type") == "memory_search"
-        and isinstance(parsed.get("payload", {}), dict)
-    ):
-        actions_list = [parsed]
-
-    if not actions_list:
-        return []
-
-    # Take the first memory_search action only
-    memory_action = None
-    for a in actions_list:
-        if isinstance(a, dict) and a.get("type") == "memory_search":
-            memory_action = a
-            break
-
-    if not isinstance(memory_action, dict):
-        return []
-
-    payload = memory_action.get("payload") or {}
-    if not isinstance(payload, dict):
-        return []
-
-    # Normalize payload minimally
-    mode = payload.get("mode")
-    if mode not in ("tags", "free"):
-        # Default to tags if a list was provided
-        if isinstance(payload.get("tags"), list):
-            mode = "tags"
-        else:
-            mode = "free"
-        payload["mode"] = mode
-
-    if mode == "tags":
-        tags = payload.get("tags")
-        if isinstance(tags, str):
-            tags = [t.strip() for t in tags.split() if t.strip()]
-        if not isinstance(tags, list):
-            tags = []
-        # keep small tags only
-        tags = [str(t).strip() for t in tags if str(t).strip()][:6]
-        payload["tags"] = tags
-
-    if mode == "free":
-        kws = payload.get("keywords")
-        if isinstance(kws, str):
-            kws = [k.strip() for k in kws.split() if k.strip()]
-        if isinstance(kws, list):
-            kws = [str(k).strip() for k in kws if str(k).strip()]
-        else:
-            kws = []
-
-        if not kws:
-            q = payload.get("query")
-            if not isinstance(q, str) or not q.strip():
-                q = text.strip()[:200]
-                payload["query"] = q
-            kws = [k.strip() for k in str(q).split() if k.strip()]
-
-        # Sanitize and dedupe keywords to keep searches broad and robust.
-        try:
-            import re
-
-            stopwords = {
-                "a",
-                "an",
-                "and",
-                "are",
-                "as",
-                "at",
-                "be",
-                "but",
-                "by",
-                "for",
-                "from",
-                "i",
-                "in",
-                "is",
-                "it",
-                "me",
-                "my",
-                "of",
-                "on",
-                "or",
-                "our",
-                "that",
-                "the",
-                "this",
-                "to",
-                "us",
-                "was",
-                "we",
-                "were",
-                "with",
-                "you",
-                "your",
-            }
-            cleaned: list[str] = []
-            seen: set[str] = set()
-            for raw in kws:
-                token = re.sub(r"[^0-9A-Za-z_\-']+", "", str(raw)).strip()
-                if not token:
-                    continue
-                if len(token) < 2:
-                    continue
-                token_l = token.lower()
-                if token_l in stopwords:
-                    continue
-                if token_l in seen:
-                    continue
-                seen.add(token_l)
-                cleaned.append(token)
-            kws = cleaned
-        except Exception:
-            pass
-
-        payload["keywords"] = kws[:6]
-        # Ensure downstream uses keywords rather than falling back to query.
-        payload.pop("query", None)
-
-    payload["max_results"] = int(max_results)
-    memory_action["payload"] = payload
-
-    # Execute the action through action_parser so we reuse the plugin system
-    try:
-        from core.action_parser import run_action
-
-        preflight_context = {
-            "interface": interface_name,
-            "from_llm": False,  # system-driven preflight, not autonomous action execution
-            "preflight": True,
-        }
-        result = await run_action(
-            memory_action,
-            preflight_context,
-            bot=None,
-            original_message=original_message,
-        )
-    except Exception as e:
-        log_warning(f"[json_prompt] LLM preflight: memory_search execution failed: {e}")
-        return []
-
-    # Extract snippets
-    snippets: list[str] = []
-    try:
-        if isinstance(result, dict):
-            rows = result.get("results")
-            if isinstance(rows, list):
-                for r in rows:
-                    if isinstance(r, dict) and r.get("snippet"):
-                        snippets.append(str(r["snippet"]))
-    except Exception:
-        snippets = []
-
-    # Telemetry: delivered flag from plugin execution
-    delivered = False
-    try:
-        if isinstance(result, dict):
-            delivered = bool(result.get("delivered_to_llm"))
-    except Exception:
-        delivered = False
-
-    try:
-        log_info(
-            f"[json_prompt][preflight_summary] strategy=llm_action snippets={len(snippets)} delivered_to_llm={delivered}"
-        )
-    except Exception:
-        pass
-
-    return snippets[: max(0, int(max_results))]
-    # Accept either {"actions": [...]} or a single action object {"type":..., "payload":...}
-    actions_list = None
-    if isinstance(parsed, dict) and isinstance(parsed.get("actions"), list):
-        actions_list = parsed.get("actions")
-    elif (
-        isinstance(parsed, dict)
-        and parsed.get("type") == "memory_search"
-        and isinstance(parsed.get("payload", {}), dict)
-    ):
-        actions_list = [parsed]
-
-    if not actions_list:
-        return []
-
-    # If the model returned other actions, log and ignore them (preflight must not cause side-effects)
-    try:
-        extra_actions = [
-            a
-            for a in actions_list
-            if isinstance(a, dict) and a.get("type") != "memory_search"
-        ]
-        if extra_actions:
-            log_info(
-                f"[json_prompt] LLM preflight returned extra actions (ignored): {[a.get('type') for a in extra_actions]}"
-            )
-    except Exception:
-        pass
-
-    # Take the first memory_search action only
-    memory_action = None
-    for a in actions_list:
-        if isinstance(a, dict) and a.get("type") == "memory_search":
-            memory_action = a
-            break
-
-    if not isinstance(memory_action, dict):
-        return []
-
-    payload = memory_action.get("payload") or {}
-    if not isinstance(payload, dict):
-        return []
-
-    # Normalize payload minimally
-    mode = payload.get("mode")
-    if mode not in ("tags", "free"):
-        # Default to tags if a list was provided
-        if isinstance(payload.get("tags"), list):
-            mode = "tags"
-        else:
-            mode = "free"
-        payload["mode"] = mode
-
-    if mode == "tags":
-        tags = payload.get("tags")
-        if isinstance(tags, str):
-            tags = [t.strip() for t in tags.split() if t.strip()]
-        if not isinstance(tags, list):
-            tags = []
-        # keep small tags only
-        tags = [str(t).strip() for t in tags if str(t).strip()][:6]
-        payload["tags"] = tags
-
-    if mode == "free":
-        kws = payload.get("keywords")
-        if isinstance(kws, str):
-            kws = [k.strip() for k in kws.split() if k.strip()]
-        if isinstance(kws, list):
-            kws = [str(k).strip() for k in kws if str(k).strip()]
-        else:
-            kws = []
-
-        if not kws:
-            q = payload.get("query")
-            if not isinstance(q, str) or not q.strip():
-                q = text.strip()[:200]
-                payload["query"] = q
-            kws = [k.strip() for k in str(q).split() if k.strip()]
-
-        # Sanitize and dedupe keywords to keep searches broad and robust.
-        try:
-            import re
-
-            stopwords = {
-                "a",
-                "an",
-                "and",
-                "are",
-                "as",
-                "at",
-                "be",
-                "but",
-                "by",
-                "for",
-                "from",
-                "i",
-                "in",
-                "is",
-                "it",
-                "me",
-                "my",
-                "of",
-                "on",
-                "or",
-                "our",
-                "that",
-                "the",
-                "this",
-                "to",
-                "us",
-                "was",
-                "we",
-                "were",
-                "with",
-                "you",
-                "your",
-            }
-            cleaned: list[str] = []
-            seen: set[str] = set()
-            for raw in kws:
-                token = re.sub(r"[^0-9A-Za-z_\-']+", "", str(raw)).strip()
-                if not token:
-                    continue
-                if len(token) < 2:
-                    continue
-                token_l = token.lower()
-                if token_l in stopwords:
-                    continue
-                if token_l in seen:
-                    continue
-                seen.add(token_l)
-                cleaned.append(token)
-            kws = cleaned
-        except Exception:
-            pass
-
-        payload["keywords"] = kws[:6]
-        # Ensure downstream uses keywords rather than falling back to query.
-        payload.pop("query", None)
-
-    payload["max_results"] = int(max_results)
-    memory_action["payload"] = payload
-
-    # Execute the action through action_parser so we reuse the plugin system
-    try:
-        from core.action_parser import run_action
-
-        preflight_context = {
-            "interface": interface_name,
-            "from_llm": False,  # system-driven preflight, not autonomous action execution
-            "preflight": True,
-        }
-        result = await run_action(
-            memory_action,
-            preflight_context,
-            bot=None,
-            original_message=original_message,
-        )
-    except Exception as e:
-        log_warning(f"[json_prompt] LLM preflight: memory_search execution failed: {e}")
-        return []
-
-    # Extract snippets
-    snippets: list[str] = []
-    try:
-        if isinstance(result, dict):
-            rows = result.get("results")
-            if isinstance(rows, list):
-                for r in rows:
-                    if isinstance(r, dict) and r.get("snippet"):
-                        snippets.append(str(r["snippet"]))
-    except Exception:
-        snippets = []
-
-    # Telemetry: delivered flag from plugin execution
-    delivered = False
-    try:
-        if isinstance(result, dict):
-            delivered = bool(result.get("delivered_to_llm"))
-    except Exception:
-        delivered = False
-
-    try:
-        log_info(
-            f"[json_prompt][preflight_summary] strategy=llm_action snippets={len(snippets)} delivered_to_llm={delivered}"
-        )
-    except Exception:
-        pass
-
-    return snippets[: max(0, int(max_results))]
 
 
 def minify_actions_block(available_actions: dict) -> dict:
@@ -718,129 +141,100 @@ async def build_json_prompt(
             mem_limit = int(_history_get_int("CONTEXT_VERBOSITY", 10))
         except Exception:
             mem_limit = 10
-        memories = await search_memories(tags=expanded_tags, limit=max(1, mem_limit))
+        try:
+            from core.synth_core_memory import search_memories
+
+            memories = await search_memories(
+                tags=expanded_tags, limit=max(1, mem_limit), include_chat=True
+            )
+        except Exception as e:
+            log_warning(f"[json_prompt] search_memories failed: {e}")
+            memories = []
         log_debug(
             f"[json_prompt] ⏱️ Loaded {len(memories)} memories from tags in {time.time() - start_time:.2f}s"
         )
 
-    # Optionally run a preflight memory search and merge results (configurable)
+    # === Recon (prompt 0) contributions ===
+    recon_contributions: list[dict] = []
+    recon_instructions: list[str] = []
+    recon_snippets: list[dict] = []
+    recon_memories: list[dict] = []
+    resolved_language = None
+    resolved_message_tone = None
+    resolved_conversation_tone = None
+
+    is_grillo_internal = bool(
+        getattr(message, "grillo_beat", False)
+        or (isinstance(context_memory, dict) and context_memory.get("grillo_beat"))
+        or (interface_path and str(interface_path).startswith("grillo"))
+    )
+
     try:
-        if bool(
-            config_registry.get_value("MEMORY_SEARCH_PREFLIGHT", False, value_type=bool)
-        ):
-            try:
-                preflight_max = int(
-                    config_registry.get_value(
-                        "MEMORY_SEARCH_PREFLIGHT_MAX_RESULTS", 5, value_type=int
-                    )
-                    or 5
-                )
-            except Exception:
-                preflight_max = 5
-            try:
-                strategy = (
-                    str(
-                        config_registry.get_value(
-                            "MEMORY_SEARCH_PREFLIGHT_STRATEGY",
-                            "llm_action",
-                            value_type=str,
-                        )
-                        or "llm_action"
-                    )
-                    .strip()
-                    .lower()
-                )
-            except Exception:
-                strategy = "llm_action"
+        from core.recon import (
+            gather_recon_contributions,
+            resolve_language,
+            resolve_tone,
+        )
 
-            preflight_results = []
-            # Preflight calls must not block the build; enforce a timeout and fail-safe fallback
-            try:
-                timeout = int(
-                    config_registry.get_value(
-                        "MEMORY_SEARCH_PREFLIGHT_TIMEOUT", 180, value_type=int
-                    )
-                    or 180
-                )
-            except Exception:
-                timeout = 180
+        recon_contributions = await gather_recon_contributions(
+            message=message,
+            context_memory=context_memory,
+            text=text,
+            tags=expanded_tags,
+            keywords=None,
+        )
 
-            if strategy == "llm_action":
-                log_info(
-                    f"[json_prompt] Preflight enabled: running LLM-driven memory_search preflight (max={preflight_max}) with timeout={timeout}s"
-                )
-                try:
-                    preflight_results = await asyncio.wait_for(
-                        llm_memory_search_preflight(
-                            text=text,
-                            interface_name=interface_name,
-                            original_message=message,
-                            max_results=preflight_max,
-                        ),
-                        timeout=timeout,
+        for c in recon_contributions:
+            ctype = c.get("type")
+            if ctype == "memory":
+                content = c.get("content")
+                if isinstance(content, dict):
+                    recon_memories.append(content)
+                elif content:
+                    recon_memories.append(
+                        {
+                            "source": c.get("source"),
+                            "id": c.get("id"),
+                            "timestamp": c.get("timestamp"),
+                            "snippet": str(content),
+                            "tags": c.get("tags") or [],
+                        }
                     )
-                except asyncio.TimeoutError:
-                    log_warning(
-                        f"[json_prompt] LLM preflight timed out after {timeout}s; proceeding without preflight snippets"
-                    )
-                    preflight_results = []
-                except Exception as e:
-                    log_warning(
-                        f"[json_prompt] LLM preflight failed: {e}; falling back to free_memory_search (max={preflight_max})"
-                    )
-                    try:
-                        preflight_results = await asyncio.wait_for(
-                            free_memory_search(text, limit=preflight_max),
-                            timeout=timeout,
-                        )
-                    except asyncio.TimeoutError:
-                        log_warning(
-                            f"[json_prompt] free_memory_search fallback timed out after {timeout}s; proceeding without preflight snippets"
-                        )
-                        preflight_results = []
-                    except Exception as e2:
-                        log_warning(
-                            f"[json_prompt] free_memory_search fallback failed: {e2}; proceeding without preflight snippets"
-                        )
-                        preflight_results = []
-            else:
-                log_info(
-                    f"[json_prompt] Preflight enabled: running free_memory_search with max={preflight_max} (strategy={strategy}) with timeout={timeout}s"
-                )
-                try:
-                    preflight_results = await asyncio.wait_for(
-                        free_memory_search(text, limit=preflight_max), timeout=timeout
-                    )
-                except asyncio.TimeoutError:
-                    log_warning(
-                        f"[json_prompt] free_memory_search timed out after {timeout}s; proceeding without preflight snippets"
-                    )
-                    preflight_results = []
-                except Exception as e:
-                    log_warning(
-                        f"[json_prompt] free_memory_search failed: {e}; proceeding without preflight snippets"
-                    )
-                    preflight_results = []
+            elif ctype == "snippet":
+                recon_snippets.append(c)
+            elif ctype == "instruction":
+                if c.get("content"):
+                    recon_instructions.append(str(c.get("content")))
 
-            if preflight_results:
-                added = 0
-                for s in preflight_results:
-                    if s not in memories:
-                        memories.append(s)
-                        added += 1
-                # Use INFO level so it's visible in default logs
-                log_info(
-                    f"[json_prompt] ⏱️ Added {added} preflight snippets in {time.time() - start_time:.2f}s"
-                )
-                try:
-                    # Telemetry: record a compact summary for monitoring
-                    log_info(
-                        f"[json_prompt][preflight_summary] strategy={strategy} added={added} total_memories={len(memories)} preflight_count={len(preflight_results)}"
-                    )
-                except Exception:
-                    pass
+        if recon_memories:
+            # Deduplicate by snippet/id
+            existing = set()
+            for m in memories:
+                if isinstance(m, dict):
+                    key = f"{m.get('source')}::{m.get('id')}::{m.get('snippet')}"
+                else:
+                    key = str(m)
+                existing.add(key)
+            for m in recon_memories:
+                key = f"{m.get('source')}::{m.get('id')}::{m.get('snippet')}"
+                if key not in existing:
+                    memories.append(m)
+                    existing.add(key)
+
+        resolved_language = await resolve_language(
+            contributions=recon_contributions,
+            interface_path=interface_path,
+            is_grillo_internal=is_grillo_internal,
+            message=message,
+        )
+        resolved_message_tone, resolved_conversation_tone = await resolve_tone(
+            contributions=recon_contributions,
+            interface_path=interface_path,
+            is_grillo_internal=is_grillo_internal,
+            message=message,
+        )
     except Exception as e:
-        log_warning(f"[json_prompt] Preflight free_memory_search failed: {e}")
+        log_warning(f"[json_prompt] Recon gather failed: {e}")
 
     # === 3. Context base (history + optional plugin contributions) ===
     try:
@@ -859,6 +253,21 @@ async def build_json_prompt(
             f"[json_prompt] Failed to build history context via HistoryEngine: {e}"
         )
         context_section = {"memories": memories}
+
+    # === 3. Recon contributions (prompt 0) ===
+    try:
+        if recon_contributions:
+            context_section["recon"] = {
+                "contributions": recon_contributions,
+                "snippets": recon_snippets,
+                "language": resolved_language,
+                "message_tone": resolved_message_tone,
+                "conversation_tone": resolved_conversation_tone,
+            }
+        if recon_instructions:
+            context_section["recon_instructions"] = recon_instructions
+    except Exception as e:
+        log_warning(f"[json_prompt] Failed to attach recon context: {e}")
 
     # === 3a. Static injections from plugins ===
     static_persona = None  # Extract persona separately for instructions
@@ -970,45 +379,34 @@ async def build_json_prompt(
             f"[json_prompt] 👤 Persona prepended to instructions ({len(static_persona)} chars)"
         )
 
+    # Recon-derived instructions (language, tone, plugin hints)
+    try:
+        recon_prefixes: list[str] = []
+        if resolved_language:
+            recon_prefixes.append(
+                f"Use {resolved_language} language for the assistant replies."
+            )
+        if resolved_message_tone:
+            recon_prefixes.append(
+                f"Use a {resolved_message_tone} tone for replies."
+            )
+        if resolved_conversation_tone:
+            recon_prefixes.append(
+                f"Tone of the conversation is: {resolved_conversation_tone}."
+            )
+        if recon_instructions:
+            recon_prefixes.extend([str(r) for r in recon_instructions if r])
+
+        if recon_prefixes:
+            json_instructions = " ".join(recon_prefixes) + " " + json_instructions
+    except Exception as e:
+        log_warning(f"[json_prompt] Failed to add recon instructions: {e}")
+
     # Keep `instructions` strictly minified (single-line) for token efficiency and tests.
     try:
         json_instructions = " ".join((json_instructions or "").split())
     except Exception:
         pass
-
-    # Memory-search “testflight”: ensure ALL runtime prompts (build_json_prompt) include
-    # a strong instruction to call the `memory_search` action when uncertain.
-    # (Previously this existed only in build_prompt(), which is not used by the main chain.)
-    # SKIP for wake/sleep commands - these are simple greetings, not memory queries.
-    is_wake_sleep = getattr(message, "is_wake_sleep_command", False)
-    try:
-        if (
-            bool(
-                config_registry.get_value("ENABLE_MEMORY_SEARCH", True, value_type=bool)
-            )
-            and not is_wake_sleep
-        ):
-            memory_search_instr = (
-                "MANDATORY: If you do NOT have enough information to answer the user, or you are unsure, DO NOT ANSWER DIRECTLY. "
-                "You MUST first call the `memory_search` action (mode='tags' preferred, otherwise mode='free' with payload.keywords list preferred) and WAIT for the `memory_search_result` outputs before issuing any user-facing message action (e.g., message_*). "
-                "Respond with ONLY valid JSON actions when interacting with plugins. After receiving `memory_search_result` outputs, you may then continue by returning the next JSON actions (for example a `message_*` action to send a reply) that reference the found memories. "
-                "If `memory_search` returns no relevant results, you may then answer, but you MUST indicate that no relevant memories were found."
-            )
-
-            # Gentle nudge (non-mandatory): encourage the model to respond to direct user questions
-            gentle_nudge = (
-                "NOTE: If the user's message is a direct question or requests suggestions, consider returning a concise user-facing `message_*` action summarizing your answer or indicating that no relevant memories were found. "
-                "This is a suggestion, not a requirement."
-            )
-
-            json_instructions = (
-                f"{json_instructions} {memory_search_instr} {gentle_nudge}"
-            )
-            json_instructions = " ".join((json_instructions or "").split())
-    except Exception as e:
-        log_debug(
-            f"[prompt_engine] Could not add memory_search instruction to build_json_prompt: {e}"
-        )
 
     # Interface-specific instructions are provided via the available actions block
     # No hardcoded interface references - plugins define their own instructions
@@ -1123,203 +521,6 @@ async def build_json_prompt(
     return prompt_with_instructions
 
 
-async def search_memories(tags=None, scope=None, limit=5):
-    if not tags:
-        return []
-
-    # Build OR conditions using JSON_CONTAINS to check if any tag exists in the JSON array
-    conditions = " OR ".join(["JSON_CONTAINS(tags, %s)"] * len(tags))
-
-    query = f"""
-        SELECT DISTINCT content
-        FROM memories
-        WHERE json_valid(tags)
-          AND ({conditions})
-    """
-
-    # Parameters: each tag encoded as a JSON string for JSON_CONTAINS
-    params = [json_dumps(tag) for tag in tags]
-
-    if scope:
-        query += " AND scope = %s"
-        params.append(scope)
-
-    query += " ORDER BY timestamp DESC LIMIT %s"
-    params.append(limit)
-
-    log_debug("Query:")
-    log_debug(query)
-    log_debug(f"Parameters: {params}")
-
-    async with get_conn_ctx() as conn:
-        try:
-            async with conn.cursor() as cur:
-                await cur.execute(query, params)
-                rows = await cur.fetchall()
-                # Truncate each memory to max 400 chars to keep JSON payload lightweight
-                memories = []
-                for row in rows:
-                    mem = row[0]
-                    if isinstance(mem, str) and len(mem) > 400:
-                        mem = mem[:400] + "..."
-                    memories.append(mem)
-
-                # Also search ai_diary for context_tags to include diary entries in memories
-                try:
-                    diary_query = f"SELECT DISTINCT content FROM ai_diary WHERE json_valid(context_tags) AND ({conditions}) ORDER BY timestamp DESC LIMIT %s"
-                    diary_params = [json_dumps(tag) for tag in tags]
-                    diary_params.append(limit)
-                    await cur.execute(diary_query, diary_params)
-                    rows2 = await cur.fetchall()
-                    for r in rows2:
-                        mem = r[0]
-                        if isinstance(mem, str) and len(mem) > 400:
-                            mem = mem[:400] + "..."
-                        memories.append(mem)
-                except Exception:
-                    # If ai_diary search fails, ignore and continue with memories only
-                    pass
-
-                log_debug(
-                    f"[search_memories] Retrieved {len(memories)} memories, ~{sum(len(str(m)) for m in memories)} chars total"
-                )
-                return memories
-        except Exception as e:
-            log_error(f"Query failed: {repr(e)}")
-            return []
-
-
-async def free_memory_search(query: str, limit: int = 5):
-    """Perform a free-text memory search over `memories` and `ai_diary` tables and
-    return a list of snippet strings (max 400 chars each). This mirrors the plugin's
-    mode='free' behavior but does not request LLM delivery, it just returns results.
-    """
-    if not query or not isinstance(query, str) or not query.strip():
-        return []
-
-    tokens = [q.strip() for q in query.split() if q.strip()]
-    if not tokens:
-        return []
-
-    params = []
-    token_clauses = []
-    for tok in tokens:
-        like = "%" + tok + "%"
-        token_clauses.append("content LIKE %s")
-        params.append(like)
-
-    where_mem = "(" + " OR ".join(token_clauses) + ")"
-
-    diary_token_clauses = []
-    for tok in tokens:
-        like = "%" + tok + "%"
-        diary_token_clauses.append("content LIKE %s")
-        params.append(like)
-        diary_token_clauses.append("personal_thought LIKE %s")
-        params.append(like)
-        diary_token_clauses.append("interaction_summary LIKE %s")
-        params.append(like)
-        diary_token_clauses.append("user_message LIKE %s")
-        params.append(like)
-
-    where_diary = "(" + " OR ".join(diary_token_clauses) + ")"
-
-    queries = []
-    queries.append(
-        f"SELECT 'memories' AS source, id, timestamp, content FROM memories WHERE {where_mem}"
-    )
-    queries.append(
-        f"SELECT 'ai_diary' AS source, id, timestamp, content FROM ai_diary WHERE {where_diary}"
-    )
-
-    # Fetch a larger pool if configured (useful when randomizing results)
-    try:
-        pool_max = int(
-            config_registry.get_value(
-                "MEMORY_SEARCH_PREFLIGHT_POOL_MAX", 100, value_type=int
-            )
-            or 100
-        )
-    except Exception:
-        pool_max = 100
-
-    union_q = " UNION ALL ".join(queries) + " ORDER BY timestamp DESC LIMIT %s"
-    params.append(pool_max)
-
-    log_debug(f"[free_memory_search] Executing query: {union_q} params={params}")
-
-    results = []
-    # Provide more helpful debug: print the DB target being used (if available)
-    try:
-        from core.db import _read_db_config
-    except Exception:
-        _read_db_config = None
-
-    if _read_db_config:
-        try:
-            db_host, db_port, db_user, db_pass, db_name = _read_db_config()
-            log_debug(
-                f"[free_memory_search] DB target: {db_user}@{db_host}:{db_port}/{db_name}"
-            )
-        except Exception:
-            pass
-
-    # Try acquiring a connection and executing the query with retries to tolerate transient DB unavailability
-    rows = []
-    max_attempts = 3
-    for attempt in range(1, max_attempts + 1):
-        try:
-            async with get_conn_ctx() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(union_q, params)
-                    rows = await cur.fetchall()
-            break
-        except Exception as e:
-            log_warning(f"[free_memory_search] DB attempt {attempt} failed: {e}")
-            if attempt < max_attempts:
-                await asyncio.sleep(1)
-                continue
-            else:
-                log_error(
-                    f"[free_memory_search] Query failed after {max_attempts} attempts: {e}"
-                )
-                return []
-
-    for r in rows:
-        src, _id, ts, content = r
-        snippet = content if isinstance(content, str) else str(content)
-        if len(snippet) > 400:
-            snippet = snippet[:400] + "..."
-        results.append(snippet)
-
-    log_debug(
-        f"[free_memory_search] Retrieved {len(results)} snippets (pool_max={pool_max})"
-    )
-    try:
-        log_info(
-            f"[json_prompt][preflight_summary] strategy=free_db snippets={len(results)} pool_max={pool_max}"
-        )
-    except Exception:
-        pass
-
-    try:
-        randomize = bool(
-            config_registry.get_value(
-                "MEMORY_SEARCH_PREFLIGHT_RANDOMIZE", False, value_type=bool
-            )
-        )
-    except Exception:
-        randomize = False
-
-    # If there are more results than the desired limit and randomization is enabled,
-    # shuffle and then return the desired number of results. Otherwise, return the
-    # top `limit` results by timestamp (already ordered DESC).
-    if len(results) > limit and randomize:
-        random.shuffle(results)
-
-    return results[:limit]
-
-
 async def build_prompt(
     user_text: str,
     identity_prompt: str = "",
@@ -1350,27 +551,6 @@ async def build_prompt(
     messages.append(
         {"role": "system", "content": f"[MEMORIE RILEVANTI]\n{memory_block}"}
     )
-
-    # When enabled, instruct the LLM to use the memory_search action if it lacks
-    # sufficient data to answer the user's question. This is an English instruction
-    # intended to guide the model to emit a valid JSON action when necessary.
-    try:
-        if bool(
-            config_registry.get_value("ENABLE_MEMORY_SEARCH", True, value_type=bool)
-        ):
-            messages.append(
-                {
-                    "role": "system",
-                    "content": (
-                        "MANDATORY: If you do NOT have enough information to answer the user, or you are unsure, DO NOT ANSWER DIRECTLY. "
-                        "You MUST first call the `memory_search` action (mode='tags' preferred, otherwise mode='free') and WAIT for the `memory_search_result` outputs before issuing any user-facing message action (e.g., message_*). "
-                        "Respond with ONLY valid JSON actions when interacting with plugins. After receiving `memory_search_result` outputs, you may then continue by returning the next JSON actions (for example a `message_*` action to send a reply) that reference the found memories. "
-                        "If `memory_search` returns no relevant results, you may then answer, but you MUST indicate that no relevant memories were found."
-                    ),
-                }
-            )
-    except Exception as e:
-        log_debug(f"[prompt_engine] Could not add memory_search instruction: {e}")
 
     messages.append({"role": "user", "content": user_text.strip()})
 

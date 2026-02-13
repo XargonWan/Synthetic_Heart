@@ -237,4 +237,4 @@ class CheckLogsPlugin:
                     pass
 
 
-PLUGIN_CLASS = CheckLogsPlugin
+PLUGIN_CLASS = None

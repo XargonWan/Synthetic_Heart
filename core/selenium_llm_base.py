@@ -2310,6 +2310,17 @@ class SeleniumLLMBase(AIPluginBase):
             log_debug("[selenium] No send button selectors configured in plugin")
             return None
 
+        def _is_stop_button_element(element) -> bool:
+            try:
+                label = (element.get_attribute("aria-label") or "").lower()
+                data_testid = (element.get_attribute("data-testid") or "").lower()
+                text = (element.text or "").strip().lower()
+                if "stop" in label or "stop" in text or "stop-button" in data_testid:
+                    return True
+            except Exception:
+                return False
+            return False
+
         for selector in selectors:
             try:
                 log_debug(f"[selenium] Trying send button selector: {selector}")
@@ -2317,10 +2328,15 @@ class SeleniumLLMBase(AIPluginBase):
                 button = WebDriverWait(driver, timeout).until(
                     EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
                 )
-                log_debug(
-                    f"[selenium] Found clickable send button with selector: {selector}"
-                )
-                return button
+                if _is_stop_button_element(button):
+                    log_debug(
+                        f"[selenium] Selector matched stop button; waiting for real send button: {selector}"
+                    )
+                else:
+                    log_debug(
+                        f"[selenium] Found clickable send button with selector: {selector}"
+                    )
+                    return button
             except TimeoutException:
                 # Element exists but isn't clickable yet, try to find it anyway
                 try:
@@ -2328,7 +2344,7 @@ class SeleniumLLMBase(AIPluginBase):
                     if elements:
                         button = elements[0]
                         # Check if it's visible at least
-                        if button.is_displayed():
+                        if button.is_displayed() and not _is_stop_button_element(button):
                             log_debug(
                                 f"[selenium] Found visible send button (but not clickable) with selector: {selector}"
                             )
@@ -2675,6 +2691,14 @@ class SeleniumLLMBase(AIPluginBase):
                 pass
 
             log_debug("[selenium] Prompt pasted, now trying to send")
+
+            # If the UI is still generating (stop button visible), wait briefly
+            try:
+                if self._has_visible_stop_button(self.driver):
+                    log_debug("[selenium] Stop button visible before send; waiting for completion")
+                    self.wait_for_response_completion(self.driver, timeout=10)
+            except Exception:
+                pass
 
             # Try to find and click send button first
             send_button = self._find_send_button(self.driver, timeout=3)
@@ -4493,6 +4517,31 @@ class SeleniumLLMBase(AIPluginBase):
                 response = self.wait_until_response_stabilizes(
                     self.driver, no_change_grace=default_grace
                 )
+
+            # Ensure streaming is fully complete (stop button hidden) before proceeding.
+            # This helps avoid interrupting the UI by sending the next prompt too early.
+            try:
+                completion_timeout = int(self.AWAIT_RESPONSE_TIMEOUT)
+            except Exception:
+                completion_timeout = None
+
+            if completion_timeout is not None:
+                completion_timeout = min(completion_timeout, 15)
+
+            try:
+                self.wait_for_response_completion(
+                    self.driver, timeout=completion_timeout
+                )
+            except Exception as e:
+                log_debug(f"[selenium] Response completion wait skipped: {e}")
+
+            # Refresh response text after completion wait (in case streaming continued)
+            try:
+                refreshed = self._extract_response_text(self.driver)
+                if refreshed:
+                    response = refreshed.strip()
+            except Exception:
+                pass
 
             # Log the full response for debugging
             if response:

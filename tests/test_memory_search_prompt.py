@@ -1,5 +1,10 @@
 import pytest
 
+pytest.skip(
+    "Legacy memory_search instructions removed (Recon replaces it)",
+    allow_module_level=True,
+)
+
 from core.prompt_engine import build_prompt
 
 
