@@ -49,6 +49,17 @@ try:
         component="agent",
         needs_component_reload=False,
     )
+    register_exposed_var(
+        "ACTION_INTENT_PROACTIVE_ENABLED",
+        label="Action Intent Proactive Enabled",
+        default=True,
+        value_type=bool,
+        ui_type="bool",
+        description="Allow Debrief to propose proactive reminder actions",
+        scope="agent",
+        component="agent",
+        needs_component_reload=False,
+    )
 except Exception:
     pass
 
@@ -88,6 +99,31 @@ class DebriefActionIntentPlugin:
         except Exception:
             return 3
 
+    def _proactive_enabled(self) -> bool:
+        try:
+            return bool(
+                config_registry.get_value(
+                    "ACTION_INTENT_PROACTIVE_ENABLED", True, value_type=bool
+                )
+            )
+        except Exception:
+            return True
+
+    @staticmethod
+    def _normalize_assistant_response(text: str) -> str:
+        if not isinstance(text, str) or not text.strip():
+            return ""
+        parsed = None
+        try:
+            parsed = extract_json_from_text(text, return_metadata=False)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict):
+            message = parsed.get("message")
+            if isinstance(message, str) and message.strip():
+                return message.strip()
+        return text.strip()
+
     async def on_debrief(
         self,
         processed_actions: List[Dict],
@@ -107,6 +143,7 @@ class DebriefActionIntentPlugin:
             or (results or {}).get("llm_response_text")
             or ""
         )
+        llm_response = self._normalize_assistant_response(llm_response)
         if not isinstance(llm_response, str) or not llm_response.strip():
             return None
 
@@ -175,6 +212,7 @@ class DebriefActionIntentPlugin:
 
         now_iso = datetime.now(timezone.utc).isoformat()
         max_actions = self._get_max_actions()
+        proactive_enabled = self._proactive_enabled()
 
         system_prompt = (
             "You are the Debrief Action-Intent analyzer. Your job is to detect\n"
@@ -184,6 +222,10 @@ class DebriefActionIntentPlugin:
             "- Only return actions from the available action schemas.\n"
             "- Do NOT repeat actions already processed or failed.\n"
             "- If no recovery actions are needed, return an empty list.\n"
+            "- If proactive reminders are enabled, infer if the user mentioned\n"
+            "  any future time/date or a task to remember and propose a suitable\n"
+            "  reminder action (e.g. schedule_message or event) without inventing\n"
+            "  missing details.\n"
             "- Output ONLY valid JSON with the exact schema below.\n\n"
             "Schema:\n"
             "{\"recovery_actions\":[{\"action_type\":str,\"payload\":object,\"reason\":str,\"confidence\":\"low|medium|high\"}]}"
@@ -197,6 +239,8 @@ class DebriefActionIntentPlugin:
                 "processed_action_types": sorted([t for t in processed_types if t]),
                 "failed_action_types": sorted([t for t in failed_types if t]),
                 "available_actions": minified_actions,
+                "proactive_enabled": proactive_enabled,
+                "preferred_action_types": ["schedule_message", "event"],
                 "max_actions": max_actions,
             },
             ensure_ascii=False,
