@@ -148,8 +148,8 @@ class TestComponentLoading(unittest.TestCase):
             # Mock engine file discovery
             mock_file = MagicMock()
             mock_file.name = "test_engine.py"
-            mock_file.relative_to.return_value = "llm_engines/test_engine"
-            mock_file.with_suffix.return_value = "llm_engines.test_engine"
+            mock_file.relative_to.return_value = "cortex/llm_engine/test_engine"
+            mock_file.with_suffix.return_value = "cortex.llm_engine.test_engine"
             mock_rglob.return_value = [mock_file]
 
             # Mock module with PLUGIN_CLASS

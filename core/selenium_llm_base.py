@@ -1531,11 +1531,15 @@ class SeleniumLLMBase(AIPluginBase):
             # Check if the image was pasted successfully
             try:
                 WebDriverWait(driver, 5).until(
-                    lambda d: d.find_elements(By.CSS_SELECTOR, "[data-testid*='image']")
-                    or d.find_elements(By.CSS_SELECTOR, "img")
-                    or d.find_elements(By.CSS_SELECTOR, "[title*='image']")
-                    or d.find_elements(By.CSS_SELECTOR, ".image-preview")
-                    or d.find_elements(By.CSS_SELECTOR, "[data-testid*='attachment']")
+                    lambda d: (
+                        d.find_elements(By.CSS_SELECTOR, "[data-testid*='image']")
+                        or d.find_elements(By.CSS_SELECTOR, "img")
+                        or d.find_elements(By.CSS_SELECTOR, "[title*='image']")
+                        or d.find_elements(By.CSS_SELECTOR, ".image-preview")
+                        or d.find_elements(
+                            By.CSS_SELECTOR, "[data-testid*='attachment']"
+                        )
+                    )
                 )
                 log_info("[selenium] Image successfully pasted")
                 return True
@@ -2054,6 +2058,14 @@ class SeleniumLLMBase(AIPluginBase):
                             log_debug(
                                 f"[selenium] Found response with selector '{selector}': {len(text)} chars"
                             )
+                            try:
+                                if hasattr(self, "_on_selector_success"):
+                                    try:
+                                        self._on_selector_success("response_text", selector)
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
                             return text
 
                 except Exception as e:
@@ -2277,6 +2289,14 @@ class SeleniumLLMBase(AIPluginBase):
                     log_debug(
                         f"[selenium] Found prompt area (clickable) with selector: {selector}"
                     )
+                    try:
+                        if hasattr(self, "_on_selector_success"):
+                            try:
+                                self._on_selector_success("prompt_area", selector)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
                     return element
                 except Exception as e1:
                     log_debug(f"[selenium] Clickable check failed for {selector}: {e1}")
@@ -2289,6 +2309,14 @@ class SeleniumLLMBase(AIPluginBase):
                         log_debug(
                             f"[selenium] Found prompt area (present) with selector: {selector}"
                         )
+                        try:
+                            if hasattr(self, "_on_selector_success"):
+                                try:
+                                    self._on_selector_success("prompt_area", selector)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
                         return element[0]  # Return first matching element
 
             except Exception as e:
@@ -2336,6 +2364,14 @@ class SeleniumLLMBase(AIPluginBase):
                     log_debug(
                         f"[selenium] Found clickable send button with selector: {selector}"
                     )
+                    try:
+                        if hasattr(self, "_on_selector_success"):
+                            try:
+                                self._on_selector_success("send_button", selector)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
                     return button
             except TimeoutException:
                 # Element exists but isn't clickable yet, try to find it anyway
@@ -2344,10 +2380,20 @@ class SeleniumLLMBase(AIPluginBase):
                     if elements:
                         button = elements[0]
                         # Check if it's visible at least
-                        if button.is_displayed() and not _is_stop_button_element(button):
+                        if button.is_displayed() and not _is_stop_button_element(
+                            button
+                        ):
                             log_debug(
                                 f"[selenium] Found visible send button (but not clickable) with selector: {selector}"
                             )
+                            try:
+                                if hasattr(self, "_on_selector_success"):
+                                    try:
+                                        self._on_selector_success("send_button", selector)
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
                             return button
                         else:
                             log_debug(
@@ -2695,7 +2741,9 @@ class SeleniumLLMBase(AIPluginBase):
             # If the UI is still generating (stop button visible), wait briefly
             try:
                 if self._has_visible_stop_button(self.driver):
-                    log_debug("[selenium] Stop button visible before send; waiting for completion")
+                    log_debug(
+                        "[selenium] Stop button visible before send; waiting for completion"
+                    )
                     self.wait_for_response_completion(self.driver, timeout=10)
             except Exception:
                 pass
@@ -3191,6 +3239,14 @@ class SeleniumLLMBase(AIPluginBase):
                 f"[{self.component_name}] Driver not initialized, assuming not logged in"
             )
             return False
+
+    def _on_selector_success(self, kind: str, selector: str) -> None:
+        """Hook called when a selector of `kind` successfully matched an element.
+
+        Plugins may override to record/promote selectors that worked in the wild.
+        Default implementation is a no-op.
+        """
+        return None
 
         try:
             # Combine specific selectors with common fallbacks

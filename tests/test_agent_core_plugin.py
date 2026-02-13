@@ -45,10 +45,11 @@ async def test_propose_action_and_approve(monkeypatch):
             return Ctx()
 
         def commit(self):
-            called['committed'] = True
+            called["committed"] = True
 
     import core.db as dbmod
-    monkeypatch.setattr(dbmod, 'get_conn_ctx', lambda: FakeConn())
+
+    monkeypatch.setattr(dbmod, "get_conn_ctx", lambda: FakeConn())
 
     notifications = []
 
@@ -57,18 +58,22 @@ async def test_propose_action_and_approve(monkeypatch):
 
     plugin = AgentCorePlugin(notify_fn=fake_notify)
 
-    res = await plugin.propose_action(proposer='tester', command={'cmd': 'ls -la'}, metadata={'k': 'v'})
-    assert res.get('status') == 'proposed'
-    assert res.get('proposal_id') == 777
-    assert notifications, 'expected notification on propose'
+    res = await plugin.propose_action(
+        proposer="tester", command={"cmd": "ls -la"}, metadata={"k": "v"}
+    )
+    assert res.get("status") == "proposed"
+    assert res.get("proposal_id") == 777
+    assert notifications, "expected notification on propose"
 
     # Approve & execute flow - monkeypatch run_command
     async def fake_run(cmd):
-        called['ran'] = cmd
-        return {'ok': True, 'output': 'ok'}
+        called["ran"] = cmd
+        return {"ok": True, "output": "ok"}
 
-    monkeypatch.setattr(plugin, '_run_command', fake_run)
+    monkeypatch.setattr(plugin, "_run_command", fake_run)
 
-    res2 = await plugin.approve_action(proposal_id=777, approver='approver', command={'cmd': 'echo hi'})
-    assert res2.get('status') == 'executed'
-    assert 'ran' in called
+    res2 = await plugin.approve_action(
+        proposal_id=777, approver="approver", command={"cmd": "echo hi"}
+    )
+    assert res2.get("status") == "executed"
+    assert "ran" in called

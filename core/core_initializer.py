@@ -191,7 +191,9 @@ class CoreInitializer:
                 await self.start_pending_async_plugins()
                 log_debug("[core_initializer] start_pending_async_plugins completed")
             except Exception as e:
-                log_warning(f"[core_initializer] start_pending_async_plugins failed: {e}")
+                log_warning(
+                    f"[core_initializer] start_pending_async_plugins failed: {e}"
+                )
 
             # 3. Load core actions (like chat_link) if not already loaded
             log_debug("[core_initializer] 🔍 About to call _ensure_core_actions()")
@@ -542,9 +544,22 @@ class CoreInitializer:
         try:
             # Initialize LLM registry
             from core.llm_registry import register_default_engines
+            from core.cortex_registry import (
+                register_default_engines as register_cortex_engines,
+            )
 
+            # Populate legacy LLM registry (keeps backward compatibility)
             register_default_engines()
             log_debug("[core_initializer] LLM registry initialized")
+
+            # Also auto-register Cortex engines (cortex/llm_engine and cortex/live)
+            try:
+                register_cortex_engines()
+                log_debug("[core_initializer] Cortex registry initialized")
+            except Exception as _e:
+                log_warning(
+                    f"[core_initializer] Cortex registry auto-registration failed: {_e}"
+                )
 
             # The interfaces registry is initialized by each interface when it starts
             log_debug("[core_initializer] Registries initialized successfully")
@@ -649,13 +664,21 @@ class CoreInitializer:
         # ``*_plugin.py`` naming convention.
 
         root_dir = Path(__file__).parent.parent
-        search_dirs = ["plugins", "llm_engines", "interface"]
+        # Include new cortex locations for LLM engines; keep legacy paths for backward compatibility
+        search_dirs = ["plugins", "cortex/llm_engine", "interface", "llm_engines"]
 
-        # If dev components are enabled, also scan dev directories
+        # If dev components are enabled, also scan dev directories (both cortex and legacy)
         if self._enable_dev_components:
-            search_dirs.extend(["plugins_dev", "llm_engines_dev", "interface_dev"])
+            search_dirs.extend(
+                [
+                    "plugins_dev",
+                    "cortex/llm_engine_dev",
+                    "interface_dev",
+                    "llm_engines_dev",
+                ]
+            )
             log_info(
-                "[core_initializer] 🔧 Dev components enabled: scanning plugins_dev/ and llm_engines_dev/"
+                "[core_initializer] 🔧 Dev components enabled: scanning plugins_dev/, cortex/llm_engine_dev/ and llm_engines_dev/"
             )
 
         for base in search_dirs:

@@ -9,7 +9,7 @@ class TestGeminiMultimodal:
 
     def test_get_mime_type(self):
         """Test MIME type detection."""
-        from llm_engines.gemini_api import GeminiAPIPlugin
+        from cortex.llm_engine.gemini_api import GeminiAPIPlugin
 
         plugin = GeminiAPIPlugin()
 
@@ -32,7 +32,7 @@ class TestGeminiMultimodal:
 
     def test_is_supported_multimodal_type(self):
         """Test supported multimodal type checking."""
-        from llm_engines.gemini_api import GeminiAPIPlugin
+        from cortex.llm_engine.gemini_api import GeminiAPIPlugin
 
         plugin = GeminiAPIPlugin()
 
@@ -49,7 +49,7 @@ class TestGeminiMultimodal:
 
     def test_extract_multimodal_parts_from_dict(self):
         """Test extracting multimodal parts from a prompt dict."""
-        from llm_engines.gemini_api import GeminiAPIPlugin
+        from cortex.llm_engine.gemini_api import GeminiAPIPlugin
 
         plugin = GeminiAPIPlugin()
 
@@ -76,7 +76,7 @@ class TestGeminiMultimodal:
 
     def test_extract_multimodal_parts_empty_for_text_only(self):
         """Test that no parts are extracted for text-only prompts."""
-        from llm_engines.gemini_api import GeminiAPIPlugin
+        from cortex.llm_engine.gemini_api import GeminiAPIPlugin
 
         plugin = GeminiAPIPlugin()
 
@@ -92,7 +92,7 @@ class TestGeminiMultimodal:
 
     def test_extract_multimodal_parts_top_level_attachments(self):
         """Test extracting multimodal parts from top-level attachments."""
-        from llm_engines.gemini_api import GeminiAPIPlugin
+        from cortex.llm_engine.gemini_api import GeminiAPIPlugin
 
         plugin = GeminiAPIPlugin()
 
@@ -117,7 +117,7 @@ class TestGeminiMultimodal:
 
     def test_extract_multimodal_parts_video(self):
         """Test extracting video attachments."""
-        from llm_engines.gemini_api import GeminiAPIPlugin
+        from cortex.llm_engine.gemini_api import GeminiAPIPlugin
 
         plugin = GeminiAPIPlugin()
 
@@ -139,7 +139,7 @@ class TestGeminiMultimodal:
 
     def test_extract_multimodal_parts_skips_unsupported(self):
         """Test that unsupported MIME types are skipped."""
-        from llm_engines.gemini_api import GeminiAPIPlugin
+        from cortex.llm_engine.gemini_api import GeminiAPIPlugin
 
         plugin = GeminiAPIPlugin()
 
@@ -160,7 +160,7 @@ class TestGeminiMultimodal:
 
     def test_extract_multimodal_parts_multiple_attachments(self):
         """Test extracting multiple attachments."""
-        from llm_engines.gemini_api import GeminiAPIPlugin
+        from cortex.llm_engine.gemini_api import GeminiAPIPlugin
 
         plugin = GeminiAPIPlugin()
 
@@ -184,7 +184,7 @@ class TestGeminiMultimodal:
 
     def test_copy_and_redact_data_attachments(self):
         """Test that attachment data is properly redacted."""
-        from llm_engines.gemini_api import GeminiAPIPlugin
+        from cortex.llm_engine.gemini_api import GeminiAPIPlugin
 
         plugin = GeminiAPIPlugin()
 
@@ -221,7 +221,7 @@ class TestGeminiMultimodal:
 
     def test_copy_and_redact_data_nested(self):
         """Test that nested attachment data is properly redacted."""
-        from llm_engines.gemini_api import GeminiAPIPlugin
+        from cortex.llm_engine.gemini_api import GeminiAPIPlugin
 
         plugin = GeminiAPIPlugin()
 
@@ -248,7 +248,7 @@ class TestGeminiMultimodal:
 
     def test_copy_and_redact_data_legacy_keys(self):
         """Test that legacy keys (images, audio, videos, documents) are redacted."""
-        from llm_engines.gemini_api import GeminiAPIPlugin
+        from cortex.llm_engine.gemini_api import GeminiAPIPlugin
 
         plugin = GeminiAPIPlugin()
 
@@ -269,7 +269,7 @@ class TestGeminiMultimodal:
 
     def test_extract_multimodal_parts_nested(self):
         """Test extracting multimodal parts from deeply nested prompt."""
-        from llm_engines.gemini_api import GeminiAPIPlugin
+        from cortex.llm_engine.gemini_api import GeminiAPIPlugin
 
         plugin = GeminiAPIPlugin()
 
@@ -290,7 +290,7 @@ class TestGeminiMultimodal:
 
     def test_extract_multimodal_parts_legacy_videos(self):
         """Test extracting video attachments from legacy 'videos' key."""
-        from llm_engines.gemini_api import GeminiAPIPlugin
+        from cortex.llm_engine.gemini_api import GeminiAPIPlugin
 
         plugin = GeminiAPIPlugin()
 
@@ -304,7 +304,7 @@ class TestGeminiMultimodal:
 
     def test_extract_multimodal_parts_ignores_schema(self):
         """Test that schema definitions with multimodal keys are ignored."""
-        from llm_engines.gemini_api import GeminiAPIPlugin
+        from cortex.llm_engine.gemini_api import GeminiAPIPlugin
 
         plugin = GeminiAPIPlugin()
 
@@ -328,7 +328,7 @@ class TestGeminiMultimodal:
 
     def test_copy_and_redact_data_ignores_schema(self):
         """Test that schema definitions are not redacted even if they have 'data' key."""
-        from llm_engines.gemini_api import GeminiAPIPlugin
+        from cortex.llm_engine.gemini_api import GeminiAPIPlugin
 
         plugin = GeminiAPIPlugin()
 

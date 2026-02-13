@@ -44,8 +44,9 @@ def test_gemini_ui_reset_opens_new_chat_and_returns_retry(monkeypatch):
     monkeypatch.setattr(
         s,
         "wait_until_response_stabilizes",
-        lambda driver,
-        **kwargs: "Non sono a mio agio con questa conversazione, meglio interromperla.",
+        lambda driver, **kwargs: (
+            "Non sono a mio agio con questa conversazione, meglio interromperla."
+        ),
     )
 
     # Prepare dummy driver indicating gemini URL and with a clickable new-chat button

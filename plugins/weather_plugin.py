@@ -203,9 +203,9 @@ class WeatherPlugin:
         # Check if update is needed based on fetch_minutes config
         now = time.time()
         timeout_sec = self.fetch_minutes * 60
-        
+
         is_stale = not self._cached_weather or (now - self._last_fetch > timeout_sec)
-        
+
         if is_stale:
             if self._update_task and not self._update_task.done():
                 # Update already in progress, just return cached message

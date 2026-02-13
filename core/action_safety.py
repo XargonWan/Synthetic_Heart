@@ -21,7 +21,7 @@ Return: (allowed: bool, reason: str, meta: dict)
 from __future__ import annotations
 
 from typing import Tuple, Dict, Any
-from core.logging_utils import log_debug, log_info, log_warning
+from core.logging_utils import log_debug, log_warning
 from core.core_initializer import core_initializer
 from core.config_manager import config_registry
 
@@ -51,11 +51,15 @@ def _get_declared_action_metadata(action_type: str) -> Dict[str, Any]:
         info = actions.get(action_type, {})
         return info
     except Exception as e:
-        log_debug(f"[action_safety] Failed to get declared metadata for {action_type}: {e}")
+        log_debug(
+            f"[action_safety] Failed to get declared metadata for {action_type}: {e}"
+        )
         return {}
 
 
-def is_action_allowed_for_execution(action: Dict[str, Any], context: Dict[str, Any], original_message: Any) -> Tuple[bool, str, Dict[str, Any]]:
+def is_action_allowed_for_execution(
+    action: Dict[str, Any], context: Dict[str, Any], original_message: Any
+) -> Tuple[bool, str, Dict[str, Any]]:
     """Decide if the provided action can be executed automatically.
 
     Returns a tuple: (allowed, reason, metadata)
@@ -66,13 +70,21 @@ def is_action_allowed_for_execution(action: Dict[str, Any], context: Dict[str, A
 
         # 1) Respect explicit safe flag
         safe_flag = action.get("safe", True)
-        llm_unsafe_override = bool(config_registry.get_value("LLM_AUTO_EXECUTE_UNSAFE_ACTIONS", False))
+        llm_unsafe_override = bool(
+            config_registry.get_value("LLM_AUTO_EXECUTE_UNSAFE_ACTIONS", False)
+        )
         if safe_flag is False and not llm_unsafe_override:
-            return False, "blocked: flagged unsafe and no global override", {"safe_flag": False}
+            return (
+                False,
+                "blocked: flagged unsafe and no global override",
+                {"safe_flag": False},
+            )
 
         # 2) Determine declared security level
         declared = _get_declared_action_metadata(action_type)
-        declared_level = _coerce_level(declared.get("security_level") or declared.get("security", None))
+        declared_level = _coerce_level(
+            declared.get("security_level") or declared.get("security", None)
+        )
 
         # 3) External effects bump
         ext = declared.get("external_effects") or []
@@ -80,27 +92,55 @@ def is_action_allowed_for_execution(action: Dict[str, Any], context: Dict[str, A
             declared_level = _level_at_least(declared_level, "medium")
 
         # 4) Allow payload override if configured (human-origin actions only)
-        allow_safe_override = bool(config_registry.get_value("ALLOW_SAFE_FLAG_OVERRIDE", False))
+        allow_safe_override = bool(
+            config_registry.get_value("ALLOW_SAFE_FLAG_OVERRIDE", False)
+        )
 
         # 5) Origin and mode
-        is_from_llm = (hasattr(original_message, "from_llm") and getattr(original_message, "from_llm")) or (isinstance(context, dict) and context.get("from_llm", False))
-        synth_mode = str(config_registry.get_value("SYNTH_AUTONOMY_MODE", "suggest") or "suggest").lower()
+        is_from_llm = (
+            hasattr(original_message, "from_llm")
+            and getattr(original_message, "from_llm")
+        ) or (isinstance(context, dict) and context.get("from_llm", False))
+        synth_mode = str(
+            config_registry.get_value("SYNTH_AUTONOMY_MODE", "suggest") or "suggest"
+        ).lower()
 
         # If developer explicitly marked action as low, treat as low and allow always
         if declared_level == "low":
-            return True, "allowed: declared low security", {"security_level": "low", "declared": declared}
+            return (
+                True,
+                "allowed: declared low security",
+                {"security_level": "low", "declared": declared},
+            )
 
         # Special-case: Grillo beats may have their own threshold
         is_grillo_beat = bool(context and context.get("grillo_beat"))
         if is_grillo_beat:
-            grillo_level = _coerce_level(config_registry.get_value("GRILLO_ALLOWED_SECURITY_LEVEL", "medium") or "medium")
+            grillo_level = _coerce_level(
+                config_registry.get_value("GRILLO_ALLOWED_SECURITY_LEVEL", "medium")
+                or "medium"
+            )
             # Also allow explicit per-action whitelist for grillo
-            grillo_allowed_actions = config_registry.get_value("GRILLO_ALLOWED_ACTIONS", []) or []
+            grillo_allowed_actions = (
+                config_registry.get_value("GRILLO_ALLOWED_ACTIONS", []) or []
+            )
             if action_type in grillo_allowed_actions:
-                return True, "allowed: explicitly whitelisted for grillo", {"security_level": declared_level}
+                return (
+                    True,
+                    "allowed: explicitly whitelisted for grillo",
+                    {"security_level": declared_level},
+                )
             if LEVELS.index(declared_level) <= LEVELS.index(grillo_level):
-                return True, f"allowed: grillo threshold {grillo_level} >= {declared_level}", {"security_level": declared_level}
-            return False, f"blocked: grillo threshold {grillo_level} lower than action {declared_level}", {"security_level": declared_level}
+                return (
+                    True,
+                    f"allowed: grillo threshold {grillo_level} >= {declared_level}",
+                    {"security_level": declared_level},
+                )
+            return (
+                False,
+                f"blocked: grillo threshold {grillo_level} lower than action {declared_level}",
+                {"security_level": declared_level},
+            )
 
         # If not from LLM (human-triggered), allow (unless payload safe flag blocks and override not set)
         if not is_from_llm:
@@ -109,24 +149,51 @@ def is_action_allowed_for_execution(action: Dict[str, Any], context: Dict[str, A
         # From LLM -> apply synth_mode policies
         if synth_mode == "suggest":
             # Proposal-only for anything above low (low already returned earlier)
-            return False, "blocked: synth in 'suggest' mode, proposals only for non-low actions", {"security_level": declared_level}
+            return (
+                False,
+                "blocked: synth in 'suggest' mode, proposals only for non-low actions",
+                {"security_level": declared_level},
+            )
 
         if synth_mode == "whitelisted":
-            allowed_autonomy = config_registry.get_value("AUTONOMY_ALLOWED_ACTIONS", []) or []
+            allowed_autonomy = (
+                config_registry.get_value("AUTONOMY_ALLOWED_ACTIONS", []) or []
+            )
             if action_type in allowed_autonomy:
-                return True, "allowed: whitelisted action", {"security_level": declared_level}
+                return (
+                    True,
+                    "allowed: whitelisted action",
+                    {"security_level": declared_level},
+                )
             return False, "blocked: not whitelisted", {"security_level": declared_level}
 
         if synth_mode == "autonomous":
             # Check configured allowed level (default high)
-            allowed_level = _coerce_level(config_registry.get_value("AUTONOMY_ALLOWED_SECURITY_LEVEL", "high") or "high")
+            allowed_level = _coerce_level(
+                config_registry.get_value("AUTONOMY_ALLOWED_SECURITY_LEVEL", "high")
+                or "high"
+            )
             if LEVELS.index(declared_level) <= LEVELS.index(allowed_level):
-                return True, "allowed: autonomous mode threshold satisfied", {"security_level": declared_level}
-            return False, "blocked: autonomous threshold lower than action", {"security_level": declared_level}
+                return (
+                    True,
+                    "allowed: autonomous mode threshold satisfied",
+                    {"security_level": declared_level},
+                )
+            return (
+                False,
+                "blocked: autonomous threshold lower than action",
+                {"security_level": declared_level},
+            )
 
         # Fallback conservative: block
-        return False, "blocked: unknown mode or policy", {"security_level": declared_level}
+        return (
+            False,
+            "blocked: unknown mode or policy",
+            {"security_level": declared_level},
+        )
 
     except Exception as e:
-        log_warning(f"[action_safety] Decision failed for action {action.get('type')}: {e}")
+        log_warning(
+            f"[action_safety] Decision failed for action {action.get('type')}: {e}"
+        )
         return False, "blocked: safety decision error", {"error": str(e)}

@@ -1,12 +1,10 @@
-import os
-import asyncio
 import core.db as db
 import plugins.ai_diary as ai_diary
 
 
 def test_sync_add_diary_does_not_create_many_pools(monkeypatch):
-    monkeypatch.setenv('SYNTH_TESTING', '1')
-    monkeypatch.setenv('DB_MAX_POOLS', '1')
+    monkeypatch.setenv("SYNTH_TESTING", "1")
+    monkeypatch.setenv("DB_MAX_POOLS", "1")
     ai_diary.PLUGIN_ENABLED = True
 
     # Clear any existing pools

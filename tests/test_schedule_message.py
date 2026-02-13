@@ -17,7 +17,9 @@ import json
 from datetime import datetime, timedelta
 import sys
 
-sys.path.insert(0, "/videodrome/videodrome-deployment/Synthetic_Heart")
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.db import get_db_connection, release_db_connection
 from core.logging_utils import log_info, log_error

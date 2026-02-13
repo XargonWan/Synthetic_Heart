@@ -22,7 +22,9 @@ async def test_declared_high_security_blocked_in_suggest_mode(monkeypatch):
     action = {"type": "danger_action", "payload": {}, "safe": True}
 
     # No plugin to execute; should be blocked by safety before execution
-    res = await ap.run_actions([action], context={}, bot=None, original_message=original_message)
+    res = await ap.run_actions(
+        [action], context={}, bot=None, original_message=original_message
+    )
 
     assert res["processed"] == []
     assert len(res["failed_actions"]) == 1
@@ -43,7 +45,9 @@ async def test_external_effects_increase_to_medium_and_block_in_suggest(monkeypa
 
     action = {"type": "maybe_network", "payload": {}, "safe": True}
 
-    res = await ap.run_actions([action], context={}, bot=None, original_message=original_message)
+    res = await ap.run_actions(
+        [action], context={}, bot=None, original_message=original_message
+    )
 
     assert res["processed"] == []
     assert len(res["failed_actions"]) == 1
@@ -77,7 +81,12 @@ async def test_grillo_allows_medium_if_configured(monkeypatch):
     ap._ACTION_PLUGINS = [FakeDiary()]
     ap.get_supported_action_types = lambda: set(["dream_diary"])
 
-    res = await ap.run_actions([{"type": "dream_diary", "payload": {}}], context={"grillo_beat": True}, bot=None, original_message=original_message)
+    res = await ap.run_actions(
+        [{"type": "dream_diary", "payload": {}}],
+        context={"grillo_beat": True},
+        bot=None,
+        original_message=original_message,
+    )
 
     assert executed.get("ok", False) is True
     assert len(res["failed_actions"]) == 0

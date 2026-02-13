@@ -204,21 +204,34 @@ async def load_plugin(
         registry = get_llm_registry()
         plugin_instance = registry.load_engine(name, notify_fn)
     except Exception as e:
-        # Fallback: try to load the plugin directly from llm_engines module
-        # This allows plugins to work even if they weren't registered during auto-discovery
+        # Fallback: attempt direct module load from new cortex packages first,
+        # then fall back to legacy `llm_engines` for backward compatibility.
         log_warning(
             f"[plugin] Registry load failed ({e}), attempting direct module load for {name}"
         )
         try:
             import importlib
 
-            module_path = f"llm_engines.{name}"
-            module = importlib.import_module(module_path)
+            candidates = [
+                f"cortex.llm_engine.{name}",
+                f"cortex.llm_engine_dev.{name}",
+                f"llm_engines.{name}",
+            ]
+            module = None
+            module_path = None
+            for candidate in candidates:
+                try:
+                    module = importlib.import_module(candidate)
+                    module_path = candidate
+                    break
+                except Exception:
+                    continue
+
+            if module is None:
+                raise ImportError(f"Could not import any candidate module for {name}")
 
             if not hasattr(module, "PLUGIN_CLASS"):
-                log_error(
-                    f"[plugin] ❌ Module {module_path} does not define PLUGIN_CLASS"
-                )
+                log_error(f"[plugin] ❌ Module {module_path} does not define PLUGIN_CLASS")
                 raise ValueError(f"Plugin `{name}` does not define `PLUGIN_CLASS`")
 
             plugin_class = getattr(module, "PLUGIN_CLASS")
@@ -236,7 +249,7 @@ async def load_plugin(
             else:
                 plugin_instance = plugin_class()
 
-            log_info(f"[plugin] ✅ Plugin loaded directly from module: {name}")
+            log_info(f"[plugin] ✅ Plugin loaded directly from module: {module_path}")
         except Exception as fallback_e:
             log_error(
                 f"[plugin] ❌ Direct module load also failed for {name}: {fallback_e}",
@@ -354,7 +367,6 @@ async def handle_incoming_message(
     """Process incoming messages or pre-built prompts."""
 
     async with _llm_chain_lease():
-
         # Check if plugin is loaded
         if plugin is None:
             log_error(
@@ -369,7 +381,9 @@ async def handle_incoming_message(
                 await load_plugin("manual")
                 if plugin is None:
                     raise ValueError("Manual plugin failed to load")
-                log_info("[plugin_instance] Manual plugin loaded successfully as fallback")
+                log_info(
+                    "[plugin_instance] Manual plugin loaded successfully as fallback"
+                )
             except Exception as fallback_e:
                 log_error(
                     f"[plugin_instance] Fallback plugin loading failed: {fallback_e}"
@@ -423,7 +437,9 @@ async def handle_incoming_message(
 
                         event_id = None
                         if maybe_ctx:
-                            event_id = maybe_ctx.get("system_message", {}).get("event_id")
+                            event_id = maybe_ctx.get("system_message", {}).get(
+                                "event_id"
+                            )
                         await message_queue.enqueue_event(
                             bot, context_memory_or_prompt, event_id=event_id
                         )
@@ -677,11 +693,11 @@ async def handle_incoming_message(
             activity_log_id = None
             if isinstance(context_memory_or_prompt, dict):
                 activity_log_id = context_memory_or_prompt.get("activity_log_id")
-            
+
             if activity_log_id and result:
                 await _update_grillo_response(activity_log_id, result)
         except Exception as e:
-             log_warning(f"[plugin_instance] Failed to update Grillo log: {e}")
+            log_warning(f"[plugin_instance] Failed to update Grillo log: {e}")
         # Log that plugin finished processing
         try:
             log_info(
@@ -726,14 +742,16 @@ async def handle_incoming_message(
             try:
                 if isinstance(prompt, dict):
                     llm_context["original_user_message"] = (
-                        prompt.get("input", {})
-                        .get("payload", {})
-                        .get("text", "")
+                        prompt.get("input", {}).get("payload", {}).get("text", "")
                     )
                 else:
-                    llm_context["original_user_message"] = getattr(message, "text", "") or ""
+                    llm_context["original_user_message"] = (
+                        getattr(message, "text", "") or ""
+                    )
             except Exception:
-                llm_context["original_user_message"] = getattr(message, "text", "") or ""
+                llm_context["original_user_message"] = (
+                    getattr(message, "text", "") or ""
+                )
 
             # Scope-aware correction: only allow actions that were present in the prompt
             try:
@@ -804,13 +822,17 @@ async def handle_incoming_message(
                     if chain_result != "ACTIONS_EXECUTED":
                         from core.debrief import run_debrief
 
-                        llm_context["llm_response_text"] = str(result) if result is not None else ""
+                        llm_context["llm_response_text"] = (
+                            str(result) if result is not None else ""
+                        )
                         await run_debrief(
                             processed_actions=[],
                             failed_actions=[],
                             results={
                                 "chain_result": chain_result,
-                                "llm_response_text": llm_context.get("llm_response_text"),
+                                "llm_response_text": llm_context.get(
+                                    "llm_response_text"
+                                ),
                             },
                             context=llm_context,
                             original_message=message,
@@ -846,9 +868,7 @@ async def handle_incoming_message(
                             "[plugin_instance] Sent fallback ACK to user after LLM produced no message actions"
                         )
                     except Exception as e:
-                        log_debug(
-                            f"[plugin_instance] Failed to send fallback ACK: {e}"
-                        )
+                        log_debug(f"[plugin_instance] Failed to send fallback ACK: {e}")
                 else:
                     log_debug(
                         "[plugin_instance] No bot.send_message available for fallback ACK"
@@ -1135,9 +1155,10 @@ async def _update_grillo_response(activity_log_id, response_text):
     """Update the grillo_activity_log with the raw response text."""
     if not activity_log_id or not response_text:
         return
-    
+
     try:
         from core.db import get_conn_ctx
+
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
                 # Logic similar to GrilloPlugin.set_activity_response_text: append if exists
@@ -1154,6 +1175,8 @@ async def _update_grillo_response(activity_log_id, response_text):
                     (response_text, response_text, activity_log_id),
                 )
                 await conn.commit()
-        log_debug(f"[plugin_instance] Updated grillo_activity_log {activity_log_id} with response ({len(response_text)} chars)")
+        log_debug(
+            f"[plugin_instance] Updated grillo_activity_log {activity_log_id} with response ({len(response_text)} chars)"
+        )
     except Exception as e:
         log_error(f"[plugin_instance] Failed to update Grillo log: {e}")

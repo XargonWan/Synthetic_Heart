@@ -152,7 +152,9 @@ async def enqueue(
                 if directed and not explicit_trigger:
                     directed = False
                     reason = "asleep_state_no_trigger"
-                    log_debug(f"[QUEUE] Suppressed message due to Asleep state: {getattr(message, 'text', '')}")
+                    log_debug(
+                        f"[QUEUE] Suppressed message due to Asleep state: {getattr(message, 'text', '')}"
+                    )
                 elif not directed and explicit_trigger:
                     directed = True
                     reason = "explicit_trigger_asleep"
@@ -964,7 +966,9 @@ async def _consumer_loop() -> None:
 
                             # Ensure generation_end hook is called when background task completes
                             processing_task.add_done_callback(
-                                lambda t: asyncio.create_task(_call_bot_generation_end(t))
+                                lambda t: asyncio.create_task(
+                                    _call_bot_generation_end(t)
+                                )
                             )
 
                             # Log any exceptions when done

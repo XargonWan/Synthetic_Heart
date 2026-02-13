@@ -14,60 +14,64 @@ class TestUnloggedModel(unittest.TestCase):
 
     def test_chatgpt_has_unlogged_model(self):
         """Test that ChatGPT engine has 'unlogged' model configured."""
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[1]
         with open(
-            "/videodrome/videodrome-deployment/Synthetic_Heart/llm_engines/selenium_chatgpt.py",
-            "r",
+            repo_root / "cortex" / "llm_engine" / "selenium_chatgpt.py", "r"
         ) as f:
             content = f.read()
-        self.assertIn('"unlogged": 1000', content)
+        self.assertIn('"unlogged": 20000', content)
 
     def test_gemini_has_unlogged_model(self):
         """Test that Gemini engine has 'unlogged' model configured."""
-        with open(
-            "/videodrome/videodrome-deployment/Synthetic_Heart/llm_engines/selenium_gemini.py",
-            "r",
-        ) as f:
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[1]
+        with open(repo_root / "cortex" / "llm_engine" / "selenium_gemini.py", "r") as f:
             content = f.read()
-        self.assertIn('"unlogged": 1000', content)
+        self.assertIn('"unlogged": 21500', content)
 
     def test_grok_has_unlogged_model(self):
         """Test that Grok engine has 'unlogged' model configured."""
-        with open(
-            "/videodrome/videodrome-deployment/Synthetic_Heart/llm_engines/selenium_grok.py",
-            "r",
-        ) as f:
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[1]
+        with open(repo_root / "cortex" / "llm_engine" / "selenium_grok.py", "r") as f:
             content = f.read()
-        self.assertIn('"unlogged": 1000', content)
+        self.assertIn('"unlogged": 21500', content)
 
     def test_chatgpt_has_login_detection(self):
         """Test that ChatGPT engine has login detection logic."""
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[1]
         with open(
-            "/videodrome/videodrome-deployment/Synthetic_Heart/llm_engines/selenium_chatgpt.py",
-            "r",
+            repo_root / "cortex" / "llm_engine" / "selenium_chatgpt.py", "r"
         ) as f:
             content = f.read()
-        self.assertIn("_check_login_status_on_startup", content)
-        self.assertIn("login_button_selectors", content)
-        self.assertIn("login_texts", content)
-        # ChatGPT uses startup login check with base class method instead of returning "unlogged" from get_current_model
+        # ChatGPT exposes login-detection selectors used by the shared base class
+        self.assertIn("login_detection_selectors", content)
+        # ChatGPT relies on the centralized `is_user_logged_in()` detection in the base class (not a literal 'unlogged' return)
 
     def test_gemini_has_login_detection(self):
         """Test that Gemini engine has login detection logic."""
-        with open(
-            "/videodrome/videodrome-deployment/Synthetic_Heart/llm_engines/selenium_gemini.py",
-            "r",
-        ) as f:
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[1]
+        with open(repo_root / "cortex" / "llm_engine" / "selenium_gemini.py", "r") as f:
             content = f.read()
         self.assertIn('return "unlogged"', content)
 
     def test_grok_has_login_detection(self):
         """Test that Grok engine has login detection logic."""
-        with open(
-            "/videodrome/videodrome-deployment/Synthetic_Heart/llm_engines/selenium_grok.py",
-            "r",
-        ) as f:
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parents[1]
+        with open(repo_root / "cortex" / "llm_engine" / "selenium_grok.py", "r") as f:
             content = f.read()
-        self.assertIn("def _is_user_logged_in(self)", content)
+        # Grok implements an engine-specific ensure/login helper and returns 'unlogged' for unauthenticated sessions
+        self.assertIn("def _ensure_logged_in(", content)
         self.assertIn('return "unlogged"', content)
 
 

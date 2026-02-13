@@ -1,4 +1,3 @@
-import asyncio
 
 from core.agent_core import AgentLoopManager
 from core.core_initializer import PLUGIN_REGISTRY
@@ -10,9 +9,11 @@ class FakeReconPlugin:
 
     async def get_recon_contributions(self, **kwargs):
         self.called = True
-        return [{'snippet': 'recent memory', 'source': 'test'}]
+        return [{"snippet": "recent memory", "source": "test"}]
 
-    def on_debrief(self, processed_actions, failed_actions, results, context, original_message):
+    def on_debrief(
+        self, processed_actions, failed_actions, results, context, original_message
+    ):
         # Simple sync handler
         self.debrief_called = True
         self.context = context
@@ -21,15 +22,15 @@ class FakeReconPlugin:
 async def test_recon_and_debrief_hooks(monkeypatch):
     fake = FakeReconPlugin()
     # Register fake plugin
-    PLUGIN_REGISTRY['fake_recon'] = fake
+    PLUGIN_REGISTRY["fake_recon"] = fake
 
     # Patch plugin_instance to return empty actions so loop still runs
     import core.plugin_instance as plugin_instance
 
     async def fake_handle(bot, message, context_memory_or_prompt):
-        return '{}'  # no actions
+        return "{}"  # no actions
 
-    monkeypatch.setattr(plugin_instance, 'handle_incoming_message', fake_handle)
+    monkeypatch.setattr(plugin_instance, "handle_incoming_message", fake_handle)
 
     # Patch DB get_conn_ctx to avoid aiomysql dependency
     import core.db as dbmod
@@ -43,7 +44,7 @@ async def test_recon_and_debrief_hooks(monkeypatch):
             self.queries.append((sql, params))
 
         async def fetchone(self):
-            return ('[]',)
+            return ("[]",)
 
     class FakeConn:
         def __init__(self):
@@ -68,16 +69,18 @@ async def test_recon_and_debrief_hooks(monkeypatch):
             return Ctx()
 
     fake_conn = FakeConn()
-    monkeypatch.setattr(dbmod, 'get_conn_ctx', lambda: fake_conn)
+    monkeypatch.setattr(dbmod, "get_conn_ctx", lambda: fake_conn)
 
     manager = AgentLoopManager()
-    task_id = await manager.run_loop(engine='test', input_payload={'cmd': 'echo'}, context={}, max_iterations=1)
+    task_id = await manager.run_loop(
+        engine="test", input_payload={"cmd": "echo"}, context={}, max_iterations=1
+    )
     assert task_id is not None
 
     task = manager._running_tasks.get(task_id)
     if task:
         await task
 
-    assert getattr(fake, 'called', False) is True
-    assert getattr(fake, 'debrief_called', True) is True
-    assert fake.context.get('task_id') == task_id
+    assert getattr(fake, "called", False) is True
+    assert getattr(fake, "debrief_called", True) is True
+    assert fake.context.get("task_id") == task_id

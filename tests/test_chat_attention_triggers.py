@@ -3,9 +3,12 @@ from types import SimpleNamespace
 
 # Skip if telegram not installed
 try:
-    import telegram  # type: ignore
+    pass  # type: ignore
 except Exception:
-    pytest.skip("python-telegram-bot not installed; skipping telegram integration tests", allow_module_level=True)
+    pytest.skip(
+        "python-telegram-bot not installed; skipping telegram integration tests",
+        allow_module_level=True,
+    )
 
 import interface.telegram_bot as tbot
 from core.chat_attention import get_attention, set_attention
@@ -72,7 +75,9 @@ async def test_empty_config_does_not_trigger_sleep(monkeypatch):
     # Ensure no configured triggers
     monkeypatch.setattr(
         "core.chat_attention.config_registry.get_value",
-        lambda k, d=None, **kwargs: "" if k in ("CHAT_SLEEP_COMMANDS", "CHAT_WAKE_COMMANDS") else "",
+        lambda k, d=None, **kwargs: (
+            "" if k in ("CHAT_SLEEP_COMMANDS", "CHAT_WAKE_COMMANDS") else ""
+        ),
     )
 
     trainer_id = 555

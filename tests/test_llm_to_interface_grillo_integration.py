@@ -48,11 +48,13 @@ async def test_grillo_persists_proposal_when_not_auto(monkeypatch):
     monkeypatch.setattr(
         config_registry,
         "get_value",
-        lambda k, default=None, **kw: False
-        if k == "GRILLO_AUTO_GENERATE_ACTIONS"
-        else False
-        if k == "GRILLO_ACTION_CHECK_ASYNC"
-        else default,
+        lambda k, default=None, **kw: (
+            False
+            if k == "GRILLO_AUTO_GENERATE_ACTIONS"
+            else False
+            if k == "GRILLO_ACTION_CHECK_ASYNC"
+            else default
+        ),
     )
 
     # Call llm_to_interface with a plain-text LLM reply
@@ -109,11 +111,13 @@ async def test_grillo_auto_executes_when_enabled(monkeypatch):
     monkeypatch.setattr(
         config_registry,
         "get_value",
-        lambda k, default=None, **kw: True
-        if k == "GRILLO_AUTO_GENERATE_ACTIONS"
-        else False
-        if k == "GRILLO_ACTION_CHECK_ASYNC"
-        else default,
+        lambda k, default=None, **kw: (
+            True
+            if k == "GRILLO_AUTO_GENERATE_ACTIONS"
+            else False
+            if k == "GRILLO_ACTION_CHECK_ASYNC"
+            else default
+        ),
     )
 
     async def fake_send(*args, **kwargs):
@@ -163,11 +167,13 @@ async def test_grillo_checker_receives_execution_metadata(monkeypatch):
     monkeypatch.setattr(
         config_registry,
         "get_value",
-        lambda k, default=None, **kw: False
-        if k == "GRILLO_AUTO_GENERATE_ACTIONS"
-        else False
-        if k == "GRILLO_ACTION_CHECK_ASYNC"
-        else default,
+        lambda k, default=None, **kw: (
+            False
+            if k == "GRILLO_AUTO_GENERATE_ACTIONS"
+            else False
+            if k == "GRILLO_ACTION_CHECK_ASYNC"
+            else default
+        ),
     )
 
     async def fake_send(*args, **kwargs):
@@ -258,11 +264,13 @@ async def test_grillo_persists_action_execs_when_not_auto(monkeypatch):
     monkeypatch.setattr(
         config_registry,
         "get_value",
-        lambda k, default=None, **kw: False
-        if k == "GRILLO_AUTO_GENERATE_ACTIONS"
-        else False
-        if k == "GRILLO_ACTION_CHECK_ASYNC"
-        else default,
+        lambda k, default=None, **kw: (
+            False
+            if k == "GRILLO_AUTO_GENERATE_ACTIONS"
+            else False
+            if k == "GRILLO_ACTION_CHECK_ASYNC"
+            else default
+        ),
     )
 
     async def fake_send(*args, **kwargs):
@@ -353,11 +361,13 @@ async def test_grillo_records_action_exec_status_when_auto(monkeypatch):
     monkeypatch.setattr(
         config_registry,
         "get_value",
-        lambda k, default=None, **kw: True
-        if k == "GRILLO_AUTO_GENERATE_ACTIONS"
-        else False
-        if k == "GRILLO_ACTION_CHECK_ASYNC"
-        else default,
+        lambda k, default=None, **kw: (
+            True
+            if k == "GRILLO_AUTO_GENERATE_ACTIONS"
+            else False
+            if k == "GRILLO_ACTION_CHECK_ASYNC"
+            else default
+        ),
     )
 
     async def fake_send(*args, **kwargs):
@@ -411,11 +421,13 @@ async def test_grillo_forces_auto_exec_when_context_is_grillo_beat(monkeypatch):
     monkeypatch.setattr(
         config_registry,
         "get_value",
-        lambda k, default=None, **kw: False
-        if k == "GRILLO_AUTO_GENERATE_ACTIONS"
-        else False
-        if k == "GRILLO_ACTION_CHECK_ASYNC"
-        else default,
+        lambda k, default=None, **kw: (
+            False
+            if k == "GRILLO_AUTO_GENERATE_ACTIONS"
+            else False
+            if k == "GRILLO_ACTION_CHECK_ASYNC"
+            else default
+        ),
     )
 
     async def fake_send(*args, **kwargs):

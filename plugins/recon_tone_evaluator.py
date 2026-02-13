@@ -23,8 +23,8 @@ class ReconToneEvaluatorPlugin:
     def get_recon_instruction(self) -> str:
         return (
             "Determine the message tone and the overall conversation tone. "
-            "Return as an object: {\"message_tone\": \"...\", "
-            "\"conversation_tone\": \"...\", \"sticky\": false}."
+            'Return as an object: {"message_tone": "...", '
+            '"conversation_tone": "...", "sticky": false}.'
         )
 
     async def parse_recon_response(

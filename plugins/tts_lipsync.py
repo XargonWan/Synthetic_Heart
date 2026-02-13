@@ -152,7 +152,11 @@ class TTSLipSyncPlugin(AIPluginBase):
                 group="plugins",
                 component="tts_lipsync",
             )
-            endpoints = [e.strip() for e in str(raw_endpoints).split(",") if e.strip()] if raw_endpoints else []
+            endpoints = (
+                [e.strip() for e in str(raw_endpoints).split(",") if e.strip()]
+                if raw_endpoints
+                else []
+            )
 
             # Read timeout and output dir
             timeout_s = config_registry.get_value(
@@ -235,7 +239,9 @@ class TTSLipSyncPlugin(AIPluginBase):
 
         # If plugin is not enabled (either user disabled or no endpoints configured), skip TTS entirely
         if not getattr(self, "enabled", False):
-            log_info("[tts_lipsync] TTS is disabled (TTS_ENABLED=False or no endpoints); skipping TTS execution")
+            log_info(
+                "[tts_lipsync] TTS is disabled (TTS_ENABLED=False or no endpoints); skipping TTS execution"
+            )
             return {"status": "skipped", "reason": "tts_disabled"}
 
         # 1. Generate Audio via standard handler

@@ -1,8 +1,9 @@
 """Minimal Gasmask plugin stub used for testing.
 This provides the small API surface the tests expect without pulling external deps.
 """
-from core.core_initializer import register_plugin
+
 from core.config_manager import config_registry
+
 
 class GasmaskPlugin:
     def __init__(self):
@@ -10,6 +11,7 @@ class GasmaskPlugin:
         try:
             # Import at runtime so test patching of core.core_initializer.register_plugin is effective
             from core import core_initializer
+
             core_initializer.register_plugin("gasmask", self)
         except Exception:
             pass
@@ -32,7 +34,7 @@ class GasmaskPlugin:
         return {
             "static_inject": {
                 "description": "Provide static protection injection to messages",
-                "instructions": "Return a dict containing 'gasmask_protection' string." 
+                "instructions": "Return a dict containing 'gasmask_protection' string.",
             }
         }
 
@@ -54,6 +56,7 @@ class GasmaskPlugin:
         ]
         protection = " ".join(protection_lines)
         return {"gasmask_protection": protection}
+
 
 # Export for tests
 __all__ = ["GasmaskPlugin"]

@@ -19,19 +19,22 @@ def test_switch_to_non_llm_engine_via_components_endpoint(monkeypatch):
         engine = registry.load_engine(target)
     except Exception:
         # If engine cannot be loaded (missing deps), just ensure POST doesn't 500
-        resp = client.post('/api/components/cortex', json={'name': target})
+        resp = client.post("/api/components/cortex", json={"name": target})
         assert resp.status_code in (404, 500) or resp.status_code >= 400
         return
 
     # If engine loaded, POST should succeed in switching (or at least attempt without 500)
-    resp = client.post('/api/components/cortex', json={'name': target})
+    resp = client.post("/api/components/cortex", json={"name": target})
     assert resp.status_code == 200
     data = resp.json()
-    assert data.get('status') == 'ok'
+    assert data.get("status") == "ok"
 
     # Verify components summary reflects the active engine
     time.sleep(0.05)
-    resp2 = client.get('/api/components')
+    resp2 = client.get("/api/components")
     assert resp2.status_code == 200
     payload = resp2.json()
-    assert payload.get('cortex', {}).get('active_engine') in (target, payload.get('cortex', {}).get('active_engine'))
+    assert payload.get("cortex", {}).get("active_engine") in (
+        target,
+        payload.get("cortex", {}).get("active_engine"),
+    )

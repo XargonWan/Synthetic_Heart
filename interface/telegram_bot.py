@@ -839,7 +839,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # /say command removed — interactive send-to-chat feature was intentionally deleted.
 
-
     # === PRIORITY 2: Handle trainer incoming responses (stickers, media with target) ===
     log_debug(
         f"🟠 [PRIORITY 2 CHECK] is_trainer({user_id})={is_trainer(user_id)}, chat_type={message.chat.type}"
@@ -871,8 +870,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 log_debug(
                     f"[telegram_bot] Exception while resolving reply target for PRIORITY 2: {e}"
                 )
-
-
 
         # If we have a target, send the content
         if target:
@@ -932,7 +929,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # should_sleep: True if sleep trigger matched
     # is_wake_word: True if wake trigger matched
     # is_wake_sleep_command: True if either matched
-
 
     # Mentions also wake up
     is_mention = False

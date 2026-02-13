@@ -13,6 +13,7 @@ except Exception:  # pragma: no cover - fallback when dotenv not installed
 
 
 from core.db import get_conn_ctx
+
 # aiomysql is optional at import time — make the import lazy/fail-safe so
 # importing core.config doesn't raise in environments where aiomysql isn't
 # installed (e.g., lightweight tests or build-time checks). Modules that need
@@ -459,6 +460,7 @@ def list_available_llms():
 # These functions provide a backward-compatible shim for older WebUI code
 # that expects simple helpers in core.config. They delegate to the
 # CortexRegistry where possible to avoid duplicating discovery logic.
+
 
 def list_available_cortexs():
     """Return a sorted list of known cortex kinds (e.g., 'llm', 'live', 'agent').

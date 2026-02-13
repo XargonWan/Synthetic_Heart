@@ -49,7 +49,6 @@ DIARY_HISTORY_DAYS = config_registry.get_var(
 )
 
 
-
 def minify_actions_block(available_actions: dict) -> dict:
     """Convert full action schemas to minimal versions for prompt.
 
@@ -386,9 +385,7 @@ async def build_json_prompt(
                 f"Use {resolved_language} language for the assistant replies."
             )
         if resolved_message_tone:
-            recon_prefixes.append(
-                f"Use a {resolved_message_tone} tone for replies."
-            )
+            recon_prefixes.append(f"Use a {resolved_message_tone} tone for replies.")
         if resolved_conversation_tone:
             recon_prefixes.append(
                 f"Tone of the conversation is: {resolved_conversation_tone}."
@@ -674,11 +671,15 @@ async def free_memory_search(query: str, limit: int = 5):
                     rows = await asyncio.wait_for(cur.fetchall(), timeout=5.0)
             break
         except asyncio.TimeoutError:
-            log_warning(f"[free_memory_search] DB attempt {attempt} timed out after 10s")
+            log_warning(
+                f"[free_memory_search] DB attempt {attempt} timed out after 10s"
+            )
             if attempt < max_attempts:
                 continue
             else:
-                log_error(f"[free_memory_search] Query timed out after {max_attempts} attempts")
+                log_error(
+                    f"[free_memory_search] Query timed out after {max_attempts} attempts"
+                )
                 return []
         except Exception as e:
             log_warning(f"[free_memory_search] DB attempt {attempt} failed: {e}")
@@ -686,7 +687,9 @@ async def free_memory_search(query: str, limit: int = 5):
                 await asyncio.sleep(0.5)
                 continue
             else:
-                log_error(f"[free_memory_search] Query failed after {max_attempts} attempts: {e}")
+                log_error(
+                    f"[free_memory_search] Query failed after {max_attempts} attempts: {e}"
+                )
                 return []
 
     log_info(f"[free_memory_search] Query completed in {time.time() - start_time:.3f}s")
@@ -724,6 +727,8 @@ async def free_memory_search(query: str, limit: int = 5):
         random.shuffle(results)
 
     return results[:limit]
+
+
 async def build_prompt(
     user_text: str,
     identity_prompt: str = "",
@@ -834,7 +839,7 @@ EXACT REQUIRED JSON FORMAT:
 def build_full_json_instructions() -> dict:
     """Return combined JSON instructions and available actions block.
 
-    Returns the optimized set of available actions (schema + brief) so the model 
+    Returns the optimized set of available actions (schema + brief) so the model
     is aware of every capability without wasting tokens on examples/verbose docs.
     """
     instructions = load_json_instructions()
@@ -845,12 +850,12 @@ def build_full_json_instructions() -> dict:
         from core.json_utils import dumps as json_dumps
 
         full_actions = core_initializer.actions_block.get("available_actions", {})
-        
+
         # Optimize: Minify actions for the main prompt to save context
         # The corrector will access full schemas/examples if needed.
         for name, definition in full_actions.items():
             actions[name] = extract_for_llm_prompt(name, definition)
-            
+
         try:
             log_debug(
                 f"[prompt_engine] Optimized actions block: {len(json_dumps(full_actions))} -> {len(json_dumps(actions))} chars"

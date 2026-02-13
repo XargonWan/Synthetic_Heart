@@ -23,7 +23,7 @@ class ReconLanguageEvaluatorPlugin:
     def get_recon_instruction(self) -> str:
         return (
             "Detect the primary language of the conversation. "
-            "Return as an object: {\"language_code\": \"it\"}."
+            'Return as an object: {"language_code": "it"}.'
         )
 
     async def parse_recon_response(

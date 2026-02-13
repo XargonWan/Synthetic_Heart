@@ -566,6 +566,7 @@ def add_diary_entry(
         if grillo_activity_log_id and diary_entry_id:
             try:
                 import asyncio
+
                 try:
                     from plugins.grillo.grillo_impl import GrilloPlugin
                 except ImportError:
@@ -1412,6 +1413,7 @@ class DiaryPlugin:
             return {"latest_diary_entries": []}
 
         import time
+
         start = time.time()
         try:
             # Get diary history days from config_registry
@@ -1442,13 +1444,15 @@ class DiaryPlugin:
                 """,
                 (cutoff_date,),
             )
-            
+
             # Process entries
             for entry in recent_entries:
                 if isinstance(entry.get("context_tags"), str):
                     entry["context_tags"] = json.loads(entry["context_tags"] or "[]")
                 if isinstance(entry.get("involved_users"), str):
-                    entry["involved_users"] = json.loads(entry["involved_users"] or "[]")
+                    entry["involved_users"] = json.loads(
+                        entry["involved_users"] or "[]"
+                    )
                 if isinstance(entry.get("emotions"), str):
                     entry["emotions"] = json.loads(entry["emotions"] or "[]")
                 if entry.get("timestamp") and hasattr(entry["timestamp"], "isoformat"):

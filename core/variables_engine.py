@@ -94,7 +94,7 @@ class ExposedVarDefinition:
         if value is None:
             return
         # For file-backed variables we accept a string path or dict metadata; skip casting
-        if self.ui_type == 'file':
+        if self.ui_type == "file":
             return
         if self.value_type is not None and not callable(self.value_type):
             try:
