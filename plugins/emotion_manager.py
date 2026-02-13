@@ -318,6 +318,17 @@ Your emotional state will decay over time, so reinforce it if the feeling persis
                 """)
                 log_debug("[emotion_manager] emotion_diary table ensured")
 
+                # Ensure timestamp column exists (for migration of existing tables)
+                try:
+                    await cur.execute(
+                        "ALTER TABLE emotion_diary ADD COLUMN timestamp DATETIME DEFAULT CURRENT_TIMESTAMP"
+                    )
+                    log_info("[emotion_manager] Added timestamp column into emotion_diary")
+                except Exception as e:
+                    # Ignore "Duplicate column name" error (1060)
+                    if "Duplicate column name" not in str(e) and getattr(e, "args", [0])[0] != 1060:
+                        log_warning(f"[emotion_manager] Could not add timestamp column: {e}")
+
     async def get_emotion_state(self, include_raw: bool = False) -> Dict[str, float]:
         """Get current emotional state with decay applied.
 

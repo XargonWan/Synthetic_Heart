@@ -274,14 +274,12 @@ def _write_to_separate_log(level: str, message: str, log_file: str) -> None:
                 "%Y-%m-%d %H:%M:%S",
             )
 
-            # Rotate at 5MB, keep 100 backups
-            # Use TimestampedRotatingFileHandler for smooth rotation
-            # Rotate at 5MB or 2000 lines, keep 100 backups
+            # Rotate at 5MB or 4000 lines, keep 100 backups
             # Use TimestampedRotatingFileHandler for smooth rotation
             fh = TimestampedRotatingFileHandler(
                 separate_log_path,
                 maxBytes=5_000_000,
-                maxLines=2000,
+                maxLines=4000,
                 backupCount=100,
                 encoding="utf-8",
             )
