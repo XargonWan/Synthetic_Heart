@@ -1347,17 +1347,26 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
                     # Centralized safety decision
                     from core.action_safety import is_action_allowed_for_execution
 
-                    allowed, reason, meta = is_action_allowed_for_execution(action, context or {}, original_message)
+                    allowed, reason, meta = is_action_allowed_for_execution(
+                        action, context or {}, original_message
+                    )
                     if not allowed:
                         # Maintain previous behavior: collect as failed action and continue
                         error_msg = f"Action '{action.get('type')}' blocked by safety policy: {reason}"
                         log_info(f"[action_parser] {error_msg}")
                         collected_errors.append(error_msg)
-                        failed_actions.append({"index": idx, "action": action, "errors": [error_msg], "safety_meta": meta})
+                        failed_actions.append(
+                            {
+                                "index": idx,
+                                "action": action,
+                                "errors": [error_msg],
+                                "safety_meta": meta,
+                            }
+                        )
                         continue
 
                     # Special-case: heuristic-recovered actions must not be auto-executed even if allowed
-                    if action.get('metadata', {}).get('heuristic_recovery'):
+                    if action.get("metadata", {}).get("heuristic_recovery"):
                         error_msg = f"Action '{action.get('type')}' flagged as heuristic recovery and requires human validation; quarantined"
                         log_warning(f"[action_parser] {error_msg}")
                         collected_errors.append(error_msg)
@@ -1366,27 +1375,8 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
                         )
                         continue
 
-                    # If synth is in 'whitelisted' mode, only execute actions present in AUTONOMY_ALLOWED_ACTIONS
-                    if synth_mode == "whitelisted":
-                        # Exception: always allow use_animation as it is a harmless state change
-                        if action.get("type") == "use_animation":
-                            pass
-                        elif (
-                            allowed_autonomy
-                            and action.get("type") not in allowed_autonomy
-                        ):
-                            error_msg = f"Action '{action.get('type')}' is not whitelisted for autonomous execution"
-                            log_warning(f"[action_parser] {error_msg}")
-                            collected_errors.append(error_msg)
-                            failed_actions.append(
-                                {"index": idx, "action": action, "errors": [error_msg]}
-                            )
-                            continue
-
-                    # If synth is in 'autonomous' mode, allow unrestricted execution (no whitelist checks)
-                    if synth_mode == "autonomous":
-                        # unrestricted - nothing to check here (still respect 'safe' and global overrides)
-                        pass
+                    # NOTE: whitelisted/autonomous mode checks are handled by
+                    # is_action_allowed_for_execution() in core.action_safety above.
                 except Exception as e:
                     log_warning(f"[action_parser] Safety/autonomy checks failed: {e}")
                     # On error, be conservative and treat as proposal-only
