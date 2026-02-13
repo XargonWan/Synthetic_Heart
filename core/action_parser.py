@@ -1065,6 +1065,12 @@ IMPORTANT: Do not include the {successful_count} actions that were already execu
         correction_message = types.SimpleNamespace()
         correction_message.chat_id = getattr(original_message, 'chat_id', None)
         correction_message.from_llm = True
+        
+        # Pass interface_path to avoid default to synth_webui
+        correction_message.interface_path = getattr(original_message, 'interface_path', None)
+        if not correction_message.interface_path and context and 'interface_path' in context:
+             correction_message.interface_path = context['interface_path']
+
         correction_message.original_text = correction_context["instruction"]
         correction_message.text = correction_context["instruction"]
 
@@ -1079,13 +1085,41 @@ IMPORTANT: Do not include the {successful_count} actions that were already execu
         # run_corrector_middleware can detect selective correction context correctly
         corrected_context = {**(context or {}), "selective_correction": True, "correction_context": correction_context, "message": original_message}
 
-        await run_corrector_middleware(
+        # Execute middleware and CAPTURE result
+        corrected_json_str = await run_corrector_middleware(
             text=correction_context["instruction"],
             bot=bot,
             context=corrected_context,
             chat_id=getattr(original_message, 'chat_id', None),
             thread_id=getattr(original_message, 'thread_id', None)
         )
+        
+        if corrected_json_str:
+            log_info(f"[action_parser] Received corrected JSON: {corrected_json_str[:200]}...")
+            
+            # Parse the corrected JSON
+            # We can use the helper from transport_layer or local
+            from core.transport_layer import extract_json_from_text
+            parsed_data = extract_json_from_text(corrected_json_str)
+            
+            actions_to_run = []
+            if parsed_data:
+                if isinstance(parsed_data, dict) and "actions" in parsed_data:
+                    actions_to_run = parsed_data["actions"]
+                elif isinstance(parsed_data, list):
+                    actions_to_run = parsed_data
+                elif isinstance(parsed_data, dict):
+                    actions_to_run = [parsed_data]
+            
+            if actions_to_run:
+                log_info(f"[action_parser] Executing {len(actions_to_run)} corrected actions")
+                # Execute valid actions
+                await run_actions(actions_to_run, context, bot, original_message)
+            else:
+                log_warning("[action_parser] Corrected JSON contained no valid actions")
+        else:
+             log_warning("[action_parser] Selective correction returned no result")
+
     except Exception as e:
         log_error(f"[action_parser] Failed to request selective correction: {e}")
 async def run_actions(actions: Any, context: Dict[str, Any], bot, original_message):
@@ -1160,6 +1194,22 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
                         failed_actions.append({"index": idx, "action": action, "errors": [error_msg]})
                         continue
 
+                    # If synth is in 'whitelisted' mode, only execute actions present in AUTONOMY_ALLOWED_ACTIONS
+                    if synth_mode == 'whitelisted':
+                        # Exception: always allow use_animation as it is a harmless state change
+                        if action.get('type') == 'use_animation':
+                            pass
+                        elif allowed_autonomy and action.get('type') not in allowed_autonomy:
+                            error_msg = f"Action '{action.get('type')}' is not whitelisted for autonomous execution"
+                            log_warning(f"[action_parser] {error_msg}")
+                            collected_errors.append(error_msg)
+                            failed_actions.append({"index": idx, "action": action, "errors": [error_msg]})
+                            continue
+
+                    # If synth is in 'autonomous' mode, allow unrestricted execution (no whitelist checks)
+                    if synth_mode == 'autonomous':
+                        # unrestricted - nothing to check here (still respect 'safe' and global overrides)
+                        pass
                 except Exception as e:
                     log_warning(f"[action_parser] Safety/autonomy checks failed: {e}")
                     # On error, be conservative and treat as proposal-only
@@ -1299,6 +1349,11 @@ async def _create_diary_entry_for_actions(processed_actions, context, original_m
     """Create a diary entry summarizing the actions performed during this interaction."""
     if not processed_actions:
         return
+    
+    # Avoid duplicate diary entries if the LLM explicitly created one
+    for action in processed_actions:
+        if action.get("type") == "create_personal_diary_entry":
+            return
     
     try:
         from plugins.ai_diary import create_personal_diary_entry, is_plugin_enabled
