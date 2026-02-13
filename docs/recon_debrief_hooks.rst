@@ -70,10 +70,13 @@ Examples
   examples like `recon_log_reader.py`).
 
 Testing & compatibility
------------------------
+------------------------
 - Recon contributions are optional; if no recon-capable plugins are
   registered the system skips Recon automatically.
 - Debrief hooks are fail-safe: plugin exceptions are logged and ignored.
+- The action-intent Debrief plugin (see `plugins/debrief_action_intent.py`) can
+  propose recovery actions when the assistant implied or promised an action
+  but did not execute it.
 
 See also
 --------

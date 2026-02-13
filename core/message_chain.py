@@ -349,6 +349,13 @@ async def handle_incoming_message(
     is_from_llm = True if source == "llm" else ctx.get("from_llm", False)
     ctx["from_llm"] = is_from_llm
 
+    # Preserve raw LLM response text for Debrief/intent-recovery plugins
+    if is_from_llm:
+        try:
+            ctx["llm_response_text"] = text or ""
+        except Exception:
+            ctx["llm_response_text"] = ""
+
     # Also set on message object if possible (for corrector_orchestrator and action_parser detection)
     try:
         if hasattr(message, "__dict__") or isinstance(message, type({})):

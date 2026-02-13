@@ -1266,6 +1266,9 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
         try:
             from core.debrief import run_debrief
 
+            if isinstance(context, dict):
+                context["debrief_ran"] = True
+
             await run_debrief(
                 processed_actions=processed_actions,
                 failed_actions=failed_actions,
@@ -1273,6 +1276,7 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
                     "processed": processed_actions,
                     "failed": failed_actions,
                     "errors": collected_errors,
+                    "llm_response_text": (context or {}).get("llm_response_text"),
                 },
                 context=context,
                 original_message=original_message,

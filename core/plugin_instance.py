@@ -796,6 +796,27 @@ async def handle_incoming_message(
             log_info(
                 f"[plugin_instance] ✅ LLM→INTERFACE: message_chain completed, result={chain_result}"
             )
+
+            # Debrief (postflight) for LLM responses without action execution.
+            # If actions were executed, Debrief already ran inside action_parser.
+            try:
+                if isinstance(llm_context, dict) and not llm_context.get("debrief_ran"):
+                    if chain_result != "ACTIONS_EXECUTED":
+                        from core.debrief import run_debrief
+
+                        llm_context["llm_response_text"] = str(result) if result is not None else ""
+                        await run_debrief(
+                            processed_actions=[],
+                            failed_actions=[],
+                            results={
+                                "chain_result": chain_result,
+                                "llm_response_text": llm_context.get("llm_response_text"),
+                            },
+                            context=llm_context,
+                            original_message=message,
+                        )
+            except Exception as e:
+                log_debug(f"[plugin_instance] Debrief-after-chain failed: {e}")
             # Don't return ACTIONS_EXECUTED as a message to the webui
             if chain_result == "ACTIONS_EXECUTED":
                 return None
