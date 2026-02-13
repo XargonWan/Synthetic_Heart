@@ -3,6 +3,7 @@
 # external code imports it. Functions are no-ops and return
 # neutral values.
 
+
 def set_target(user_id, chat_id):
     """No-op: /say functionality removed."""
     return None

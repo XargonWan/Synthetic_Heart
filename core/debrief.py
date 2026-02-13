@@ -6,6 +6,7 @@ from core.config_manager import config_registry
 # Expose config flag
 try:
     from core.variables_engine import register_exposed_var
+
     register_exposed_var(
         "ENABLE_DEBRIEF",
         label="Enable Debrief (postflight)",
@@ -57,6 +58,7 @@ async def run_debrief(
 
     try:
         from core.core_initializer import PLUGIN_REGISTRY
+
         plugins = list(PLUGIN_REGISTRY.values())
     except Exception as e:
         log_warning(f"[debrief] Failed to access PLUGIN_REGISTRY: {e}")
@@ -68,9 +70,21 @@ async def run_debrief(
         try:
             if hasattr(plugin, "on_debrief"):
                 try:
-                    rval = plugin.on_debrief(processed_actions=processed_actions, failed_actions=failed_actions, results=results, context=context or {}, original_message=original_message)
+                    rval = plugin.on_debrief(
+                        processed_actions=processed_actions,
+                        failed_actions=failed_actions,
+                        results=results,
+                        context=context or {},
+                        original_message=original_message,
+                    )
                 except TypeError:
-                    rval = plugin.on_debrief(processed_actions, failed_actions, results, context or {}, original_message)
+                    rval = plugin.on_debrief(
+                        processed_actions,
+                        failed_actions,
+                        results,
+                        context or {},
+                        original_message,
+                    )
                 if asyncio.iscoroutine(rval):
                     await rval
                 if isinstance(rval, dict) and rval.get("recovery_actions"):
@@ -78,7 +92,9 @@ async def run_debrief(
                     if isinstance(actions, list):
                         recovery_actions.extend(actions)
         except Exception as e:
-            log_warning(f"[debrief] Plugin {plugin.__class__.__name__} on_debrief failed: {e}")
+            log_warning(
+                f"[debrief] Plugin {plugin.__class__.__name__} on_debrief failed: {e}"
+            )
 
     if recovery_actions:
         policy = str(

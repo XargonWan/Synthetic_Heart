@@ -7,6 +7,7 @@ from core.config_manager import config_registry
 # Expose config flags
 try:
     from core.variables_engine import register_exposed_var
+
     register_exposed_var(
         "ENABLE_RECON",
         label="Enable Recon (preflight)",
@@ -340,6 +341,7 @@ async def gather_recon_contributions(
     contributions: List[Dict[str, Any]] = []
     try:
         from core.core_initializer import PLUGIN_REGISTRY
+
         plugins = list(PLUGIN_REGISTRY.values())
     except Exception as e:
         log_warning(f"[recon] Failed to access PLUGIN_REGISTRY: {e}")

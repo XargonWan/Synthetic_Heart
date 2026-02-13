@@ -2,7 +2,6 @@
 """Tests for TTS Lip Sync plugin behavior."""
 
 import asyncio
-from types import SimpleNamespace
 
 
 def test_execute_skipped_when_disabled():
@@ -18,7 +17,9 @@ def test_execute_skipped_when_disabled():
     action = {"type": "tts_speak", "payload": {"text": "hello"}}
 
     async def run():
-        result = await plugin.execute_action(action, context={}, bot=None, original_message=None)
+        result = await plugin.execute_action(
+            action, context={}, bot=None, original_message=None
+        )
         assert isinstance(result, dict)
         assert result.get("status") == "skipped"
         assert result.get("reason") == "tts_disabled"
@@ -48,6 +49,7 @@ def test_refresh_config_respects_enabled_flag():
 
     # Patch config_registry.get_value
     import core.config_manager as cm
+
     old_get = cm.config_registry.get_value
     cm.config_registry.get_value = fake_get_value
 
@@ -75,6 +77,7 @@ def test_refresh_config_can_disable():
         return default
 
     import core.config_manager as cm
+
     old_get = cm.config_registry.get_value
     cm.config_registry.get_value = fake_get_value
 

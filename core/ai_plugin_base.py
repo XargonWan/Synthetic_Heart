@@ -81,7 +81,10 @@ class AIPluginBase:
 
         Default implementation returns an unsupported payload so callers can fall back.
         """
-        return {"status": "unsupported", "reason": "engine does not implement agent_execute"}
+        return {
+            "status": "unsupported",
+            "reason": "engine does not implement agent_execute",
+        }
 
     async def handle_custom_action(self, action_type: str, payload: dict):
         """Handle a plugin-defined custom action."""

@@ -472,8 +472,10 @@ class HistoryEngine:
                 for m in unified_candidates[-verbosity:] if verbosity > 0 else []:
                     # Skip if this entry's text matches the current input
                     entry_text = (
-                        m.get("text") or m.get("message_text") or ""
-                    ).strip() if isinstance(m, dict) else ""
+                        (m.get("text") or m.get("message_text") or "").strip()
+                        if isinstance(m, dict)
+                        else ""
+                    )
                     if input_text and entry_text == input_text:
                         continue
 

@@ -3,7 +3,6 @@ from datetime import datetime
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
-import pytest
 
 from core.prompt_engine import build_json_prompt
 
@@ -69,7 +68,10 @@ def test_build_json_prompt_respects_config_toggle(monkeypatch):
     monkeypatch.setattr("core.action_parser.gather_static_injections", _dummy_gather)
 
     # Toggle config to disable local time
-    orig_get_value = getattr(__import__("core.prompt_engine", fromlist=["config_registry"]).config_registry, "get_value")
+    orig_get_value = getattr(
+        __import__("core.prompt_engine", fromlist=["config_registry"]).config_registry,
+        "get_value",
+    )
 
     def fake_get_value(key, default=None, value_type=None):
         if key == "INCLUDE_LOCAL_TIME_IN_PROMPTS":

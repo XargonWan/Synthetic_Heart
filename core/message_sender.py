@@ -248,8 +248,6 @@ def extract_response_target(message, user_id):
                         "type": detect_media_type(message),
                     }
 
-
-
     log_debug(f"Final target = {target}")
     return target
 

@@ -4,7 +4,6 @@
 import json
 import re
 import asyncio
-import contextvars
 from typing import Any, Dict, Optional
 from types import SimpleNamespace
 from core.logging_utils import log_debug, log_warning, log_error, log_info
@@ -34,13 +33,13 @@ def _strip_stacktraces_and_addresses(s: str) -> str:
     isolated lines containing '0x' hex addresses which commonly appear in native traces.
     """
     # Remove common Python Traceback blocks
-    s2 = re.sub(r'(?is)traceback.*?(?=\n\s*\n|$)', '', s)
+    s2 = re.sub(r"(?is)traceback.*?(?=\n\s*\n|$)", "", s)
 
     # Remove generic 'Stacktrace:' blocks
-    s2 = re.sub(r'(?is)stacktrace:.*?(?=\n\s*\n|$)', '', s2)
+    s2 = re.sub(r"(?is)stacktrace:.*?(?=\n\s*\n|$)", "", s2)
 
     # Remove long blocks that look like hex-address stacks (lines with 0x..)
-    s2 = re.sub(r'(?m)^.*0x[0-9a-fA-F]+.*\n?', '', s2)
+    s2 = re.sub(r"(?m)^.*0x[0-9a-fA-F]+.*\n?", "", s2)
 
     return s2
 
@@ -51,7 +50,7 @@ def _find_json_substrings(s: str, max_window: int = 20000):
     The scan is bounded to avoid pathological worst-cases."""
     n = len(s)
     for i, ch in enumerate(s):
-        if ch not in '{[':
+        if ch not in "{[":
             continue
         depth = 0
         start = i
@@ -61,10 +60,10 @@ def _find_json_substrings(s: str, max_window: int = 20000):
             cj = s[j]
             if cj == ch:
                 depth += 1
-            elif (ch == '{' and cj == '}') or (ch == '[' and cj == ']'):
+            elif (ch == "{" and cj == "}") or (ch == "[" and cj == "]"):
                 depth -= 1
                 if depth == 0:
-                    yield (start, j + 1, s[start:j + 1])
+                    yield (start, j + 1, s[start : j + 1])
                     break
 
 
@@ -73,7 +72,8 @@ def _get_system_reply_timeout():
     try:
         # Prefer config_registry so UI/API changes are respected at runtime
         from core.config_manager import config_registry
-        timeout = int(config_registry.get_value('AWAIT_RESPONSE_TIMEOUT', 600))
+
+        timeout = int(config_registry.get_value("AWAIT_RESPONSE_TIMEOUT", 600))
         return timeout
     except (ValueError, TypeError):
         return 600  # 10 minutes default
@@ -82,20 +82,25 @@ def _get_system_reply_timeout():
 def _cleanup_expired_system_replies():
     """Remove expired entries from _EXPECTING_SYSTEM_REPLY."""
     import time
+
     current_time = time.time()
     timeout = _get_system_reply_timeout()
     expired_keys = [
-        chat_id for chat_id, timestamp in _EXPECTING_SYSTEM_REPLY.items()
+        chat_id
+        for chat_id, timestamp in _EXPECTING_SYSTEM_REPLY.items()
         if current_time - timestamp > timeout
     ]
     for chat_id in expired_keys:
         del _EXPECTING_SYSTEM_REPLY[chat_id]
-        log_debug(f"[transport] Removed expired system reply expectation for chat_id={chat_id} (timeout={timeout}s)")
+        log_debug(
+            f"[transport] Removed expired system reply expectation for chat_id={chat_id} (timeout={timeout}s)"
+        )
 
 
 def _add_system_reply_expectation(chat_id: str):
     """Add a system reply expectation with timestamp."""
     import time
+
     _cleanup_expired_system_replies()  # Clean up expired ones first
     _EXPECTING_SYSTEM_REPLY[chat_id] = time.time()
 
@@ -121,26 +126,26 @@ def _format_json_error(text: str, err: json.JSONDecodeError) -> str:
     return (
         f"{err.msg} at line {err.lineno} column {err.colno}\n"
         f"{snippet}\n{pointer}\n"
-        "Tip: escape inner quotes with \\\" and ensure proper commas and brackets."
+        'Tip: escape inner quotes with \\" and ensure proper commas and brackets.'
     )
 
 
 def extract_json_from_text(text: str, return_metadata: bool = False) -> Optional[Dict]:
     """Extract the first valid JSON object or array from text.
-    
-    This function is smart enough to extract JSON even when LLMs (like Gemini) 
+
+    This function is smart enough to extract JSON even when LLMs (like Gemini)
     add extra text before or after the JSON structure. It scans the entire text
     looking for valid JSON objects or arrays, ignoring any surrounding text.
-    
+
     Args:
         text: The text to parse
         return_metadata: If True, returns (json_obj, metadata_dict) tuple
                         If False, returns just json_obj (backward compatible)
-    
+
     Returns:
         If return_metadata=False: JSON object or None
         If return_metadata=True: (JSON object or None, metadata dict)
-        
+
     Metadata dict contains:
         - 'had_errors': bool - True if parsing encountered errors
         - 'error_count': int - Number of parsing errors encountered
@@ -151,48 +156,55 @@ def extract_json_from_text(text: str, return_metadata: bool = False) -> Optional
         - 'suffix': str - Text after JSON (if any)
     """
     metadata = {
-        'had_errors': False,
-        'error_count': 0,
-        'unparsed_content': '',
-        'recovered': False,
-        'had_extra_text': False,
-        'prefix': '',
-        'suffix': ''
+        "had_errors": False,
+        "error_count": 0,
+        "unparsed_content": "",
+        "recovered": False,
+        "had_extra_text": False,
+        "prefix": "",
+        "suffix": "",
     }
-    
+
     if not text:
         return (None, metadata) if return_metadata else None
-    
+
     # Try to clean up common markdown/formatting issues
     cleaned_text = text.strip()
-    
+
     # Remove markdown code blocks if present
-    if cleaned_text.startswith('```json'):
+    if cleaned_text.startswith("```json"):
         cleaned_text = cleaned_text[7:]  # Remove ```json
-        if cleaned_text.endswith('```'):
+        if cleaned_text.endswith("```"):
             cleaned_text = cleaned_text[:-3]  # Remove ```
         cleaned_text = cleaned_text.strip()
-    elif cleaned_text.startswith('```'):
+    elif cleaned_text.startswith("```"):
         cleaned_text = cleaned_text[3:]  # Remove ```
-        if cleaned_text.endswith('```'):
+        if cleaned_text.endswith("```"):
             cleaned_text = cleaned_text[:-3]  # Remove ```
         cleaned_text = cleaned_text.strip()
-    
+
     # Also try original text in case cleaning broke something
     sanitized = _remove_control_chars(text)
     stripped_noise = _strip_stacktraces_and_addresses(text)
-    texts_to_try = [cleaned_text, stripped_noise.strip(), sanitized.strip(), text.strip()]
-    
+    texts_to_try = [
+        cleaned_text,
+        stripped_noise.strip(),
+        sanitized.strip(),
+        text.strip(),
+    ]
+
     decoder = json.JSONDecoder()
     found_json = None
-    best_extra_chars = float('inf')  # Track the JSON with least extra content
+    best_extra_chars = float("inf")  # Track the JSON with least extra content
 
     for text_variant in texts_to_try:
-        log_debug(f"[extract_json_from_text] Trying text variant (length: {len(text_variant)})")
+        log_debug(
+            f"[extract_json_from_text] Trying text variant (length: {len(text_variant)})"
+        )
 
         # First pass: look for clean JSON (no extra text)
-        object_start_indices = [i for i, char in enumerate(text_variant) if char == '{']
-        array_start_indices = [i for i, char in enumerate(text_variant) if char == '[']
+        object_start_indices = [i for i, char in enumerate(text_variant) if char == "{"]
+        array_start_indices = [i for i, char in enumerate(text_variant) if char == "["]
         all_start_indices = sorted(set(object_start_indices + array_start_indices))
 
         for start in all_start_indices:
@@ -206,30 +218,46 @@ def extract_json_from_text(text: str, return_metadata: bool = False) -> Optional
                 extra_chars = len(prefix) + len(suffix)
 
                 # Skip if prefix looks like explanatory text (common LLM patterns)
-                if prefix and len(prefix.split()) <= 3:  # Skip prefixes like "json", "here is", etc.
+                if (
+                    prefix and len(prefix.split()) <= 3
+                ):  # Skip prefixes like "json", "here is", etc.
                     prefix_lower = prefix.lower().strip()
-                    if prefix_lower in ['json', 'here', 'output', 'response', 'result', 'answer'] or \
-                       prefix_lower.startswith(('here is', 'the json', 'json:', 'output:')):
-                        log_debug(f"[extract_json_from_text] Skipping JSON with explanatory prefix: '{prefix}'")
+                    if prefix_lower in [
+                        "json",
+                        "here",
+                        "output",
+                        "response",
+                        "result",
+                        "answer",
+                    ] or prefix_lower.startswith(
+                        ("here is", "the json", "json:", "output:")
+                    ):
+                        log_debug(
+                            f"[extract_json_from_text] Skipping JSON with explanatory prefix: '{prefix}'"
+                        )
                         continue
 
                 # Prefer clean JSON (no extra text)
                 if extra_chars == 0:
-                    log_debug(f"[extract_json_from_text] ✅ Found clean JSON: {type(obj)}")
+                    log_debug(
+                        f"[extract_json_from_text] ✅ Found clean JSON: {type(obj)}"
+                    )
                     found_json = obj
-                    metadata['had_extra_text'] = False
+                    metadata["had_extra_text"] = False
                     break
 
                 # If we have extra text, keep track of the one with least extra content
                 elif extra_chars < best_extra_chars:
                     best_extra_chars = extra_chars
                     found_json = obj
-                    metadata['had_extra_text'] = True
-                    metadata['prefix'] = prefix
-                    metadata['suffix'] = suffix
-                    metadata['prefix_length'] = len(prefix)
-                    metadata['suffix_length'] = len(suffix)
-                    log_debug(f"[extract_json_from_text] Found JSON with {extra_chars} extra chars (best so far)")
+                    metadata["had_extra_text"] = True
+                    metadata["prefix"] = prefix
+                    metadata["suffix"] = suffix
+                    metadata["prefix_length"] = len(prefix)
+                    metadata["suffix_length"] = len(suffix)
+                    log_debug(
+                        f"[extract_json_from_text] Found JSON with {extra_chars} extra chars (best so far)"
+                    )
 
             except json.JSONDecodeError as e:
                 # Save helpful error info (used by the corrector middleware)
@@ -244,18 +272,20 @@ def extract_json_from_text(text: str, return_metadata: bool = False) -> Optional
                 except Exception:
                     pass
 
-                metadata.setdefault('error_messages', []).append(err_msg)
-                log_debug(f"[extract_json_from_text] JSON decode error at position {start}: {e}")
-                metadata['had_errors'] = True
-                metadata['error_count'] += 1
+                metadata.setdefault("error_messages", []).append(err_msg)
+                log_debug(
+                    f"[extract_json_from_text] JSON decode error at position {start}: {e}"
+                )
+                metadata["had_errors"] = True
+                metadata["error_count"] += 1
                 continue
 
         if found_json:
             break
-        
+
         if found_json:
             break
-    
+
     if not found_json:
         # As a last resort, try to find balanced JSON substrings in noise-reduced variants.
         tried_substrings = 0
@@ -268,51 +298,69 @@ def extract_json_from_text(text: str, return_metadata: bool = False) -> Optional
                     obj = json.loads(substr)
                     # We found a valid JSON substring — accept it
                     found_json = obj
-                    metadata['had_extra_text'] = True
-                    metadata['prefix'] = candidate_source[:start].strip()
-                    metadata['suffix'] = candidate_source[end:].strip()
-                    metadata['prefix_length'] = len(metadata['prefix'])
-                    metadata['suffix_length'] = len(metadata['suffix'])
-                    metadata['noise_removed'] = tried_substrings > 0
-                    log_info(f"[extract_json_from_text] ✅ Extracted JSON from substring of sanitized text (start={start}, len={len(substr)})")
+                    metadata["had_extra_text"] = True
+                    metadata["prefix"] = candidate_source[:start].strip()
+                    metadata["suffix"] = candidate_source[end:].strip()
+                    metadata["prefix_length"] = len(metadata["prefix"])
+                    metadata["suffix_length"] = len(metadata["suffix"])
+                    metadata["noise_removed"] = tried_substrings > 0
+                    log_info(
+                        f"[extract_json_from_text] ✅ Extracted JSON from substring of sanitized text (start={start}, len={len(substr)})"
+                    )
                     break
-                except Exception as e:  # JSON still invalid — continue
-                    metadata['had_errors'] = True
-                    metadata['error_count'] += 1
+                except Exception:  # JSON still invalid — continue
+                    metadata["had_errors"] = True
+                    metadata["error_count"] += 1
                     continue
             if found_json:
                 break
 
         if not found_json:
             log_debug("[extract_json_from_text] No valid JSON found in text")
-            log_debug(f"[extract_json_from_text] Text content (first 500 chars): {text[:500]}")
-            log_debug(f"[extract_json_from_text] Text content (last 500 chars): {text[-500:]}")
+            log_debug(
+                f"[extract_json_from_text] Text content (first 500 chars): {text[:500]}"
+            )
+            log_debug(
+                f"[extract_json_from_text] Text content (last 500 chars): {text[-500:]}"
+            )
             return (None, metadata) if return_metadata else None
 
     # Log results based on what we found
-    if metadata.get('had_extra_text', False):
-        prefix_len = metadata.get('prefix_length', 0)
-        suffix_len = metadata.get('suffix_length', 0)
-        log_info(f"[extract_json_from_text] ✅ Extracted JSON with {prefix_len + suffix_len} extra chars (prefix: {prefix_len}, suffix: {suffix_len})")
+    if metadata.get("had_extra_text", False):
+        prefix_len = metadata.get("prefix_length", 0)
+        suffix_len = metadata.get("suffix_length", 0)
+        log_info(
+            f"[extract_json_from_text] ✅ Extracted JSON with {prefix_len + suffix_len} extra chars (prefix: {prefix_len}, suffix: {suffix_len})"
+        )
     else:
         log_debug(f"[extract_json_from_text] ✅ Found clean JSON: {type(found_json)}")
 
     # If we had errors but found JSON, it means we recovered from corruption
-    if metadata['had_errors'] and found_json:
-        metadata['recovered'] = True
-        log_warning(f"[extract_json_from_text] ⚠️ JSON recovered after {metadata['error_count']} parsing errors - may be incomplete")
+    if metadata["had_errors"] and found_json:
+        metadata["recovered"] = True
+        log_warning(
+            f"[extract_json_from_text] ⚠️ JSON recovered after {metadata['error_count']} parsing errors - may be incomplete"
+        )
 
         # Attempt to recover missing/partially-corrupted actions that the
         # JSON decoder couldn't parse due to poor quoting inside string values
         try:
             # Normalize: if the decoder returned a single action dict instead of
             # a top-level object containing 'actions', convert it into an actions list
-            if isinstance(found_json, dict) and 'actions' not in found_json and 'type' in found_json:
+            if (
+                isinstance(found_json, dict)
+                and "actions" not in found_json
+                and "type" in found_json
+            ):
                 # Make top-level actions list containing the single decoded action
-                found_json = {'actions': [found_json]}
+                found_json = {"actions": [found_json]}
 
             # Only attempt targeted recovery when we have an actions array
-            if isinstance(found_json, dict) and 'actions' in found_json and isinstance(found_json['actions'], list):
+            if (
+                isinstance(found_json, dict)
+                and "actions" in found_json
+                and isinstance(found_json["actions"], list)
+            ):
                 _attempt_recover_actions_from_text(text, found_json, metadata)
         except Exception as e:
             log_debug(f"[extract_json_from_text] Action recovery failed: {e}")
@@ -320,7 +368,9 @@ def extract_json_from_text(text: str, return_metadata: bool = False) -> Optional
     return (found_json, metadata) if return_metadata else found_json
 
 
-def _attempt_recover_actions_from_text(original_text: str, found_json: dict, metadata: dict):
+def _attempt_recover_actions_from_text(
+    original_text: str, found_json: dict, metadata: dict
+):
     """Targeted recovery for common LLM output corruption patterns.
 
     Current heuristic:
@@ -335,13 +385,13 @@ def _attempt_recover_actions_from_text(original_text: str, found_json: dict, met
     Mutates found_json in-place when successful and updates metadata.
     """
     try:
-        text = original_text or ''
+        text = original_text or ""
         # Collect types already present
         existing = set()
         try:
-            for a in found_json.get('actions', []):
-                if isinstance(a, dict) and 'type' in a:
-                    existing.add(a['type'])
+            for a in found_json.get("actions", []):
+                if isinstance(a, dict) and "type" in a:
+                    existing.add(a["type"])
         except Exception:
             existing = set()
 
@@ -349,7 +399,10 @@ def _attempt_recover_actions_from_text(original_text: str, found_json: dict, met
         candidates = []
         try:
             from core.core_initializer import core_initializer
-            available_actions = core_initializer.actions_block.get("available_actions", {})
+
+            available_actions = core_initializer.actions_block.get(
+                "available_actions", {}
+            )
             candidates = [
                 action_type
                 for action_type in available_actions.keys()
@@ -371,22 +424,24 @@ def _attempt_recover_actions_from_text(original_text: str, found_json: dict, met
                     continue
 
                 # Find where payload object starts
-                brace_idx = text.find('{', payload_idx)
+                brace_idx = text.find("{", payload_idx)
                 if brace_idx == -1:
                     continue
 
                 # Try to extract a reasonable slice for the payload by searching
                 # for the next '}' that likely terminates the payload object.
                 # Use a conservative search window to avoid expensive scans.
-                window = text[brace_idx:brace_idx + 8001]  # a large but bounded window
+                window = text[
+                    brace_idx : brace_idx + 8001
+                ]  # a large but bounded window
 
                 # Attempt to find the closing brace for this payload using simple balance
                 depth = 0
                 end_idx = None
                 for i, ch in enumerate(window):
-                    if ch == '{':
+                    if ch == "{":
                         depth += 1
-                    elif ch == '}':
+                    elif ch == "}":
                         depth -= 1
                         if depth == 0:
                             end_idx = brace_idx + i + 1
@@ -395,7 +450,7 @@ def _attempt_recover_actions_from_text(original_text: str, found_json: dict, met
                 if end_idx is None:
                     # fallback: try to locate a following known key which likely marks end
                     next_key_pos = len(text)
-                    for k in ('"type"', '"actions"', '\n\n'):
+                    for k in ('"type"', '"actions"', "\n\n"):
                         kp = text.find(k, brace_idx + 1)
                         if kp != -1:
                             next_key_pos = min(next_key_pos, kp)
@@ -413,7 +468,14 @@ def _attempt_recover_actions_from_text(original_text: str, found_json: dict, met
                 val_start = text_field_match.end()
 
                 # Find a conservative marker to end the text value: look for common next keys
-                markers = ['"interface_path"', '"reply_to_message_id"', '"chat_name"', '"reply_to_message_id"', '"send_in"', '"send_at"']
+                markers = [
+                    '"interface_path"',
+                    '"reply_to_message_id"',
+                    '"chat_name"',
+                    '"reply_to_message_id"',
+                    '"send_in"',
+                    '"send_at"',
+                ]
                 marker_pos = None
                 search_base = brace_idx + val_start
                 for mk in markers:
@@ -426,10 +488,10 @@ def _attempt_recover_actions_from_text(original_text: str, found_json: dict, met
                     # fallback: look for the end of payload object
                     marker_pos = end_idx
 
-                raw_value = text[brace_idx + val_start:marker_pos]
+                raw_value = text[brace_idx + val_start : marker_pos]
 
                 # Trim trailing characters that may belong to JSON punctuation (like ",)
-                raw_value = raw_value.rstrip(' ,\n\r\t}')
+                raw_value = raw_value.rstrip(" ,\n\r\t}")
 
                 # Remove a possible leading quote or stray characters
                 if raw_value.startswith('"'):
@@ -452,30 +514,27 @@ def _attempt_recover_actions_from_text(original_text: str, found_json: dict, met
                     interface_path = ip_match.group(1)
 
                 # Build recovered action and append
-                recovered_action = {
-                    'type': candidate,
-                    'payload': {
-                        'text': safe_text
-                    }
-                }
+                recovered_action = {"type": candidate, "payload": {"text": safe_text}}
                 if interface_path:
-                    recovered_action['payload']['interface_path'] = interface_path
+                    recovered_action["payload"]["interface_path"] = interface_path
 
                 # Append recovered action only if not present already
-                found_json.setdefault('actions', [])
-                found_json['actions'].append(recovered_action)
-                metadata['recovered'] = True
-                metadata['recovery_attempts'] = metadata.get('recovery_attempts', 0) + 1
-                log_info(f"[extract_json_from_text] Recovered missing action {candidate} (heuristic)")
+                found_json.setdefault("actions", [])
+                found_json["actions"].append(recovered_action)
+                metadata["recovered"] = True
+                metadata["recovery_attempts"] = metadata.get("recovery_attempts", 0) + 1
+                log_info(
+                    f"[extract_json_from_text] Recovered missing action {candidate} (heuristic)"
+                )
                 # Break after first recovery for this candidate to avoid duplicates
                 break
     except Exception as e:
         log_debug(f"[attempt_recover] Recovery routine error: {e}")
 
 
-
-
-async def _grillo_fire_and_forget(bot, message, original_user_message: str, llm_reply: str, context: dict):
+async def _grillo_fire_and_forget(
+    bot, message, original_user_message: str, llm_reply: str, context: dict
+):
     """Background helper that calls the GrilloActionChecker and either auto-executes
     or persists proposed actions depending on configuration and policy.
 
@@ -483,24 +542,34 @@ async def _grillo_fire_and_forget(bot, message, original_user_message: str, llm_
     main LLM->interface flow.
     """
     try:
-        log_info(f"[grillo] Checker started for chat_id={getattr(message,'chat_id',None)} chain_result={context.get('chain_result') if context else 'unknown'}")
+        log_info(
+            f"[grillo] Checker started for chat_id={getattr(message, 'chat_id', None)} chain_result={context.get('chain_result') if context else 'unknown'}"
+        )
         # Prefer plugin-provided checker via PLUGIN_REGISTRY to avoid importing plugin internals from core
         from core.core_initializer import PLUGIN_REGISTRY
+
         grillo_plugin = None
         try:
             if isinstance(PLUGIN_REGISTRY, dict):
-                grillo_plugin = PLUGIN_REGISTRY.get("grillo_plugin") or PLUGIN_REGISTRY.get("grillo_impl")
+                grillo_plugin = PLUGIN_REGISTRY.get(
+                    "grillo_plugin"
+                ) or PLUGIN_REGISTRY.get("grillo_impl")
         except Exception:
             grillo_plugin = None
 
         if grillo_plugin and hasattr(grillo_plugin, "suggest_actions_from_reply"):
-            actions = await grillo_plugin.suggest_actions_from_reply(llm_reply, original_user_message, context or {}, message)
+            actions = await grillo_plugin.suggest_actions_from_reply(
+                llm_reply, original_user_message, context or {}, message
+            )
         else:
             # Fallback to legacy checker module if plugin not available
             try:
                 from plugins.grillo.grillo_action_checker import GrilloActionChecker
+
                 checker = GrilloActionChecker()
-                actions = await checker.inspect_reply_and_suggest_actions(llm_reply, original_user_message, context or {}, message)
+                actions = await checker.inspect_reply_and_suggest_actions(
+                    llm_reply, original_user_message, context or {}, message
+                )
             except Exception as e:
                 log_debug(f"[grillo] Checker raised exception: {e}")
                 return
@@ -517,121 +586,252 @@ async def _grillo_fire_and_forget(bot, message, original_user_message: str, llm_
     # Determine auto-exec policy
     try:
         from core.config_manager import config_registry
+
         # If this invocation came from a Grillo beat (observer or other beats),
         # force auto-execution so beats are active by default (the action parser
         # still enforces policy/autonomy checks).
-        if context and isinstance(context, dict) and context.get('grillo_beat'):
+        if context and isinstance(context, dict) and context.get("grillo_beat"):
             auto_exec = True
-            log_info(f"[grillo] Force auto_exec because grillo_beat present (beat_type={context.get('beat_type')})")
+            log_info(
+                f"[grillo] Force auto_exec because grillo_beat present (beat_type={context.get('beat_type')})"
+            )
         else:
-            auto_exec = bool(config_registry.get_value('GRILLO_AUTO_GENERATE_ACTIONS', False, value_type=bool, group='grillo', component='grillo'))
+            auto_exec = bool(
+                config_registry.get_value(
+                    "GRILLO_AUTO_GENERATE_ACTIONS",
+                    False,
+                    value_type=bool,
+                    group="grillo",
+                    component="grillo",
+                )
+            )
     except Exception:
         auto_exec = False
 
     from core.core_initializer import PLUGIN_REGISTRY
+
     grillo_plugin = None
     try:
         if isinstance(PLUGIN_REGISTRY, dict):
-            grillo_plugin = PLUGIN_REGISTRY.get('grillo_plugin') or PLUGIN_REGISTRY.get('grillo_impl')
+            grillo_plugin = PLUGIN_REGISTRY.get("grillo_plugin") or PLUGIN_REGISTRY.get(
+                "grillo_impl"
+            )
     except Exception:
         grillo_plugin = None
 
     if auto_exec:
         try:
             # Quarantine heuristic-recovered actions: do not auto-execute them
-            quarantined_actions = [a for a in actions if a.get('metadata', {}).get('heuristic_recovery')]
-            actions_to_exec = [a for a in actions if not a.get('metadata', {}).get('heuristic_recovery')]
+            quarantined_actions = [
+                a for a in actions if a.get("metadata", {}).get("heuristic_recovery")
+            ]
+            actions_to_exec = [
+                a
+                for a in actions
+                if not a.get("metadata", {}).get("heuristic_recovery")
+            ]
 
             if quarantined_actions:
-                log_info(f"[grillo] Quarantined {len(quarantined_actions)} heuristic-recovered action(s); persisting as proposals")
-                if grillo_plugin and hasattr(grillo_plugin, 'create_activity_log'):
+                log_info(
+                    f"[grillo] Quarantined {len(quarantined_actions)} heuristic-recovered action(s); persisting as proposals"
+                )
+                if grillo_plugin and hasattr(grillo_plugin, "create_activity_log"):
                     try:
-                        activity_id_q = await grillo_plugin.create_activity_log(beat_type='grillo_quarantined', prompt_text=str({'user': original_user_message, 'llm_reply': llm_reply}), metadata={'quarantined_actions': quarantined_actions})
-                        log_info(f"[grillo] Persisted quarantined actions activity_id={activity_id_q}")
+                        activity_id_q = await grillo_plugin.create_activity_log(
+                            beat_type="grillo_quarantined",
+                            prompt_text=str(
+                                {"user": original_user_message, "llm_reply": llm_reply}
+                            ),
+                            metadata={"quarantined_actions": quarantined_actions},
+                        )
+                        log_info(
+                            f"[grillo] Persisted quarantined actions activity_id={activity_id_q}"
+                        )
                     except Exception as e:
-                        log_debug(f"[grillo] Failed to persist quarantined actions: {e}")
+                        log_debug(
+                            f"[grillo] Failed to persist quarantined actions: {e}"
+                        )
 
             # If no remaining actions to auto-execute, return early
             if not actions_to_exec:
-                log_info("[grillo] No actions to auto-execute after quarantining; returning")
+                log_info(
+                    "[grillo] No actions to auto-execute after quarantining; returning"
+                )
                 return
 
             # Run actions through the canonical action parser so policy/autonomy
             # checks are applied consistently.
             from core import action_parser
+
             run_ctx = dict(context or {})
-            run_ctx['grillo_auto'] = True
-            result = await action_parser.run_actions(actions_to_exec, run_ctx, bot, message)
-            log_info(f"[grillo] Auto-executed {len(actions_to_exec)} action(s); result: {result}")
+            run_ctx["grillo_auto"] = True
+            result = await action_parser.run_actions(
+                actions_to_exec, run_ctx, bot, message
+            )
+            log_info(
+                f"[grillo] Auto-executed {len(actions_to_exec)} action(s); result: {result}"
+            )
             if GrilloPlugin:
                 try:
-                    activity_id = await GrilloPlugin.create_activity_log(beat_type='grillo_auto_exec', prompt_text=str({'user': original_user_message, 'llm_reply': llm_reply}), metadata={'suggested_actions': actions_to_exec, 'result': result})
+                    activity_id = await GrilloPlugin.create_activity_log(
+                        beat_type="grillo_auto_exec",
+                        prompt_text=str(
+                            {"user": original_user_message, "llm_reply": llm_reply}
+                        ),
+                        metadata={
+                            "suggested_actions": actions_to_exec,
+                            "result": result,
+                        },
+                    )
                     log_info(f"[grillo] Logged auto-exec activity id={activity_id}")
                 except Exception as e:
-                    log_debug(f"[grillo] create_activity_log failed after auto-exec: {e}")
+                    log_debug(
+                        f"[grillo] create_activity_log failed after auto-exec: {e}"
+                    )
 
             # Persist action-level execution results
-            if grillo_plugin and hasattr(grillo_plugin, 'create_action_exec') and activity_id:
+            if (
+                grillo_plugin
+                and hasattr(grillo_plugin, "create_action_exec")
+                and activity_id
+            ):
                 try:
-                    processed = result.get('processed', []) if isinstance(result, dict) else []
-                    failed = result.get('failed_actions', []) if isinstance(result, dict) else []
+                    processed = (
+                        result.get("processed", []) if isinstance(result, dict) else []
+                    )
+                    failed = (
+                        result.get("failed_actions", [])
+                        if isinstance(result, dict)
+                        else []
+                    )
                     db_count = 0
                     fallback_count = 0
                     for idx, a in enumerate(actions_to_exec):
                         try:
-                            if any((a == p) or (p.get('type') == a.get('type') and p.get('payload') == a.get('payload')) for p in processed):
-                                res = await grillo_plugin.create_action_exec(activity_log_id=activity_id, action_index=idx, action_type=a.get('type'), payload=a.get('payload'), status='processed', result=result)
+                            if any(
+                                (a == p)
+                                or (
+                                    p.get("type") == a.get("type")
+                                    and p.get("payload") == a.get("payload")
+                                )
+                                for p in processed
+                            ):
+                                res = await grillo_plugin.create_action_exec(
+                                    activity_log_id=activity_id,
+                                    action_index=idx,
+                                    action_type=a.get("type"),
+                                    payload=a.get("payload"),
+                                    status="processed",
+                                    result=result,
+                                )
                                 if res:
                                     db_count += 1
                                 else:
                                     fallback_count += 1
                             else:
                                 # Try to match by index in failed list
-                                fail_entry = next((f for f in failed if f.get('index') == idx), None)
+                                fail_entry = next(
+                                    (f for f in failed if f.get("index") == idx), None
+                                )
                                 if fail_entry:
-                                    err = '; '.join(fail_entry.get('errors', [])) if isinstance(fail_entry.get('errors', []), list) else str(fail_entry.get('errors'))
-                                    res = await grillo_plugin.create_action_exec(activity_log_id=activity_id, action_index=idx, action_type=a.get('type'), payload=a.get('payload'), status='failed', error_text=err, result=fail_entry)
+                                    err = (
+                                        "; ".join(fail_entry.get("errors", []))
+                                        if isinstance(
+                                            fail_entry.get("errors", []), list
+                                        )
+                                        else str(fail_entry.get("errors"))
+                                    )
+                                    res = await grillo_plugin.create_action_exec(
+                                        activity_log_id=activity_id,
+                                        action_index=idx,
+                                        action_type=a.get("type"),
+                                        payload=a.get("payload"),
+                                        status="failed",
+                                        error_text=err,
+                                        result=fail_entry,
+                                    )
                                     if res:
                                         db_count += 1
                                     else:
                                         fallback_count += 1
                                 else:
                                     # Unknown outcome: mark processed with available result
-                                    res = await grillo_plugin.create_action_exec(activity_log_id=activity_id, action_index=idx, action_type=a.get('type'), payload=a.get('payload'), status='processed', result=result)
+                                    res = await grillo_plugin.create_action_exec(
+                                        activity_log_id=activity_id,
+                                        action_index=idx,
+                                        action_type=a.get("type"),
+                                        payload=a.get("payload"),
+                                        status="processed",
+                                        result=result,
+                                    )
                                     if res:
                                         db_count += 1
                                     else:
                                         fallback_count += 1
                         except Exception as e:
-                            log_debug(f"[grillo] create_action_exec failed after auto-exec per-action: {e}")
-                    log_info(f"[grillo] Recorded action_execs for activity_id={activity_id}: db={db_count}, fallback={fallback_count}")
+                            log_debug(
+                                f"[grillo] create_action_exec failed after auto-exec per-action: {e}"
+                            )
+                    log_info(
+                        f"[grillo] Recorded action_execs for activity_id={activity_id}: db={db_count}, fallback={fallback_count}"
+                    )
                 except Exception as e:
-                    log_debug(f"[grillo] create_action_exec failed after auto-exec: {e}")
+                    log_debug(
+                        f"[grillo] create_action_exec failed after auto-exec: {e}"
+                    )
         except Exception as e:
             log_warning(f"[grillo] Auto-execution failed: {e}")
-            if grillo_plugin and hasattr(grillo_plugin, 'create_activity_log'):
+            if grillo_plugin and hasattr(grillo_plugin, "create_activity_log"):
                 try:
-                    await grillo_plugin.create_activity_log(beat_type='grillo_auto_exec_failure', prompt_text=str({'user': original_user_message, 'llm_reply': llm_reply, 'error': str(e)}), metadata={'suggested_actions': actions})
+                    await grillo_plugin.create_activity_log(
+                        beat_type="grillo_auto_exec_failure",
+                        prompt_text=str(
+                            {
+                                "user": original_user_message,
+                                "llm_reply": llm_reply,
+                                "error": str(e),
+                            }
+                        ),
+                        metadata={"suggested_actions": actions},
+                    )
                 except Exception:
                     pass
     else:
         # Persist proposal for human review
         try:
-            if grillo_plugin and hasattr(grillo_plugin, 'create_activity_log'):
+            if grillo_plugin and hasattr(grillo_plugin, "create_activity_log"):
                 try:
-                    activity_id = await grillo_plugin.create_activity_log(beat_type='grillo_proposal', prompt_text=str({'user': original_user_message, 'llm_reply': llm_reply}), metadata={'suggested_actions': actions})
+                    activity_id = await grillo_plugin.create_activity_log(
+                        beat_type="grillo_proposal",
+                        prompt_text=str(
+                            {"user": original_user_message, "llm_reply": llm_reply}
+                        ),
+                        metadata={"suggested_actions": actions},
+                    )
                     if activity_id:
-                        log_info(f'[grillo] Persisted suggested actions to grillo_activity_log id={activity_id}')
+                        log_info(
+                            f"[grillo] Persisted suggested actions to grillo_activity_log id={activity_id}"
+                        )
                     else:
-                        log_warning(f'[grillo] create_activity_log returned None while persisting proposal (activity not recorded)')
+                        log_warning(
+                            "[grillo] create_activity_log returned None while persisting proposal (activity not recorded)"
+                        )
                 except Exception as e:
-                    log_debug(f"[grillo] create_activity_log failed while persisting proposal: {e}")
+                    log_debug(
+                        f"[grillo] create_activity_log failed while persisting proposal: {e}"
+                    )
         except Exception as e:
-            log_warning(f"[grillo] Failed to create activity log for suggested actions: {e}")
+            log_warning(
+                f"[grillo] Failed to create activity log for suggested actions: {e}"
+            )
 
         # Persist suggested actions as pending (best-effort)
         try:
-            if grillo_plugin and hasattr(grillo_plugin, 'create_action_exec') and activity_id:
+            if (
+                grillo_plugin
+                and hasattr(grillo_plugin, "create_action_exec")
+                and activity_id
+            ):
                 try:
                     pending_count = 0
                     fallback_count = 0
@@ -639,53 +839,67 @@ async def _grillo_fire_and_forget(bot, message, original_user_message: str, llm_
                         res_id = await grillo_plugin.create_action_exec(
                             activity_log_id=activity_id,
                             action_index=idx,
-                            action_type=a.get('type', 'unknown'),
-                            payload=a.get('payload'),
-                            status='pending'
+                            action_type=a.get("type", "unknown"),
+                            payload=a.get("payload"),
+                            status="pending",
                         )
                         if res_id:
                             pending_count += 1
                         else:
                             fallback_count += 1
-                    log_info(f"[grillo] Persisted {pending_count} action_exec(s) to DB for activity_id={activity_id}, {fallback_count} to fallback")
+                    log_info(
+                        f"[grillo] Persisted {pending_count} action_exec(s) to DB for activity_id={activity_id}, {fallback_count} to fallback"
+                    )
                 except Exception as e:
-                    log_debug(f"[grillo] create_action_exec failed while persisting proposal: {e}")
+                    log_debug(
+                        f"[grillo] create_action_exec failed while persisting proposal: {e}"
+                    )
             elif grillo_plugin and not activity_id:
                 # DB didn't record activity; write a fallback activity and store action execs there
                 try:
                     activity_obj = {
-                        'beat_type': 'grillo_proposal',
-                        'prompt_text': str({'user': original_user_message, 'llm_reply': llm_reply}),
-                        'response_text': None,
-                        'metadata': {'suggested_actions': actions},
+                        "beat_type": "grillo_proposal",
+                        "prompt_text": str(
+                            {"user": original_user_message, "llm_reply": llm_reply}
+                        ),
+                        "response_text": None,
+                        "metadata": {"suggested_actions": actions},
                     }
-                    fallback_activity_id = await (grillo_plugin._fallback_write_activity(activity_obj) if hasattr(grillo_plugin, '_fallback_write_activity') else None)
+                    fallback_activity_id = await (
+                        grillo_plugin._fallback_write_activity(activity_obj)
+                        if hasattr(grillo_plugin, "_fallback_write_activity")
+                        else None
+                    )
                     written = 0
                     for idx, a in enumerate(actions):
                         exec_obj = {
-                            'activity_log_id': fallback_activity_id,
-                            'action_index': idx,
-                            'action_type': a.get('type', 'unknown'),
-                            'payload': a.get('payload'),
-                            'status': 'pending',
-                            'error_text': None,
-                            'result': None,
-                            'created_at': None,
+                            "activity_log_id": fallback_activity_id,
+                            "action_index": idx,
+                            "action_type": a.get("type", "unknown"),
+                            "payload": a.get("payload"),
+                            "status": "pending",
+                            "error_text": None,
+                            "result": None,
+                            "created_at": None,
                         }
-                        if hasattr(grillo_plugin, '_fallback_write_action_exec'):
+                        if hasattr(grillo_plugin, "_fallback_write_action_exec"):
                             await grillo_plugin._fallback_write_action_exec(exec_obj)
                         written += 1
-                    log_info(f"[grillo] Persisted {written} action_exec(s) to fallback for fallback_activity_id={fallback_activity_id}")
+                    log_info(
+                        f"[grillo] Persisted {written} action_exec(s) to fallback for fallback_activity_id={fallback_activity_id}"
+                    )
                 except Exception as e:
                     log_debug(f"[grillo] fallback write for proposal failed: {e}")
         except Exception as e:
-            log_debug(f"[grillo] create_action_exec outer failed while persisting proposal: {e}")
+            log_debug(
+                f"[grillo] create_action_exec outer failed while persisting proposal: {e}"
+            )
 
 
 async def universal_send(interface_send_func, *args, text: str = None, **kwargs):
     """
     Universal send function that intercepts JSON actions and parses them.
-    
+
     Args:
         interface_send_func: The actual send function of the interface (e.g., bot.send_message)
         *args: Positional arguments for the interface send function
@@ -699,6 +913,7 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
     try:
         if isinstance(text, str) and text:
             from core.text_utils import try_recover_mojibake
+
             recovered_text = try_recover_mojibake(text)
             if recovered_text and recovered_text != text:
                 log_debug("[transport] Recovered mojibake in outbound text")
@@ -709,24 +924,30 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
 
     # Diagnostic: log interface function and runtime send parameters
     try:
-        bot_self = getattr(interface_send_func, '__self__', None)
-        log_debug(f"[transport] universal_send called: interface_send_func={interface_send_func} bot_self={bot_self} args={args} kwargs_keys={list(kwargs.keys())}")
+        bot_self = getattr(interface_send_func, "__self__", None)
+        log_debug(
+            f"[transport] universal_send called: interface_send_func={interface_send_func} bot_self={bot_self} args={args} kwargs_keys={list(kwargs.keys())}"
+        )
     except Exception as _:
-        log_debug("[transport] universal_send diagnostic logging failed to inspect interface_send_func")
+        log_debug(
+            "[transport] universal_send diagnostic logging failed to inspect interface_send_func"
+        )
 
     # Map thread_id to message_thread_id for Telegram API compatibility
-    if 'thread_id' in kwargs:
-        thread_id = kwargs.pop('thread_id')
+    if "thread_id" in kwargs:
+        thread_id = kwargs.pop("thread_id")
         # Convert thread_id to int if it's a string (for Telegram API compatibility)
         if isinstance(thread_id, str) and thread_id.isdigit():
             thread_id = int(thread_id)
-        kwargs['message_thread_id'] = thread_id
+        kwargs["message_thread_id"] = thread_id
 
     # Save LLM response to chat history (before JSON parsing)
     # Extract interface_path for saving to chat history
-    interface_path = kwargs.get('interface_path')
-    log_debug(f"[transport] Checking for chat history save: interface_path={interface_path}, text_len={len(text) if text else 0}")
-    
+    interface_path = kwargs.get("interface_path")
+    log_debug(
+        f"[transport] Checking for chat history save: interface_path={interface_path}, text_len={len(text) if text else 0}"
+    )
+
     if interface_path and text:
         try:
             from core.chat_context_manager import add_message_to_context
@@ -735,44 +956,62 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
             # Extract JSON and metadata to decide what (if any) human-readable
             # companion text should be saved alongside LLM-originated JSON.
             json_payload, json_meta = extract_json_from_text(text, return_metadata=True)
-            log_debug(f"[transport] JSON data extracted: {json_payload is not None} metadata: {bool(json_meta)}")
+            log_debug(
+                f"[transport] JSON data extracted: {json_payload is not None} metadata: {bool(json_meta)}"
+            )
 
             # If JSON present and metadata indicates extra text (prefix/suffix), use those.
             if json_payload is None:
                 text_content = text
             else:
-                if json_meta and (json_meta.get('prefix') or json_meta.get('suffix')):
+                if json_meta and (json_meta.get("prefix") or json_meta.get("suffix")):
                     # Compose companion text from prefix+suffix
                     parts = []
-                    if json_meta.get('prefix'):
-                        parts.append(json_meta.get('prefix').strip())
-                    if json_meta.get('suffix'):
-                        parts.append(json_meta.get('suffix').strip())
+                    if json_meta.get("prefix"):
+                        parts.append(json_meta.get("prefix").strip())
+                    if json_meta.get("suffix"):
+                        parts.append(json_meta.get("suffix").strip())
                     text_content = "\n".join(parts).strip()
                 else:
                     # Pure JSON only — nothing to save as user-visible content
                     text_content = ""
-            log_debug(f"[transport] Text content for history: {len(text_content)} chars (was {len(text)})")
-            
+            log_debug(
+                f"[transport] Text content for history: {len(text_content)} chars (was {len(text)})"
+            )
+
             if text_content:  # Only save if there's actual message content
-                log_info(f"[transport] 📝 Saving LLM response to chat history: {interface_path}")
+                log_info(
+                    f"[transport] 📝 Saving LLM response to chat history: {interface_path}"
+                )
                 await add_message_to_context(
                     interface_path=interface_path,
                     message_text=text_content,
                     sender_name="self",
                     sender_id="synth",
-                    timestamp=datetime.now().isoformat()
+                    timestamp=datetime.now().isoformat(),
                 )
-                log_info(f"[transport] ✅ LLM response saved to chat history for {interface_path}")
+                log_info(
+                    f"[transport] ✅ LLM response saved to chat history for {interface_path}"
+                )
             else:
-                log_debug(f"[transport] No text content to save (only JSON)")
+                log_debug("[transport] No text content to save (only JSON)")
         except Exception as e:
-            log_error(f"[transport] ❌ Failed to save LLM response to chat history: {e}")
+            log_error(
+                f"[transport] ❌ Failed to save LLM response to chat history: {e}"
+            )
             import traceback
+
             log_debug(f"[transport] Traceback: {traceback.format_exc()}")
 
     # Filter out internal parameters that should not be passed to interface send functions
-    excluded_params = {'event_id', 'interface', 'is_llm_response', 'context', 'error_retry_policy', 'interface_path'}
+    excluded_params = {
+        "event_id",
+        "interface",
+        "is_llm_response",
+        "context",
+        "error_retry_policy",
+        "interface_path",
+    }
     for param in excluded_params:
         kwargs.pop(param, None)
 
@@ -791,7 +1030,7 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
     if json_data:
         log_debug(f"[transport] Detected JSON data, parsing: {json_data}")
         try:
-            log_debug(f"[flow] transport.detects_json -> will attempt run_actions")
+            log_debug("[flow] transport.detects_json -> will attempt run_actions")
             # Handle new nested actions format
             if isinstance(json_data, dict) and "actions" in json_data:
                 actions = json_data["actions"]
@@ -808,25 +1047,32 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
                 log_warning(f"[transport] Unrecognized JSON structure: {json_data}")
                 return await interface_send_func(*args, text=text, **kwargs)
 
-            bot = getattr(interface_send_func, '__self__', None) or (
-                args[0] if args and hasattr(args[0], 'send_message') else None
+            bot = getattr(interface_send_func, "__self__", None) or (
+                args[0] if args and hasattr(args[0], "send_message") else None
             )
 
             if not bot:
-                log_warning("[transport] Could not extract bot instance for action parsing")
+                log_warning(
+                    "[transport] Could not extract bot instance for action parsing"
+                )
                 return await interface_send_func(*args, text=text, **kwargs)
 
             # Create message context for actions
             message = SimpleNamespace()
-            chat_id_value = kwargs.get('chat_id') or (args[0] if args else None)
+            chat_id_value = kwargs.get("chat_id") or (args[0] if args else None)
 
             # Accept int or numeric string chat IDs (some interfaces provide strings)
             if chat_id_value is None or not isinstance(chat_id_value, (int, str)):
-                log_warning(f"[transport] Invalid chat_id for action processing: {chat_id_value}")
+                log_warning(
+                    f"[transport] Invalid chat_id for action processing: {chat_id_value}"
+                )
                 return await interface_send_func(*args, text=text, **kwargs)
 
             # Coerce numeric string to int when possible for internal consistency
-            if isinstance(chat_id_value, str) and chat_id_value.strip().lstrip('-').isdigit():
+            if (
+                isinstance(chat_id_value, str)
+                and chat_id_value.strip().lstrip("-").isdigit()
+            ):
                 try:
                     chat_id_value = int(chat_id_value)
                 except Exception:
@@ -838,8 +1084,9 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
             # Mark this message as coming from an LLM so corrective flows trigger
             message.from_llm = True
             message.original_text = text
-            message.thread_id = kwargs.get('thread_id')
+            message.thread_id = kwargs.get("thread_id")
             from datetime import datetime
+
             message.date = datetime.utcnow()
 
             # Use centralized action system for all action types.  The action
@@ -847,26 +1094,28 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
             # plain text if it's unavailable.
             try:
                 from core.action_parser import run_actions  # type: ignore
-            except Exception as e:  # pragma: no cover - executed when action_parser missing
+            except (
+                Exception
+            ) as e:  # pragma: no cover - executed when action_parser missing
                 log_warning(f"[transport] action parser unavailable: {e}")
                 return await interface_send_func(*args, text=text, **kwargs)
 
             # Determine current interface from bot
             current_interface = "unknown"  # default fallback
-            if hasattr(bot, 'get_interface_id'):
+            if hasattr(bot, "get_interface_id"):
                 try:
                     current_interface = bot.get_interface_id()
                 except Exception as e:
                     log_debug(f"[transport] Could not get interface_id from bot: {e}")
-            
+
             context = {
                 "interface": current_interface,
                 "original_chat_id": chat_id_value,
-                "original_thread_id": kwargs.get('thread_id'),
-                "original_text": text[:500] if text else "",  # Include preview of original text
-                "thread_defaults": {
-                    "default": None
-                }
+                "original_thread_id": kwargs.get("thread_id"),
+                "original_text": text[:500]
+                if text
+                else "",  # Include preview of original text
+                "thread_defaults": {"default": None},
             }  # Add more context as needed
             # Mark context to indicate source is LLM (used by selective corrector)
             context["from_llm"] = True
@@ -874,7 +1123,7 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
             # Filter actions to only include those for the current interface
             current_interface_actions = []
             cross_interface_actions = []
-            
+
             for action in actions:
                 action_type = action.get("type", "")
                 # Check if action belongs to current interface
@@ -882,59 +1131,83 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
                     current_interface_actions.append(action)
                 else:
                     cross_interface_actions.append(action)
-                    log_debug(f"[transport] Skipping cross-interface action {action_type} (current: {current_interface})")
-            
+                    log_debug(
+                        f"[transport] Skipping cross-interface action {action_type} (current: {current_interface})"
+                    )
+
             if cross_interface_actions:
-                log_info(f"[transport] Filtered {len(cross_interface_actions)} cross-interface actions, processing {len(current_interface_actions)} for {current_interface}")
-            
+                log_info(
+                    f"[transport] Filtered {len(cross_interface_actions)} cross-interface actions, processing {len(current_interface_actions)} for {current_interface}"
+                )
+
             # Only process actions for current interface
             if current_interface_actions:
                 # Diagnostic: list action types and payload summaries
                 try:
-                    types_list = [a.get('type') for a in current_interface_actions]
-                    log_debug(f"[transport] Actions for {current_interface}: {types_list}")
+                    types_list = [a.get("type") for a in current_interface_actions]
+                    log_debug(
+                        f"[transport] Actions for {current_interface}: {types_list}"
+                    )
                     for a in current_interface_actions:
-                        log_debug(f"[transport] Action detail: type={a.get('type')} payload_keys={list((a.get('payload') or {}).keys())}")
+                        log_debug(
+                            f"[transport] Action detail: type={a.get('type')} payload_keys={list((a.get('payload') or {}).keys())}"
+                        )
                 except Exception:
                     pass
                 try:
-                    result = await run_actions(current_interface_actions, context, bot, message)
-                    processed_actions = result.get("processed", []) if isinstance(result, dict) else current_interface_actions
-                    log_debug(f"[transport] run_actions result: processed={len(processed_actions)} failed={len(result.get('failed_actions', [])) if isinstance(result, dict) else 0}")
+                    result = await run_actions(
+                        current_interface_actions, context, bot, message
+                    )
+                    processed_actions = (
+                        result.get("processed", [])
+                        if isinstance(result, dict)
+                        else current_interface_actions
+                    )
+                    log_debug(
+                        f"[transport] run_actions result: processed={len(processed_actions)} failed={len(result.get('failed_actions', [])) if isinstance(result, dict) else 0}"
+                    )
                 except Exception as e:
                     log_warning(f"[transport] Failed to process actions: {e}")
                     processed_actions = []
                 finally:
-                    log_debug(f"[flow] transport.after_run_actions -> processed_count={len(processed_actions)}")
+                    log_debug(
+                        f"[flow] transport.after_run_actions -> processed_count={len(processed_actions)}"
+                    )
 
                 log_info(
                     f"[transport] Processed {len(processed_actions)} unique JSON actions via plugin system"
                 )
-                
+
                 # After processing actions, check if there's text outside the JSON that should be sent
-                if json_metadata and (json_metadata.get('prefix') or json_metadata.get('suffix')):
+                if json_metadata and (
+                    json_metadata.get("prefix") or json_metadata.get("suffix")
+                ):
                     companion_text = ""
-                    
+
                     # Combine prefix and suffix, removing duplicate content
-                    if json_metadata.get('prefix'):
-                        companion_text = json_metadata.get('prefix', '').strip()
-                    
-                    if json_metadata.get('suffix'):
-                        suffix_text = json_metadata.get('suffix', '').strip()
+                    if json_metadata.get("prefix"):
+                        companion_text = json_metadata.get("prefix", "").strip()
+
+                    if json_metadata.get("suffix"):
+                        suffix_text = json_metadata.get("suffix", "").strip()
                         if companion_text:
                             companion_text += "\n" + suffix_text
                         else:
                             companion_text = suffix_text
-                    
+
                     if companion_text:
-                        log_info(f"[transport] Sending companion text alongside JSON actions: {len(companion_text)} chars")
+                        log_info(
+                            f"[transport] Sending companion text alongside JSON actions: {len(companion_text)} chars"
+                        )
                         # Send the companion text as a separate message after the actions
                         await interface_send_func(*args, text=companion_text, **kwargs)
-                
+
                 return
             else:
                 # No actions for current interface, send as plain text
-                log_debug(f"[transport] No actions for current interface {current_interface}, sending as plain text")
+                log_debug(
+                    f"[transport] No actions for current interface {current_interface}, sending as plain text"
+                )
                 return await interface_send_func(*args, text=text, **kwargs)
 
         except Exception as e:
@@ -946,11 +1219,15 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
     # so LLMs should only output JSON. If they output plain text anyway, it still gets sent,
     # but companion text from JSON extraction does NOT get sent in this path.
     if text and not text.startswith(("[ERROR]", "[WARNING]", "[INFO]", "[DEBUG]")):
-        log_debug(f"[flow] transport.non_json -> forwarding plain text (no JSON detected, no corrector triggered) chat_id={kwargs.get('chat_id')}")
+        log_debug(
+            f"[flow] transport.non_json -> forwarding plain text (no JSON detected, no corrector triggered) chat_id={kwargs.get('chat_id')}"
+        )
         return await interface_send_func(*args, text=text, **kwargs)
 
     # Send as normal text
-    log_debug(f"[flow] transport.forward_plain -> calling interface_send_func for chat_id={kwargs.get('chat_id')}")
+    log_debug(
+        f"[flow] transport.forward_plain -> calling interface_send_func for chat_id={kwargs.get('chat_id')}"
+    )
     return await interface_send_func(*args, text=text, **kwargs)
 
 
@@ -961,15 +1238,15 @@ def _get_attempted_action_full_description(
     allowed_action_types: Optional[set[str]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Extract which action was attempted and return its FULL description.
-    
+
     When the corrector is triggered due to JSON parsing errors, this function:
     1. Tries to parse the partial/corrupted JSON to identify the action type attempted
     2. Looks up the FULL (non-minified) action description from the core_initializer
     3. Returns the full description so the corrector can provide complete details
-    
+
     Args:
         error_text: The malformed JSON text that the LLM tried to produce
-        
+
     Returns:
         Dict with keys:
             - 'action_type': str - The action type that was attempted (e.g., 'message_telegram_bot')
@@ -979,19 +1256,23 @@ def _get_attempted_action_full_description(
     try:
         # Try to extract partial JSON to find action type
         import re
-        
+
         # Look for "type": "..." or "action": "..." patterns
         type_match = re.search(r'"type"\s*:\s*"([^"]+)"', error_text)
         if not type_match:
             type_match = re.search(r'"action"\s*:\s*"([^"]+)"', error_text)
-        
+
         if not type_match:
-            log_debug("[_get_attempted_action] Could not extract action type from error text")
+            log_debug(
+                "[_get_attempted_action] Could not extract action type from error text"
+            )
             return None
-        
+
         action_type = type_match.group(1)
-        log_debug(f"[_get_attempted_action] Identified attempted action type: {action_type}")
-        
+        log_debug(
+            f"[_get_attempted_action] Identified attempted action type: {action_type}"
+        )
+
         # Enforce allowed action scope (if provided)
         if allowed_action_types is not None and action_type not in allowed_action_types:
             log_debug(
@@ -1002,29 +1283,37 @@ def _get_attempted_action_full_description(
         # Now get the FULL description from core_initializer (not minified)
         try:
             from core.core_initializer import core_initializer
-            
+
             full_actions = core_initializer.actions_block.get("available_actions", {})
-            
+
             if action_type in full_actions:
                 full_description = full_actions[action_type]
-                log_debug(f"[_get_attempted_action] Found full description for {action_type}")
+                log_debug(
+                    f"[_get_attempted_action] Found full description for {action_type}"
+                )
                 return {
-                    'action_type': action_type,
-                    'full_description': full_description
+                    "action_type": action_type,
+                    "full_description": full_description,
                 }
             else:
-                log_debug(f"[_get_attempted_action] Action type '{action_type}' not found in available actions")
+                log_debug(
+                    f"[_get_attempted_action] Action type '{action_type}' not found in available actions"
+                )
                 return None
         except Exception as e:
-            log_debug(f"[_get_attempted_action] Could not load full action description: {e}")
+            log_debug(
+                f"[_get_attempted_action] Could not load full action description: {e}"
+            )
             return None
-            
+
     except Exception as e:
         log_debug(f"[_get_attempted_action] Error analyzing attempted action: {e}")
         return None
 
 
-async def run_corrector_middleware(text: str, bot=None, context: dict = None, chat_id=None, thread_id=None) -> str:
+async def run_corrector_middleware(
+    text: str, bot=None, context: dict = None, chat_id=None, thread_id=None
+) -> str:
     """Attempt to obtain a corrected LLM output that contains valid JSON actions.
 
     Strategy:
@@ -1035,7 +1324,7 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
 
     This function is intentionally best-effort and non-blocking for the system: if no
     active LLM plugin is available it will log and return None.
-    
+
     Args:
         text: The text to correct
         bot: The bot instance
@@ -1047,7 +1336,6 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
         # Avoid circular imports at module import time
         from core import action_parser
         from core.logging_utils import log_debug, log_info, log_warning
-        from core.prompt_engine import build_full_json_instructions
         from types import SimpleNamespace
     except Exception as e:
         try:
@@ -1057,10 +1345,10 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
         return None
 
     # CORRECTOR_RETRIES may be a ConfigVar; ensure we have an int
-    max_retries = int(getattr(action_parser, 'CORRECTOR_RETRIES', 2))
+    max_retries = int(getattr(action_parser, "CORRECTOR_RETRIES", 2))
 
     # Extract message from context if available
-    message = context.get('message') if context else None
+    message = context.get("message") if context else None
 
     # Normalize allowed action types from context (scope-aware correction)
     allowed_action_types = None
@@ -1068,27 +1356,46 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
         scoped_actions = context.get("allowed_action_types") or context.get("allowed_actions")
         if isinstance(scoped_actions, (list, set, tuple)):
             allowed_action_types = {str(a) for a in scoped_actions if a}
-    
+
     # Check if we have selective correction context (some actions succeeded, some failed)
-    correction_context = getattr(message, 'correction_context', None) if message else None
-    
+    correction_context = (
+        getattr(message, "correction_context", None) if message else None
+    )
+
     # If already valid JSON WITHOUT errors, nothing to do
     try:
         json_obj, metadata = extract_json_from_text(text, return_metadata=True)
         # If we have a JSON object, prefer it even if there was extra surrounding
         # noise (e.g., stacktraces) as long as we recovered or there were no parsing
         # errors that leave us without a valid JSON structure.
-        if json_obj and not correction_context and (not metadata.get('had_errors', False) or metadata.get('recovered', False) or metadata.get('had_extra_text', False)):
-            log_debug("[corrector_middleware] Input contains valid JSON (possibly with extra noise); skipping correction")
+        if (
+            json_obj
+            and not correction_context
+            and (
+                not metadata.get("had_errors", False)
+                or metadata.get("recovered", False)
+                or metadata.get("had_extra_text", False)
+            )
+        ):
+            log_debug(
+                "[corrector_middleware] Input contains valid JSON (possibly with extra noise); skipping correction"
+            )
             return text
-        elif json_obj and metadata.get('had_errors', False):
-            log_debug(f"[corrector_middleware] JSON recovered with {metadata.get('error_count', 0)} errors; proceeding with correction")
+        elif json_obj and metadata.get("had_errors", False):
+            log_debug(
+                f"[corrector_middleware] JSON recovered with {metadata.get('error_count', 0)} errors; proceeding with correction"
+            )
     except Exception:
         pass
 
     # Don't correct system messages or messages that clearly don't need correction
-    if text and ("system_message" in text or text.startswith(("[ERROR]", "[WARNING]", "[INFO]", "[DEBUG]"))):
-        log_debug("[corrector_middleware] Text appears to be system message; skipping correction to prevent loops")
+    if text and (
+        "system_message" in text
+        or text.startswith(("[ERROR]", "[WARNING]", "[INFO]", "[DEBUG]"))
+    ):
+        log_debug(
+            "[corrector_middleware] Text appears to be system message; skipping correction to prevent loops"
+        )
         return None
 
     last_error_hint = LAST_JSON_ERROR_INFO or "Invalid or missing JSON"
@@ -1106,23 +1413,31 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
             llm_plugin = None
             if plugin_instance is not None:
                 # plugin_instance may export get_plugin() or plugin attribute
-                llm_plugin = getattr(plugin_instance, 'get_plugin', lambda: None)()
+                llm_plugin = getattr(plugin_instance, "get_plugin", lambda: None)()
                 if llm_plugin is None:
-                    llm_plugin = getattr(plugin_instance, 'plugin', None)
+                    llm_plugin = getattr(plugin_instance, "plugin", None)
 
             # Log plugin discovery
             try:
                 if llm_plugin is None:
-                    log_debug(f"[corrector_middleware] attempt {attempt}: no active LLM plugin found")
+                    log_debug(
+                        f"[corrector_middleware] attempt {attempt}: no active LLM plugin found"
+                    )
                 else:
-                    log_debug(f"[corrector_middleware] attempt {attempt}: using LLM plugin {getattr(llm_plugin, '__class__', llm_plugin)}")
+                    log_debug(
+                        f"[corrector_middleware] attempt {attempt}: using LLM plugin {getattr(llm_plugin, '__class__', llm_plugin)}"
+                    )
             except Exception:
                 pass
 
-            if not llm_plugin or not hasattr(llm_plugin, 'handle_incoming_message'):
-                log_warning(f"[corrector_middleware] No active LLM plugin available (attempt {attempt}/{max_retries})")
+            if not llm_plugin or not hasattr(llm_plugin, "handle_incoming_message"):
+                log_warning(
+                    f"[corrector_middleware] No active LLM plugin available (attempt {attempt}/{max_retries})"
+                )
                 # no plugin available — stop trying and indicate failure (do NOT send to interface)
-                log_debug("[corrector_middleware] No LLM available; blocking and returning None")
+                log_debug(
+                    "[corrector_middleware] No LLM available; blocking and returning None"
+                )
                 return None
 
             # Build a correction payload similar to action_parser.corrector
@@ -1131,7 +1446,7 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
             # 2. Corrector only needs the format template, not all actions
             # 3. LLM just needs to fix the JSON structure, not learn new actions
             attempted_action_info = None
-            
+
             # Try to identify which action was attempted and include its full description
             try:
                 attempted_action_info = _get_attempted_action_full_description(
@@ -1139,15 +1454,21 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
                     allowed_action_types=allowed_action_types,
                 )
                 if attempted_action_info:
-                    log_info(f"[corrector_middleware] Including full description for attempted action: {attempted_action_info['action_type']}")
+                    log_info(
+                        f"[corrector_middleware] Including full description for attempted action: {attempted_action_info['action_type']}"
+                    )
             except Exception as e:
-                log_debug(f"[corrector_middleware] Could not extract attempted action info: {e}")
+                log_debug(
+                    f"[corrector_middleware] Could not extract attempted action info: {e}"
+                )
 
             # Use the thread_id from the original conversation if available
             # Avoid defaulting to 0. If there's no thread_id, leave it as None so
             # downstream code doesn't accidentally route to thread 0.
             payload_thread_id = thread_id if thread_id is not None else None
-            log_debug(f"[corrector_middleware] Using payload_thread_id={payload_thread_id} for corrector request")
+            log_debug(
+                f"[corrector_middleware] Using payload_thread_id={payload_thread_id} for corrector request"
+            )
 
             # Extract the original user message text from context if available
             # This is CRUCIAL: when the corrector retries, the LLM needs to know what the
@@ -1159,44 +1480,46 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
             #          Without it, LLM might respond "Acknowledged, JSON was valid"
             original_user_message = ""
             if message:
-                original_user_message = getattr(message, 'text', "") or ""
+                original_user_message = getattr(message, "text", "") or ""
             if not original_user_message and context and context.get("original_user_message") is not None:
                 original_user_message = context.get("original_user_message") or ""
-            
+
             # Build correction message based on whether we have selective correction context
             if correction_context:
                 # Selective correction: tell LLM what succeeded and what needs fixing
-                successful = correction_context.get('successful_actions', [])
-                failed = correction_context.get('failed_actions', [])
-                errors = correction_context.get('errors', [])
-                
+                successful = correction_context.get("successful_actions", [])
+                failed = correction_context.get("failed_actions", [])
+                errors = correction_context.get("errors", [])
+
                 correction_message_text = (
                     f"PARTIAL SUCCESS - Some actions completed, others failed.\n\n"
                     f"✅ Successfully executed {len(successful)} action(s):\n"
                 )
                 for action in successful:
-                    action_type = action.get('type', 'unknown')
+                    action_type = action.get("type", "unknown")
                     correction_message_text += f"  - {action_type}\n"
-                
+
                 correction_message_text += (
                     f"\n❌ Failed {len(failed)} action(s) that need correction:\n"
                 )
                 for failed_item in failed:
-                    action = failed_item.get('action', {})
-                    action_errors = failed_item.get('errors', [])
-                    action_type = action.get('type', 'unknown')
-                    correction_message_text += f"  - {action_type}: {', '.join(action_errors)}\n"
-                
+                    action = failed_item.get("action", {})
+                    action_errors = failed_item.get("errors", [])
+                    action_type = action.get("type", "unknown")
+                    correction_message_text += (
+                        f"  - {action_type}: {', '.join(action_errors)}\n"
+                    )
+
                 if allowed_action_types:
                     correction_message_text += (
                         f"\nAllowed action types for this scope: {', '.join(sorted(allowed_action_types))}\n"
                     )
                 correction_message_text += (
-                    f"\nRequirements:\n"
-                    f"1. Respond with ONLY valid JSON\n"
-                    f"2. Include ONLY the missing/failed actions - do NOT repeat successful ones\n"
-                    f"3. Fix validation errors in the failed actions\n"
-                    f"4. Ensure you've created ALL actions from the user's original request\n"
+                    "\nRequirements:\n"
+                    "1. Respond with ONLY valid JSON\n"
+                    "2. Include ONLY the missing/failed actions - do NOT repeat successful ones\n"
+                    "3. Fix validation errors in the failed actions\n"
+                    "4. Ensure you've created ALL actions from the user's original request\n"
                 )
             else:
                 # Full correction: complete JSON failure
@@ -1212,7 +1535,7 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
                     correction_message_text += (
                         f"\nAllowed action types for this scope: {', '.join(sorted(allowed_action_types))}"
                     )
-            
+
             correction_payload = {
                 "system_message": {
                     "type": "error",
@@ -1223,13 +1546,19 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
                     "thread_id": payload_thread_id,
                 }
             }
-            
+
             # If we identified an action attempt, include its complete (non-minified) description
             if attempted_action_info:
-                correction_payload["system_message"]["attempted_action"] = attempted_action_info["action_type"]
-                correction_payload["system_message"]["action_full_schema"] = attempted_action_info["full_description"]
-                log_debug(f"[corrector_middleware] Added full action schema for {attempted_action_info['action_type']}")
-            
+                correction_payload["system_message"]["attempted_action"] = (
+                    attempted_action_info["action_type"]
+                )
+                correction_payload["system_message"]["action_full_schema"] = (
+                    attempted_action_info["full_description"]
+                )
+                log_debug(
+                    f"[corrector_middleware] Added full action schema for {attempted_action_info['action_type']}"
+                )
+
             # Add required format examples
             correction_payload["system_message"]["required_format"] = {
                 "actions": [
@@ -1237,8 +1566,8 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
                         "type": "message_<interface>_bot",
                         "payload": {
                             "text": "Your message content here (optional - only if you want to reply to user)",
-                            "interface_path": f"<interface_name>/{chat_id or '<chat_id>'}/{payload_thread_id if payload_thread_id is not None else ''}"
-                        }
+                            "interface_path": f"<interface_name>/{chat_id or '<chat_id>'}/{payload_thread_id if payload_thread_id is not None else ''}",
+                        },
                     }
                 ]
             }
@@ -1247,25 +1576,29 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
                 "MUST contain 'actions' array",
                 "NO text outside JSON structure",
                 "NO markdown formatting",
-                "NO explanations outside JSON"
+                "NO explanations outside JSON",
             ]
             correction_prompt = json.dumps(correction_payload, ensure_ascii=False)
 
             # Construct a lightweight message object expected by plugins
             # CRITICAL: Preserve interface_path from original message/context so error messages route correctly
             correction_message = SimpleNamespace()
-            correction_message.chat_id = chat_id or getattr(bot, 'chat_id', None) or -1
+            correction_message.chat_id = chat_id or getattr(bot, "chat_id", None) or -1
             correction_message.text = correction_prompt
-            correction_message.thread_id = payload_thread_id  # Use thread_id from original conversation
+            correction_message.thread_id = (
+                payload_thread_id  # Use thread_id from original conversation
+            )
             correction_message.date = None
             correction_message.from_user = None
-            correction_message.chat = SimpleNamespace(id=correction_message.chat_id, type='private')
+            correction_message.chat = SimpleNamespace(
+                id=correction_message.chat_id, type="private"
+            )
             # Extract interface_path from original message or context
             correction_message.interface_path = None
-            if message and hasattr(message, 'interface_path'):
+            if message and hasattr(message, "interface_path"):
                 correction_message.interface_path = message.interface_path
-            elif context and 'interface_path' in context:
-                correction_message.interface_path = context['interface_path']
+            elif context and "interface_path" in context:
+                correction_message.interface_path = context["interface_path"]
 
             scope_label = "unknown"
             if context and isinstance(context.get("action_scope"), str):
@@ -1284,29 +1617,41 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
 
             # Call plugin directly and await returned value when available
             try:
-                corrected = await llm_plugin.handle_incoming_message(bot, correction_message, correction_prompt)
+                corrected = await llm_plugin.handle_incoming_message(
+                    bot, correction_message, correction_prompt
+                )
             except TypeError:
                 # Some plugins expect different signature; try fallback
-                corrected = await llm_plugin.handle_incoming_message(bot, correction_message, correction_prompt)
+                corrected = await llm_plugin.handle_incoming_message(
+                    bot, correction_message, correction_prompt
+                )
 
             # Log corrected result type/length
             try:
-                log_debug(f"[corrector_middleware] LLM returned type={type(corrected)} len={(len(corrected) if isinstance(corrected, str) else 'N/A')}")
+                log_debug(
+                    f"[corrector_middleware] LLM returned type={type(corrected)} len={(len(corrected) if isinstance(corrected, str) else 'N/A')}"
+                )
             except Exception:
                 pass
 
             if corrected and isinstance(corrected, str):
-                log_debug(f"[corrector_middleware] LLM returned text len={len(corrected)}")
+                log_debug(
+                    f"[corrector_middleware] LLM returned text len={len(corrected)}"
+                )
                 # If corrected contains valid JSON, return it (do not echo to chat)
                 try:
                     if extract_json_from_text(corrected):
-                        log_info("[corrector_middleware] Received corrected JSON from LLM")
+                        log_info(
+                            "[corrector_middleware] Received corrected JSON from LLM"
+                        )
                         return corrected
                 except Exception:
                     pass
 
                 # Not valid JSON yet — DO NOT send LLM suggestion to chat (policy)
-                log_debug("[corrector_middleware] LLM suggestion is not valid JSON; will retry without echoing to interface")
+                log_debug(
+                    "[corrector_middleware] LLM suggestion is not valid JSON; will retry without echoing to interface"
+                )
 
                 # Update text with LLM reply and retry
                 text = corrected
@@ -1322,8 +1667,10 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
             await asyncio.sleep(1)
 
     # Exhausted retries — send error message if possible
-    log_warning(f"[corrector_middleware] Exhausted {max_retries} attempts without valid JSON; blocking message for chat_id={chat_id}")
-    if llm_plugin and hasattr(llm_plugin, '_send_error_message') and message:
+    log_warning(
+        f"[corrector_middleware] Exhausted {max_retries} attempts without valid JSON; blocking message for chat_id={chat_id}"
+    )
+    if llm_plugin and hasattr(llm_plugin, "_send_error_message") and message:
         try:
             await llm_plugin._send_error_message(bot, message)
         except Exception as e:
@@ -1345,7 +1692,9 @@ async def interface_to_llm(send_to_llm_func, *args, text: str = None, **kwargs):
     corrector.
     """
     try:
-        log_debug(f"[chain] interface_to_llm called -> send_to_llm_func={send_to_llm_func} kwargs_keys={list(kwargs.keys())}")
+        log_debug(
+            f"[chain] interface_to_llm called -> send_to_llm_func={send_to_llm_func} kwargs_keys={list(kwargs.keys())}"
+        )
     except Exception:
         pass
     return await send_to_llm_func(*args, text=text, **kwargs)
@@ -1363,7 +1712,7 @@ async def llm_to_interface(interface_send_func, *args, text: str = None, **kwarg
         text = ""
 
     # Extract chat_id for logging
-    chat_id = kwargs.get('chat_id')
+    chat_id = kwargs.get("chat_id")
     if chat_id is None and args:
         maybe = args[1] if len(args) > 1 else None
         chat_id = maybe if isinstance(maybe, (int, str)) else None
@@ -1378,7 +1727,9 @@ async def llm_to_interface(interface_send_func, *args, text: str = None, **kwarg
     _cleanup_expired_system_replies()
 
     try:
-        log_debug(f"[chain] llm_to_interface called -> interface_send_func={interface_send_func}")
+        log_debug(
+            f"[chain] llm_to_interface called -> interface_send_func={interface_send_func}"
+        )
     except Exception:
         pass
 
@@ -1386,18 +1737,21 @@ async def llm_to_interface(interface_send_func, *args, text: str = None, **kwarg
     # components and the orchestrator can detect origin without changes to every
     # LLM engine. Engines that already set this can override it.
     try:
-        kwargs.setdefault('is_llm_response', True)
+        kwargs.setdefault("is_llm_response", True)
     except Exception:
         pass
 
     # Suppress empty/whitespace LLM replies early — centralize handling here
-    if kwargs.get('is_llm_response', False) and (not text or not text.strip()):
-        log_debug("[transport] Empty LLM response received; skipping corrector and not forwarding")
+    if kwargs.get("is_llm_response", False) and (not text or not text.strip()):
+        log_debug(
+            "[transport] Empty LLM response received; skipping corrector and not forwarding"
+        )
         return None
 
     # Normalize LLM text for mojibake / double-escaped sequences BEFORE parsing
     try:
         from core.text_utils import normalize_for_outbound
+
         norm_text = normalize_for_outbound(text)
         if norm_text and norm_text != text:
             log_debug("[llm_to_interface] Normalized LLM text (mojibake/unescape)")
@@ -1412,31 +1766,46 @@ async def llm_to_interface(interface_send_func, *args, text: str = None, **kwarg
         json_metadata = None
         if text and text.strip():
             try:
-                json_payload, json_metadata = extract_json_from_text(text, return_metadata=True)
+                json_payload, json_metadata = extract_json_from_text(
+                    text, return_metadata=True
+                )
             except Exception:
                 json_payload = None
                 json_metadata = None
 
         # Check if JSON was corrupted during parsing
-        is_corrupted = json_metadata and (json_metadata.get('recovered', False) or json_metadata.get('unparsed_content', ''))
-        
+        is_corrupted = json_metadata and (
+            json_metadata.get("recovered", False)
+            or json_metadata.get("unparsed_content", "")
+        )
+
         if is_corrupted:
-            log_warning(f"[llm_to_interface] 🔧 Corrupted JSON detected - activating corrector to regenerate damaged actions")
-            log_debug(f"[llm_to_interface] Unparsed content ({len(json_metadata.get('unparsed_content', ''))} chars): {json_metadata.get('unparsed_content', '')[:200]}...")
-        
+            log_warning(
+                "[llm_to_interface] 🔧 Corrupted JSON detected - activating corrector to regenerate damaged actions"
+            )
+            log_debug(
+                f"[llm_to_interface] Unparsed content ({len(json_metadata.get('unparsed_content', ''))} chars): {json_metadata.get('unparsed_content', '')[:200]}..."
+            )
+
         # Check if LLM returned plain text with NO JSON at all (violates LLM instructions)
-        is_plain_text_only = (not json_payload and text and text.strip())
+        is_plain_text_only = not json_payload and text and text.strip()
         if is_plain_text_only:
-            log_warning(f"[llm_to_interface] ⚠️ LLM returned plain text with NO JSON - violates instructions! Activating corrector to request JSON format")
-        
+            log_warning(
+                "[llm_to_interface] ⚠️ LLM returned plain text with NO JSON - violates instructions! Activating corrector to request JSON format"
+            )
+
         # Detect correction/system payloads (top-level "system_message") OR corrupted JSON OR plain text only
-        if (isinstance(json_payload, dict) and 'system_message' in json_payload) or is_corrupted or is_plain_text_only:
+        if (
+            (isinstance(json_payload, dict) and "system_message" in json_payload)
+            or is_corrupted
+            or is_plain_text_only
+        ):
             try:
                 # Determine bot instance from args if present
                 bot = args[0] if args and len(args) > 0 else None
 
                 # Attempt to determine chat_id from kwargs or positional args
-                chat_id = kwargs.get('chat_id')
+                chat_id = kwargs.get("chat_id")
                 if chat_id is None and len(args) > 1:
                     maybe = args[1]
                     if isinstance(maybe, (int, str)):
@@ -1446,9 +1815,11 @@ async def llm_to_interface(interface_send_func, *args, text: str = None, **kwarg
                 try:
                     if isinstance(chat_id, str):
                         s = chat_id.strip()
-                        if s == "" or not s.lstrip('-').isdigit():
+                        if s == "" or not s.lstrip("-").isdigit():
                             # invalid/empty string -> normalize to None
-                            log_debug(f"[llm_to_interface] Sanitizing invalid chat_id '{chat_id}' -> None")
+                            log_debug(
+                                f"[llm_to_interface] Sanitizing invalid chat_id '{chat_id}' -> None"
+                            )
                             chat_id = None
                         else:
                             chat_id = int(s)
@@ -1457,7 +1828,9 @@ async def llm_to_interface(interface_send_func, *args, text: str = None, **kwarg
                     else:
                         chat_id = None
                 except Exception:
-                    log_debug(f"[llm_to_interface] Could not coerce chat_id '{chat_id}' to int; setting to None")
+                    log_debug(
+                        f"[llm_to_interface] Could not coerce chat_id '{chat_id}' to int; setting to None"
+                    )
                     chat_id = None
 
                 # Build lightweight message and context objects for orchestrator
@@ -1468,53 +1841,73 @@ async def llm_to_interface(interface_send_func, *args, text: str = None, **kwarg
                 message.chat_id = chat_id
                 message.text = ""
                 message.original_text = text
-                message.thread_id = kwargs.get('thread_id')
+                message.thread_id = kwargs.get("thread_id")
                 # Mark this message as originating from the LLM so the orchestrator
                 # will process it. This complements the is_llm_response flag.
                 message.from_llm = True
                 message.date = datetime.utcnow()
 
-                current_interface = kwargs.get('interface') or (getattr(bot, 'get_interface_id', lambda: 'unknown')() if bot else 'unknown')
+                current_interface = kwargs.get("interface") or (
+                    getattr(bot, "get_interface_id", lambda: "unknown")()
+                    if bot
+                    else "unknown"
+                )
                 corrector_context = {
-                    'interface': current_interface,
-                    'original_chat_id': chat_id,
-                    'original_thread_id': kwargs.get('thread_id'),
-                    'original_text': text[:500] if text else ''
+                    "interface": current_interface,
+                    "original_chat_id": chat_id,
+                    "original_thread_id": kwargs.get("thread_id"),
+                    "original_text": text[:500] if text else "",
                 }
-                
+
                 # If JSON is corrupted, extract already-completed actions from the recovered JSON
                 completed_actions = []
                 if is_corrupted and json_payload:
-                    log_info("[llm_to_interface] Extracting completed actions from corrupted JSON")
+                    log_info(
+                        "[llm_to_interface] Extracting completed actions from corrupted JSON"
+                    )
                     # Extract actions from recovered JSON
                     if isinstance(json_payload, dict) and "actions" in json_payload:
                         recovered_actions = json_payload.get("actions", [])
                         if isinstance(recovered_actions, list):
-                            completed_actions = [a.get('type') for a in recovered_actions if isinstance(a, dict) and 'type' in a]
-                            log_info(f"[llm_to_interface] Found {len(completed_actions)} actions in recovered JSON: {completed_actions}")
+                            completed_actions = [
+                                a.get("type")
+                                for a in recovered_actions
+                                if isinstance(a, dict) and "type" in a
+                            ]
+                            log_info(
+                                f"[llm_to_interface] Found {len(completed_actions)} actions in recovered JSON: {completed_actions}"
+                            )
 
                 # Delegate to the parser orchestrator (will call corrector middleware as needed)
                 from core import action_parser
+
                 orchestrator_result = await action_parser.corrector_orchestrator(
-                    text, 
-                    corrector_context, 
-                    bot, 
+                    text,
+                    corrector_context,
+                    bot,
                     message,
                     completed_actions=completed_actions if is_corrupted else None,
-                    force_correction=is_plain_text_only  # Force corrector to run for plain text
+                    force_correction=is_plain_text_only,  # Force corrector to run for plain text
                 )
 
                 if orchestrator_result is True:
-                    log_debug('[llm_to_interface] corrector_orchestrator executed actions; not forwarding text')
+                    log_debug(
+                        "[llm_to_interface] corrector_orchestrator executed actions; not forwarding text"
+                    )
                     return None
                 elif orchestrator_result is False:
-                    log_warning('[llm_to_interface] corrector_orchestrator blocked message; not forwarding')
+                    log_warning(
+                        "[llm_to_interface] corrector_orchestrator blocked message; not forwarding"
+                    )
                     return None
                 else:
-                    log_debug('[llm_to_interface] corrector_orchestrator returned None; forwarding as usual')
+                    log_debug(
+                        "[llm_to_interface] corrector_orchestrator returned None; forwarding as usual"
+                    )
 
             except Exception as e:
                 import traceback
+
                 log_warning(f"[llm_to_interface] Orchestrator handling failed: {e}")
                 log_debug(f"[llm_to_interface] Traceback: {traceback.format_exc()}")
                 # On failure, avoid forwarding suspicious payload to interface
@@ -1528,21 +1921,23 @@ async def llm_to_interface(interface_send_func, *args, text: str = None, **kwarg
     # Delegate to central message chain for unified handling of LLM-origin and interface-origin messages
     try:
         from core.message_chain import handle_incoming_message
+
         # Determine source: if this path was called from llm_to_interface we set is_llm_response
-        source = 'llm' if kwargs.get('is_llm_response', False) else 'interface'
+        source = "llm" if kwargs.get("is_llm_response", False) else "interface"
         # Build a message object compatible with message_chain
         from types import SimpleNamespace
         from datetime import datetime
+
         message = SimpleNamespace()
         # Try to extract chat_id from kwargs/args
-        chat_id = kwargs.get('chat_id')
+        chat_id = kwargs.get("chat_id")
         if chat_id is None and args:
             maybe = args[1] if len(args) > 1 else None
             chat_id = maybe if isinstance(maybe, (int, str)) else None
         message.chat_id = chat_id
         message.text = ""
         message.original_text = text
-        message.thread_id = kwargs.get('thread_id')
+        message.thread_id = kwargs.get("thread_id")
         message.date = datetime.utcnow()
         # If this chat_id is marked as expecting a system/LLM reply from the
         # corrector middleware, consume it here and do not re-enter the message
@@ -1551,28 +1946,39 @@ async def llm_to_interface(interface_send_func, *args, text: str = None, **kwarg
         try:
             if chat_id is not None and _is_expecting_system_reply(str(chat_id)):
                 # Check if this is actually a correction response by looking for typical patterns
-                is_correction_response = (
-                    isinstance(text, str) and (
-                        "system_message" in text or
-                        text.strip().startswith('{"actions":') or
-                        "correction" in text.lower() or
-                        "corrected" in text.lower()
-                    )
+                is_correction_response = isinstance(text, str) and (
+                    "system_message" in text
+                    or text.strip().startswith('{"actions":')
+                    or "correction" in text.lower()
+                    or "corrected" in text.lower()
                 )
-                
+
                 if is_correction_response:
                     _remove_system_reply_expectation(str(chat_id))
-                    log_debug(f"[llm_to_interface] Consuming expected system reply for chat_id={chat_id}; not forwarding to message_chain")
+                    log_debug(
+                        f"[llm_to_interface] Consuming expected system reply for chat_id={chat_id}; not forwarding to message_chain"
+                    )
                     return None
                 else:
                     # This doesn't look like a correction response, might be a normal message
                     # Log a warning and let it through
-                    log_warning(f"[llm_to_interface] Expected system reply for chat_id={chat_id} but message doesn't look like correction. Allowing through.")
-                    _remove_system_reply_expectation(str(chat_id))  # Clear the expectation anyway
+                    log_warning(
+                        f"[llm_to_interface] Expected system reply for chat_id={chat_id} but message doesn't look like correction. Allowing through."
+                    )
+                    _remove_system_reply_expectation(
+                        str(chat_id)
+                    )  # Clear the expectation anyway
         except Exception:
             pass
         # Pass through to message chain
-        result = await handle_incoming_message(bot=getattr(interface_send_func, '__self__', None) or None, message=message, text=text, source=source, context=kwargs.get('context', None), **kwargs)
+        result = await handle_incoming_message(
+            bot=getattr(interface_send_func, "__self__", None) or None,
+            message=message,
+            text=text,
+            source=source,
+            context=kwargs.get("context", None),
+            **kwargs,
+        )
 
         # At this point the message_chain has completed. If this was an LLM plain-text
         # reply (no JSON was present originally) we optionally run the Grillo checker in
@@ -1580,11 +1986,13 @@ async def llm_to_interface(interface_send_func, *args, text: str = None, **kwarg
         try:
             # Ensure we only trigger for LLM-origin responses (plain-text or JSON)
             # but skip system/correction payloads (they are handled by corrector).
-            if kwargs.get('is_llm_response', False) and not (isinstance(json_payload, dict) and 'system_message' in json_payload):
+            if kwargs.get("is_llm_response", False) and not (
+                isinstance(json_payload, dict) and "system_message" in json_payload
+            ):
                 # Avoid double-invoking Grillo on the same message
                 already_checked = False
                 try:
-                    already_checked = getattr(message, 'grillo_checked', False)
+                    already_checked = getattr(message, "grillo_checked", False)
                 except Exception:
                     already_checked = False
 
@@ -1592,53 +2000,92 @@ async def llm_to_interface(interface_send_func, *args, text: str = None, **kwarg
                     # Respect config that allows async vs sync execution for tests
                     try:
                         from core.config_manager import config_registry
-                        async_check = bool(config_registry.get_value('GRILLO_ACTION_CHECK_ASYNC', True, value_type=bool, group='grillo', component='grillo'))
+
+                        async_check = bool(
+                            config_registry.get_value(
+                                "GRILLO_ACTION_CHECK_ASYNC",
+                                True,
+                                value_type=bool,
+                                group="grillo",
+                                component="grillo",
+                            )
+                        )
                     except Exception:
                         async_check = True
 
                     # Build minimal context to pass through
-                    checker_context = kwargs.get('context') or {}
+                    checker_context = kwargs.get("context") or {}
                     checker_context = dict(checker_context)
                     # Attach last_action_result from message if present
-                    if hasattr(message, 'last_action_result'):
-                        checker_context['last_action_result'] = getattr(message, 'last_action_result')
+                    if hasattr(message, "last_action_result"):
+                        checker_context["last_action_result"] = getattr(
+                            message, "last_action_result"
+                        )
                     # Attach the final chain result (ACTIONS_EXECUTED / FORWARD_AS_TEXT / etc.)
                     try:
-                        checker_context['chain_result'] = result
+                        checker_context["chain_result"] = result
                     except Exception:
                         pass
 
                     # Get an original_user_message when available in context
-                    original_user_message = checker_context.get('original_user_message') or checker_context.get('original_text') or ''
+                    original_user_message = (
+                        checker_context.get("original_user_message")
+                        or checker_context.get("original_text")
+                        or ""
+                    )
 
                     if async_check:
                         try:
-                            log_info(f"[grillo] Scheduling checker for chat_id={getattr(message,'chat_id',None)} chain_result={result}")
-                            asyncio.create_task(_grillo_fire_and_forget(getattr(interface_send_func, '__self__', None) or None, message, original_user_message, text, checker_context))
+                            log_info(
+                                f"[grillo] Scheduling checker for chat_id={getattr(message, 'chat_id', None)} chain_result={result}"
+                            )
+                            asyncio.create_task(
+                                _grillo_fire_and_forget(
+                                    getattr(interface_send_func, "__self__", None)
+                                    or None,
+                                    message,
+                                    original_user_message,
+                                    text,
+                                    checker_context,
+                                )
+                            )
                             # Mark as scheduled
                             try:
-                                setattr(message, 'grillo_checked', True)
+                                setattr(message, "grillo_checked", True)
                             except Exception:
                                 pass
                         except Exception as e:
-                            log_debug('[llm_to_interface] Failed to schedule Grillo checker task: ' + str(e))
+                            log_debug(
+                                "[llm_to_interface] Failed to schedule Grillo checker task: "
+                                + str(e)
+                            )
                     else:
                         # Synchronous for testing convenience
                         try:
-                            await _grillo_fire_and_forget(getattr(interface_send_func, '__self__', None) or None, message, original_user_message, text, checker_context)
+                            await _grillo_fire_and_forget(
+                                getattr(interface_send_func, "__self__", None) or None,
+                                message,
+                                original_user_message,
+                                text,
+                                checker_context,
+                            )
                             try:
-                                setattr(message, 'grillo_checked', True)
+                                setattr(message, "grillo_checked", True)
                             except Exception:
                                 pass
                         except Exception:
-                            log_debug('[llm_to_interface] Grillo checker synchronous call failed')
+                            log_debug(
+                                "[llm_to_interface] Grillo checker synchronous call failed"
+                            )
         except Exception:
-            log_debug('[llm_to_interface] Grillo checker invocation encountered an error')
+            log_debug(
+                "[llm_to_interface] Grillo checker invocation encountered an error"
+            )
 
-        if result == 'ACTIONS_EXECUTED' or result == 'BLOCKED':
+        if result == "ACTIONS_EXECUTED" or result == "BLOCKED":
             # Orchestrator handled or blocked: nothing to forward
             return None
-        elif result == 'LLM_FAILED':
+        elif result == "LLM_FAILED":
             # LLM failed and fallback message was already sent: nothing more to forward
             return None
         # Else forward as usual

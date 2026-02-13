@@ -4,7 +4,6 @@ from core.mention_utils import is_message_for_bot
 import core.chat_attention as chat_attention
 
 
-
 class DummyChat:
     def __init__(
         self, type="group", human_count=None, title=None, username=None, id=123
@@ -104,7 +103,10 @@ async def test_chat_asleep_non_wake_message(caplog):
     directed, reason = await is_message_for_bot(msg, bot)
     assert directed is False
     assert reason == "chat_asleep"
-    assert "SyntH is asleep, message is not a wake command so is not considered a message for bot" in caplog.text
+    assert (
+        "SyntH is asleep, message is not a wake command so is not considered a message for bot"
+        in caplog.text
+    )
     # Restore attention for isolation
     chat_attention.set_attention(9999, True)
 

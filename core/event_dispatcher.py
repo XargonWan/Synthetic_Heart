@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 
 from core.time_zone_utils import get_local_timezone, format_dual_time
@@ -12,7 +11,6 @@ import time
 from core.core_initializer import PLUGIN_REGISTRY
 
 # Prefer plugin registry lookup to avoid importing plugin internals into core
-
 
 
 # Track events currently dispatched to prevent duplicate processing
@@ -53,9 +51,12 @@ async def dispatch_pending_events(bot):
         # Fallback to dynamic import if registry doesn't provide it
         try:
             from plugins.event_plugin import EventPlugin as _EventPlugin
+
             event_plugin = _EventPlugin()
         except Exception:
-            log_warning("[event_dispatcher] Event plugin not available; skipping event prompt creation")
+            log_warning(
+                "[event_dispatcher] Event plugin not available; skipping event prompt creation"
+            )
             event_plugin = None
 
     for ev in events:
