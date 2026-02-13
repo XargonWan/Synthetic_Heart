@@ -109,14 +109,24 @@ PLUTCHIK_OPPOSITES = {
     "sad": "happy",
     "angry": "fear",
     "fear": "angry",
-    "disgust": "neutral",
+
     "neutral": "disgust",
     "surprised": "relaxed",
     "relaxed": "surprised",
     "love": "disgust",
     "arousal": "disgust",
     # Disgust reduces Love/Arousal
+    # Disgust reduces Love/Arousal
     "disgust": "love",  # Primary opposite mapping
+}
+
+# Default baseline intensity for emotions (to avoid dropping to absolute zero)
+DEFAULT_BASELINE = 0.1
+
+# Specific baselines for certain emotions
+EMOTION_BASELINES = {
+    "neutral": 5.0,  # Neutral state should be relatively high
+    "relaxed": 1.0,  # Always a bit relaxed
 }
 
 
@@ -156,6 +166,13 @@ class EmotionState:
 
         # Exponential decay: intensity * e^(-delta_t / tau)
         decayed = self.intensity * math.exp(-delta_t / tau)
+
+        # Get baseline for this emotion
+        baseline = EMOTION_BASELINES.get(self.emotion_name, DEFAULT_BASELINE)
+
+        # Exponential decay towards baseline: B + (I - B) * e^(-delta_t / tau)
+        # decayed = self.intensity * math.exp(-delta_t / tau)
+        decayed = baseline + (self.intensity - baseline) * math.exp(-delta_t / tau)
 
         # Return clamped value
         return max(0.0, min(10.0, decayed))
@@ -429,7 +446,7 @@ class EmotionManager(PluginBase):
                     await conn.commit()
 
             log_debug(f"[emotion_manager] Set {emotion} = {intensity}")
-            
+
             # Notify animation handler
             try:
                 from core.animation_handler import get_animation_handler
@@ -451,7 +468,6 @@ class EmotionManager(PluginBase):
         except Exception as e:
             log_error(f"[emotion_manager] Error setting emotion: {e}")
             return False
-
 
     async def update_emotion_from_tags(
         self, text: str, apply_balancing: bool = True
@@ -583,11 +599,13 @@ class EmotionManager(PluginBase):
         return emotion_tags
 
     async def decay_emotions(self, threshold: Optional[float] = None):
-        """Apply decay to all emotions and remove low-intensity ones.
+        """Apply decay to all emotions and remove those below baseline (if applicable).
 
-        Args:
-            threshold: Remove emotions below this intensity (default 0.1)
+        Note: With baselines, we rarely remove emotions, just clamp them.
+        We ensure all canonical emotions exist at least at their baseline.
         """
+        # Threshold concept is slightly different now with baselines,
+        # but we can still use it to clean up non-canonical noise.
         if threshold is None:
             threshold = self._decay_threshold
 
@@ -599,90 +617,76 @@ class EmotionManager(PluginBase):
                         "SELECT emotion_name, intensity, timestamp FROM emotion_state"
                     )
                     rows = await cur.fetchall()
+                    existing_emotions = {row[0] for row in rows}
 
                     now = datetime.now()
                     to_remove = []
                     to_update = []
 
+                    # 1. Decay existing emotions
                     for emotion_name, intensity, timestamp in rows:
                         state = EmotionState(emotion_name, intensity, timestamp)
                         decayed = state.get_decayed_intensity(now)
 
-                        if decayed < threshold:
-                            to_remove.append(emotion_name)
-                            log_debug(
-                                f"[emotion_manager] Marking for removal: {emotion_name} ({decayed:.2f})"
-                            )
-                        else:
-                            # Only update if changed significantly to save writes
+                        baseline = EMOTION_BASELINES.get(emotion_name, DEFAULT_BASELINE)
+
+                        # If it's a valid/canonical emotion, we enforce baseline
+                        if (
+                            emotion_name in VALID_EMOTIONS
+                            or emotion_name in CANONICAL_EMOTIONS
+                        ):
+                            if decayed < baseline:
+                                decayed = baseline
+
                             if abs(decayed - intensity) > 0.01:
                                 to_update.append((decayed, emotion_name))
+                        else:
+                            # Non-canonical garbage -> remove if below threshold/baseline
+                            if decayed < max(threshold, baseline):
+                                to_remove.append(emotion_name)
+                            elif abs(decayed - intensity) > 0.01:
+                                to_update.append((decayed, emotion_name))
 
-                    # Perform updates using the SAME connection
+                    # 2. Ensure all canonical emotions exist
+                    to_insert = []
+                    for canon in CANONICAL_EMOTIONS:
+                        if canon not in existing_emotions:
+                            base = EMOTION_BASELINES.get(canon, DEFAULT_BASELINE)
+                            # We insert them "fresh" at baseline
+                            to_insert.append((canon, base))
+                            log_debug(
+                                f"[emotion_manager] Seeding missing canonical emotion: {canon} = {base}"
+                            )
+
+                    # Perform updates
                     if to_update:
                         await cur.executemany(
                             "UPDATE emotion_state SET intensity = %s WHERE emotion_name = %s",
                             to_update,
                         )
-                        # Log decay events to emotion_diary
-                        decay_logs = [
-                            (
-                                "emotion_manager",
-                                "decay",
-                                name,
-                                val,
-                                "active",
-                                "decay_cycle",
-                            )
-                            for val, name in to_update
-                        ]
-                        await cur.executemany(
-                            """
-                            INSERT INTO emotion_diary 
-                            (source, event, emotion, intensity, state, trigger_condition, timestamp)
-                            VALUES (%s, %s, %s, %s, %s, %s, NOW())
-                            """,
-                            decay_logs,
-                        )
-                    
+                        # Log significant decay events? Maybe too verbose if we log every minute.
+                        # Let's skip detailed diary logging for routine decay to save space/perf,
+                        # or only log if change is large.
+                        pass
+
                     if to_remove:
                         await cur.executemany(
                             "DELETE FROM emotion_state WHERE emotion_name = %s",
                             [(name,) for name in to_remove],
                         )
-                        # Log removal events
-                        removal_logs = [
-                            (
-                                "emotion_manager",
-                                "decay_remove",
-                                name,
-                                0.0,
-                                "removed",
-                                "decay_cycle",
-                            )
-                            for name in to_remove
-                        ]
+
+                    if to_insert:
                         await cur.executemany(
-                            """
-                            INSERT INTO emotion_diary 
-                            (source, event, emotion, intensity, state, trigger_condition, timestamp)
-                            VALUES (%s, %s, %s, %s, %s, %s, NOW())
-                            """,
-                            removal_logs,
+                            "INSERT INTO emotion_state (emotion_name, intensity, timestamp) VALUES (%s, %s, NOW())",
+                            to_insert,
                         )
-                    
-                    if to_update or to_remove:
+
+                    if to_update or to_remove or to_insert:
                         await conn.commit()
-                        log_info(f"[emotion_manager] Decayed emotions: updated {len(to_update)}, removed {len(to_remove)}")
-                    
-                    # Prevent "decay into the void": if table is empty (all removed), re-seed default
-                    if len(to_remove) == len(rows) and len(rows) > 0:
-                        log_info("[emotion_manager] 🌌 All emotions decayed to void. Re-seeding start state: neutral=5.0")
-                        await cur.execute(
-                             "INSERT INTO emotion_state (emotion_name, intensity, timestamp) VALUES (%s, %s, %s)",
-                             ("neutral", 5.0, now)
-                        )
-                        await conn.commit()
+                        if len(to_update) > 0 or len(to_insert) > 0:
+                            log_debug(
+                                f"[emotion_manager] Decay cycle: updated {len(to_update)}, inserted {len(to_insert)}, removed {len(to_remove)}"
+                            )
 
         except Exception as e:
             log_error(f"[emotion_manager] Error decaying emotions: {e}")
@@ -701,29 +705,43 @@ class EmotionManager(PluginBase):
         try:
             merged_emotions: Dict[str, float] = {}
 
-            # Source 1: Get emotions from ai_diary (latest N entries)
+            # Source 1: Get emotions from ai_diary (latest N entries with timestamps)
             log_debug("[emotion_manager] Fetching emotions from ai_diary...")
             try:
+                now = datetime.now()
                 async with get_conn_ctx() as conn:
                     cm = conn.cursor()
                     if inspect.iscoroutine(cm):
                         cm = await cm
                     async with cm as cur:
-                        # Get latest 10 diary entries with emotions
+                        # Get latest 20 diary entries with emotions AND timestamp
                         await cur.execute(
-                            """SELECT emotions FROM ai_diary 
+                            """SELECT emotions, timestamp FROM ai_diary 
                                WHERE emotions IS NOT NULL AND emotions != '[]' 
-                               ORDER BY timestamp DESC LIMIT 10"""
+                               ORDER BY timestamp DESC LIMIT 20"""
                         )
                         rows = await cur.fetchall()
 
                         for row in rows:
-                            if row and row[0]:
+                            if row and row[0]:  # emotions, timestamp
+                                emotions_json = row[0]
+                                entry_ts = row[1]
+
+                                # Calculate decay based on diary entry age
+                                # Note: We treat the diary entry as a snapshot at that time.
+                                # IF the entry is old, its influence should be decayed.
+                                if isinstance(entry_ts, str):
+                                    # handle potential string format (though db should return datetime)
+                                    try:
+                                        entry_ts = datetime.fromisoformat(entry_ts)
+                                    except (ValueError, TypeError):
+                                        entry_ts = now  # fallback
+
                                 try:
                                     emotions_data = (
-                                        json.loads(row[0])
-                                        if isinstance(row[0], str)
-                                        else row[0]
+                                        json.loads(emotions_json)
+                                        if isinstance(emotions_json, str)
+                                        else emotions_json
                                     )
                                     if isinstance(emotions_data, list):
                                         for emotion_entry in emotions_data:
@@ -731,31 +749,43 @@ class EmotionManager(PluginBase):
                                             if isinstance(emotion_entry, str):
                                                 # Simple string format
                                                 emotion_type = emotion_entry.lower()
-                                                intensity = 5.0  # Default intensity
+                                                raw_intensity = 5.0  # Default intensity
                                             elif isinstance(emotion_entry, dict):
                                                 # Object format with type and intensity
                                                 emotion_type = emotion_entry.get(
                                                     "type", ""
                                                 ).lower()
-                                                intensity = float(
+                                                raw_intensity = float(
                                                     emotion_entry.get("intensity", 5.0)
                                                 )
                                             else:
                                                 continue
 
-                                            # Favor higher intensities
                                             if emotion_type in VALID_EMOTIONS:
+                                                # Apply decay to this historical value
+                                                # Create temp state to calc decay
+                                                temp_state = EmotionState(
+                                                    emotion_type,
+                                                    raw_intensity,
+                                                    entry_ts,
+                                                )
+                                                decayed_diary_val = (
+                                                    temp_state.get_decayed_intensity(
+                                                        now
+                                                    )
+                                                )
+
                                                 if (
                                                     emotion_type not in merged_emotions
-                                                    or intensity
+                                                    or decayed_diary_val
                                                     > merged_emotions[emotion_type]
                                                 ):
                                                     merged_emotions[emotion_type] = (
-                                                        intensity
+                                                        decayed_diary_val
                                                     )
-                                                    log_debug(
-                                                        f"[emotion_manager] 📔 From diary: {emotion_type} = {intensity}"
-                                                    )
+                                                    # log_debug(
+                                                    #     f"[emotion_manager] 📔 From diary (decayed): {emotion_type} = {decayed_diary_val:.2f} (raw {raw_intensity} from {entry_ts})"
+                                                    # )
                                 except (json.JSONDecodeError, ValueError) as e:
                                     log_warning(
                                         f"[emotion_manager] Could not parse diary emotions: {e}"
@@ -777,12 +807,20 @@ class EmotionManager(PluginBase):
                 log_warning(f"[emotion_manager] Error fetching from emotion_state: {e}")
 
             # If no emotions found anywhere, initialize default state
-            if not merged_emotions:
-                log_info("[emotion_manager] ⚠️ No emotions found in diary or DB. Seeding default state: neutral=5.0")
-                merged_emotions["neutral"] = 5.0
-            
+            # Ensure all canonical emotions have at least baseline in merged set
+            for canon in CANONICAL_EMOTIONS:
+                base = EMOTION_BASELINES.get(canon, DEFAULT_BASELINE)
+                if canon not in merged_emotions:
+                    merged_emotions[canon] = base
+                elif merged_emotions[canon] < base:
+                    merged_emotions[canon] = base
+
             # Save merged emotions back to DB
             # This effectively "re-syncs" the DB to match the diary + decay state
+            # NOTE: We must be careful here. set_emotion(..., intensity) updates timestamp to NOW().
+            # If we just read a decayed intensity of 5.0 (originally 10.0 from 1hr ago), and set 5.0 now,
+            # we effectively "reset" the decay curve starting at 5.0.
+            # This is mathematically consistent (5.0 now decays to 2.5 in 1 more hr, just like 10.0(old) would have).
             for emotion_type, intensity in merged_emotions.items():
                 await self.set_emotion(emotion_type, intensity)
 
