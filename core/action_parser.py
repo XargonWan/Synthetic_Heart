@@ -912,18 +912,6 @@ async def run_action(action: Any, context: Dict[str, Any], bot, original_message
 
     action_interface = action.get("interface")
 
-    # Preflight safety: prevent preflight-run actions from performing side-effects.
-    # When preflight=True in context we only allow read-only/search actions (e.g., memory_search).
-    try:
-        if isinstance(context, dict) and bool(context.get('preflight')):
-            PREFLIGHT_BLOCKED_ACTIONS = {"create_personal_diary_entry", "create_diary_entry"}
-            if action_type in PREFLIGHT_BLOCKED_ACTIONS:
-                log_info(f"[action_parser] ⚠️ Skipping action '{action_type}' during preflight to avoid side-effects")
-                return {"skipped_due_to_preflight": True, "action": action}
-    except Exception:
-        # Fail-safe: if anything goes wrong, proceed with normal execution
-        pass
-
     log_info(f"[action_parser] 🚀 Executing action: type={action_type}, interface={action_interface}")
 
     # Use plugin system for all action types (including messages)
@@ -1272,6 +1260,25 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
                 log_warning(f"[action_parser] Failed to invoke selective correction: {e}")
         else:
             log_debug("[action_parser] Errors found but message is not from LLM; skipping correction to prevent loops")
+
+    # Debrief hooks (postflight) before diary creation
+    if not (context or {}).get("from_debrief"):
+        try:
+            from core.debrief import run_debrief
+
+            await run_debrief(
+                processed_actions=processed_actions,
+                failed_actions=failed_actions,
+                results={
+                    "processed": processed_actions,
+                    "failed": failed_actions,
+                    "errors": collected_errors,
+                },
+                context=context,
+                original_message=original_message,
+            )
+        except Exception as e:
+            log_debug(f"[action_parser] Debrief failed: {e}")
 
     # Create diary entry for this interaction
     await _create_diary_entry_for_actions(processed_actions, context, original_message)

@@ -619,4 +619,4 @@ class MemorySearchPlugin:
 
 
 # Export plugin class for dynamic import patterns
-PLUGIN_CLASS = MemorySearchPlugin
+PLUGIN_CLASS = None

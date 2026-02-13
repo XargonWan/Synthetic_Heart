@@ -3,6 +3,8 @@
 from core.prompt_engine import build_json_prompt
 from core.llm_registry import get_llm_registry
 import asyncio
+import contextvars
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from datetime import datetime
 import json
@@ -20,6 +22,99 @@ from core.multimodal_attachment import (
 
 # Plugin managed centrally in initialize_core_components
 plugin = None
+
+# Global lease to serialize LLM chains (Recon + prompt + actions) across tasks
+_llm_chain_lock = asyncio.Lock()
+_llm_chain_depth = contextvars.ContextVar("llm_chain_depth", default=0)
+
+try:
+    from core.variables_engine import register_exposed_var
+
+    register_exposed_var(
+        "LLM_CHAIN_LEASE_TIMEOUT_SEC",
+        label="LLM chain lease timeout (s)",
+        default=300,
+        value_type=int,
+        ui_type="number",
+        description=(
+            "Force-release the global LLM chain lease after this many seconds to "
+            "avoid deadlocks. Set to 0 to disable."
+        ),
+        scope="agent",
+        component="agent",
+        advanced=True,
+        needs_component_reload=False,
+    )
+except Exception:
+    pass
+
+
+@asynccontextmanager
+async def _llm_chain_lease():
+    depth = _llm_chain_depth.get()
+    if depth > 0:
+        _llm_chain_depth.set(depth + 1)
+        try:
+            yield
+        finally:
+            _llm_chain_depth.set(max(depth - 1, 0))
+        return
+
+    try:
+        timeout = int(
+            config_registry.get_value(
+                "LLM_CHAIN_LEASE_TIMEOUT_SEC", 300, value_type=int
+            )
+            or 300
+        )
+    except Exception:
+        timeout = 300
+
+    acquired = False
+    try:
+        if timeout > 0:
+            await asyncio.wait_for(_llm_chain_lock.acquire(), timeout=timeout)
+        else:
+            await _llm_chain_lock.acquire()
+        acquired = True
+    except asyncio.TimeoutError:
+        log_warning(
+            f"[plugin_instance] LLM chain lease acquire timed out after {timeout}s; proceeding without lock"
+        )
+        yield
+        return
+
+    _llm_chain_depth.set(1)
+    watchdog_task = None
+
+    async def _lease_watchdog() -> None:
+        try:
+            await asyncio.sleep(timeout)
+            if _llm_chain_lock.locked():
+                log_error(
+                    f"[plugin_instance] LLM chain lease timed out after {timeout}s; forcing release"
+                )
+                try:
+                    _llm_chain_lock.release()
+                except Exception:
+                    pass
+        except asyncio.CancelledError:
+            pass
+
+    if timeout > 0:
+        watchdog_task = asyncio.create_task(_lease_watchdog())
+
+    try:
+        yield
+    finally:
+        _llm_chain_depth.set(0)
+        if watchdog_task:
+            watchdog_task.cancel()
+        if acquired and _llm_chain_lock.locked():
+            try:
+                _llm_chain_lock.release()
+            except Exception:
+                pass
 
 
 async def load_plugin(
@@ -54,14 +149,13 @@ async def load_plugin(
                         f"[plugin] ✅ Ongoing response completed in {current_plugin_name}"
                     )
                 except asyncio.TimeoutError:
+                    # Prefer to avoid force-cancelling an in-progress LLM response here;
+                    # rely on the engine's own waiting/recovery logic (Selenium already
+                    # implements robust wait/retry). Log and proceed with the hotswap
+                    # without cancelling the worker task to prevent premature stop.
                     log_warning(
-                        f"[plugin] ⏰ Timeout waiting for response completion in {current_plugin_name}, cancelling task"
+                        f"[plugin] ⏰ Timeout waiting for response completion in {current_plugin_name}; continuing without cancelling the worker (will let engine finish)"
                     )
-                    plugin._worker_task.cancel()
-                    try:
-                        await asyncio.wait_for(plugin._worker_task, timeout=5.0)
-                    except (asyncio.TimeoutError, Exception):
-                        pass  # Task cancelled or already done
                 except Exception as e:
                     log_warning(
                         f"[plugin] ⚠️ Error waiting for response completion: {e}"
@@ -259,88 +353,92 @@ async def handle_incoming_message(
 ):
     """Process incoming messages or pre-built prompts."""
 
-    # Check if plugin is loaded
-    if plugin is None:
-        log_error(
-            "[plugin_instance] No LLM plugin loaded! Cannot handle incoming message."
-        )
-        log_error(f"[plugin_instance] Available plugins: {dir()}")
-        # Try to load manual plugin as fallback
-        try:
-            log_warning(
-                "[plugin_instance] Attempting to load manual plugin as fallback..."
+    async with _llm_chain_lease():
+
+        # Check if plugin is loaded
+        if plugin is None:
+            log_error(
+                "[plugin_instance] No LLM plugin loaded! Cannot handle incoming message."
             )
-            await load_plugin("manual")
-            if plugin is None:
-                raise ValueError("Manual plugin failed to load")
-            log_info("[plugin_instance] Manual plugin loaded successfully as fallback")
-        except Exception as fallback_e:
-            log_error(f"[plugin_instance] Fallback plugin loading failed: {fallback_e}")
-            raise ValueError("No LLM plugin loaded and fallback failed")
+            log_error(f"[plugin_instance] Available plugins: {dir()}")
+            # Try to load manual plugin as fallback
+            try:
+                log_warning(
+                    "[plugin_instance] Attempting to load manual plugin as fallback..."
+                )
+                await load_plugin("manual")
+                if plugin is None:
+                    raise ValueError("Manual plugin failed to load")
+                log_info("[plugin_instance] Manual plugin loaded successfully as fallback")
+            except Exception as fallback_e:
+                log_error(
+                    f"[plugin_instance] Fallback plugin loading failed: {fallback_e}"
+                )
+                raise ValueError("No LLM plugin loaded and fallback failed")
 
-    # Normalize message user/date fields to avoid AttributeErrors later
-    try:
-        from core.user_utils import ensure_message_user_fields
-
-        ensure_message_user_fields(message)
-    except Exception:
-        pass
-
-    if message is None and isinstance(context_memory_or_prompt, dict):
-        prompt = context_memory_or_prompt
-        message = SimpleNamespace(
-            chat_id="TARDIS / system / events",
-            message_id=int(datetime.utcnow().timestamp() * 1000) % 1_000_000,
-            text=prompt.get("input", {}).get("payload", {}).get("description", ""),
-            date=datetime.utcnow(),
-            from_user=SimpleNamespace(id=0, full_name="system", username="system"),
-            reply_to_message=None,
-            chat=SimpleNamespace(id="TARDIS / system / events", type="private"),
-        )
-        log_debug("[plugin_instance] Handling pre-built event prompt")
-    else:
-        # If this is a structured 'event' system prompt, enqueue it into the
-        # central message queue with high priority so it is processed ASAP.
+        # Normalize message user/date fields to avoid AttributeErrors later
         try:
-            # Prefer explicit context dict (pre-built prompts)
-            maybe_ctx = (
-                context_memory_or_prompt
-                if isinstance(context_memory_or_prompt, dict)
-                else None
-            )
-            sys_type = None
-            if maybe_ctx and isinstance(maybe_ctx.get("system_message"), dict):
-                sys_type = maybe_ctx["system_message"].get("type")
-            # Also accept messages that carry a system-like from_user (id==0)
-            if sys_type == "event" or (
-                hasattr(message, "from_user")
-                and getattr(message.from_user, "id", None) == 0
-                and isinstance(context_memory_or_prompt, dict)
-                and context_memory_or_prompt.get("system_message", {}).get("type")
-                == "event"
-            ):
-                try:
-                    # Import lazily to avoid circular imports at module load
-                    from core import message_queue
+            from core.user_utils import ensure_message_user_fields
 
-                    event_id = None
-                    if maybe_ctx:
-                        event_id = maybe_ctx.get("system_message", {}).get("event_id")
-                    await message_queue.enqueue_event(
-                        bot, context_memory_or_prompt, event_id=event_id
-                    )
-                    log_debug(
-                        f"[plugin_instance] Enqueued system event for processing: chat_id={getattr(message, 'chat_id', None)} event_id={event_id}"
-                    )
-                    return None
-                except Exception as e:
-                    log_warning(
-                        f"[plugin_instance] Failed to enqueue event prompt: {e}"
-                    )
-                    # Fall through and let the plugin handle it directly
-                    pass
+            ensure_message_user_fields(message)
         except Exception:
             pass
+
+        if message is None and isinstance(context_memory_or_prompt, dict):
+            prompt = context_memory_or_prompt
+            message = SimpleNamespace(
+                chat_id="TARDIS / system / events",
+                message_id=int(datetime.utcnow().timestamp() * 1000) % 1_000_000,
+                text=prompt.get("input", {}).get("payload", {}).get("description", ""),
+                date=datetime.utcnow(),
+                from_user=SimpleNamespace(id=0, full_name="system", username="system"),
+                reply_to_message=None,
+                chat=SimpleNamespace(id="TARDIS / system / events", type="private"),
+            )
+            log_debug("[plugin_instance] Handling pre-built event prompt")
+        else:
+            # If this is a structured 'event' system prompt, enqueue it into the
+            # central message queue with high priority so it is processed ASAP.
+            try:
+                # Prefer explicit context dict (pre-built prompts)
+                maybe_ctx = (
+                    context_memory_or_prompt
+                    if isinstance(context_memory_or_prompt, dict)
+                    else None
+                )
+                sys_type = None
+                if maybe_ctx and isinstance(maybe_ctx.get("system_message"), dict):
+                    sys_type = maybe_ctx["system_message"].get("type")
+                # Also accept messages that carry a system-like from_user (id==0)
+                if sys_type == "event" or (
+                    hasattr(message, "from_user")
+                    and getattr(message.from_user, "id", None) == 0
+                    and isinstance(context_memory_or_prompt, dict)
+                    and context_memory_or_prompt.get("system_message", {}).get("type")
+                    == "event"
+                ):
+                    try:
+                        # Import lazily to avoid circular imports at module load
+                        from core import message_queue
+
+                        event_id = None
+                        if maybe_ctx:
+                            event_id = maybe_ctx.get("system_message", {}).get("event_id")
+                        await message_queue.enqueue_event(
+                            bot, context_memory_or_prompt, event_id=event_id
+                        )
+                        log_debug(
+                            f"[plugin_instance] Enqueued system event for processing: chat_id={getattr(message, 'chat_id', None)} event_id={event_id}"
+                        )
+                        return None
+                    except Exception as e:
+                        log_warning(
+                            f"[plugin_instance] Failed to enqueue event prompt: {e}"
+                        )
+                        # Fall through and let the plugin handle it directly
+                        pass
+            except Exception:
+                pass
 
         message_text = getattr(message, "text", "")
         log_debug(f"[plugin_instance] Received message: {message_text}")
@@ -623,6 +721,31 @@ async def handle_incoming_message(
                 llm_context["chat_id"] = message.chat_id
             if hasattr(message, "interface_path") and message.interface_path:
                 llm_context["interface_path"] = message.interface_path
+
+            # Preserve original user message for corrector (scope-safe)
+            try:
+                if isinstance(prompt, dict):
+                    llm_context["original_user_message"] = (
+                        prompt.get("input", {})
+                        .get("payload", {})
+                        .get("text", "")
+                    )
+                else:
+                    llm_context["original_user_message"] = getattr(message, "text", "") or ""
+            except Exception:
+                llm_context["original_user_message"] = getattr(message, "text", "") or ""
+
+            # Scope-aware correction: only allow actions that were present in the prompt
+            try:
+                if isinstance(prompt, dict) and isinstance(prompt.get("actions"), dict):
+                    llm_context["allowed_action_types"] = list(prompt["actions"].keys())
+                else:
+                    llm_context["allowed_action_types"] = None
+            except Exception:
+                llm_context["allowed_action_types"] = None
+
+            # Explicitly tag the action scope for the corrector
+            llm_context["action_scope"] = "main"
 
             # Ensure action_parser/plugins can reliably detect the originating interface
             if interface:

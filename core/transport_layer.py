@@ -956,7 +956,10 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
 
 # Re-entry guard removed: rely solely on the corrector retry counter to avoid loops
 
-def _get_attempted_action_full_description(error_text: str) -> Optional[Dict[str, Any]]:
+def _get_attempted_action_full_description(
+    error_text: str,
+    allowed_action_types: Optional[set[str]] = None,
+) -> Optional[Dict[str, Any]]:
     """Extract which action was attempted and return its FULL description.
     
     When the corrector is triggered due to JSON parsing errors, this function:
@@ -989,6 +992,13 @@ def _get_attempted_action_full_description(error_text: str) -> Optional[Dict[str
         action_type = type_match.group(1)
         log_debug(f"[_get_attempted_action] Identified attempted action type: {action_type}")
         
+        # Enforce allowed action scope (if provided)
+        if allowed_action_types is not None and action_type not in allowed_action_types:
+            log_debug(
+                f"[_get_attempted_action] Action type '{action_type}' not in allowed scope; skipping"
+            )
+            return None
+
         # Now get the FULL description from core_initializer (not minified)
         try:
             from core.core_initializer import core_initializer
@@ -1051,6 +1061,13 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
 
     # Extract message from context if available
     message = context.get('message') if context else None
+
+    # Normalize allowed action types from context (scope-aware correction)
+    allowed_action_types = None
+    if context:
+        scoped_actions = context.get("allowed_action_types") or context.get("allowed_actions")
+        if isinstance(scoped_actions, (list, set, tuple)):
+            allowed_action_types = {str(a) for a in scoped_actions if a}
     
     # Check if we have selective correction context (some actions succeeded, some failed)
     correction_context = getattr(message, 'correction_context', None) if message else None
@@ -1117,7 +1134,10 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
             
             # Try to identify which action was attempted and include its full description
             try:
-                attempted_action_info = _get_attempted_action_full_description(text)
+                attempted_action_info = _get_attempted_action_full_description(
+                    text,
+                    allowed_action_types=allowed_action_types,
+                )
                 if attempted_action_info:
                     log_info(f"[corrector_middleware] Including full description for attempted action: {attempted_action_info['action_type']}")
             except Exception as e:
@@ -1139,7 +1159,9 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
             #          Without it, LLM might respond "Acknowledged, JSON was valid"
             original_user_message = ""
             if message:
-                original_user_message = getattr(message, 'text', "")
+                original_user_message = getattr(message, 'text', "") or ""
+            if not original_user_message and context and context.get("original_user_message") is not None:
+                original_user_message = context.get("original_user_message") or ""
             
             # Build correction message based on whether we have selective correction context
             if correction_context:
@@ -1165,6 +1187,10 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
                     action_type = action.get('type', 'unknown')
                     correction_message_text += f"  - {action_type}: {', '.join(action_errors)}\n"
                 
+                if allowed_action_types:
+                    correction_message_text += (
+                        f"\nAllowed action types for this scope: {', '.join(sorted(allowed_action_types))}\n"
+                    )
                 correction_message_text += (
                     f"\nRequirements:\n"
                     f"1. Respond with ONLY valid JSON\n"
@@ -1182,6 +1208,10 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
                     f"3. Fix any JSON syntax errors\n"
                     f"Error details: {last_error_hint}"
                 )
+                if allowed_action_types:
+                    correction_message_text += (
+                        f"\nAllowed action types for this scope: {', '.join(sorted(allowed_action_types))}"
+                    )
             
             correction_payload = {
                 "system_message": {
@@ -1237,7 +1267,12 @@ async def run_corrector_middleware(text: str, bot=None, context: dict = None, ch
             elif context and 'interface_path' in context:
                 correction_message.interface_path = context['interface_path']
 
-            log_debug(f"[corrector_middleware] Requesting correction from LLM (attempt {attempt}/{max_retries}) - chat_id={correction_message.chat_id}, thread_id={correction_message.thread_id}")
+            scope_label = "unknown"
+            if context and isinstance(context.get("action_scope"), str):
+                scope_label = context.get("action_scope")
+            log_debug(
+                f"[corrector_middleware] Requesting correction from LLM (attempt {attempt}/{max_retries}) - chat_id={correction_message.chat_id}, thread_id={correction_message.thread_id}, scope={scope_label}"
+            )
 
             # Mark that we are expecting a system reply for this chat_id so llm_to_interface can
             # consume it without forwarding and avoid re-entry loops.

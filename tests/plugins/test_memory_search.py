@@ -1,7 +1,12 @@
+import pytest
+
+pytest.skip(
+    "Legacy memory_search plugin removed (Recon replaces it)",
+    allow_module_level=True,
+)
+
 from types import SimpleNamespace
 from datetime import datetime
-
-import pytest
 
 from plugins.memory_search import MemorySearchPlugin
 

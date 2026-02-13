@@ -96,6 +96,10 @@ async def test_llm_plugin_worker_task_waiting():
     # Cleanup should have been called after waiting
     initial_plugin.cleanup.assert_called_once()
 
+    # We must NOT force-cancel an ongoing worker task on hotswap timeouts —
+    # rely on the engine's own waiting logic instead (Selenium handles streaming)
+    mock_task.cancel.assert_not_called()
+
 
 @pytest.mark.asyncio
 async def test_hotswap_raises_if_start_fails_when_ensured():
