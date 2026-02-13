@@ -109,7 +109,6 @@ PLUTCHIK_OPPOSITES = {
     "sad": "happy",
     "angry": "fear",
     "fear": "angry",
-
     "neutral": "disgust",
     "surprised": "relaxed",
     "relaxed": "surprised",
@@ -242,6 +241,17 @@ class EmotionManager(PluginBase):
                 "optional_params": {},
             },
         }
+
+    def get_prompt_instructions(self, action_type: str) -> str:
+        """Return instructions for LLM on how to use emotion actions."""
+        # Generic instructions for emotion system (used by core_initializer to append to system prompt)
+        return """
+To express emotions, include tags in your response like {emotion intensity}.
+Supported emotions: happy, sad, angry, fear, disgust, surprised, neutral, relaxed, love, arousal, devotion.
+Intensity is 0.0 to 10.0.
+Example: "I am so happy to see you! {happy 8.5, love 5.0}"
+Your emotional state will decay over time, so reinforce it if the feeling persists.
+"""
 
     async def start(self):
         """Initialize emotion manager and create DB table if needed."""
@@ -857,31 +867,48 @@ class EmotionManager(PluginBase):
         max_emotions = config_registry.get_value("EMOTION_MAX_DISPLAY", 7)
 
         if not emotions:
-            emotion_str = "neutral (no active emotions)"
+            emotion_str = "Neutral 5.0 (moderate)"
         else:
-            # Sort by intensity (descending) and take top N
+            # Sort by intensity (max EMOTION_MAX_DISPLAY)
             sorted_emotions = sorted(
                 emotions.items(), key=lambda x: x[1], reverse=True
             )[:max_emotions]
-            emotion_lines = [
-                f"{name} ({intensity:.1f})" for name, intensity in sorted_emotions
-            ]
+
+            emotion_lines = []
+            for name, intensity in sorted_emotions:
+                # Add qualitative descriptor
+                desc = ""
+                if intensity < 2.0:
+                    desc = "trace"
+                elif intensity < 4.0:
+                    desc = "low"
+                elif intensity < 7.0:
+                    desc = "moderate"
+                elif intensity < 9.0:
+                    desc = "high"
+                else:
+                    desc = "intense"
+
+                emotion_lines.append(f"{name} ({intensity:.1f} - {desc})")
+
             emotion_str = ", ".join(emotion_lines)
 
         log_debug(f"[emotion_manager] Providing static injection: {emotion_str}")
-        # Provide canonical available emotions for the LLM to use (helpful to avoid made-up labels)
+
+        # Provide canonical available emotions for the LLM to use
         avail = sorted(list(CANONICAL_EMOTIONS))
         avail_str = ", ".join(avail)
 
         instruction = (
-            f"Current emotional state: {emotion_str}\n\n"
-            f"You can use the following emotions: {avail_str}.\n"
-            "If you wish to indicate one or more emotions in your response, include them using the exact names above with a numeric intensity between 0.0 and 10.0 (for example: {happy 7, surprised 3}). "
-            "You do not have to list all emotions — include only those that are relevant. Do NOT invent other emotion names; use only the provided set."
+            f"Current Emotional State: {emotion_str}\n"
+            f"Available Emotion Tags: {avail_str}\n"
+            "Instruction: To express emotions, include tags in your response like {happy 8.5, surprised 3.0}. "
+            "Use only the provided emotion names. Your emotional state decays over time, so reinforce it if feelings persist."
         )
 
         return {
             "emotion_state": instruction,
+            "current_emotions_nl": emotion_str,
             "available_emotions": avail,
         }
 
