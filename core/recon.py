@@ -269,6 +269,44 @@ async def _build_recon_history_texts_async(
     return local_text, global_text
 
 
+async def _normalize_keywords_list(raw_keywords: List[str] | None) -> List[str]:
+    """Normalize Recon keywords into single-word tokens.
+
+    Rules:
+    - split on underscores, hyphens and non-alphanumeric chars
+    - split camelCase boundaries (e.g. behaviorChange -> behavior, change)
+    - lowercase, strip and dedupe while preserving order
+    - return an empty list if input is None or no valid tokens
+    """
+    if not raw_keywords:
+        return []
+
+    import re
+
+    def _split_camel(s: str) -> List[str]:
+        # Insert space between lower->upper transitions then split
+        parts = re.sub('([a-z0-9])([A-Z])', r"\1 \2", s).split()
+        return parts
+
+    seen = set()
+    out: List[str] = []
+    for k in raw_keywords:
+        if not k:
+            continue
+        # replace non-alnum with space, then split camelCase
+        k = str(k).strip()
+        k = re.sub(r"[^0-9A-Za-z]+", " ", k)
+        for part in k.split():
+            for sub in _split_camel(part):
+                tok = sub.strip().lower()
+                if not tok:
+                    continue
+                if tok not in seen:
+                    seen.add(tok)
+                    out.append(tok)
+    return out
+
+
 async def gather_recon_contributions(
     message=None,
     context_memory=None,
@@ -407,6 +445,9 @@ async def gather_recon_contributions(
         return []
 
     # Dispatch responses to plugins
+    # normalize keywords into single-word tokens before dispatching to plugins
+    norm_keywords = await _normalize_keywords_list(keywords)
+
     for plugin in recon_plugins:
         key = plugin.get_recon_key()
         plugin_name = plugin.__class__.__name__
@@ -418,7 +459,7 @@ async def gather_recon_contributions(
                 context_memory=context_memory,
                 text=text,
                 tags=tags,
-                keywords=keywords,
+                keywords=norm_keywords,
                 max_results=max_results,
             )
         except Exception as e:

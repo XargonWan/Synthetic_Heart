@@ -76,3 +76,50 @@ async def test_build_json_prompt_includes_recon_contributions(monkeypatch):
 
     # Clean up registry
     PLUGIN_REGISTRY.pop("fake_recon_injection", None)
+
+
+@pytest.mark.asyncio
+async def test_recon_keyword_normalization(monkeypatch):
+    """Keywords passed into gather_recon_contributions must be normalized into single-word tokens."""
+    recorded = {}
+
+    class KWPlugin:
+        def get_recon_key(self):
+            return "KW"
+
+        def get_recon_instruction(self):
+            return "Return keywords"
+
+        async def parse_recon_response(self, data, **kwargs):
+            # record what keywords the core passed to us
+            recorded['keywords'] = kwargs.get('keywords')
+            return []
+
+    from core.core_initializer import PLUGIN_REGISTRY
+    PLUGIN_REGISTRY['kw_plugin_test'] = KWPlugin()
+
+    import core.recon as recon_mod
+
+    # Call gather_recon_contributions with compound keywords
+    contribs = await recon_mod.gather_recon_contributions(
+        message=None,
+        context_memory=None,
+        text="test",
+        tags=None,
+        keywords=["narrative_part", "behavior_change", "locale_update"],
+        max_results=3,
+    )
+
+    # Plugin should have received normalized single-word tokens (split on '_' and lowercased)
+    assert 'keywords' in recorded, "plugin did not receive keywords"
+    assert recorded['keywords'] == [
+        "narrative",
+        "part",
+        "behavior",
+        "change",
+        "locale",
+        "update",
+    ]
+
+    # cleanup
+    PLUGIN_REGISTRY.pop('kw_plugin_test', None)
