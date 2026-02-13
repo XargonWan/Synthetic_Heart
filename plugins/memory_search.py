@@ -556,25 +556,25 @@ class MemorySearchPlugin:
                 log_error(f"[memory_search] Query error: {e}")
                 return {"processed": True, "results": [], "error": str(e)}
 
-                    for r in rows:
-                        src, _id, ts, content = r
-                        try:
-                            ts_iso = (
-                                ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
-                            )
-                        except Exception:
-                            ts_iso = str(ts)
-                        snippet = content if isinstance(content, str) else str(content)
-                        if len(snippet) > 400:
-                            snippet = snippet[:400] + "..."
-                        results.append(
-                            {
-                                "source": src,
-                                "id": _id,
-                                "timestamp": ts_iso,
-                                "snippet": snippet,
-                            }
-                        )
+            for r in rows:
+                src, _id, ts, content = r
+                try:
+                    ts_iso = (
+                        ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+                    )
+                except Exception:
+                    ts_iso = str(ts)
+                snippet = content if isinstance(content, str) else str(content)
+                if len(snippet) > 400:
+                    snippet = snippet[:400] + "..."
+                results.append(
+                    {
+                        "source": src,
+                        "id": _id,
+                        "timestamp": ts_iso,
+                        "snippet": snippet,
+                    }
+                )
 
             log_info(f"[memory_search] Retrieved {len(results)} results")
 
