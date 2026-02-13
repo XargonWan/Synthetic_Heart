@@ -1585,7 +1585,7 @@ def get_action_plugin_instructions() -> dict[str, dict]:
     return instructions
 
 
-async def gather_static_injections(message, context_memory):
+async def gather_static_injections(message=None, context_memory=None):
     """Gathers static contextual data from all plugins that support 'static_inject'.
     
     This is used to build the context for every prompt with information like
