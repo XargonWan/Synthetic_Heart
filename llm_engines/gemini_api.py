@@ -724,6 +724,13 @@ class GeminiAPIPlugin(AIPluginBase):
                     log_debug(
                         f"[gemini_api] Redacted heavy data from prompt: {len(str(prompt))} -> {len(prompt_text)} chars"
                     )
+            else:
+                # Fallback: attempt string-based redaction on raw prompt text
+                # This catches embedded JSON or sensitive keys in unstructured prompts (e.g. Grillo)
+                original_len = len(prompt_text)
+                prompt_text = self._redact_string_content(prompt_text)
+                if len(prompt_text) != original_len:
+                     log_debug("[gemini_api] Redacted sensitive patterns from raw string prompt")
 
             log_debug(
                 f"[gemini_api] Sending prompt ({len(prompt_text)} chars) to {self._current_model}"
@@ -1184,6 +1191,16 @@ class GeminiAPIPlugin(AIPluginBase):
 
         # Keys that can contain lists of multimodal attachments
         MULTIMODAL_KEYS = {"attachments", "images", "audio", "documents", "videos"}
+        # Keys to skip during recursion (to avoid parsing schemas or instructions)
+        SKIP_KEYS = {
+            "actions",
+            "tools",
+            "schemas",
+            "instructions",
+            "instructions_verbose",
+            "systemInstruction",
+            "conversation_history",  # Skip history to avoid re-parsing old attachments if structured that way
+        }
 
         # Collect all attachments from all locations
         attachments = []
@@ -1215,7 +1232,9 @@ class GeminiAPIPlugin(AIPluginBase):
                             attachments.append(items)
 
                 # Recurse into all dict values
-                for value in container.values():
+                for key, value in container.items():
+                    if key in SKIP_KEYS:
+                        continue
                     collect_attachments_recursive(value)
 
             elif isinstance(container, list):
@@ -1272,23 +1291,29 @@ class GeminiAPIPlugin(AIPluginBase):
 
         return parts
 
+    def _redact_string_content(self, text: str) -> str:
+        """Redact sensitive patterns from string content (e.g. embedded JSON)."""
+        if not text or not isinstance(text, str):
+            return text
+        
+        # Pattern for quoted "weight" key followed by value
+        # Matches: "weight": 10, 'weight': "high"
+        # Does NOT match unquoted weight: (to avoid natural language hits)
+        import re
+        # Pattern: (quote)weight(quote) : (value)
+        pattern = r'((?:"|\')weight(?:"|\'))\s*:\s*((?:"[^"]*"|\'[^\']*\'|[^,}\]\s]+))'
+        
+        def replacer(match):
+            key_part = match.group(1) # "weight"
+            # Replace value with <redacted> string, preserving quotes of key
+            return f'{key_part}: "<redacted>"'
+        
+        return re.sub(pattern, replacer, text, flags=re.IGNORECASE)
+
     def _copy_and_redact_data(self, prompt: dict) -> dict:
         """Create a deep copy of the prompt and redact heavy binary data recursively.
-
-        This ensures that when the prompt is serialized to JSON for the 'text'
-        part of the Gemini request, it doesn't contain massive base64 strings
-        that are already being sent as native multimodal 'inline_data' parts.
-
-        This fixes the "duplicate data" issue where:
-        - The plugin_instance adds base64-encoded multimodal data to the prompt
-        - gemini_api.py extracts it and sends it as native inline_data parts
-        - BUT the JSON text prompt ALSO contained the same base64 strings
-        - This causes massive prompt sizes and confuses the model
-
-        Handles:
-        - 'attachments' key at any nesting level
-        - Legacy keys: 'images', 'audio', 'documents', 'videos'
-        - Both 'data' and 'base64' field names for binary content
+        
+        ... (docstring truncated) ...
         """
         import copy
 
@@ -1299,6 +1324,8 @@ class GeminiAPIPlugin(AIPluginBase):
             MULTIMODAL_KEYS = {"attachments", "images", "audio", "documents", "videos"}
             # Fields within attachments that contain heavy base64 data
             DATA_FIELDS = {"data", "base64"}
+            # Keys to redact from the prompt (instructions are moved to systemInstruction)
+            REDACT_KEYS = {"instructions", "instructions_verbose", "systemInstruction"}
             # Keys that suggest a dict is actually an attachment
             ATTACHMENT_FIELDS = {
                 "mime_type",
@@ -1328,6 +1355,17 @@ class GeminiAPIPlugin(AIPluginBase):
             def redact_recursive(container) -> None:
                 """Recursively search and redact multimodal data at any level."""
                 if isinstance(container, dict):
+                    # First, remove redundant instruction keys from this level
+                    for key in REDACT_KEYS:
+                        if key in container:
+                            container.pop(key, None)
+
+                    # Also remove internal logic keys that might confuse the model if they leaked
+                    # "weight" is often used in weighted choices or emotions and shouldn't appear in the final prompt
+                    if "weight" in container:
+                        log_debug("[gemini_api] Redacting internal 'weight' key from prompt data")
+                        container.pop("weight", None)
+
                     # Check for multimodal list keys at this level
                     for key in MULTIMODAL_KEYS:
                         if key in container:
@@ -1340,13 +1378,21 @@ class GeminiAPIPlugin(AIPluginBase):
                                 redact_multimodal_item(items)
 
                     # Recurse into all dict values
-                    for value in container.values():
-                        redact_recursive(value)
+                    for key, value in container.items():
+                        if isinstance(value, (dict, list)):
+                            redact_recursive(value)
+                        elif isinstance(value, str) and "weight" in value.lower():
+                            # Attempt to redact string content if it looks suspicious
+                            # This catches cases where JSON is dumped into a string field
+                            container[key] = self._redact_string_content(value)
 
                 elif isinstance(container, list):
                     # Recurse into list items
-                    for item in container:
-                        redact_recursive(item)
+                    for i, item in enumerate(container):
+                        if isinstance(item, (dict, list)):
+                            redact_recursive(item)
+                        elif isinstance(item, str) and "weight" in item.lower():
+                            container[i] = self._redact_string_content(item)
 
             # Start recursive redaction from root
             redact_recursive(redacted)
