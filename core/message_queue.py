@@ -88,6 +88,16 @@ async def enqueue(
         # Don't block enqueue if normalization fails - keep behavior safe
         log_debug("[QUEUE] Failed to normalise message.user for incoming message")
 
+    # Default to 'local' history scope for interface-originated messages unless
+    # an explicit history_scope was provided by the caller. This keeps the
+    # behaviour implicit for interfaces and avoids touching all call sites.
+    try:
+        if history_scope is None and (interface_id or (bot and hasattr(bot, "get_interface_id"))):
+            history_scope = "local"
+            log_debug(f"[QUEUE] Defaulted history_scope to 'local' for interface {interface_id or getattr(bot, 'get_interface_id', lambda: None)()}")
+    except Exception:
+        pass
+
     message_text = getattr(message, "text", "")
     user_id = (
         getattr(message.from_user, "id", "unknown") if message.from_user else "unknown"
@@ -451,6 +461,14 @@ async def enqueue_low_priority(
         ensure_message_user_fields(message)
     except Exception:
         log_debug("[QUEUE] Failed to normalise message.user for enqueue_low_priority")
+
+    # Default history_scope for interface-originated low-priority messages as well
+    try:
+        if history_scope is None and interface_id:
+            history_scope = "local"
+            log_debug(f"[QUEUE] Defaulted history_scope to 'local' for low-priority interface {interface_id}")
+    except Exception:
+        pass
 
     user_id = (
         getattr(message.from_user, "id", "unknown") if message.from_user else "unknown"
