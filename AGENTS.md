@@ -126,3 +126,8 @@ To run tests locally on Windows, the agent must use `uv`:
 1. **Sync Dependencies (Install):**
 ```powershell
    uv sync
+```
+
+## Task completion
+
+When a task is completed, the agent must confirm the task is completed and the user is satisfied with the result. If the user user is satisfied with the result, the agent must commit all changes following the .\docs\contributing.rst file reporting the task as completed, to the user.
