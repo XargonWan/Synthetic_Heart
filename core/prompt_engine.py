@@ -808,6 +808,7 @@ def load_json_instructions() -> str:
         "Use input.interface and input.payload.source.interface_path to route replies.\n"
         "NEVER use 'target' — always use 'interface_path' in message actions.\n"
         "Include reply_message_id when replying to specific messages. Use thread_id from input.payload.source.thread_id when present (omit if missing).\n"
+        "CLARIFICATION POLICY: If the user's intent, referent, or the subject of a follow-up is ambiguous or missing, DO NOT GUESS — ask one concise clarifying question before asserting facts or taking action. When the user asks whether you 'understood' but there is no clear context, request clarification rather than assuming.\n"
         'RESPONSE FORMAT: {"actions": [{"type": "action_name", "payload": { ... }}] }\n'
         "Key rules: ALWAYS use 'type' and 'payload', one action object per array entry. Do NOT add any text outside the JSON."
         "Do NOT embed emotion tags, annotations, or bracketed markers inside message text (e.g., '{happy 6.0}')."
@@ -829,6 +830,7 @@ def load_unminified_chat_instruction(interface_name: str | None = None) -> str:
     base = """
 CONCISE RULES (DEFAULT):
 - Keep user-facing messages short and to the point. Default to a single short paragraph or a one-line reply when possible.
+- If the user's request or referent is ambiguous, ask one short clarifying question before responding (do NOT guess the meaning).
 - Expand only when the user explicitly requests more detail or context.
 
 RESPONSE FORMAT (STRICT):
