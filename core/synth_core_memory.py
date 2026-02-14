@@ -3,6 +3,7 @@ import logging
 import json
 import os
 from core.logging_utils import log_debug, log_info, log_warning
+from core.text_utils import sanitize_text_content
 
 # === Memory logging setup ===
 os.makedirs("logs", exist_ok=True)  # Ensure log directory exists
@@ -144,6 +145,8 @@ async def search_memories(
                     for r in rows:
                         src, _id, ts, content, row_tags = r
                         snippet = content if isinstance(content, str) else str(content)
+                        # Sanitize internal keys like 'weight'
+                        snippet = sanitize_text_content(snippet)
                         if len(snippet) > 400:
                             snippet = snippet[:400] + "..."
                         try:
@@ -202,6 +205,8 @@ async def search_memories(
                     for r in rows:
                         src, _id, ts, content, row_tags = r
                         snippet = content if isinstance(content, str) else str(content)
+                        # Sanitize internal keys like 'weight'
+                        snippet = sanitize_text_content(snippet)
                         if len(snippet) > 400:
                             snippet = snippet[:400] + "..."
                         try:
@@ -245,6 +250,8 @@ async def search_memories(
                             for r in rows:
                                 src, _id, ts, content, _ = r
                                 snippet = content if isinstance(content, str) else str(content)
+                                # Sanitize internal keys like 'weight'
+                                snippet = sanitize_text_content(snippet)
                                 if len(snippet) > 400:
                                     snippet = snippet[:400] + "..."
                                 try:

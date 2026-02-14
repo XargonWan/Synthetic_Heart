@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from core.config_manager import config_registry
 from core.logging_utils import log_debug
+from core.text_utils import sanitize_text_content
 from core.variables_engine import register_exposed_var
 
 from core.history_types import HistoryContribution, HistoryEntry
@@ -168,6 +169,9 @@ def _entry_to_text(entry: HistoryEntry) -> str:
 
     # Chat-like message dicts
     text = entry.get("text") or entry.get("message_text") or entry.get("content") or ""
+    # Sanitize chat content
+    text = sanitize_text_content(str(text))
+    
     sender = (
         entry.get("sender_name")
         or entry.get("username")
@@ -180,6 +184,11 @@ def _entry_to_text(entry: HistoryEntry) -> str:
     if "interaction_summary" in entry or "personal_thought" in entry:
         summary = entry.get("interaction_summary") or ""
         thought = entry.get("personal_thought") or ""
+        
+        # Sanitize internal fields
+        summary = sanitize_text_content(str(summary))
+        thought = sanitize_text_content(str(thought))
+        
         parts = []
         if summary:
             parts.append(f"summary: {summary}")

@@ -133,3 +133,62 @@ def normalize_for_outbound(text: Optional[str]) -> Optional[str]:
         pass
 
     return text
+
+
+def sanitize_text_content(text: str) -> str:
+    """Redact sensitive patterns from string content (e.g. embedded JSON).
+    
+    Specifically targets internal keys like 'weight' that might leak into prompts
+    and confuse the model.
+    """
+    if not text or not isinstance(text, str):
+        return text
+    
+    # Pattern for quoted "weight" key followed by value
+    # Matches: "weight": 10, 'weight': "high"
+    # Does NOT match unquoted weight: (to avoid natural language hits)
+    import re
+    # Pattern: (quote)weight(quote) : (value)
+    pattern = r'((?:"|\')weight(?:"|\'))\s*:\s*((?:"[^"]*"|\'[^\']*\'|[^,}\]\s]+))'
+    
+    def replacer(match):
+        key_part = match.group(1) # "weight"
+        # Replace value with <redacted> string, preserving quotes of key
+        return f'{key_part}: "<redacted>"'
+    
+    return re.sub(pattern, replacer, text, flags=re.IGNORECASE)
+
+
+def strip_emotion_tags(text: str) -> str:
+    """Strip emotion tags like {emotion intensity, ...} from text.
+    
+    Used to clean up user-facing messages.
+    """
+    if not text or not isinstance(text, str):
+        return text
+    
+    import re
+    # Pattern: {emotion intensity, ...}
+    # Matches {happy 10, sad 5.5}
+    pattern = r"\{([^}]+)\}"
+    
+    def replacer(match):
+        content = match.group(1)
+        # Check if content looks like emotion data "word number"
+        # Allow multi-item: "happy 10, sad 5"
+        items = content.split(',')
+        is_emotion = True
+        for item in items:
+            item = item.strip()
+            # Strict check: word(s) followed by number
+            # Allows "deep love 10" or "happy 10.5"
+            # Using -?\d as well just in case
+            if not re.match(r"^[a-zA-Z_\s]+\s+-?\d+(?:\.\d+)?$", item):
+                is_emotion = False
+                break
+        
+        if is_emotion:
+            return "" # Strip it
+        return match.group(0) # Keep it
+        
+    return re.sub(pattern, replacer, text)

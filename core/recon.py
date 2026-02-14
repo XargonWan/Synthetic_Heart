@@ -2,6 +2,7 @@ import asyncio
 import json
 from typing import Any, Dict, List, Tuple
 from core.logging_utils import log_debug, log_info, log_warning
+from core.text_utils import sanitize_text_content
 from core.config_manager import config_registry
 
 # Expose config flags
@@ -238,7 +239,7 @@ async def _build_recon_history_texts_async(
                         or ""
                     )
                     if content:
-                        local_lines.append(f"[{sender}] {content}")
+                        local_lines.append(f"[{sender}] {sanitize_text_content(str(content))}")
     except Exception:
         pass
 
@@ -254,14 +255,14 @@ async def _build_recon_history_texts_async(
                 sender = item.get("sender_name") or "unknown"
                 content = item.get("text") or ""
                 if content:
-                    local_lines.append(f"[{sender}] {content}")
+                    local_lines.append(f"[{sender}] {sanitize_text_content(str(content))}")
 
         global_cached = await load_global_chat_history(limit=6)
         for item in list(global_cached)[-6:]:
             sender = item.get("sender_name") or "unknown"
             content = item.get("text") or ""
             if content:
-                global_lines.append(f"[{sender}] {content}")
+                global_lines.append(f"[{sender}] {sanitize_text_content(str(content))}")
     except Exception:
         pass
 

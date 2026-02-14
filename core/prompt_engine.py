@@ -2,6 +2,7 @@
 
 from core.synth_tagging import extract_tags, expand_tags
 from core.logging_utils import log_debug, log_info, log_warning, log_error
+from core.text_utils import sanitize_text_content
 from core.json_utils import dumps as json_dumps
 from core.config_manager import config_registry
 from core.user_utils import get_user_display_name, get_user_usertag
@@ -97,6 +98,7 @@ async def build_json_prompt(
     context_memory,
     interface_name: str | None = None,
     image_data: dict | None = None,
+    attachments: list[dict] | None = None,
     max_chars: int | None = None,
 ) -> dict:
     """Build the JSON prompt expected by plugins.
@@ -338,6 +340,13 @@ async def build_json_prompt(
             f"[json_prompt] Including image data in prompt: {image_data.get('type', 'unknown')}"
         )
 
+    # Add multimodal attachments if present
+    if attachments:
+        input_payload["attachments"] = attachments
+        log_debug(
+            f"[json_prompt] Including {len(attachments)} multimodal attachments in prompt"
+        )
+
     reply = getattr(message, "reply_to_message", None)
     if reply:
         reply_text = getattr(reply, "text", None) or getattr(reply, "caption", None)
@@ -557,6 +566,8 @@ async def search_memories(tags=None, scope=None, limit=5):
                 memories = []
                 for row in rows:
                     mem = row[0]
+                    # Sanitize explicit prompt engine memory lookup
+                    mem = sanitize_text_content(str(mem))
                     if isinstance(mem, str) and len(mem) > 400:
                         mem = mem[:400] + "..."
                     memories.append(mem)
@@ -570,6 +581,8 @@ async def search_memories(tags=None, scope=None, limit=5):
                     rows2 = await cur.fetchall()
                     for r in rows2:
                         mem = r[0]
+                        # Sanitize diary content too
+                        mem = sanitize_text_content(str(mem))
                         if isinstance(mem, str) and len(mem) > 400:
                             mem = mem[:400] + "..."
                         memories.append(mem)
@@ -700,6 +713,8 @@ async def free_memory_search(query: str, limit: int = 5):
     for r in rows:
         src, _id, ts, content = r
         snippet = content if isinstance(content, str) else str(content)
+        # Sanitize free search
+        snippet = sanitize_text_content(snippet)
         if len(snippet) > 400:
             snippet = snippet[:400] + "..."
         results.append(snippet)

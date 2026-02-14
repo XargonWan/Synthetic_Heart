@@ -457,57 +457,57 @@ async def handle_incoming_message(
             f"[plugin] Incoming for {plugin.__class__.__name__}: chat_id={message.chat_id}, user_id={user_id}, text={message_text!r} via {interface_name}"
         )
 
-        image_data, has_image_trigger = await _extract_image_data_from_message(
-            message, interface_name
-        )
+        # RACE CONDITION FIX: Abort Grillo outreach if activity occurred while beat was queued
+        if (
+            isinstance(context_memory_or_prompt, dict)
+            and context_memory_or_prompt.get("beat_type") == "outreach"
+        ):
+            try:
+                target_path = context_memory_or_prompt.get("interface_path")
+                if not target_path:
+                    target_path = f"{interface_name}/{getattr(message, 'chat_id', '')}"
 
-        processed_image_data = None
-        if image_data:
+                from core.chat_history_cache import get_last_message
+                last_msg = await get_last_message(target_path)
+                
+                if last_msg:
+                    ts_str = last_msg.get("timestamp")
+                    if ts_str:
+                        # Parse timestamp
+                        last_ts = None
+                        try:
+                            last_ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                        except ValueError:
+                            pass
+                        
+                        if last_ts:
+                            if not last_ts.tzinfo:
+                                from datetime import timezone
+                                last_ts = last_ts.replace(tzinfo=timezone.utc)
+                            
+                            from datetime import timezone
+                            now_utc = datetime.now(timezone.utc)
+                            delta = (now_utc - last_ts).total_seconds() / 60
+                            
+                            # If activity in last 2 mins, abort
+                            if delta < 2.0:
+                                log_info(
+                                    f"[plugin_instance] 🛑 Aborting queued outreach beat due to recent activity ({delta:.1f}m ago) in {target_path}"
+                                )
+                                # Optional: record suppression event?
+                                return None
+            except Exception as e:
+                log_warning(f"[plugin_instance] Error ensuring outreach safety: {e}")
+
+        # Unified multimodal extraction (replaces legacy image extraction)
+        attachments = await _extract_multimodal_attachments(bot, message, interface_name)
+        has_multimodal_trigger = bool(attachments)
+        processed_image_data = None # Legacy variable for backward comp if needed, but we rely on attachments now
+
+        if attachments:
             log_info(
-                f"[plugin_instance] Message contains image: {image_data['type']} from user {user_id}"
+                f"[plugin_instance] Message contains {len(attachments)} attachments from user {user_id}"
             )
-
-            # Create abstract context for image processing
-            abstract_user = AbstractUser(id=user_id, interface_name=interface_name)
-            abstract_message = AbstractMessage(
-                id=getattr(message, "message_id", None),
-                text=getattr(message, "text", "") or getattr(message, "caption", ""),
-                chat_id=getattr(message, "chat_id", None),
-                interface_name=interface_name,
-            )
-            abstract_context = AbstractContext(
-                interface_name=interface_name,
-                user=abstract_user,
-                message=abstract_message,
-            )
-
-            # Check if message has text trigger (mentions, keywords, etc.)
-            text_has_trigger = False
-            if message_text:
-                directed, reason = await is_message_for_bot(
-                    message, bot, human_count=None
-                )
-                text_has_trigger = directed
-
-            # Combine image trigger with text trigger
-            combined_trigger = has_image_trigger or text_has_trigger
-
-            # Process the image (but don't auto-forward to LLM here)
-            processed_image_data = await process_image_message(
-                image_data,
-                abstract_context,
-                has_trigger=combined_trigger,
-                forward_to_llm=False,  # We'll include it in the prompt instead
-            )
-
-            if processed_image_data:
-                log_info(
-                    f"[plugin_instance] Image processed successfully for user {user_id}"
-                )
-            else:
-                log_debug(
-                    f"[plugin_instance] Image not processed (access denied or error) for user {user_id}"
-                )
 
         if isinstance(context_memory_or_prompt, str):
             try:
@@ -548,11 +548,13 @@ async def handle_incoming_message(
                         )
 
                 log_debug(f"[plugin_instance] Exception path - max_chars={max_chars}")
+                log_debug(f"[plugin_instance] Exception path - max_chars={max_chars}")
                 prompt = await build_json_prompt(
                     message,
                     {},
                     interface_name,
-                    image_data=processed_image_data,
+                    image_data=None, # Legacy
+                    attachments=attachments,
                     max_chars=max_chars,
                 )
         else:
@@ -604,24 +606,15 @@ async def handle_incoming_message(
                 context_memory_or_prompt,
                 interface_name,
                 image_data=processed_image_data,
+                attachments=attachments,
                 max_chars=max_chars,
             )
 
-    # Extract multimodal attachments (images, audio, documents) for LLM engines
-    # that support multimodal input (e.g., gemini_api)
-    multimodal_attachments = await _extract_multimodal_attachments(
-        bot, message, interface_name
-    )
-    if multimodal_attachments:
+    # Multimodal attachments are already extracted and passed to build_json_prompt above
+    if attachments:
         log_info(
-            f"[plugin_instance] Extracted {len(multimodal_attachments)} multimodal attachment(s)"
+            f"[plugin_instance] Processing {len(attachments)} multimodal attachment(s)"
         )
-        # Add attachments to the prompt for LLM engines to consume
-        if isinstance(prompt, dict):
-            if "input" in prompt and isinstance(prompt["input"], dict):
-                prompt["input"]["attachments"] = multimodal_attachments
-            else:
-                prompt["attachments"] = multimodal_attachments
 
     prompt = sanitize_for_json(prompt)
     log_debug("🌐 JSON PROMPT built for the plugin:")

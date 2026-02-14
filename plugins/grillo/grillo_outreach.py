@@ -135,8 +135,24 @@ class GrilloOutreachPlugin:
             log_debug("[grillo_outreach] Skipping - no recent user activity")
             return
 
+        # Determine target first
+        interface, chat_id = await self._get_target_interface_and_chat()
+        if not interface:
+            log_warning("[grillo_outreach] No target interface configured")
+            return
+
+        # Check for VERY recent activity (silence check)
+        # Verify that the chat is actually silent before reaching out.
+        # This prevents "double-texting" where Grillo replies to a message
+        # that is currently being processed by the main loop.
+        if await self._has_very_recent_activity(interface, chat_id, minutes=10):
+            log_debug(
+                f"[grillo_outreach] Skipping - conversation currently active (msg < 10m ago) in {interface}/{chat_id}"
+            )
+            return
+
         # Generate outreach
-        await self._generate_outreach_beat()
+        await self._generate_outreach_beat(interface, chat_id)
         self._last_outreach = now
 
     async def _has_recent_activity(self, hours: int = 24) -> bool:
@@ -204,6 +220,56 @@ class GrilloOutreachPlugin:
             log_warning(f"[grillo_outreach] Error getting context: {e}")
 
         return snippets
+
+    async def _has_very_recent_activity(
+        self, interface: str, chat_id: Optional[str], minutes: int = 10
+    ) -> bool:
+        """Check if there's been activity in the specific chat within the last N minutes.
+
+        This uses the real-time chat history cache (which feeds the context)
+        to ensure we don't interrupt an active flow.
+        """
+        try:
+            from core.chat_history_cache import get_last_message
+
+            interface_path = f"{interface}/{chat_id}" if chat_id else interface
+            last_msg = await get_last_message(interface_path)
+            if not last_msg:
+                return False
+
+            # Check timestamp
+            ts_str = last_msg.get("timestamp")
+            if not ts_str:
+                return False
+
+            # Parse timestamp (handle various formats if needed)
+            last_ts = None
+            try:
+                # Assuming ISO format from chat_history_cache
+                last_ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            except ValueError:
+                return False
+
+            if not last_ts.tzinfo:
+                from datetime import timezone
+
+                last_ts = last_ts.replace(tzinfo=timezone.utc)
+
+            from datetime import timezone
+            now_utc = datetime.now(timezone.utc)
+            
+            delta = (now_utc - last_ts).total_seconds() / 60
+            if delta < minutes:
+                log_debug(
+                    f"[grillo_outreach] Recent activity detected: {delta:.1f}m ago in {interface_path}"
+                )
+                return True
+
+            return False
+        except Exception as e:
+            log_warning(f"[grillo_outreach] Error checking very recent activity: {e}")
+            return False  # Fail open (allow outreach) or closed? Fail open might cause double text again.
+            # But fail closed might kill outreach. Let's return False and rely on logs for now.
 
     async def _get_target_interface_and_chat(
         self,
@@ -300,9 +366,11 @@ RESPOND ONLY WITH VALID JSON:
 """
         return prompt
 
-    async def _generate_outreach_beat(self) -> None:
+    async def _generate_outreach_beat(
+        self, interface: str, chat_id: Optional[str]
+    ) -> None:
         """Generate and enqueue an outreach beat."""
-        interface, chat_id = await self._get_target_interface_and_chat()
+        # interface, chat_id passed in now
         if not interface:
             log_warning("[grillo_outreach] No target interface configured")
             return

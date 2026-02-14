@@ -173,7 +173,8 @@ async def extract_multimodal_from_telegram(
             chat_id = getattr(chat_id, "id", chat_id)
 
         # Check whitelist if processor provided and this is a group
-        chat_type = getattr(getattr(message, "chat", None), "type", "private")
+        chat_obj = getattr(message, "chat", None)
+        chat_type = getattr(chat_obj, "type", "private")
         is_group = chat_type in ("group", "supergroup")
 
         if is_group and image_processor:
@@ -184,8 +185,9 @@ async def extract_multimodal_from_telegram(
                 return []
 
         # Handle photos (Telegram sends multiple sizes, get largest)
-        if message.photo:
-            photo = message.photo[-1]  # Last is largest
+        photos = getattr(message, "photo", None)
+        if photos:
+            photo = photos[-1]  # Last is largest
             try:
                 file = await bot.get_file(photo.file_id)
                 file_bytes = await file.download_as_bytearray()
@@ -204,8 +206,9 @@ async def extract_multimodal_from_telegram(
                 log_warning(f"[multimodal] Failed to download Telegram photo: {e}")
 
         # Handle documents (PDFs, etc.)
-        if message.document:
-            doc = message.document
+        document = getattr(message, "document", None)
+        if document:
+            doc = document
             mime_type = doc.mime_type or get_mime_type(None, doc.file_name)
 
             if is_supported_type(mime_type):
@@ -234,9 +237,9 @@ async def extract_multimodal_from_telegram(
                 )
 
         # Handle audio files
-        if message.audio:
-            audio = message.audio
-            mime_type = audio.mime_type or get_mime_type(None, audio.file_name)
+        audio = getattr(message, "audio", None)
+        if audio:
+            mime_type = getattr(audio, "mime_type", None) or get_mime_type(None, getattr(audio, "file_name", None))
 
             if is_supported_type(mime_type):
                 try:
@@ -258,9 +261,9 @@ async def extract_multimodal_from_telegram(
                     log_warning(f"[multimodal] Failed to download Telegram audio: {e}")
 
         # Handle voice messages
-        if message.voice:
-            voice = message.voice
-            mime_type = voice.mime_type or "audio/ogg"  # Telegram voice is usually OGG
+        voice = getattr(message, "voice", None)
+        if voice:
+            mime_type = getattr(voice, "mime_type", None) or "audio/ogg"  # Telegram voice is usually OGG
 
             if is_supported_type(mime_type):
                 try:
@@ -279,9 +282,9 @@ async def extract_multimodal_from_telegram(
                     log_warning(f"[multimodal] Failed to download Telegram voice: {e}")
 
         # Handle video files
-        if message.video:
-            video = message.video
-            mime_type = video.mime_type or "video/mp4"  # Default to mp4
+        video = getattr(message, "video", None)
+        if video:
+            mime_type = getattr(video, "mime_type", None) or "video/mp4"  # Default to mp4
 
             if is_supported_type(mime_type):
                 # Check file size - Telegram allows up to 20MB for bots to download
@@ -315,8 +318,8 @@ async def extract_multimodal_from_telegram(
                 log_debug(f"[multimodal] Skipping unsupported video type: {mime_type}")
 
         # Handle video notes (round videos) - these are small circular videos
-        if message.video_note:
-            video_note = message.video_note
+        video_note = getattr(message, "video_note", None)
+        if video_note:
             # Video notes are always mp4, and typically small (up to 1 minute)
             file_size = getattr(video_note, "file_size", 0) or 0
             if file_size <= 20 * 1024 * 1024:  # 20MB limit
@@ -342,12 +345,12 @@ async def extract_multimodal_from_telegram(
                 log_debug(f"[multimodal] Video note too large: {file_size} bytes")
 
         # Handle stickers (as images if static)
+        sticker = getattr(message, "sticker", None)
         if (
-            message.sticker
-            and not message.sticker.is_animated
-            and not message.sticker.is_video
+            sticker
+            and not getattr(sticker, "is_animated", False)
+            and not getattr(sticker, "is_video", False)
         ):
-            sticker = message.sticker
             try:
                 file = await bot.get_file(sticker.file_id)
                 file_bytes = await file.download_as_bytearray()

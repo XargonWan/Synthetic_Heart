@@ -51,14 +51,22 @@ def _maybe_unescape_text_in_payload(payload: dict) -> None:
 
     # Recover common mojibake (UTF-8 bytes decoded as latin-1/cp1252)
     try:
-        from core.text_utils import try_recover_mojibake
+        from core.text_utils import try_recover_mojibake, strip_emotion_tags
+
+        # Strip emotion tags first to clean up user-facing text
+        # (e.g. "{happy 10, sad 5}" instructions leaking into output)
+        stripped = strip_emotion_tags(text)
+        if stripped != text:
+            # Update payload and local var
+            payload["text"] = stripped
+            text = stripped
 
         recovered = try_recover_mojibake(text)
         if recovered and recovered != text:
             payload["text"] = recovered
             text = recovered
     except Exception:
-        # Non-fatal — keep original text if recovery fails
+        # Non-fatal — keep original text if recovery/strip fails
         pass
 
     # Quick heuristic — only attempt to decode when we see backslash escapes
@@ -1318,6 +1326,31 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
     for idx, action in enumerate(actions):
         try:
             action_type = action.get("type")
+
+            # --- Automatic Interface Correction ---
+            # If the LLM generates a generic 'message_synth_webui' (or legacy 'message_send') 
+            # but we are on a specific interface like 'telegram_bot', rewrite the action
+            # to target the correct interface. This prevents messages being "lost" to the webui.
+            current_interface = context.get("interface")
+            if (
+                current_interface
+                and current_interface != "synth_webui"
+                and action_type in ("message_synth_webui", "message_send")
+            ):
+                target_action = f"message_{current_interface}"
+                log_info(
+                    f"[action_parser] 🔄 Rewriting action '{action_type}' -> '{target_action}' to match context interface '{current_interface}'"
+                )
+                action["type"] = target_action
+                action_type = target_action
+                
+                # Ensure interface_path is present in payload for bot interfaces
+                payload = action.setdefault("payload", {})
+                if "interface_path" not in payload and "interface_path" in context:
+                    payload["interface_path"] = context["interface_path"]
+                    log_debug(
+                        f"[action_parser] 💉 Injected interface_path='{context['interface_path']}' into rewritten action"
+                    )
 
             # Halt processing of subsequent non-terminal actions until the LLM
             # has seen the outputs from executed terminal commands.
