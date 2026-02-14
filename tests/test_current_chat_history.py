@@ -124,3 +124,101 @@ def test_no_duplication_with_history_recent(monkeypatch):
     recent_entries = res["context"].get("history_recent", [])
     assert any("Carol" in e for e in current_entries)
     assert recent_entries == []
+
+
+def test_local_global_separation(monkeypatch):
+    """Verify prompt exposes `local_history` and `global_history` and that
+    global_history excludes messages from the same `interface_path`."""
+    monkeypatch.setattr("core.action_parser.gather_static_injections", _dummy_gather)
+
+    now = datetime.utcnow().replace(tzinfo=timezone.utc)
+    local_msg = _make_msg("Alice", "Local message", now - timedelta(minutes=2))
+    other_msg = _make_msg("Eve", "Other chat message", now - timedelta(minutes=1))
+
+    interface = "telegram_bot/123"
+    # in-memory chat_map contains the local message
+    context_memory = {interface: deque([local_msg])}
+
+    async def _fake_cache_load(ip):
+        assert ip == interface
+        return deque([local_msg])
+
+    async def _fake_global_load(limit=10):
+        # Simulate DB returning both local and other messages
+        return deque([
+            {**local_msg, "interface_path": interface},
+            {**other_msg, "interface_path": "discord_bot/999"},
+        ])
+
+    monkeypatch.setattr("core.chat_history_cache.load_chat_history", _fake_cache_load)
+    monkeypatch.setattr("core.chat_history_cache.load_global_chat_history", _fake_global_load)
+
+    message = SimpleNamespace(
+        interface_path=interface,
+        text="hi",
+        message_id=10,
+        from_user=SimpleNamespace(full_name="user", username="user"),
+        date=now,
+    )
+
+    res = asyncio.run(
+        prompt_engine.build_json_prompt(message, context_memory, interface_name="telegram")
+    )
+
+    ctx = res["context"]
+    assert "local_history" in ctx and "global_history" in ctx
+    assert any("Local message" in e for e in ctx["local_history"]) 
+    # global_history must NOT contain the local message
+    assert all("Local message" not in e for e in ctx["global_history"])
+    # global_history should include the other chat's message
+    assert any("Other chat message" in e for e in ctx["global_history"])
+
+
+def test_history_scope_local_only(monkeypatch):
+    """When history_scope='local', global history must be empty."""
+    monkeypatch.setattr("core.action_parser.gather_static_injections", _dummy_gather)
+
+    now = datetime.utcnow().replace(tzinfo=timezone.utc)
+    local_msg = _make_msg("Alice", "Local only", now - timedelta(minutes=2))
+    other_msg = _make_msg("Eve", "External", now - timedelta(minutes=1))
+
+    interface = "telegram_bot/555"
+    context_memory = {interface: deque([local_msg])}
+
+    async def _fake_cache_load(ip):
+        return deque([local_msg])
+
+    async def _fake_global_load(limit=10):
+        return deque([{**other_msg, "interface_path": "discord/1"}])
+
+    monkeypatch.setattr("core.chat_history_cache.load_chat_history", _fake_cache_load)
+    monkeypatch.setattr("core.chat_history_cache.load_global_chat_history", _fake_global_load)
+
+    message = SimpleNamespace(
+        interface_path=interface,
+        text="check",
+        message_id=11,
+        from_user=SimpleNamespace(full_name="user", username="user"),
+        date=now,
+    )
+
+    # Explicit per-call override
+    res = asyncio.run(
+        prompt_engine.build_json_prompt(
+            message, context_memory, interface_name="telegram", history_scope="local"
+        )
+    )
+
+    ctx = res["context"]
+    assert ctx.get("history_recent", []) == []
+    assert ctx.get("global_history", []) == []
+    assert any("Local only" in e for e in ctx.get("local_history", []))
+
+    # Also verify that passing the scope via `context_memory` dict works equivalently
+    context_memory_with_scope = {**context_memory, "history_scope": "local"}
+    res2 = asyncio.run(
+        prompt_engine.build_json_prompt(message, context_memory_with_scope, interface_name="telegram")
+    )
+    ctx2 = res2["context"]
+    assert ctx2.get("global_history", []) == []
+    assert any("Local only" in e for e in ctx2.get("local_history", []))

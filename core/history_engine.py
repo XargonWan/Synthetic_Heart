@@ -253,6 +253,7 @@ class HistoryEngine:
         interface_name: Optional[str] = None,
         text: str = "",
         memories: Optional[Sequence[HistoryEntry]] = None,
+        history_scope: str | None = None,
     ) -> Dict[str, Any]:
         verbosity = max(0, _get_int("CONTEXT_VERBOSITY", 10))
         thoughts_limit = max(0, _get_int("THOUGHTS_LIMIT", 5))
@@ -265,6 +266,13 @@ class HistoryEngine:
         enable_tags_placeholder = _get_bool("ENABLE_TAGS_PLACEHOLDER", True)
         diary_full = _get_bool("AI_DIARY_FULL", True)
         unified_mode = _get_bool("UNIFIED_HISTORY", True)
+
+        # Allow callers to pass a per-prompt history_scope via argument or context_memory dict
+        if history_scope is None and isinstance(context_memory, dict):
+            try:
+                history_scope = context_memory.get("history_scope")
+            except Exception:
+                history_scope = None
 
         interface_path = getattr(message, "interface_path", None)
         if not interface_path:
@@ -462,11 +470,13 @@ class HistoryEngine:
                         m for m in unified_candidates if not _is_internal_noise(m)
                     ]
 
-                history_current_chat = []
+                # Build separate lists for local vs other chat entries while preserving
+                # the original dedup behavior used for the unified view.
+                local_lines: List[str] = []
+                other_lines: List[str] = []
                 seen_history = set()
 
                 # Filter out the current inbound message to avoid duplication
-                # with input.payload.text in the prompt
                 input_text = (text or "").strip()
 
                 for m in unified_candidates[-verbosity:] if verbosity > 0 else []:
@@ -483,8 +493,20 @@ class HistoryEngine:
                     k = _dedup_key(line)
                     if k in seen_history:
                         continue
-                    history_current_chat.append(line)
+
+                    # Determine origin: prefer explicit interface_path/source_path fields
+                    entry_path = (m.get("interface_path") or m.get("source_path") or "")
+                    if entry_path and interface_path and str(entry_path) == str(interface_path):
+                        local_lines.append(line)
+                    else:
+                        other_lines.append(line)
+
                     seen_history.add(k)
+
+                # Preserve legacy `history_current_chat` as the merged unified view
+                history_current_chat = local_lines + other_lines
+                # Ensure `history_recent` (global) contains ONLY other chats
+                history_recent = other_lines
             except Exception as e:
                 log_debug(f"[history_engine] Failed building UNIFIED history: {e}")
 
@@ -647,9 +669,32 @@ class HistoryEngine:
         if thoughts_limit > 0:
             thoughts = thoughts[-thoughts_limit:]
 
+        # Expose explicit local/global separation in addition to legacy keys
+        local_history = history_current_chat
+        global_history = history_recent
+
+        # Honor per-call history_scope override when present
+        try:
+            if history_scope == "local":
+                # Return only local history; global history is intentionally empty
+                history_recent = []
+                global_history = []
+            elif history_scope == "recent":
+                # Return only global/recent history
+                history_current_chat = []
+                local_history = []
+            elif history_scope == "unified":
+                # Keep merged history_current_chat as-is, but ensure global_history
+                # does not contain local entries (already enforced above).
+                pass
+        except Exception:
+            pass
+
         context: Dict[str, Any] = {
             "history_current_chat": history_current_chat,
             "history_recent": history_recent,
+            "local_history": local_history,
+            "global_history": global_history,
             "thoughts": thoughts,
         }
 

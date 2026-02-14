@@ -98,6 +98,7 @@ async def build_json_prompt(
     interface_name: str | None = None,
     image_data: dict | None = None,
     max_chars: int | None = None,
+    history_scope: str | None = None,
 ) -> dict:
     """Build the JSON prompt expected by plugins.
 
@@ -114,6 +115,9 @@ async def build_json_prompt(
     max_chars : int | None
         Maximum characters for the JSON prompt. If provided, the prompt will be
         intelligently reduced by removing oldest memories. If None, no reduction is done.
+    history_scope : str | None
+        Optional per-prompt override for history selection. One of: 'local', 'recent', 'unified'.
+        If None, falls back to any `history_scope` in `context_memory` or to the global `UNIFIED_HISTORY` setting.
     """
     import time
 
@@ -239,6 +243,11 @@ async def build_json_prompt(
     try:
         from core.history_engine import HistoryEngine
 
+        # Determine effective history_scope (explicit param -> context_memory -> default behavior)
+        effective_history_scope = history_scope
+        if effective_history_scope is None and isinstance(context_memory, dict):
+            effective_history_scope = context_memory.get("history_scope")
+
         history_engine = HistoryEngine()
         context_section = await history_engine.build_context(
             message=message,
@@ -246,12 +255,20 @@ async def build_json_prompt(
             interface_name=interface_name,
             text=text,
             memories=memories,
+            history_scope=effective_history_scope,
         )
     except Exception as e:
         log_warning(
             f"[json_prompt] Failed to build history context via HistoryEngine: {e}"
         )
         context_section = {"memories": memories}
+
+    # Expose chosen history_scope to downstream plugins/engines explicitly
+    try:
+        if effective_history_scope:
+            input_payload.setdefault("history_scope", effective_history_scope)
+    except Exception:
+        pass
 
     # === 3. Recon contributions (prompt 0) ===
     try:
