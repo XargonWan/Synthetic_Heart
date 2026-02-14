@@ -730,7 +730,9 @@ class GeminiAPIPlugin(AIPluginBase):
                 original_len = len(prompt_text)
                 prompt_text = self._redact_string_content(prompt_text)
                 if len(prompt_text) != original_len:
-                     log_debug("[gemini_api] Redacted sensitive patterns from raw string prompt")
+                    log_debug(
+                        "[gemini_api] Redacted sensitive patterns from raw string prompt"
+                    )
 
             log_debug(
                 f"[gemini_api] Sending prompt ({len(prompt_text)} chars) to {self._current_model}"
@@ -1295,24 +1297,25 @@ class GeminiAPIPlugin(AIPluginBase):
         """Redact sensitive patterns from string content (e.g. embedded JSON)."""
         if not text or not isinstance(text, str):
             return text
-        
+
         # Pattern for quoted "weight" key followed by value
         # Matches: "weight": 10, 'weight': "high"
         # Does NOT match unquoted weight: (to avoid natural language hits)
         import re
+
         # Pattern: (quote)weight(quote) : (value)
         pattern = r'((?:"|\')weight(?:"|\'))\s*:\s*((?:"[^"]*"|\'[^\']*\'|[^,}\]\s]+))'
-        
+
         def replacer(match):
-            key_part = match.group(1) # "weight"
+            key_part = match.group(1)  # "weight"
             # Replace value with <redacted> string, preserving quotes of key
             return f'{key_part}: "<redacted>"'
-        
+
         return re.sub(pattern, replacer, text, flags=re.IGNORECASE)
 
     def _copy_and_redact_data(self, prompt: dict) -> dict:
         """Create a deep copy of the prompt and redact heavy binary data recursively.
-        
+
         ... (docstring truncated) ...
         """
         import copy
@@ -1324,8 +1327,11 @@ class GeminiAPIPlugin(AIPluginBase):
             MULTIMODAL_KEYS = {"attachments", "images", "audio", "documents", "videos"}
             # Fields within attachments that contain heavy base64 data
             DATA_FIELDS = {"data", "base64"}
-            # Keys to redact from the prompt (instructions are moved to systemInstruction)
-            REDACT_KEYS = {"instructions", "instructions_verbose", "systemInstruction"}
+            # Keys to redact from the prompt (verbose/system copies are moved to systemInstruction).
+            # NOTE: "instructions" is intentionally KEPT because it carries the persona
+            # identity (CRITICAL SYSTEM IDENTITY block) that the model must see in the
+            # user content.  Only the redundant copies are stripped.
+            REDACT_KEYS = {"instructions_verbose", "systemInstruction"}
             # Keys that suggest a dict is actually an attachment
             ATTACHMENT_FIELDS = {
                 "mime_type",
@@ -1363,7 +1369,9 @@ class GeminiAPIPlugin(AIPluginBase):
                     # Also remove internal logic keys that might confuse the model if they leaked
                     # "weight" is often used in weighted choices or emotions and shouldn't appear in the final prompt
                     if "weight" in container:
-                        log_debug("[gemini_api] Redacting internal 'weight' key from prompt data")
+                        log_debug(
+                            "[gemini_api] Redacting internal 'weight' key from prompt data"
+                        )
                         container.pop("weight", None)
 
                     # Check for multimodal list keys at this level
