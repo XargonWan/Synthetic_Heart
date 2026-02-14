@@ -38,3 +38,34 @@ def test_timestamped_rotation_lines():
         assert len(timestamped_files) >= 1
 
         handler.close()
+
+
+def test_timestamped_rotation_respects_backupcount():
+    """Ensure TimestampedRotatingFileHandler enforces backupCount (old files are removed)."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        log_file = os.path.join(tmp_dir, "test_lines.log")
+
+        # Keep only 2 backups
+        handler = TimestampedRotatingFileHandler(log_file, maxLines=2, backupCount=2)
+        formatter = logging.Formatter("%(message)s")
+        handler.setFormatter(formatter)
+
+        logger = logging.getLogger("test_logger_backupcount")
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+
+        # Write many lines to trigger multiple rollovers
+        for i in range(20):
+            logger.info(f"Line {i}")
+
+        handler.close()
+
+        files = os.listdir(tmp_dir)
+        timestamped_files = [
+            f
+            for f in files
+            if f.startswith("test_lines.") and f.endswith(".log") and f != "test_lines.log"
+        ]
+        # backupCount == 2 -> at most 2 timestamped backups should remain
+        assert len(timestamped_files) <= 2
