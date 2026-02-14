@@ -673,22 +673,9 @@ class HistoryEngine:
         local_history = history_current_chat
         global_history = history_recent
 
-        # Honor per-call history_scope override when present
-        try:
-            if history_scope == "local":
-                # Return only local history; global history is intentionally empty
-                history_recent = []
-                global_history = []
-            elif history_scope == "recent":
-                # Return only global/recent history
-                history_current_chat = []
-                local_history = []
-            elif history_scope == "unified":
-                # Keep merged history_current_chat as-is, but ensure global_history
-                # does not contain local entries (already enforced above).
-                pass
-        except Exception:
-            pass
+        # Do NOT strip out the alternate history by default; always return both
+        # `local_history` and `global_history` so the assistant sees surrounding
+        # context while still being able to distinguish them.
 
         context: Dict[str, Any] = {
             "history_current_chat": history_current_chat,
@@ -697,6 +684,14 @@ class HistoryEngine:
             "global_history": global_history,
             "thoughts": thoughts,
         }
+
+        # Echo the requested history_scope (if any) so downstream systems can
+        # treat one stream as 'primary' while still seeing the other.
+        try:
+            if history_scope:
+                context["history_scope"] = history_scope
+        except Exception:
+            pass
 
         if enable_memories:
             context["memories"] = out_memories

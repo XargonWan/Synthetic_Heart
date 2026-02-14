@@ -175,7 +175,9 @@ def test_local_global_separation(monkeypatch):
 
 
 def test_history_scope_local_only(monkeypatch):
-    """When history_scope='local', global history must be empty."""
+    """When history_scope='local' we MUST still include both local and global histories
+    in the master prompt, but mark `scope`/`history_scope` so the assistant knows
+    which stream is primary."""
     monkeypatch.setattr("core.action_parser.gather_static_injections", _dummy_gather)
 
     now = datetime.utcnow().replace(tzinfo=timezone.utc)
@@ -202,7 +204,7 @@ def test_history_scope_local_only(monkeypatch):
         date=now,
     )
 
-    # Explicit per-call override
+    # Explicit per-call override — expect BOTH histories present but scope marked
     res = asyncio.run(
         prompt_engine.build_json_prompt(
             message, context_memory, interface_name="telegram", history_scope="local"
@@ -210,9 +212,15 @@ def test_history_scope_local_only(monkeypatch):
     )
 
     ctx = res["context"]
-    assert ctx.get("history_recent", []) == []
-    assert ctx.get("global_history", []) == []
+    # local_history must contain the local entry
     assert any("Local only" in e for e in ctx.get("local_history", []))
+    # global_history must still include external chat entries (and MUST NOT include local entries)
+    assert any("External" in e for e in ctx.get("global_history", []))
+    assert all("Local only" not in e for e in ctx.get("global_history", []))
+
+    # The input payload should expose the requested scope so the LLM can prioritise
+    assert res.get("input", {}).get("payload", {}).get("history_scope") == "local"
+    assert res.get("input", {}).get("payload", {}).get("scope") == "local"
 
     # Also verify that passing the scope via `context_memory` dict works equivalently
     context_memory_with_scope = {**context_memory, "history_scope": "local"}
@@ -220,5 +228,5 @@ def test_history_scope_local_only(monkeypatch):
         prompt_engine.build_json_prompt(message, context_memory_with_scope, interface_name="telegram")
     )
     ctx2 = res2["context"]
-    assert ctx2.get("global_history", []) == []
-    assert any("Local only" in e for e in ctx2.get("local_history", []))
+    assert any("External" in e for e in ctx2.get("global_history", []))
+    assert res2.get("input", {}).get("payload", {}).get("history_scope") == "local"

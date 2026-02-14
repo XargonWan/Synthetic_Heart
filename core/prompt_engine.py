@@ -345,7 +345,8 @@ async def build_json_prompt(
         },
         "timestamp": message.date.isoformat(),
         "privacy": "default",
-        "scope": "local",
+        # Set `scope` to the effective history_scope when provided, otherwise keep legacy default
+        "scope": (effective_history_scope if ("effective_history_scope" in locals() and effective_history_scope) else "local"),
     }
 
     # Add image data if present
