@@ -1311,6 +1311,14 @@ async def _create_diary_entry_for_actions(processed_actions, context, original_m
         interface_name = context.get("interface", "unknown")
         chat_id = getattr(original_message, "chat_id", None)
         interface_path = getattr(original_message, "interface_path", None)
+
+        # Prefer LLM-provided diary metadata when present.
+        # This avoids generic/hardcoded reflections unrelated to the real context.
+        llm_diary_payload = {}
+        for action in processed_actions:
+            if action.get("type") == "create_personal_diary_entry":
+                llm_diary_payload = action.get("payload") or {}
+                break
         
         # Get user message from context or original_message
         user_message = ""
@@ -1383,10 +1391,17 @@ async def _create_diary_entry_for_actions(processed_actions, context, original_m
         
         synth_response = " | ".join(synth_response_parts)
         
-        # Generate context tags based on action types and content
-        context_tags = _generate_context_tags(action_types, synth_response, user_message, interface_name)
-        
-        # Use create_personal_diary_entry for automatic thought and emotion generation
+        # Use payload tags if provided by LLM, otherwise keep automatic tag generation.
+        payload_context_tags = llm_diary_payload.get("context_tags")
+        if payload_context_tags:
+            context_tags = payload_context_tags
+        else:
+            context_tags = _generate_context_tags(
+                action_types, synth_response, user_message, interface_name
+            )
+
+        # Use create_personal_diary_entry with heuristics disabled.
+        # We only persist diary metadata explicitly provided by the LLM payload.
         create_personal_diary_entry(
             synth_response=synth_response,
             user_message=user_message if user_message else None,
@@ -1394,7 +1409,10 @@ async def _create_diary_entry_for_actions(processed_actions, context, original_m
             involved_users=involved_list,
             interface=interface_name,
             chat_id=str(chat_id) if chat_id else None,
-            grillo_activity_log_id=context.get("activity_log_id") if isinstance(context, dict) else None
+            grillo_activity_log_id=context.get("activity_log_id") if isinstance(context, dict) else None,
+            interaction_summary=llm_diary_payload.get("interaction_summary"),
+            personal_thought=llm_diary_payload.get("personal_thought"),
+            emotions=llm_diary_payload.get("emotions"),
         )
         
         log_debug(f"[action_parser] Created personal diary entry: {synth_response}")
