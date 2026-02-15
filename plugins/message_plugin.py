@@ -98,7 +98,8 @@ class MessagePlugin:
                 # interface_name_from_path = parts[0]
                 target = parts[1]  # chat_id or user_id
                 if len(parts) >= 3:
-                    thread_id = parts[2]  # thread_id or channel_id
+                    # Treat an empty third segment (trailing slash) as no thread
+                    thread_id = parts[2].strip() or None
             else:
                 log_warning(
                     f"[message_plugin] Invalid interface_path format: {interface_path}"
@@ -145,8 +146,11 @@ class MessagePlugin:
         if not target:
             target = getattr(original_message, "chat_id", None)
 
-        if not thread_id and hasattr(original_message, "thread_id"):
-            thread_id = getattr(original_message, "thread_id", None)
+        if not thread_id:
+            # Accept both normalized `thread_id` and Telegram's native `message_thread_id`
+            thread_id = getattr(original_message, "thread_id", None) or getattr(
+                original_message, "message_thread_id", None
+            )
 
         rebuilt_interface_path = None
         if interface_name and target:
@@ -239,8 +243,11 @@ class MessagePlugin:
         if not target:
             target = getattr(original_message, "chat_id", None)
 
-        if not thread_id and hasattr(original_message, "thread_id"):
-            thread_id = getattr(original_message, "thread_id", None)
+        if not thread_id:
+            # Accept both normalized `thread_id` and Telegram's native `message_thread_id`
+            thread_id = getattr(original_message, "thread_id", None) or getattr(
+                original_message, "message_thread_id", None
+            )
 
         reply_to = None
         if (
