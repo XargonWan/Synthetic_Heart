@@ -440,7 +440,7 @@ class GrilloChatObserverPlugin:
         )
 
         # Use configured synth name in examples to avoid hardcoding 'G.R.I.L.L.O.'
-        synth_name = str(config_registry.get_var("SYNTH_NAME", "SyntH"))
+        _synth_name = str(config_registry.get_var("SYNTH_NAME", "SyntH"))
 
         # Keep the propose clause short and rely on OBSERVER_INSTRUCTIONS for friendly examples and required JSON format
         prompt = header + body + propose_clause + OBSERVER_INSTRUCTIONS

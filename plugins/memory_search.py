@@ -14,6 +14,7 @@ import json
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timedelta, timezone
 import re
+import time
 
 
 # Helper: map human-friendly keywords to sensible durations (some include slack already)
@@ -530,7 +531,6 @@ class MemorySearchPlugin:
         )
         max_results = int(payload.get("max_results") or default_max)
 
-        mode = payload.get("mode")
         results: List[Dict[str, Any]] = []
 
         try:

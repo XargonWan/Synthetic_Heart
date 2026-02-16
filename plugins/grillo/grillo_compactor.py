@@ -605,7 +605,7 @@ class GrilloCompactorPlugin:
                     short_summary = cl.get("short_summary")
                     if short_summary:
                         short_summary = str(short_summary)
-                    shortened = bool(cl.get("shortened") or False)
+                    # 'shortened' flag from cluster payload is not used here; ignore
                     tags = cl.get("tags") or []
                     feeling = str(cl.get("feeling") or "")
                     source_ids = cl.get("source_ids") or []
@@ -683,7 +683,6 @@ class GrilloCompactorPlugin:
                                             and new_chars < total_source_chars
                                         ):
                                             summary_chars = new_chars
-                                            shortened = True
                                             shortened_ok = True
                                             summary = short_summary
                                             log_debug(

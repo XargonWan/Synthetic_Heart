@@ -96,11 +96,11 @@ def _search_in_lines(
                     matches.extend(lines[start:end])
                     break
     else:
-        lowered = [l.lower() for l in lines]
+        lowered = [line.lower() for line in lines]
         qlower = [q.lower() for q in queries]
-        for i, l in enumerate(lowered):
+        for i, line in enumerate(lowered):
             for q in qlower:
-                if q in l:
+                if q in line:
                     start = max(0, i - context)
                     end = min(len(lines), i + context + 1)
                     matches.extend(lines[start:end])
@@ -108,10 +108,10 @@ def _search_in_lines(
     # Deduplicate while keeping order
     seen = set()
     out = []
-    for l in matches:
-        if l not in seen:
-            seen.add(l)
-            out.append(l)
+    for line in matches:
+        if line not in seen:
+            seen.add(line)
+            out.append(line)
     return out
 
 

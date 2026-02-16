@@ -123,8 +123,7 @@ class EventPlugin(AIPluginBase):
         host = os.getenv("DB_HOST", "localhost")
         port = int(os.getenv("DB_PORT", "3306"))
         user = os.getenv("DB_USER", "root")
-        # Reuse the same variable name used in core.db for consistency
-        password = os.getenv("DB_PASS", "")
+        # DB password read/used by core.db; not needed locally here
         db_name = os.getenv("DB_NAME", "synth")
 
         log_debug(
@@ -1814,7 +1813,7 @@ Weekly recurring reminder:
 
                         # Create a proper message context for the action parser
                         # This ensures the action goes to the right interface
-                        action_message = type(
+                        _action_message = type(
                             "ActionMessage",
                             (),
                             {
