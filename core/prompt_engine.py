@@ -97,6 +97,7 @@ async def build_json_prompt(
     interface_name: str | None = None,
     image_data: dict | None = None,
     max_chars: int | None = None,
+    history_scope: str | None = None,
 ) -> dict:
     """Build the JSON prompt expected by plugins.
 
@@ -113,6 +114,9 @@ async def build_json_prompt(
     max_chars : int | None
         Maximum characters for the JSON prompt. If provided, the prompt will be
         intelligently reduced by removing oldest memories. If None, no reduction is done.
+    history_scope : str | None
+        Optional per-prompt override for history selection. One of: 'local', 'recent', 'unified'.
+        If None, falls back to any `history_scope` in `context_memory` or to the global `UNIFIED_HISTORY` setting.
     """
     import time
 
@@ -238,6 +242,11 @@ async def build_json_prompt(
     try:
         from core.history_engine import HistoryEngine
 
+        # Determine effective history_scope (explicit param -> context_memory -> default behavior)
+        effective_history_scope = history_scope
+        if effective_history_scope is None and isinstance(context_memory, dict):
+            effective_history_scope = context_memory.get("history_scope")
+
         history_engine = HistoryEngine()
         context_section = await history_engine.build_context(
             message=message,
@@ -245,12 +254,20 @@ async def build_json_prompt(
             interface_name=interface_name,
             text=text,
             memories=memories,
+            history_scope=effective_history_scope,
         )
     except Exception as e:
         log_warning(
             f"[json_prompt] Failed to build history context via HistoryEngine: {e}"
         )
         context_section = {"memories": memories}
+
+    # Expose chosen history_scope to downstream plugins/engines explicitly
+    try:
+        if effective_history_scope:
+            input_payload.setdefault("history_scope", effective_history_scope)
+    except Exception:
+        pass
 
     # === 3. Recon contributions (prompt 0) ===
     try:
@@ -327,7 +344,8 @@ async def build_json_prompt(
         },
         "timestamp": message.date.isoformat(),
         "privacy": "default",
-        "scope": "local",
+        # Set `scope` to the effective history_scope when provided, otherwise keep legacy default
+        "scope": (effective_history_scope if ("effective_history_scope" in locals() and effective_history_scope) else "local"),
     }
 
     # Add image data if present
@@ -795,6 +813,7 @@ def load_json_instructions() -> str:
         "Use input.interface and input.payload.source.interface_path to route replies.\n"
         "NEVER use 'target' — always use 'interface_path' in message actions.\n"
         "Include reply_message_id when replying to specific messages. Use thread_id from input.payload.source.thread_id when present (omit if missing).\n"
+        "CLARIFICATION POLICY: If the user's intent, referent, or the subject of a follow-up is ambiguous or missing, DO NOT GUESS — ask one concise clarifying question before asserting facts or taking action. When the user asks whether you 'understood' but there is no clear context, request clarification rather than assuming.\n"
         'RESPONSE FORMAT: {"actions": [{"type": "action_name", "payload": { ... }}] }\n'
         "Key rules: ALWAYS use 'type' and 'payload', one action object per array entry. Do NOT add any text outside the JSON."
         "Do NOT embed emotion tags, annotations, or bracketed markers inside message text (e.g., '{happy 6.0}')."
@@ -816,6 +835,7 @@ def load_unminified_chat_instruction(interface_name: str | None = None) -> str:
     base = """
 CONCISE RULES (DEFAULT):
 - Keep user-facing messages short and to the point. Default to a single short paragraph or a one-line reply when possible.
+- If the user's request or referent is ambiguous, ask one short clarifying question before responding (do NOT guess the meaning).
 - Expand only when the user explicitly requests more detail or context.
 
 RESPONSE FORMAT (STRICT):

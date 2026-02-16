@@ -60,6 +60,7 @@ async def enqueue(
     bot,
     message,
     context_memory=None,
+    history_scope: str | None = None,
     priority: bool = False,
     interface_id: str = None,
     skip_mention_check: bool = False,
@@ -71,6 +72,7 @@ async def enqueue(
         bot: The bot instance
         message: The message to process
         context_memory: (Deprecated) Message context dict. If not provided, uses centralized context manager.
+        history_scope: Optional per-message history scope ("local"|"recent"|"unified"). If None, falls back to global `UNIFIED_HISTORY` behavior.
         priority: If True, message is added to front of queue (for events)
         interface_id: The interface identifier (e.g., 'webui', 'interface_name')
         skip_mention_check: If True, skip is_message_for_bot check (for 1:1 interfaces like ollama, webui)
@@ -85,6 +87,16 @@ async def enqueue(
     except Exception:
         # Don't block enqueue if normalization fails - keep behavior safe
         log_debug("[QUEUE] Failed to normalise message.user for incoming message")
+
+    # Default to 'local' history scope for interface-originated messages unless
+    # an explicit history_scope was provided by the caller. This keeps the
+    # behaviour implicit for interfaces and avoids touching all call sites.
+    try:
+        if history_scope is None and (interface_id or (bot and hasattr(bot, "get_interface_id"))):
+            history_scope = "local"
+            log_debug(f"[QUEUE] Defaulted history_scope to 'local' for interface {interface_id or getattr(bot, 'get_interface_id', lambda: None)()}")
+    except Exception:
+        pass
 
     message_text = getattr(message, "text", "")
     user_id = (
@@ -409,6 +421,7 @@ async def enqueue(
         "timestamp": time.time(),
         "context": context_memory,
         "priority": priority,
+        "history_scope": history_scope,
     }
 
     global _counter
@@ -430,7 +443,7 @@ async def enqueue(
 
 
 async def enqueue_low_priority(
-    bot, message, context_memory=None, interface_id: str = None, original_message=None
+    bot, message, context_memory=None, history_scope: str | None = None, interface_id: str = None, original_message=None
 ) -> None:
     """Enqueue a low-priority (background) message into the global queue.
 
@@ -438,6 +451,9 @@ async def enqueue_low_priority(
     messages that must never block other user messages. It performs the same
     normalization and persistence steps as :func:`enqueue` but pushes the
     item with LOW_PRIORITY (value 2).
+
+    Args:
+        history_scope: Optional per-message history scope propagated to the consumer/prompt builder.
     """
     if context_memory is None:
         context_memory = get_context_memory()
@@ -447,6 +463,14 @@ async def enqueue_low_priority(
         ensure_message_user_fields(message)
     except Exception:
         log_debug("[QUEUE] Failed to normalise message.user for enqueue_low_priority")
+
+    # Default history_scope for interface-originated low-priority messages as well
+    try:
+        if history_scope is None and interface_id:
+            history_scope = "local"
+            log_debug(f"[QUEUE] Defaulted history_scope to 'local' for low-priority interface {interface_id}")
+    except Exception:
+        pass
 
     user_id = (
         getattr(message.from_user, "id", "unknown") if message.from_user else "unknown"
@@ -484,6 +508,7 @@ async def enqueue_low_priority(
         "timestamp": time.time(),
         "context": context_memory,
         "priority": False,
+        "history_scope": history_scope,
     }
 
     global _counter
@@ -736,6 +761,12 @@ async def _consumer_loop() -> None:
                     if isinstance(context, dict):
                         context["interface_path"] = interface_path
                         context["thread_id"] = thread_id
+                        # Propagate per-message history_scope when present so prompt_engine/history_engine can honour it
+                        hs = final.get("history_scope")
+                        if hs is not None:
+                            context["history_scope"] = hs
+                            log_debug(f"[QUEUE] Propagated history_scope into context: {hs}")
+
                         log_debug(
                             f"[QUEUE] Added interface_path to context: {interface_path}"
                         )

@@ -2,6 +2,7 @@ import logging
 import os
 import sys
 import traceback
+import glob
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from typing import Optional
@@ -239,8 +240,24 @@ class TimestampedRotatingFileHandler(RotatingFileHandler):
             # It will exceed maxBytes, but better than crashing.
             pass
 
-        # Cleanup: we skip complex cleanup to avoid blocking main thread.
-        # User has backupCount=9999 anyway.
+        # Cleanup: remove old timestamped backups beyond `backupCount` to
+        # avoid unbounded accumulation of rotated files. Sort by mtime and
+        # delete the oldest files while keeping the most recent `backupCount`.
+        try:
+            if getattr(self, "backupCount", 0) > 0:
+                pattern = f"{base}.*{ext}"
+                rotated = [p for p in glob.glob(pattern) if os.path.abspath(p) != os.path.abspath(self.baseFilename)]
+                # Sort newest first by modification time
+                rotated.sort(key=os.path.getmtime, reverse=True)
+                # Remove files older than the requested backupCount
+                for old in rotated[self.backupCount:]:
+                    try:
+                        os.remove(old)
+                    except Exception:
+                        pass
+        except Exception:
+            # Never raise from rollover cleanup
+            pass
 
         if self.maxLines > 0:
             self._line_count = 0  # Reset line count after successful rotation
@@ -338,7 +355,7 @@ def setup_logging() -> logging.Logger:
                 _LOG_FILE,
                 maxBytes=5_000_000,
                 maxLines=2000,
-                backupCount=9999,
+                backupCount=10,  # keep a reasonable default number of backups
                 encoding="utf-8",
             )
             fh.setFormatter(formatter)
