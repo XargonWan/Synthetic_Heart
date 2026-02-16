@@ -55,13 +55,13 @@ def cleanup_components():
 
         # Let the core initializer handle cleanup of all registered components
 
-        # Cleanup LLM engines
-        from core.llm_registry import get_llm_registry
+        # Cleanup Cortex engines
+        from core.cortex_registry import get_cortex_registry
 
-        registry = get_llm_registry()
-        for engine_name in registry.get_registered_engines():
+        registry = get_cortex_registry()
+        for engine_name in registry.get_available_engines():
             try:
-                engine_instance = registry.get_engine_instance(engine_name)
+                engine_instance = registry.get_engine(engine_name)
                 if engine_instance and hasattr(engine_instance, "cleanup"):
                     engine_instance.cleanup()
                     log_debug(f"[main] Cleaned up engine: {engine_name}")
@@ -320,11 +320,11 @@ if __name__ == "__main__":
                     INTERFACE_REGISTRY.clear()
                     PLUGIN_REGISTRY.clear()
 
-                    # Clear LLM registry
-                    from core.llm_registry import get_llm_registry
+                    # Clear Cortex registry
+                    from core.cortex_registry import get_cortex_registry
 
-                    llm_registry = get_llm_registry()
-                    llm_registry._engines.clear()
+                    cortex_registry = get_cortex_registry()
+                    cortex_registry._engines.clear()
 
                     log_info("[main] ✅ Cleanup completed - restarting application...")
                     await asyncio.sleep(1)  # Brief pause before restart

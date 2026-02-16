@@ -1,6 +1,6 @@
 import json
 
-from core.selenium_llm_base import SeleniumLLMBase
+from cortex.selenium_engine.selenium_llm_base import SeleniumLLMBase
 
 
 class DummySelenium(SeleniumLLMBase):

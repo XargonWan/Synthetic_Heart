@@ -1,5 +1,5 @@
-# Import the base Selenium LLM library
-from core.selenium_llm_base import SeleniumLLMBase
+# Import the base Selenium engine library
+from cortex.selenium_engine.selenium_llm_base import SeleniumLLMBase
 from core.logging_utils import log_debug
 from core.variables_engine import register_exposed_var
 from selenium.webdriver.common.by import By
@@ -14,7 +14,7 @@ register_exposed_var(
     description="Model name for ChatGPT/OpenAI API calls (e.g., gpt-4o, gpt-4-turbo, gpt-3.5-turbo). Leave empty to use default.",
     scope="llm",
     component="selenium_chatgpt",
-    tags=["llm_engine"],
+    tags=["cortex_engine"],
     advanced=True,
     hidden=True,  # Hide model selection until model-selection UX is improved
 )
@@ -62,7 +62,7 @@ class SeleniumChatGPTPlugin(SeleniumLLMBase):
         self._update_interface_limits()
 
         # Register the ChatGPT limits globally so selenium_llm_base can use them
-        from core.selenium_llm_base import set_active_selenium_limits
+        from cortex.selenium_engine.selenium_llm_base import set_active_selenium_limits
 
         default_limit = MODEL_LIMITS_MAP.get("default", 51000)
         set_active_selenium_limits(default_limit, "chatgpt")
@@ -204,7 +204,9 @@ class SeleniumChatGPTPlugin(SeleniumLLMBase):
         # Update global limits for this model
         if model in self.model_limits_map:
             limit = self.model_limits_map[model]
-            from core.selenium_llm_base import set_active_selenium_limits
+            from cortex.selenium_engine.selenium_llm_base import (
+                set_active_selenium_limits,
+            )
 
             set_active_selenium_limits(limit, f"chatgpt_{model}")
             log_debug(

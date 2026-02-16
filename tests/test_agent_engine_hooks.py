@@ -37,9 +37,12 @@ async def test_engine_hooks_attach_and_agent_execute(monkeypatch):
             return hook
 
     monkeypatch.setattr(
-        "core.config.get_active_llm", lambda: asyncio.sleep(0, result="some_engine")
+        "core.config.get_active_cortex_engine",
+        lambda: asyncio.sleep(0, result="some_engine"),
     )
-    monkeypatch.setattr("core.llm_registry.get_llm_registry", lambda: FakeRegistry())
+    monkeypatch.setattr(
+        "core.cortex_registry.get_cortex_registry", lambda: FakeRegistry()
+    )
 
     agent = AgentCore()
     agent._enabled = True

@@ -13,7 +13,7 @@ class ComponentDescriptor:
         self, name: str, component_type: str, actions: Dict[str, Dict[str, Any]] = None
     ):
         self.name = name
-        self.component_type = component_type  # "plugin", "interface", "llm_engine"
+        self.component_type = component_type  # "plugin", "interface", "cortex_engine"
         self.actions = actions or {}
 
     @classmethod
@@ -77,7 +77,7 @@ class ComponentRegistryManager:
 
         Args:
             component_name: Name of the component
-            component_type: Type of component ("plugin", "interface", "llm_engine")
+            component_type: Type of component ("plugin", "interface", "cortex_engine")
             json_config: JSON configuration containing action definitions
 
         Returns:

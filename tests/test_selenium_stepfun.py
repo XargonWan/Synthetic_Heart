@@ -7,9 +7,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # Import plugin module dynamically (avoid depending on package import machinery during test collection)
 import importlib.util
+
 spec = importlib.util.spec_from_file_location(
-    "cortex.llm_engine.selenium_stepfun",
-    Path(__file__).resolve().parents[1] / "cortex" / "llm_engine" / "selenium_stepfun.py",
+    "cortex.selenium_engine.dev.selenium_stepfun",
+    Path(__file__).resolve().parents[1]
+    / "cortex"
+    / "selenium_engine"
+    / "dev"
+    / "selenium_stepfun.py",
 )
 selenium_stepfun = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(selenium_stepfun)
@@ -22,7 +27,8 @@ class TestSeleniumStepFunEngine(unittest.TestCase):
 
         repo_root = Path(__file__).resolve().parents[1]
         with open(
-            repo_root / "cortex" / "llm_engine" / "selenium_stepfun.py", "r"
+            repo_root / "cortex" / "selenium_engine" / "dev" / "selenium_stepfun.py",
+            "r",
         ) as f:
             content = f.read()
         # Ensure the strict unlogged prompt limit required by StepFun's free UI
@@ -33,7 +39,8 @@ class TestSeleniumStepFunEngine(unittest.TestCase):
 
         repo_root = Path(__file__).resolve().parents[1]
         with open(
-            repo_root / "cortex" / "llm_engine" / "selenium_stepfun.py", "r"
+            repo_root / "cortex" / "selenium_engine" / "dev" / "selenium_stepfun.py",
+            "r",
         ) as f:
             content = f.read()
         # Confirm the primary prompt textarea selector (exact from user)

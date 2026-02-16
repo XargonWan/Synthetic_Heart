@@ -1,4 +1,4 @@
-# llm_engines/openai_chatgpt.py
+# cortex/llm_provider/dev/openai_chatgpt.py
 
 from core.ai_plugin_base import AIPluginBase
 import os
@@ -106,18 +106,8 @@ def supports_functions(model_name: str = None) -> bool:
 
 def get_interface_limits() -> dict:
     """Get the limits and capabilities for OpenAI ChatGPT interface."""
-    # Get current model from active LLM or use default
-    try:
-        from core.config import get_active_llm
-
-        active_llm = get_active_llm()
-        model_name = (
-            active_llm.get("model_name", OPENAI_CONFIG["default_model"])
-            if active_llm
-            else OPENAI_CONFIG["default_model"]
-        )
-    except:
-        model_name = OPENAI_CONFIG["default_model"]
+    # Use configured default model
+    model_name = OPENAI_CONFIG["default_model"]
 
     limits = {
         "max_prompt_chars": get_max_prompt_chars(model_name),

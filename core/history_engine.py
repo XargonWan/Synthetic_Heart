@@ -497,8 +497,12 @@ class HistoryEngine:
                         continue
 
                     # Determine origin: prefer explicit interface_path/source_path fields
-                    entry_path = (m.get("interface_path") or m.get("source_path") or "")
-                    if entry_path and interface_path and str(entry_path) == str(interface_path):
+                    entry_path = m.get("interface_path") or m.get("source_path") or ""
+                    if (
+                        entry_path
+                        and interface_path
+                        and str(entry_path) == str(interface_path)
+                    ):
                         local_lines.append(line)
                     else:
                         other_lines.append(line)

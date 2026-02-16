@@ -506,8 +506,8 @@ class GrilloCompactorPlugin:
         try:
             # Local imports
             from core.db import get_conn_ctx, insert_memory
-            from core.llm_registry import get_llm_registry
-            from core.config import get_active_llm
+            from core.cortex_registry import get_cortex_registry
+            from core.config import get_active_cortex_engine
 
             # Normalize window entries
             batch = window
@@ -555,21 +555,21 @@ class GrilloCompactorPlugin:
             }
 
             # Call LLM
-            active_llm = await get_active_llm()
-            registry = get_llm_registry()
-            engine = registry.get_engine(active_llm)
+            active_cortex = await get_active_cortex_engine(scope="grillo")
+            registry = get_cortex_registry()
+            engine = registry.get_engine(active_cortex)
             if engine is None:
                 try:
-                    engine = registry.load_engine(active_llm)
+                    engine = registry.load_engine(active_cortex)
                 except Exception as e:
                     log_error(
-                        f"[grillo_compactor] Could not load active LLM engine '{active_llm}': {e}"
+                        f"[grillo_compactor] Could not load active Cortex engine '{active_cortex}': {e}"
                     )
                     # Try a safe fallback to the bundled 'manual' engine
                     try:
                         engine = registry.load_engine("manual")
                         log_info(
-                            "[grillo_compactor] Fallback to 'manual' LLM engine succeeded"
+                            "[grillo_compactor] Fallback to 'manual' Cortex engine succeeded"
                         )
                     except Exception as e2:
                         log_error(
@@ -760,7 +760,7 @@ class GrilloCompactorPlugin:
                                     summary,
                                     json.dumps(source_ids),
                                     len(source_ids),
-                                    active_llm,
+                                    active_cortex,
                                     confidence,
                                     notes_value,
                                     1,

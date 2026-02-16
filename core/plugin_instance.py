@@ -1,7 +1,7 @@
 # core/plugin_instance.py
 
 from core.prompt_engine import build_json_prompt
-from core.llm_registry import get_llm_registry
+from core.cortex_registry import get_cortex_registry
 import asyncio
 import contextvars
 from contextlib import asynccontextmanager
@@ -201,61 +201,11 @@ async def load_plugin(
             return
 
     try:
-        registry = get_llm_registry()
+        registry = get_cortex_registry()
         plugin_instance = registry.load_engine(name, notify_fn)
     except Exception as e:
-        # Fallback: attempt direct module load from new cortex packages first,
-        # then fall back to legacy `llm_engines` for backward compatibility.
-        log_warning(
-            f"[plugin] Registry load failed ({e}), attempting direct module load for {name}"
-        )
-        try:
-            import importlib
-
-            candidates = [
-                f"cortex.llm_engine.{name}",
-                f"cortex.llm_engine_dev.{name}",
-                f"llm_engines.{name}",
-            ]
-            module = None
-            module_path = None
-            for candidate in candidates:
-                try:
-                    module = importlib.import_module(candidate)
-                    module_path = candidate
-                    break
-                except Exception:
-                    continue
-
-            if module is None:
-                raise ImportError(f"Could not import any candidate module for {name}")
-
-            if not hasattr(module, "PLUGIN_CLASS"):
-                log_error(f"[plugin] ❌ Module {module_path} does not define PLUGIN_CLASS")
-                raise ValueError(f"Plugin `{name}` does not define `PLUGIN_CLASS`")
-
-            plugin_class = getattr(module, "PLUGIN_CLASS")
-
-            # Verify display_name
-            if not hasattr(plugin_class, "display_name"):
-                error_msg = f"Plugin `{name}` does not define `display_name`"
-                log_error(f"[plugin] ❌ {error_msg}")
-                raise ValueError(error_msg)
-
-            # Create instance with or without notify_fn
-            plugin_args = plugin_class.__init__.__code__.co_varnames
-            if "notify_fn" in plugin_args:
-                plugin_instance = plugin_class(notify_fn=notify_fn)
-            else:
-                plugin_instance = plugin_class()
-
-            log_info(f"[plugin] ✅ Plugin loaded directly from module: {module_path}")
-        except Exception as fallback_e:
-            log_error(
-                f"[plugin] ❌ Direct module load also failed for {name}: {fallback_e}",
-                fallback_e,
-            )
-            raise
+        log_error(f"[plugin] ❌ Cortex registry load failed for {name}: {e}", e)
+        raise
 
     plugin = plugin_instance
     log_debug(f"[plugin] Plugin initialized: {plugin.__class__.__name__}")
@@ -356,7 +306,7 @@ async def load_plugin(
         except Exception as e:
             log_warning(f"[plugin] Error during model setup: {e}")
 
-    # NOTE: Do NOT call set_active_llm() here - it overwrites the DB value during startup
+    # NOTE: Do NOT call set_base_cortex() here - it overwrites the DB value during startup
     # The active LLM is already persisted when changed via WebUI/commands, and should be
     # loaded from DB during initialization, not overwritten with the current plugin name
 

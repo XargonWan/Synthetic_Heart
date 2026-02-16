@@ -1,5 +1,3 @@
-
-
 async def test_list_agent_proposals(monkeypatch):
     # Patch DB conn to return a sample proposed row
     import core.db as dbmod

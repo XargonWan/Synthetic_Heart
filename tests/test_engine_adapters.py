@@ -1,6 +1,6 @@
 import pytest
 
-from cortex.llm_engine.gemini_api import PLUGIN_CLASS as GeminiClass
+from cortex.llm_provider.gemini_api import PLUGIN_CLASS as GeminiClass
 from core.core_initializer import PLUGIN_REGISTRY
 
 
@@ -26,7 +26,7 @@ async def test_gemini_agent_adapter(monkeypatch):
 
 
 def test_selenium_agent_adapter(monkeypatch):
-    from core.selenium_llm_base import SeleniumLLMBase
+    from cortex.selenium_engine.selenium_llm_base import SeleniumLLMBase
 
     s = SeleniumLLMBase(config={})
 

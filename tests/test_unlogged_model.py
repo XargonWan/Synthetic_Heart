@@ -18,7 +18,7 @@ class TestUnloggedModel(unittest.TestCase):
 
         repo_root = Path(__file__).resolve().parents[1]
         with open(
-            repo_root / "cortex" / "llm_engine" / "selenium_chatgpt.py", "r"
+            repo_root / "cortex" / "selenium_engine" / "selenium_chatgpt.py", "r"
         ) as f:
             content = f.read()
         self.assertIn('"unlogged": 20000', content)
@@ -28,7 +28,9 @@ class TestUnloggedModel(unittest.TestCase):
         from pathlib import Path
 
         repo_root = Path(__file__).resolve().parents[1]
-        with open(repo_root / "cortex" / "llm_engine" / "selenium_gemini.py", "r") as f:
+        with open(
+            repo_root / "cortex" / "selenium_engine" / "selenium_gemini.py", "r"
+        ) as f:
             content = f.read()
         self.assertIn('"unlogged": 21500', content)
 
@@ -37,7 +39,9 @@ class TestUnloggedModel(unittest.TestCase):
         from pathlib import Path
 
         repo_root = Path(__file__).resolve().parents[1]
-        with open(repo_root / "cortex" / "llm_engine" / "selenium_grok.py", "r") as f:
+        with open(
+            repo_root / "cortex" / "selenium_engine" / "selenium_grok.py", "r"
+        ) as f:
             content = f.read()
         self.assertIn('"unlogged": 21500', content)
 
@@ -47,7 +51,7 @@ class TestUnloggedModel(unittest.TestCase):
 
         repo_root = Path(__file__).resolve().parents[1]
         with open(
-            repo_root / "cortex" / "llm_engine" / "selenium_chatgpt.py", "r"
+            repo_root / "cortex" / "selenium_engine" / "selenium_chatgpt.py", "r"
         ) as f:
             content = f.read()
         # ChatGPT exposes login-detection selectors used by the shared base class
@@ -59,7 +63,9 @@ class TestUnloggedModel(unittest.TestCase):
         from pathlib import Path
 
         repo_root = Path(__file__).resolve().parents[1]
-        with open(repo_root / "cortex" / "llm_engine" / "selenium_gemini.py", "r") as f:
+        with open(
+            repo_root / "cortex" / "selenium_engine" / "selenium_gemini.py", "r"
+        ) as f:
             content = f.read()
         self.assertIn('return "unlogged"', content)
 
@@ -68,7 +74,9 @@ class TestUnloggedModel(unittest.TestCase):
         from pathlib import Path
 
         repo_root = Path(__file__).resolve().parents[1]
-        with open(repo_root / "cortex" / "llm_engine" / "selenium_grok.py", "r") as f:
+        with open(
+            repo_root / "cortex" / "selenium_engine" / "selenium_grok.py", "r"
+        ) as f:
             content = f.read()
         # Grok implements an engine-specific ensure/login helper and returns 'unlogged' for unauthenticated sessions
         self.assertIn("def _ensure_logged_in(", content)

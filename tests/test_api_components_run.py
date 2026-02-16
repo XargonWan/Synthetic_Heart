@@ -107,10 +107,13 @@ async def test_run_grillo_compactor_dry_run(monkeypatch):
         def get_engine(self, name):
             return FakeEngine()
 
-    # Patch llm registry
-    monkeypatch.setattr("core.llm_registry.get_llm_registry", lambda: FakeRegistry())
+    # Patch cortex registry
     monkeypatch.setattr(
-        "core.config.get_active_llm", lambda: asyncio.sleep(0, result="dummy")
+        "core.cortex_registry.get_cortex_registry", lambda: FakeRegistry()
+    )
+    monkeypatch.setattr(
+        "core.config.get_active_cortex_engine",
+        lambda: asyncio.sleep(0, result="dummy"),
     )
 
     try:

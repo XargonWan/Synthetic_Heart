@@ -1553,10 +1553,10 @@ class EventPlugin(AIPluginBase):
 
         return SilentBot()
 
-    async def _delegate_to_active_llm(
+    async def _delegate_to_active_cortex(
         self, action: dict, event_id: int, event_info: dict = None
     ):
-        """Delegate the action execution to the active LLM plugin."""
+        """Delegate the action execution to the active Cortex plugin."""
         try:
             # Track the current event ID for delivery confirmation
             self._current_processing_event_id = event_id
@@ -1568,7 +1568,7 @@ class EventPlugin(AIPluginBase):
             )
 
             log_debug(
-                f"[event_plugin] Delegating event {event_id} to active LLM via auto-response system"
+                f"[event_plugin] Delegating event {event_id} to active Cortex via auto-response system"
             )
 
             # Create a JSON prompt for the scheduled action with lateness info

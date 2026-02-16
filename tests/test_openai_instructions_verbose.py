@@ -1,7 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 
-import cortex.llm_engine_dev.openai_chatgpt as openai_mod
+import cortex.llm_provider.dev.openai_chatgpt as openai_mod
 
 
 def test_openai_includes_instructions_verbose(monkeypatch):

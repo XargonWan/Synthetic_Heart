@@ -43,11 +43,11 @@ except Exception as e:
     traceback.print_exc()
 
 try:
-    print("4. Testing llm_engines.manual...")
+    print("4. Testing cortex.llm_provider.dev.manual...")
 
-    print("   ✅ llm_engines.manual imported successfully")
+    print("   ✅ cortex.llm_provider.dev.manual imported successfully")
 except Exception as e:
-    print(f"   ❌ llm_engines.manual failed: {e}")
+    print(f"   ❌ cortex.llm_provider.dev.manual failed: {e}")
     import traceback
 
     traceback.print_exc()

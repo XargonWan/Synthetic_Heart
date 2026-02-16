@@ -1,5 +1,5 @@
 # Import the base Selenium LLM library
-from core.selenium_llm_base import SeleniumLLMBase
+from cortex.selenium_engine.selenium_llm_base import SeleniumLLMBase
 from core.logging_utils import log_debug
 from core.variables_engine import register_exposed_var
 from selenium.webdriver.common.by import By
@@ -14,7 +14,7 @@ register_exposed_var(
     description="Model name for Grok API calls. Leave empty to use default.",
     scope="llm",
     component="selenium_grok",
-    tags=["llm_engine"],
+    tags=["cortex_engine"],
     hidden=True,  # Hide model selection until model-selection UX is improved
 )
 

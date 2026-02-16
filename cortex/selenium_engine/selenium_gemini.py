@@ -1,5 +1,5 @@
 # Import the base Selenium LLM library
-from core.selenium_llm_base import SeleniumLLMBase
+from cortex.selenium_engine.selenium_llm_base import SeleniumLLMBase
 from core.logging_utils import log_debug
 from selenium.webdriver.common.by import By
 import time
@@ -22,7 +22,7 @@ try:
         description="Gemini model name used for requests (hidden until model-selection UX is improved).",
         scope="llm",
         component="selenium_gemini",
-        tags=["llm_engine"],
+        tags=["cortex_engine"],
         advanced=True,
         hidden=True,
     )

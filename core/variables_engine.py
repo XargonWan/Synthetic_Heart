@@ -562,17 +562,6 @@ def register_all():
         advanced=True,
     )
 
-    register_exposed_var(
-        "LLM_MODE",
-        label="LLM Mode",
-        default="manual",
-        value_type=str,
-        ui_type="string",
-        description="Legacy compatibility flag for the active LLM mode.",
-        scope="core",
-        tags=["bootstrap"],
-    )
-
     # --- Emotion system tuning (advanced) ---
     register_exposed_var(
         "EMOTION_DECAY_TAU",

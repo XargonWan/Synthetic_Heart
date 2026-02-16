@@ -93,9 +93,12 @@ async def test_skip_leading_untagged_candidates(monkeypatch):
         def get_engine(self, name):
             return FakeEngine()
 
-    monkeypatch.setattr("core.llm_registry.get_llm_registry", lambda: FakeRegistry())
     monkeypatch.setattr(
-        "core.config.get_active_llm", lambda: asyncio.sleep(0, result="dummy")
+        "core.cortex_registry.get_cortex_registry", lambda: FakeRegistry()
+    )
+    monkeypatch.setattr(
+        "core.config.get_active_cortex_engine",
+        lambda: asyncio.sleep(0, result="dummy"),
     )
 
     # Capture logs to ensure skip was logged

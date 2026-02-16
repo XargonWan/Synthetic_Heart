@@ -26,7 +26,7 @@ async def test_agent_attaches_to_engine(monkeypatch):
     # Register fake engine instance
     registry._engines["fakeengine"] = FakeEngine()
 
-    # Patch get_active_llm to return 'fakeengine'
+    # Patch get_active_cortex_engine to return 'fakeengine'
     import core.config as conf
 
     async def fake_get_active():

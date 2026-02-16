@@ -1,8 +1,8 @@
-# core/selenium_llm_base.py
+# cortex/selenium_engine/selenium_llm_base.py
 
 """
-Base library for Selenium-based LLM engines.
-Provides common functionality for ChatGPT, Gemini, Grok and other browser-based LLMs.
+Base library for Selenium-based Cortex engines.
+Provides common functionality for ChatGPT, Gemini, Grok and other browser-based engines.
 """
 
 try:  # pragma: no cover - import guard for test environments/containers
@@ -11,6 +11,8 @@ except Exception:  # pragma: no cover
     uc = None
 from selenium import webdriver
 import os
+import importlib
+import pkgutil
 import time
 import json
 import glob
@@ -68,6 +70,50 @@ from core.action_parser import CORRECTOR_RETRIES
 from core.message_chain import RESPONSE_TIMEOUT
 from core.prompt_engine import reduce_json_text_for_transmission
 
+ENGINE_KIND = "selenium_engine"
+ENGINE_LABEL = "Selenium browser-based engines"
+CAPABILITIES: Dict[str, bool] = {"actions": True}
+
+
+def discover_and_register(registry, dev_enabled: bool = False) -> None:
+    """Register the Selenium cortex kind and its child engines."""
+    registry.register_cortex_kind(ENGINE_KIND, ENGINE_LABEL, CAPABILITIES)
+
+    base_path = os.path.dirname(__file__)
+
+    def _register_from_path(path: str, module_prefix: str) -> None:
+        for _importer, module_name, is_pkg in pkgutil.iter_modules([path]):
+            if is_pkg or module_name.startswith("_") or module_name.endswith("_base"):
+                continue
+            module_path = f"{module_prefix}.{module_name}"
+            try:
+                mod = importlib.import_module(module_path)
+            except Exception as exc:
+                log_warning(f"[selenium_base] Failed to import {module_path}: {exc}")
+                continue
+            if not hasattr(mod, "PLUGIN_CLASS"):
+                continue
+            label = getattr(mod, "ENGINE_LABEL", None)
+            if not label and hasattr(mod, "PLUGIN_CLASS"):
+                label = getattr(mod.PLUGIN_CLASS, "engine_label", None)
+            registry.register_engine_module(
+                module_name,
+                module_path,
+                cortex=ENGINE_KIND,
+                label=label or None,
+            )
+            log_debug(
+                f"[selenium_base] Registered engine: {module_name} ({module_path})"
+            )
+
+    _register_from_path(base_path, "cortex.selenium_engine")
+
+    if dev_enabled:
+        dev_path = os.path.join(base_path, "dev")
+        if os.path.isdir(dev_path):
+            _register_from_path(dev_path, "cortex.selenium_engine.dev")
+
+
 # Register exposed variables for WebUI (shared by all Selenium-based LLM engines)
 register_exposed_var(
     "CHROMIUM_HEADLESS",
@@ -102,7 +148,7 @@ register_exposed_var(
     description="Seconds to wait for ChatGPT response before timing out",
     scope="llm",
     component="selenium_chatgpt_legacy",
-    tags=["llm_engine"],
+    tags=["cortex_engine"],
 )
 
 register_exposed_var(
@@ -114,7 +160,7 @@ register_exposed_var(
     description="Maximum number of retries for the response corrector",
     scope="llm",
     component="selenium_chatgpt_legacy",
-    tags=["llm_engine"],
+    tags=["cortex_engine"],
 )
 
 register_exposed_var(
@@ -126,7 +172,7 @@ register_exposed_var(
     description="Seconds to wait for ChatGPT to start responding for PART1 (smaller than AWAIT_RESPONSE_TIMEOUT)",
     scope="llm",
     component="selenium_llm_base",
-    tags=["llm_engine"],
+    tags=["cortex_engine"],
 )
 
 register_exposed_var(
@@ -138,7 +184,7 @@ register_exposed_var(
     description="Seconds to wait for UI confirmation after sending a prompt (textarea cleared or sending indicator).",
     scope="llm",
     component="selenium_llm_base",
-    tags=["llm_engine"],
+    tags=["cortex_engine"],
     advanced=True,
 )
 
@@ -151,7 +197,7 @@ register_exposed_var(
     description="Polling interval while waiting for the response to stabilize.",
     scope="llm",
     component="selenium_llm_base",
-    tags=["llm_engine"],
+    tags=["cortex_engine"],
     advanced=True,
 )
 
@@ -164,7 +210,7 @@ register_exposed_var(
     description="How many seconds the response length must remain unchanged before we consider it complete.",
     scope="llm",
     component="selenium_llm_base",
-    tags=["llm_engine"],
+    tags=["cortex_engine"],
     advanced=True,
 )
 
@@ -177,7 +223,7 @@ register_exposed_var(
     description="Shorter stable-grace for PART1 (context-only) to reduce latency.",
     scope="llm",
     component="selenium_llm_base",
-    tags=["llm_engine"],
+    tags=["cortex_engine"],
     advanced=True,
 )
 
@@ -223,7 +269,7 @@ register_exposed_var(
     ),
     scope="llm",
     component="selenium_llm_base",
-    tags=["llm_engine"],
+    tags=["cortex_engine"],
     advanced=True,
 )
 
@@ -2061,7 +2107,9 @@ class SeleniumLLMBase(AIPluginBase):
                             try:
                                 if hasattr(self, "_on_selector_success"):
                                     try:
-                                        self._on_selector_success("response_text", selector)
+                                        self._on_selector_success(
+                                            "response_text", selector
+                                        )
                                     except Exception:
                                         pass
                             except Exception:
@@ -2389,7 +2437,9 @@ class SeleniumLLMBase(AIPluginBase):
                             try:
                                 if hasattr(self, "_on_selector_success"):
                                     try:
-                                        self._on_selector_success("send_button", selector)
+                                        self._on_selector_success(
+                                            "send_button", selector
+                                        )
                                     except Exception:
                                         pass
                             except Exception:
@@ -2542,17 +2592,24 @@ class SeleniumLLMBase(AIPluginBase):
             global _active_selenium_max_prompt_chars
             model_limit = _active_selenium_max_prompt_chars  # Fallback to global limit
             try:
-                if hasattr(self, "llm_registry") and self.llm_registry:
-                    active_llm = getattr(self.llm_registry, "active_llm", None)
-                    if active_llm and hasattr(active_llm, "get_model_context_length"):
+                from core.config_manager import config_registry
+                from core.cortex_registry import get_cortex_registry
+
+                active_name = config_registry.get_value("BASE_CORTEX", "")
+                if active_name:
+                    registry = get_cortex_registry()
+                    active_engine = registry.get_engine(active_name)
+                    if active_engine and hasattr(
+                        active_engine, "get_model_context_length"
+                    ):
                         try:
-                            model_limit = active_llm.get_model_context_length()
+                            model_limit = active_engine.get_model_context_length()
                             log_debug(
                                 f"[selenium] Got model limit from registry: {model_limit}"
                             )
                         except Exception:
                             log_debug(
-                                "[selenium] Could not fetch model limit from active_llm"
+                                "[selenium] Could not fetch model limit from active cortex engine"
                             )
             except Exception as e:
                 log_debug(f"[selenium] Could not fetch model limit: {e}")

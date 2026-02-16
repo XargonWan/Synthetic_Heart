@@ -1,3 +1,3 @@
-"""Cortex package: hosts llm_engine, live adapters, and future cortex kinds."""
+"""Cortex package: hosts live adapters, LLM providers, selenium engines, and agent engines."""
 
-__all__ = ["llm_engine", "live"]
+__all__ = ["live", "llm_provider", "selenium_engine", "agent"]

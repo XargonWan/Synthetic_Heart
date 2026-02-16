@@ -182,8 +182,8 @@ try {
         const logSearchInput = document.getElementById('log-search');
         const chatPanel = document.getElementById('chat');
         const chatToggleBtn = document.getElementById('chat-toggle');
-        const componentsLLMSummary = document.getElementById('components-llm-summary');
-        const componentsLLMList = document.getElementById('components-llm-list');
+        const componentsCortexSummary = document.getElementById('components-cortex-summary');
+        const componentsCortexList = document.getElementById('components-cortex-list');
         const componentsInterfacesList = document.getElementById('components-interfaces-list');
         const componentsPluginsList = document.getElementById('components-plugins-list');
         const configGeneralList = document.getElementById('config-general-list');
@@ -1195,11 +1195,11 @@ try {
 
             async function loadComponentsSummary() {
                 try {
-                    const componentsLLMSummaryEl = document.getElementById('components-llm-summary');
-                    const componentsLLMListEl = document.getElementById('components-llm-list');
+                    const componentsCortexSummaryEl = document.getElementById('components-cortex-summary');
+                    const componentsCortexListEl = document.getElementById('components-cortex-list');
                     const componentsInterfacesListEl = document.getElementById('components-interfaces-list');
                     const componentsPluginsListEl = document.getElementById('components-plugins-list');
-                    if (!componentsLLMListEl || !componentsInterfacesListEl || !componentsPluginsListEl) return;
+                    if (!componentsCortexListEl || !componentsInterfacesListEl || !componentsPluginsListEl) return;
                     const res = await fetch('/api/components');
                     // Handle non-2xx responses gracefully and display server-provided
                     // error details in the UI without throwing. This avoids breaking
@@ -1212,12 +1212,12 @@ try {
                             try { data = JSON.parse(text); } catch (e) { data = null; }
                             const errText = (data && (data.detail || data.error || JSON.stringify(data))) || text || `HTTP ${res.status}`;
                             console.error('[synth_webui] Components endpoint error:', res.status, errText);
-                            if (componentsLLMListEl) componentsLLMListEl.innerHTML = `<div class="meta">Failed to load components: ${safeEscapeHtml(errText)}</div>`;
+                            if (componentsCortexListEl) componentsCortexListEl.innerHTML = `<div class="meta">Failed to load components: ${safeEscapeHtml(errText)}</div>`;
                             if (componentsInterfacesListEl) componentsInterfacesListEl.innerHTML = `<div class="meta">Failed to load components: ${safeEscapeHtml(errText)}</div>`;
                             if (componentsPluginsListEl) componentsPluginsListEl.innerHTML = `<div class="meta">Failed to load components: ${safeEscapeHtml(errText)}</div>`;
                         } catch (e) {
                             console.error('[synth_webui] Failed to read components error body', e);
-                            if (componentsLLMListEl) componentsLLMListEl.innerHTML = '<div class="meta">Failed to load components.</div>';
+                            if (componentsCortexListEl) componentsCortexListEl.innerHTML = '<div class="meta">Failed to load components.</div>';
                             if (componentsInterfacesListEl) componentsInterfacesListEl.innerHTML = '<div class="meta">Failed to load components.</div>';
                             if (componentsPluginsListEl) componentsPluginsListEl.innerHTML = '<div class="meta">Failed to load components.</div>';
                         }
@@ -1225,17 +1225,17 @@ try {
                     }
                     data = await res.json();
 
-                    // Cortex summary (backward-compatible with previous LLM payload)
-                    if (componentsLLMSummaryEl && data.cortex) {
-                        componentsLLMSummaryEl.textContent = `Active engine: ${data.cortex.active_engine || '—'} (cortex: ${data.cortex.active_kind || '—'})`;
+                    // Cortex summary
+                    if (componentsCortexSummaryEl && data.cortex) {
+                        componentsCortexSummaryEl.textContent = `Active engine: ${data.cortex.active_engine || '—'} (cortex: ${data.cortex.active_kind || '—'})`;
                     }
 
                     const cortexKindSelect = document.getElementById('cortex-kind-select');
-                    const llmSelect = document.getElementById('llm-engine-select');
-                    const llmModelLabel = document.getElementById('llm-engine-model');
-                    const llmLabel = document.getElementById('llm-engine-label');
-                    const llmLoginStateLabel = document.getElementById('llm-engine-login-state');
-                    const llmLoginBtn = document.getElementById('llm-login-btn');
+                    const engineSelect = document.getElementById('cortex-engine-select');
+                    const engineModelLabel = document.getElementById('cortex-engine-model');
+                    const engineLabel = document.getElementById('cortex-engine-label');
+                    const engineLoginStateLabel = document.getElementById('cortex-engine-login-state');
+                    const engineLoginBtn = document.getElementById('cortex-login-btn');
                     const devToggle = document.getElementById('dev-components-toggle');
 
                     // Helper to render engines list and select for a particular cortex kind
@@ -1248,26 +1248,26 @@ try {
                         });
 
                         // Populate engine select
-                        if (llmSelect) {
-                            llmSelect.innerHTML = '';
+                        if (engineSelect) {
+                            engineSelect.innerHTML = '';
                             engines.forEach((engine) => {
                                 const opt = document.createElement('option');
                                 opt.value = engine.name;
                                 opt.textContent = engine.display_name || engine.name || 'Engine';
                                 if (engine.active) opt.selected = true;
-                                llmSelect.appendChild(opt);
+                                engineSelect.appendChild(opt);
                             });
                         }
 
                         // Update info field with active engine for this cortex
                         const active = engines.find(e => e.active) || engines.find(e => e.name === (data.cortex && data.cortex.active_engine)) || engines[0] || null;
-                        if (llmModelLabel) llmModelLabel.textContent = `model: ${active ? (active.display_name || active.name || '—') : '—'}`;
-                        if (llmLabel) llmLabel.textContent = active ? (active.label || active.description || '') : '';
+                        if (engineModelLabel) engineModelLabel.textContent = `model: ${active ? (active.display_name || active.name || '—') : '—'}`;
+                        if (engineLabel) engineLabel.textContent = active ? (active.label || active.description || '') : '';
                         const loginState = active ? (active.login_state || (active.logged_in ? 'logged' : 'unlogged')) : '—';
-                        if (llmLoginStateLabel) llmLoginStateLabel.textContent = `state: ${loginState}`;
-                        if (llmLoginBtn) {
-                            llmLoginBtn.disabled = !active || !active.loaded;
-                            llmLoginBtn.textContent = active && active.logged_in ? 'Logged' : 'Login';
+                        if (engineLoginStateLabel) engineLoginStateLabel.textContent = `state: ${loginState}`;
+                        if (engineLoginBtn) {
+                            engineLoginBtn.disabled = !active || !active.loaded;
+                            engineLoginBtn.textContent = active && active.logged_in ? 'Logged' : 'Login';
                         }
                     };
 
@@ -1293,13 +1293,13 @@ try {
                     }
 
                     // Initial render
-                    const initialKind = (data.cortex && data.cortex.active_kind) || (data.cortex && data.cortex.available_kinds && data.cortex.available_kinds[0]) || 'llm';
+                    const initialKind = (data.cortex && data.cortex.active_kind) || (data.cortex && data.cortex.available_kinds && data.cortex.available_kinds[0]) || 'llm_provider';
                     renderForCortex(initialKind);
 
-                    // Bind llmSelect change to switch engine (backwards-compatible endpoint)
-                    if (!llmSelect.dataset.bound) {
-                        llmSelect.addEventListener('change', async () => {
-                            const selected = llmSelect.value;
+                    // Bind engineSelect change to switch engine
+                    if (!engineSelect.dataset.bound) {
+                        engineSelect.addEventListener('change', async () => {
+                            const selected = engineSelect.value;
                             if (!selected) return;
                             try {
                                 const res = await fetch('/api/components/cortex', {
@@ -1314,12 +1314,12 @@ try {
                                 alert('Failed to switch engine.');
                             }
                         });
-                        llmSelect.dataset.bound = '1';
+                        engineSelect.dataset.bound = '1';
                     }
 
-                    if (llmLoginBtn && !llmLoginBtn.dataset.bound) {
-                            llmLoginBtn.addEventListener('click', async () => {
-                                const selected = llmSelect.value;
+                    if (engineLoginBtn && !engineLoginBtn.dataset.bound) {
+                            engineLoginBtn.addEventListener('click', async () => {
+                                const selected = engineSelect.value;
                                 if (!selected) return;
                                 try {
                                     const res = await fetch('/api/components/cortex/login', {
@@ -1330,11 +1330,11 @@ try {
                                     if (!res.ok) throw new Error('HTTP ' + res.status);
                                     await loadComponentsSummary();
                                 } catch (e) {
-                                    console.error('[synth_webui] Failed to start LLM login', e);
-                                    alert('LLM login flow failed to start.');
+                                    console.error('[synth_webui] Failed to start cortex login', e);
+                                    alert('Cortex login flow failed to start.');
                                 }
                             });
-                            llmLoginBtn.dataset.bound = '1';
+                            engineLoginBtn.dataset.bound = '1';
                         }
 
                     if (devToggle) {
@@ -1455,18 +1455,18 @@ try {
                         });
                     };
 
-                    // Render engine list for the selected cortex kind (fallback to llm list for backward compatibility)
-                    const toRenderKind = initialKind || 'llm';
+                    // Render engine list for the selected cortex kind
+                    const toRenderKind = initialKind || 'llm_provider';
                     const byCortex = (data.cortex && data.cortex.by_cortex) || {};
-                    renderDetailsList(byCortex[toRenderKind] || (data.llm && data.llm.engines) || [], componentsLLMListEl);
+                    renderDetailsList(byCortex[toRenderKind] || [], componentsCortexListEl);
                     renderDetailsList(data.interfaces || [], componentsInterfacesListEl);
                     renderDetailsList(data.plugins || [], componentsPluginsListEl);
                 } catch (e) {
                     console.error('[synth_webui] Failed to load components', e);
-                    const componentsLLMListEl = document.getElementById('components-llm-list');
+                    const componentsCortexListEl = document.getElementById('components-cortex-list');
                     const componentsInterfacesListEl = document.getElementById('components-interfaces-list');
                     const componentsPluginsListEl = document.getElementById('components-plugins-list');
-                    if (componentsLLMListEl) componentsLLMListEl.innerHTML = '<div class="meta">Failed to load components.</div>';
+                    if (componentsCortexListEl) componentsCortexListEl.innerHTML = '<div class="meta">Failed to load components.</div>';
                     if (componentsInterfacesListEl) componentsInterfacesListEl.innerHTML = '<div class="meta">Failed to load components.</div>';
                     if (componentsPluginsListEl) componentsPluginsListEl.innerHTML = '<div class="meta">Failed to load components.</div>';
                 }
@@ -1954,7 +1954,7 @@ try {
                         const res = await fetch('/api/components');
                         if (res.ok) {
                             const payload = await res.json();
-                            const total = (payload.llm && payload.llm.engines ? payload.llm.engines.length : 0)
+                            const total = (payload.cortex && payload.cortex.engines ? payload.cortex.engines.length : 0)
                                 + (payload.interfaces ? payload.interfaces.length : 0)
                                 + (payload.plugins ? payload.plugins.length : 0);
                             componentsEl.textContent = String(total);

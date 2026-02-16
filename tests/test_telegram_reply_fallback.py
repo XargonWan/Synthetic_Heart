@@ -101,7 +101,7 @@ def test_resolve_from_textual_fallback():
 
 
 def test_manual_tracks_last_sent_chunk(monkeypatch):
-    from cortex.llm_engine_dev.manual import ManualAIPlugin
+    from cortex.llm_provider.dev.manual import ManualAIPlugin
 
     plugin = ManualAIPlugin()
 
@@ -155,7 +155,7 @@ def test_manual_tracks_last_sent_chunk(monkeypatch):
 
 
 def test_manual_prefers_forwarded_message(monkeypatch):
-    from cortex.llm_engine_dev.manual import ManualAIPlugin
+    from cortex.llm_provider.dev.manual import ManualAIPlugin
 
     plugin = ManualAIPlugin()
 

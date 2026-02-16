@@ -712,7 +712,17 @@ async def init_db() -> None:
             # Insert default settings if they don't exist
             await cur.execute(
                 """
-                INSERT IGNORE INTO settings (`setting_key`, `value`) VALUES ('active_llm', 'selenium_chatgpt')
+                INSERT IGNORE INTO settings (`setting_key`, `value`) VALUES ('base_cortex', 'selenium_chatgpt')
+                """
+            )
+            await cur.execute(
+                """
+                INSERT IGNORE INTO settings (`setting_key`, `value`) VALUES ('grillo_cortex', 'Default')
+                """
+            )
+            await cur.execute(
+                """
+                INSERT IGNORE INTO settings (`setting_key`, `value`) VALUES ('trainer_cortex', 'Default')
                 """
             )
         except Exception as e:

@@ -6,7 +6,7 @@ from core.webui import SynthWebUIInterface
 from core.cortex_registry import get_cortex_registry
 
 
-def test_switch_to_non_llm_engine_via_components_endpoint(monkeypatch):
+def test_switch_to_non_default_cortex_engine_via_components_endpoint(monkeypatch):
     """Ensure the components endpoint can switch to an engine that may be live/agent."""
     webui = SynthWebUIInterface(autostart=False)
     client = TestClient(webui.app)

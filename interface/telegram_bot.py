@@ -49,8 +49,8 @@ from core.message_sender import (
     detect_media_type,
 )
 from core.config import (
-    get_active_llm,
-    list_available_llms,
+    get_active_cortex_engine,
+    list_available_cortex_engines,
     set_log_chat_id_and_thread,
     get_log_chat_id_sync,
 )
@@ -178,8 +178,8 @@ async def ensure_plugin_loaded(update: Update):
     if plugin_instance.plugin is None:
         log_warning("[telegram_bot] No plugin loaded, attempting to load...")
         try:
-            current = await get_active_llm()
-            log_debug(f"[telegram_bot] Active LLM from config: {current}")
+            current = await get_active_cortex_engine()
+            log_debug(f"[telegram_bot] Active Cortex from config: {current}")
             if current:
                 log_debug(f"[telegram_bot] Loading plugin: {current}")
                 await plugin_instance.load_plugin(current, notify_fn=telegram_notify)
@@ -187,7 +187,7 @@ async def ensure_plugin_loaded(update: Update):
                     f"[telegram_bot] Plugin loaded successfully: {plugin_instance.plugin is not None}"
                 )
         except Exception as e:  # pragma: no cover - runtime safeguard
-            log_warning(f"[telegram_interface] Failed to autoload LLM: {e}")
+            log_warning(f"[telegram_interface] Failed to autoload Cortex: {e}")
         if plugin_instance.plugin is None:
             log_warning("[telegram_bot] Plugin still None, trying manual fallback...")
             try:
@@ -195,10 +195,10 @@ async def ensure_plugin_loaded(update: Update):
                 log_warning("[telegram_interface] Falling back to ManualAIPlugin")
             except Exception as e:
                 log_error(f"[telegram_bot] Manual plugin fallback failed: {e}")
-                log_error("No LLM plugin loaded.")
+                log_error("No Cortex plugin loaded.")
                 from core.notifier import notify_trainer
 
-                notify_trainer("⚠️ No LLM plugin active. Use /llm to select one.")
+                notify_trainer("⚠️ No Cortex plugin active. Use /cortex to select one.")
                 return False
     else:
         log_debug(
@@ -1270,45 +1270,45 @@ async def manage_chat_id_command(update: Update, context: ContextTypes.DEFAULT_T
 # /say command removed — use direct message sending via interface-specific tooling.
 
 
-async def llm_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cortex_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_info(
-        f"[telegram_bot] LLM command received from user {update.effective_user.id}"
+        f"[telegram_bot] Cortex command received from user {update.effective_user.id}"
     )
 
     if not is_trainer(update.effective_user.id):
         log_warning(
-            f"[telegram_bot] LLM command rejected: user {update.effective_user.id} != get_trainer_id() {get_trainer_id()}"
+            f"[telegram_bot] Cortex command rejected: user {update.effective_user.id} != get_trainer_id() {get_trainer_id()}"
         )
         return
 
     args = context.args
-    log_info(f"[telegram_bot] LLM command args: {args}")
+    log_info(f"[telegram_bot] Cortex command args: {args}")
 
-    current = await get_active_llm()
-    available = list_available_llms()
+    current = await get_active_cortex_engine()
+    available = list_available_cortex_engines()
 
     if not args:
-        msg = f"*Active LLM:* `{current}`\n\n*Available:*"
+        msg = f"*Active Cortex:* `{current}`\n\n*Available:*"
         msg += "\n" + "\n".join(f"• `{name}`" for name in available)
-        msg += "\n\nTo change: `/llm <name>`"
+        msg += "\n\nTo change: `/cortex <name>`"
         await update.message.reply_text(msg, parse_mode="Markdown")
         return
 
     choice = args[0]
     if choice not in available:
-        await update.message.reply_text(f"❌ LLM `{choice}` not found.")
+        await update.message.reply_text(f"❌ Cortex `{choice}` not found.")
         return
 
     try:
-        from core.config import switch_active_llm
+        from core.config import switch_active_cortex_engine
 
         # Use the centralized switch function with full reinitialization for Telegram
-        await switch_active_llm(choice, use_hot_swap=False)
+        await switch_active_cortex_engine(choice, use_hot_swap=False)
         await update.message.reply_text(
-            f"✅ LLM mode dynamically updated to `{choice}`."
+            f"✅ Cortex engine dynamically updated to `{choice}`."
         )
     except ValueError as e:
-        await update.message.reply_text(f"❌ LLM not available: {e}")
+        await update.message.reply_text(f"❌ Cortex not available: {e}")
     except Exception as e:
         await update.message.reply_text(f"❌ Error loading plugin: {e}")
 

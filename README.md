@@ -17,7 +17,7 @@ Synthetic Heart (SyntH) is a FOSS application and framework that helps you creat
 A SyntH isn't just a prompt-driven chatbot. Their identity, memories and personality live in the database instead of within a single LLM session. That means a Synth can think, reflect, and make choices even while you're not interacting with it. It preserves continuity and evolves over time; it can be right or wrong, and can develop opinions — much like a real social being.
 
 ### Completely free & swappable
-Because SyntH decouples persona data from the underlying LLM, you can connect any LLM engine you prefer (ChatGPT, Gemini, local models such as Ollama, or others). No expensive hardware required — use the LLM engine you already have access to.
+Because SyntH decouples persona data from the underlying LLM, you can connect any Cortex engine you prefer (LLM providers like ChatGPT or Gemini, Selenium-based web engines, local models such as Ollama, or others). No expensive hardware required — use the engine you already have access to.
 
 ### Fully pluggable — build anything
 - Dev friendly: craft new interfaces, plugins, or hook into games and apps.
@@ -43,7 +43,7 @@ Beta, but stable enough for daily use. Development branch gives access to the la
 
 ### Features
 
-- Switchable LLM engines (Selenium-driven ChatGPT, Gemini or Grok sessions). **Note: Currently, only Selenium ChatGPT (Legacy) is fully functional. Other engines are experimental and may not work reliably.**
+- Switchable Cortex engines (Selenium-driven ChatGPT, Gemini or Grok sessions). **Note: Currently, only Selenium ChatGPT (Legacy) is fully functional. Other engines are experimental and may not work reliably.**
 - Multiple chat interfaces including the builtin webui, Telegram, Discord and Matrix
 - **VRM Avatar System**: 3D animated avatars with idle, talking, and thinking states.
 - **SyntH Web UI**: A production-ready web interface featuring VRM avatar support and real-time animations.  
@@ -127,7 +127,7 @@ For the fastest development experience on Windows, we recommend using **uv**. It
 
 ### First Run Setup
 1.  **Access the WebUI:** Navigate to `https://localhost:8000` (Accept the self-signed certificate warning if prompted).
-2.  **Select Engine:** Go to **Components** and select your desired LLM Engine.
+2.  **Select Engine:** Go to **Components** and select your desired Cortex kind + engine.
 3.  **Login (Selenium Engines):** If using a Selenium engine (like ChatGPT or Gemini), click the **Login** button to authenticate via the virtual browser.
 
 > **Note on Skins:** The `skins` folder is optional if you do not intend to edit them. If you skip downloading it, ensure the volume mapping for `./skins` is commented out in your compose file, otherwise, an empty folder will override the built-in skins.
@@ -150,18 +150,18 @@ You can browse and manage Docker images for this project on [Docker Hub](https:/
 
 ## Contributing
 
-Pull requests are welcome! Everyone is encouraged to submit contributions—especially new components, plugins, and LLM engines—to expand SyntH's capabilities. Please read the guidelines in the documentation before submitting.
+Pull requests are welcome! Everyone is encouraged to submit contributions—especially new components, plugins, and Cortex engines—to expand SyntH's capabilities. Please read the guidelines in the documentation before submitting.
 
 ## What's next (Planned features & fixes)
 Here are the main improvements and integrations we plan to work on — contributions are welcome:
 
 - [ ] Event system fixes
 - [ ] Global animation engine fixes — make animations always reflect the actual state of the SyntH and their current actions
-- [ ] Helper LLM engine — offload some background/service actions to a dedicated helper model running alongside the user-facing LLM
+- [ ] Helper Cortex engine — offload some background/service actions to a dedicated helper model running alongside the user-facing LLM
 - [ ] Memory retagging engine — improve tagging and indexing of memory entries for better recall and context
 - [ ] Memory compressor engine — compact/condense long-term memory while retaining critical information
-- [ ] Grok web LLM engine support
-- [ ] Deepseek web LLM engine support
+- [ ] Grok web Cortex engine support
+- [ ] Deepseek web Cortex engine support
 - [ ] Voice message plugin — enable synth to record and send voice messages
 - [ ] Desktop presence — allow SyntH to show up on a desktop environment (outside web interfaces)
 - [ ] First gaming plugin: Minecraft integration

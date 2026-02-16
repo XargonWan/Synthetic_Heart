@@ -1,4 +1,4 @@
-# llm_engines/manual.py
+# cortex/llm_provider/dev/manual.py
 
 from plugins.message_map import (
     init_message_map_table,
@@ -72,7 +72,7 @@ def get_interface_limits() -> dict:
     """
     # Try to get limits from active Selenium LLM engine
     try:
-        from core.selenium_llm_base import get_active_selenium_limits
+        from cortex.selenium_engine.selenium_llm_base import get_active_selenium_limits
 
         selenium_limits = get_active_selenium_limits()
         max_prompt_chars = selenium_limits.get("max_prompt_chars", 128001)
@@ -138,7 +138,9 @@ class ManualAIPlugin(AIPluginBase):
         """
         # Try to get limits from active Selenium LLM engine
         try:
-            from core.selenium_llm_base import get_active_selenium_limits
+            from cortex.selenium_engine.selenium_llm_base import (
+                get_active_selenium_limits,
+            )
 
             selenium_limits = get_active_selenium_limits()
             max_prompt_chars = selenium_limits.get("max_prompt_chars", 128001)

@@ -8,7 +8,7 @@ This directory contains the test suite for the Synthetic Heart. The tests are de
 Basic functionality tests that verify core imports and initialization work correctly.
 
 ### Component Loading Tests (`test_component_loading.py`)
-Tests that verify the auto-discovery and registration system for plugins, interfaces, and LLM engines.
+Tests that verify the auto-discovery and registration system for plugins, interfaces, and Cortex engines.
 
 ### Message Chain Tests (`test_message_chain.py`, `test_message_chain_integration.py`)
 Tests for the core message processing pipeline, including JSON extraction, action execution, and error handling.

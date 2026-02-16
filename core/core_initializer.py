@@ -8,7 +8,7 @@ import threading
 from pathlib import Path
 from typing import Any
 from core.logging_utils import log_info, log_error, log_warning, log_debug
-from core.config import get_active_llm, list_available_llms
+from core.config import list_available_cortex_engines
 from dataclasses import dataclass, field
 from typing import List, Dict
 from enum import Enum
@@ -37,7 +37,7 @@ class ComponentInfo:
     """Information about a system component."""
 
     name: str
-    type: str  # "plugin", "interface", "llm", "core"
+    type: str  # "plugin", "interface", "cortex", "core"
     status: ComponentStatus = ComponentStatus.LOADING
     actions: List[str] = field(default_factory=list)
     error: str = ""
@@ -50,7 +50,7 @@ class CoreInitializer:
     def __init__(self):
         self.loaded_plugins = []
         self.active_interfaces = []
-        self.active_llm = None
+        self.active_cortex = None
         self.startup_errors = []
         self.actions_block = {"available_actions": {}}
         self.interface_actions = {}
@@ -79,10 +79,10 @@ class CoreInitializer:
         """Check if dev components are currently enabled."""
         return self._enable_dev_components
 
-    def _evaluate_llm_health(self, plugin: Any) -> tuple[bool, str]:
-        """Return (ok, error_message) for an LLM engine health check."""
+    def _evaluate_cortex_health(self, plugin: Any) -> tuple[bool, str]:
+        """Return (ok, error_message) for a Cortex engine health check."""
         if plugin is None:
-            return False, "LLM engine instance is missing"
+            return False, "Cortex engine instance is missing"
 
         if hasattr(plugin, "get_health_status"):
             try:
@@ -122,19 +122,19 @@ class CoreInitializer:
             # 0. Initialize registries
             await self._initialize_registries()
 
-            # 0.5. Pre-load ACTIVE_LLM from database before loading the LLM engine
-            # This ensures we load the correct LLM that was saved by the user
-            log_debug("[core_initializer] Pre-loading ACTIVE_LLM from database...")
+            # 0.5. Pre-load BASE_CORTEX from database before loading the engine
+            # This ensures we load the correct Cortex engine that was saved by the user
+            log_debug("[core_initializer] Pre-loading BASE_CORTEX from database...")
             try:
                 from core.config_manager import config_registry
 
-                # Force load ACTIVE_LLM from DB if it exists
-                definition = config_registry._definitions.get("ACTIVE_LLM")
+                # Force load BASE_CORTEX from DB if it exists
+                definition = config_registry._definitions.get("BASE_CORTEX")
                 if definition:
                     from core.db import ensure_core_tables
 
                     await ensure_core_tables()
-                    raw_value = await config_registry._load_from_db("ACTIVE_LLM")
+                    raw_value = await config_registry._load_from_db("BASE_CORTEX")
                     if raw_value:
                         definition.raw_value = raw_value
                         definition.value = config_registry._convert_value(
@@ -142,25 +142,25 @@ class CoreInitializer:
                         )
                         definition.loaded = True
                         log_info(
-                            f"[core_initializer] ✅ Pre-loaded ACTIVE_LLM from DB: {raw_value}"
+                            f"[core_initializer] ✅ Pre-loaded BASE_CORTEX from DB: {raw_value}"
                         )
                     else:
                         log_debug(
-                            "[core_initializer] ACTIVE_LLM not found in DB, using default"
+                            "[core_initializer] BASE_CORTEX not found in DB, using default"
                         )
                 else:
                     log_debug(
-                        "[core_initializer] ACTIVE_LLM definition not found in registry"
+                        "[core_initializer] BASE_CORTEX definition not found in registry"
                     )
             except Exception as preload_exc:
                 log_warning(
-                    f"[core_initializer] Failed to pre-load ACTIVE_LLM: {preload_exc}"
+                    f"[core_initializer] Failed to pre-load BASE_CORTEX: {preload_exc}"
                 )
 
-            # 1. Load LLM engine
-            await self._load_llm_engine(notify_fn)
+            # 1. Load Cortex engine
+            await self._load_cortex_engine(notify_fn)
 
-            # 1.5. Flush env overrides to DB now that LLM is loaded (avoids connection deadlocks)
+            # 1.5. Flush env overrides to DB now that Cortex is loaded (avoids connection deadlocks)
             try:
                 log_debug("[core_initializer] About to flush env overrides to database")
                 from core.config_manager import config_registry
@@ -533,7 +533,7 @@ class CoreInitializer:
             "successful_components": successful,
             "failed_components": failed,
             "loading_components": loading,
-            "active_llm": self.active_llm,
+            "active_cortex": self.active_cortex,
             "active_interfaces": self.active_interfaces,
             "startup_errors": self.startup_errors,
             "initialization_completed": self.initialization_completed,
@@ -542,19 +542,10 @@ class CoreInitializer:
     async def _initialize_registries(self):
         """Initialize the core registries."""
         try:
-            # Initialize LLM registry
-            from core.llm_registry import register_default_engines
-            from core.cortex_registry import (
-                register_default_engines as register_cortex_engines,
-            )
+            from core.cortex_registry import register_default_engines
 
-            # Populate legacy LLM registry (keeps backward compatibility)
-            register_default_engines()
-            log_debug("[core_initializer] LLM registry initialized")
-
-            # Also auto-register Cortex engines (cortex/llm_engine and cortex/live)
             try:
-                register_cortex_engines()
+                register_default_engines(dev_enabled=self._enable_dev_components)
                 log_debug("[core_initializer] Cortex registry initialized")
             except Exception as _e:
                 log_warning(
@@ -564,7 +555,7 @@ class CoreInitializer:
             # The interfaces registry is initialized by each interface when it starts
             log_debug("[core_initializer] Registries initialized successfully")
 
-            # NOTE: flush_env_overrides_to_db() will be called AFTER LLM engine is loaded
+            # NOTE: flush_env_overrides_to_db() will be called AFTER the Cortex engine is loaded
             # to avoid connection pool deadlocks during initialization
             # After registries are in place, migrate any existing config_registry
             # definitions into the new Exposed Variables registry so metadata/UI
@@ -598,87 +589,90 @@ class CoreInitializer:
                 f"[core_initializer] Configured trainer ID {trainer_id} for {interface_name}"
             )
 
-    async def _load_llm_engine(self, notify_fn=None):
-        """Load the active LLM engine."""
+    async def _load_cortex_engine(self, notify_fn=None):
+        """Load the active cortex engine."""
         try:
-            self.active_llm = await get_active_llm()
+            from core.config import get_active_cortex_engine
+
+            self.active_cortex = await get_active_cortex_engine()
             self.track_component(
-                self.active_llm,
-                "llm",
+                self.active_cortex,
+                "cortex",
                 ComponentStatus.LOADING,
-                details="Loading LLM engine",
+                details="Loading Cortex engine",
             )
 
             # Import here to avoid circular imports
             from core.plugin_instance import load_plugin
 
-            await load_plugin(self.active_llm, notify_fn=notify_fn)
+            await load_plugin(self.active_cortex, notify_fn=notify_fn)
 
             # Verify plugin was loaded successfully
             from core.plugin_instance import plugin
 
             if plugin is None:
-                error_msg = f"Plugin {self.active_llm} failed to load"
+                error_msg = f"Plugin {self.active_cortex} failed to load"
                 log_error(f"[core_initializer] {error_msg}!")
                 self.startup_errors.append(error_msg)
                 self.mark_component_failed(
-                    self.active_llm, error_msg, "LLM plugin initialization failed"
+                    self.active_cortex,
+                    error_msg,
+                    "Cortex plugin initialization failed",
                 )
             else:
                 log_debug(
-                    f"[core_initializer] Plugin {self.active_llm} loaded successfully: {plugin.__class__.__name__}"
+                    f"[core_initializer] Plugin {self.active_cortex} loaded successfully: {plugin.__class__.__name__}"
                 )
-                ok, error = self._evaluate_llm_health(plugin)
+                ok, error = self._evaluate_cortex_health(plugin)
                 if ok:
                     self.mark_component_success(
-                        self.active_llm,
-                        details=f"LLM engine: {plugin.__class__.__name__}",
+                        self.active_cortex,
+                        details=f"Cortex engine: {plugin.__class__.__name__}",
                     )
                 else:
-                    message = error or "LLM engine loaded but not ready"
+                    message = error or "Cortex engine loaded but not ready"
                     log_warning(
-                        f"[core_initializer] LLM engine health check failed: {message}"
+                        f"[core_initializer] Cortex engine health check failed: {message}"
                     )
                     self.mark_component_failed(
-                        self.active_llm, message, "LLM engine configuration incomplete"
+                        self.active_cortex,
+                        message,
+                        "Cortex engine configuration incomplete",
                     )
 
-            log_debug(f"[core_initializer] Active LLM engine loaded: {self.active_llm}")
+            log_debug(
+                f"[core_initializer] Active Cortex engine loaded: {self.active_cortex}"
+            )
         except Exception as e:
-            error_msg = f"Failed to load active LLM: {repr(e)}"
+            error_msg = f"Failed to load active Cortex engine: {repr(e)}"
             log_error(f"[core_initializer] {error_msg}")
-            self.startup_errors.append(f"LLM engine error: {e}")
-            if hasattr(self, "active_llm") and self.active_llm:
+            self.startup_errors.append(f"Cortex engine error: {e}")
+            if hasattr(self, "active_cortex") and self.active_cortex:
                 self.mark_component_failed(
-                    self.active_llm, str(e), "LLM loading exception"
+                    self.active_cortex,
+                    str(e),
+                    "Cortex loading exception",
                 )
             else:
                 self.track_component(
-                    "unknown_llm", "llm", ComponentStatus.FAILED, error=str(e)
+                    "unknown_cortex", "cortex", ComponentStatus.FAILED, error=str(e)
                 )
 
     def _load_plugins(self):
         """Auto-discover and load all available plugins for validation and startup."""
         # Note: This now actually loads and starts action providers from
-        # plugins, LLM engines and interfaces. Files no longer need to follow a
+        # plugins, Cortex engines and interfaces. Files no longer need to follow a
         # ``*_plugin.py`` naming convention.
 
         root_dir = Path(__file__).parent.parent
-        # Include new cortex locations for LLM engines; keep legacy paths for backward compatibility
-        search_dirs = ["plugins", "cortex/llm_engine", "interface", "llm_engines"]
+        # Include cortex locations; legacy paths are removed
+        search_dirs = ["plugins", "cortex", "interface"]
 
-        # If dev components are enabled, also scan dev directories (both cortex and legacy)
+        # If dev components are enabled, also scan dev directories
         if self._enable_dev_components:
-            search_dirs.extend(
-                [
-                    "plugins_dev",
-                    "cortex/llm_engine_dev",
-                    "interface_dev",
-                    "llm_engines_dev",
-                ]
-            )
+            search_dirs.extend(["plugins_dev", "interface_dev"])
             log_info(
-                "[core_initializer] 🔧 Dev components enabled: scanning plugins_dev/, cortex/llm_engine_dev/ and llm_engines_dev/"
+                "[core_initializer] 🔧 Dev components enabled: scanning plugins_dev/ and cortex/*/dev/"
             )
 
         for base in search_dirs:
@@ -688,6 +682,13 @@ class CoreInitializer:
 
             for py_file in base_path.rglob("*.py"):
                 if py_file.name == "__init__.py" or py_file.name.startswith("_"):
+                    continue
+
+                if (
+                    not self._enable_dev_components
+                    and "dev" in py_file.parts
+                    and "cortex" in py_file.parts
+                ):
                     continue
 
                 module_name = ".".join(
@@ -1055,18 +1056,21 @@ class CoreInitializer:
                     f"[core_initializer] Failed to register reload handler for {interface_name}: {e}"
                 )
 
-        # Register reload handlers for LLM engines (e.g., API keys)
+        # Register reload handlers for Cortex engines (e.g., API keys)
         try:
-            from core.config import list_available_llms, get_active_llm
-            from core.llm_registry import get_llm_registry
+            from core.config import (
+                list_available_cortex_engines,
+                get_active_cortex_engine,
+            )
+            from core.cortex_registry import get_cortex_registry
             from core.plugin_instance import load_plugin
 
-            for engine_name in list_available_llms():
+            for engine_name in list_available_cortex_engines():
 
-                async def _reload_llm_engine(engine_name=engine_name):
-                    llm_registry = get_llm_registry()
+                async def _reload_cortex_engine(engine_name=engine_name):
+                    cortex_registry = get_cortex_registry()
                     try:
-                        active = await get_active_llm()
+                        active = await get_active_cortex_engine()
                     except Exception:
                         active = None
 
@@ -1077,35 +1081,37 @@ class CoreInitializer:
                         if active_plugin is None:
                             self.mark_component_failed(
                                 engine_name,
-                                "LLM reload returned no instance",
+                                "Cortex reload returned no instance",
                                 "Reload failed",
                             )
                         else:
-                            ok, error = self._evaluate_llm_health(active_plugin)
+                            ok, error = self._evaluate_cortex_health(active_plugin)
                             if ok:
                                 self.mark_component_success(
                                     engine_name,
-                                    details=f"LLM engine: {active_plugin.__class__.__name__}",
+                                    details=f"Cortex engine: {active_plugin.__class__.__name__}",
                                 )
                             else:
-                                message = error or "LLM engine loaded but not ready"
+                                message = error or "Cortex engine loaded but not ready"
                                 self.mark_component_failed(
                                     engine_name,
                                     message,
-                                    "LLM engine configuration incomplete",
+                                    "Cortex engine configuration incomplete",
                                 )
                     else:
-                        if llm_registry.get_engine(engine_name):
-                            llm_registry.unload_engine(engine_name)
-                        llm_registry.load_engine(engine_name)
+                        if cortex_registry.get_engine(engine_name):
+                            cortex_registry.unload_engine(engine_name)
+                        cortex_registry.load_engine(engine_name)
 
-                config_registry.register_reload_handler(engine_name, _reload_llm_engine)
+                config_registry.register_reload_handler(
+                    engine_name, _reload_cortex_engine
+                )
                 log_info(
-                    f"[core_initializer] ✅ Reload handler registered for LLM engine: {engine_name}"
+                    f"[core_initializer] ✅ Reload handler registered for Cortex engine: {engine_name}"
                 )
         except Exception as e:
             log_warning(
-                f"[core_initializer] Failed to register LLM reload handlers: {e}"
+                f"[core_initializer] Failed to register Cortex reload handlers: {e}"
             )
 
     def register_interface(self, interface_name: str):
@@ -1483,23 +1489,27 @@ class CoreInitializer:
         log_info(f"   • 🔄 Loading: {resume['loading']}")
         log_info(f"   • ⚡ Total actions available: {resume['total_actions']}")
 
-        # --- LLM Engine ---
-        available_llms = list_available_llms()
-        if resume["active_llm"]:
-            llm_status = (
+        # --- Cortex Engine ---
+        available_engines = list_available_cortex_engines()
+        if resume["active_cortex"]:
+            cortex_status = (
                 "✅"
                 if any(
-                    c.name == resume["active_llm"]
+                    c.name == resume["active_cortex"]
                     and c.status == ComponentStatus.SUCCESS
                     for c in resume["successful_components"]
                 )
                 else "❌"
             )
-            log_info(f"🧠 Active LLM Engine: {llm_status} {resume['active_llm']}")
+            log_info(
+                f"🧠 Active Cortex Engine: {cortex_status} {resume['active_cortex']}"
+            )
         else:
-            log_info("🧠 Active LLM Engine: ❌ None")
-        if available_llms:
-            log_info(f"🧠 Available LLM Engines: {', '.join(sorted(available_llms))}")
+            log_info("🧠 Active Cortex Engine: ❌ None")
+        if available_engines:
+            log_info(
+                f"🧠 Available Cortex Engines: {', '.join(sorted(available_engines))}"
+            )
 
         # --- Successful Components ---
         if resume["successful_components"]:
@@ -1515,7 +1525,7 @@ class CoreInitializer:
                 type_emoji = {
                     "plugin": "🧩",
                     "interface": "🔌",
-                    "llm": "🧠",
+                    "cortex": "🧠",
                     "core": "⚙️",
                 }.get(comp_type, "📦")
                 log_info(f"   {type_emoji} {comp_type.upper()}S ({len(components)}):")

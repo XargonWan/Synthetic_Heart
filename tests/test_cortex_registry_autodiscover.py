@@ -3,7 +3,7 @@ from core.cortex_registry import get_cortex_registry, register_default_engines
 
 
 class TestCortexRegistryAutoDiscover(unittest.TestCase):
-    def test_autodiscover_registers_cortex_llm_engines(self):
+    def test_autodiscover_registers_cortex_engines(self):
         reg = get_cortex_registry()
         # Clear any previous registration for test isolation
         reg._engine_modules.clear()
@@ -13,10 +13,17 @@ class TestCortexRegistryAutoDiscover(unittest.TestCase):
         register_default_engines()
 
         engines = reg.get_available_engines()
-        # Basic sanity: our cortex/llm_engine folder should register known engines
+        # Basic sanity: our cortex/selenium_engine folder should register known engines
         self.assertIn("selenium_chatgpt", engines)
         self.assertIn("selenium_gemini", engines)
-        # The new StepFun engine should also be discoverable under cortex
+
+    def test_autodiscover_registers_dev_engines_when_enabled(self):
+        reg = get_cortex_registry()
+        reg._engine_modules.clear()
+        reg._engine_meta.clear()
+
+        register_default_engines(dev_enabled=True)
+        engines = reg.get_available_engines()
         self.assertIn("selenium_stepfun", engines)
 
 

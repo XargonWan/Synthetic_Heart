@@ -258,14 +258,18 @@ class DebriefActionIntentPlugin:
 
         engine = None
         try:
-            from core.config import get_active_llm
-            from core.llm_registry import get_llm_registry
+            from core.config import get_active_cortex_engine
+            from core.cortex_registry import get_cortex_registry
 
-            active_llm = await get_active_llm()
-            registry = get_llm_registry()
-            engine = registry.get_engine(active_llm) or registry.load_engine(active_llm)
+            active_cortex = await get_active_cortex_engine()
+            registry = get_cortex_registry()
+            engine = registry.get_engine(active_cortex) or registry.load_engine(
+                active_cortex
+            )
         except Exception as e:
-            log_warning(f"[debrief_action_intent] Failed to load active LLM: {e}")
+            log_warning(
+                f"[debrief_action_intent] Failed to load active Cortex engine: {e}"
+            )
             engine = None
 
         if not engine or not hasattr(engine, "generate_response"):

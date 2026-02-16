@@ -6,10 +6,10 @@ from core.webui import SynthWebUIInterface
 
 class FakeRegistry:
     def __init__(self):
-        self._engine_meta = {"manual": {"cortex": "llm"}}
+        self._engine_meta = {"manual": {"cortex": "llm_provider"}}
 
     def get_available_engines(self, cortex=None):
-        if cortex is None or cortex == "llm":
+        if cortex is None or cortex == "llm_provider":
             return ["manual"]
         return []
 
@@ -22,12 +22,14 @@ async def test_components_summary_resilient(monkeypatch):
         "core.cortex_registry.get_cortex_registry", lambda: FakeRegistry()
     )
 
-    # Simulate get_active_llm raising an exception to ensure webui handles it
-    def fake_get_active_llm():
+    # Simulate get_active_cortex_engine raising an exception to ensure webui handles it
+    def fake_get_active_cortex_engine():
         raise RuntimeError("DB not ready")
 
     monkeypatch.setattr(
-        "core.config.get_active_llm", fake_get_active_llm, raising=False
+        "core.config.get_active_cortex_engine",
+        fake_get_active_cortex_engine,
+        raising=False,
     )
 
     webui = SynthWebUIInterface(autostart=False)
@@ -37,7 +39,6 @@ async def test_components_summary_resilient(monkeypatch):
 
     payload = json.loads(resp.body)
     # Basic structural checks
-    assert "llm" in payload
+    assert "cortex" in payload
     assert "interfaces" in payload
     assert "plugins" in payload
-    assert "cortex" in payload

@@ -135,7 +135,7 @@ def _import_sandboxed_selenium_llm_base():
         )
 
     # Now import the module under test
-    import core.selenium_llm_base as slb
+    import cortex.selenium_engine.selenium_llm_base as slb
 
     importlib.reload(slb)
     return slb

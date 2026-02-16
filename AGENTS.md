@@ -4,7 +4,8 @@
 
 **Role:** You are a Senior Python Architect.
 **Environment:** VS Code (Local Windows Machine).
-**Toolchain:** **Astral** (`uv` + `ruff` + `ty`). Do NOT use `pip` or `venv`.
+**Toolchain:** **Astral** (`uv` + `ruff` + `ty`). Do NOT use `pip`.
+`uv` can be used inside a venv if needed.
 
 ### 1. The Rules of Engagement
 * **❌ NO GIT PUSH:** You are **strictly forbidden** from running `git push`. You may stage/commit locally if asked, but I (the human) perform the push.
@@ -41,10 +42,10 @@ Synth is even the name given to the digital person "speicement" that this projec
 This project is structured around a **core** with modular components:
 - **Core**: message chain, validation, dispatcher, DB, notifier. Includes automatic registration of validation rules from component actions.
 - **Plugins**: provide actions (must register them via `get_supported_actions()` or delegate to interfaces). Sometimes called ActionPlugins. Some subclass `AIPluginBase` for LLM-like behavior.
-- **LLM Engines**: interchangeable reasoning backends, implementing `AIPluginBase`.
+- **Cortex Engines**: interchangeable reasoning backends (LLM providers, Selenium engines, live adapters, agent engines) implementing `AIPluginBase`.
 - **Interfaces**: input/output handlers (e.g. Telegram, Discord). Register actions via `get_supported_actions()`.  
 
-The **core must never hardcode plugin, LLM, or interface logic**.  
+The **core must never hardcode plugin, Cortex, or interface logic**.  
 If a plugin/engine/interface is removed, the rest of the system should continue working.
 
 ---
@@ -91,10 +92,12 @@ Notes for contributors:
 
 ---
 
-## LLM Engines
+## Cortex Engines
 - Engines subclass `AIPluginBase`.
 - They handle reasoning and output JSON actions.
-- Interchangeable: multiple engines can coexist.
+- Interchangeable: multiple engines can coexist across kinds (`llm_provider`, `selenium_engine`, `live`, `agent`).
+- Base modules live in `cortex/<kind>/*_base.py` and must register their kind + children via `discover_and_register()`.
+- Dev engines live under `cortex/<kind>/dev` and are only discovered when dev components are enabled.
 
 ---
 

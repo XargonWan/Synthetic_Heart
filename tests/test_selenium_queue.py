@@ -1,7 +1,7 @@
 import asyncio
 import pytest
 
-from core.selenium_llm_base import SeleniumLLMBase
+from cortex.selenium_engine.selenium_llm_base import SeleniumLLMBase
 
 
 @pytest.mark.asyncio

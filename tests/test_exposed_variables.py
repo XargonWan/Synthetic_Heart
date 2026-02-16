@@ -44,7 +44,7 @@ async def test_should_retry_respects_updated_limit():
 
 def test_chromium_headless_reflects_config_change():
     # Instantiate a SeleniumLLMBase-derived object minimally to test listener
-    from core.selenium_llm_base import SeleniumLLMBase
+    from cortex.selenium_engine.selenium_llm_base import SeleniumLLMBase
     from core.config_manager import config_registry
 
     inst = SeleniumLLMBase(notify_fn=None, config={})

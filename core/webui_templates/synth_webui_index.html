@@ -97,23 +97,25 @@
             <div class="settings-grid" style="flex-direction: column;">
             
             <article class="card">
-                <h2>LLM Engines</h2>
-                <div id="components-llm">
-                <div class="meta" id="components-llm-summary">Loading…</div>
+                <h2>Cortex Engines</h2>
+                <div id="components-cortex">
+                <div class="meta" id="components-cortex-summary">Loading…</div>
 
-                <!-- LLM engine quick controls: engine selector + login -->
-                <div class="meta" id="components-llm-controls" style="display:flex; gap:10px; align-items:center; margin-top:10px;">
-                    <select id="llm-engine-select" style="padding:10px 14px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; min-width:360px; font-size:1rem;">
+                <!-- Cortex engine quick controls: kind + engine selector + login -->
+                <div class="meta" id="components-cortex-controls" style="display:flex; gap:10px; align-items:center; margin-top:10px;">
+                    <select id="cortex-kind-select" style="padding:8px 12px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:8px; font-weight:600; min-width:200px;">
                     </select>
-                    <div id="llm-engine-info" class="meta" style="min-width:160px;">
-                        <span id="llm-engine-model">model: –</span>
+                    <select id="cortex-engine-select" style="padding:10px 14px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; min-width:360px; font-size:1rem;">
+                    </select>
+                    <div id="cortex-engine-info" class="meta" style="min-width:160px;">
+                        <span id="cortex-engine-model">model: –</span>
                         &nbsp;•&nbsp;
-                        <span id="llm-engine-login-state">state: –</span>
+                        <span id="cortex-engine-login-state">state: –</span>
                     </div>
-                    <button id="llm-login-btn" class="pill">Login</button>
+                    <button id="cortex-login-btn" class="pill">Login</button>
                 </div>
 
-                <div class="components-list" id="components-llm-list"></div>
+                <div class="components-list" id="components-cortex-list"></div>
                 </div>
             </article>
             <article class="card">
@@ -135,7 +137,7 @@
                 <div style="display: flex; align-items: center; gap: 15px; margin-top: 10px;">
                     <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
                         <input type="checkbox" id="dev-components-toggle" style="width: 20px; height: 20px; cursor: pointer;">
-                        <span style="font-weight: 500;">Enable development components (interface_dev, plugins_dev, llm_engines_dev)</span>
+                        <span style="font-weight: 500;">Enable development components (interface_dev, plugins_dev, cortex/&lt;kind&gt;/dev)</span>
                     </label>
                 </div>
                 <div class="meta" style="margin-top: 10px;">

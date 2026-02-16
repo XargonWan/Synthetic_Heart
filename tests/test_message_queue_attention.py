@@ -188,9 +188,16 @@ async def test_enqueue_defaults_history_scope_local(monkeypatch):
     while not mq._queue.empty():
         mq._queue.get_nowait()
 
-    fake_message = SimpleNamespace(from_user=SimpleNamespace(id=5), chat=SimpleNamespace(id=999, type="private"), text="hi", chat_id=999)
+    fake_message = SimpleNamespace(
+        from_user=SimpleNamespace(id=5),
+        chat=SimpleNamespace(id=999, type="private"),
+        text="hi",
+        chat_id=999,
+    )
 
-    await mq.enqueue(None, fake_message, interface_id="telegram", skip_mention_check=True)
+    await mq.enqueue(
+        None, fake_message, interface_id="telegram", skip_mention_check=True
+    )
 
     # Item should be enqueued with history_scope defaulted to 'local'
     assert not mq._queue.empty()

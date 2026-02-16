@@ -1,4 +1,4 @@
-from core.selenium_llm_base import SeleniumLLMBase
+from cortex.selenium_engine.selenium_llm_base import SeleniumLLMBase
 from core.logging_utils import log_debug
 from selenium.webdriver.common.by import By
 
@@ -80,7 +80,7 @@ class SeleniumStepFunPlugin(SeleniumLLMBase):
         ]
 
         # Register global limits for this engine
-        from core.selenium_llm_base import set_active_selenium_limits
+        from cortex.selenium_engine.selenium_llm_base import set_active_selenium_limits
 
         default_limit = MODEL_LIMITS_MAP.get("default", 20000)
         set_active_selenium_limits(default_limit, "stepfun")

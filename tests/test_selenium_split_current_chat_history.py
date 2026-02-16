@@ -8,7 +8,7 @@ sys.modules.setdefault(
     "undetected_chromedriver", types.ModuleType("undetected_chromedriver")
 )
 
-from core.selenium_llm_base import SeleniumLLMBase
+from cortex.selenium_engine.selenium_llm_base import SeleniumLLMBase
 
 
 def test_split_includes_current_chat_history():

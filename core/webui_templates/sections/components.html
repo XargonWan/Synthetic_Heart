@@ -2,26 +2,26 @@
     <div class="settings-grid" style="flex-direction: column;">
         <article class="card">
             <h2>Cortex Engines</h2>
-            <div class="meta">A <strong>Cortex</strong> is a category of runtime engines (e.g., <em>llm</em>, <em>live</em>, <em>agent</em>). Choose the Cortex kind first, then pick an engine. Each engine shows a short label explaining its intended use (provided by the engine registration).</div>
-            <div id="components-llm">
-                <div class="meta" id="components-llm-summary">Loading…</div>
+            <div class="meta">A <strong>Cortex</strong> is a category of runtime engines (e.g., <em>llm_provider</em>, <em>selenium_engine</em>, <em>live</em>, <em>agent</em>). Choose the Cortex kind first, then pick an engine. Each engine shows a short label explaining its intended use (provided by the engine registration).</div>
+            <div id="components-cortex">
+                <div class="meta" id="components-cortex-summary">Loading…</div>
 
-                <div class="meta" id="components-llm-controls" style="display:flex; gap:10px; align-items:center; margin-top:10px; flex-wrap:wrap;">
+                <div class="meta" id="components-cortex-controls" style="display:flex; gap:10px; align-items:center; margin-top:10px; flex-wrap:wrap;">
                     <select id="cortex-kind-select" style="padding:8px 12px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:8px; font-weight:600; min-width:200px;">
                     </select>
 
-                    <select id="llm-engine-select" style="padding:10px 14px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; min-width:360px; font-size:1rem;">
+                    <select id="cortex-engine-select" style="padding:10px 14px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; min-width:360px; font-size:1rem;">
                     </select>
 
-                    <div id="llm-engine-info" class="meta" style="min-width:260px;">
-                        <div style="font-weight:600;" id="llm-engine-model">model: –</div>
-                        <div style="font-size:0.9rem; color:var(--muted);" id="llm-engine-label">—</div>
-                        <div style="margin-top:6px;" id="llm-engine-login-state">state: –</div>
+                    <div id="cortex-engine-info" class="meta" style="min-width:260px;">
+                        <div style="font-weight:600;" id="cortex-engine-model">model: –</div>
+                        <div style="font-size:0.9rem; color:var(--muted);" id="cortex-engine-label">—</div>
+                        <div style="margin-top:6px;" id="cortex-engine-login-state">state: –</div>
                     </div>
-                    <button id="llm-login-btn" class="pill">Login</button>
+                    <button id="cortex-login-btn" class="pill">Login</button>
                 </div>
 
-                <div class="components-list" id="components-llm-list"></div>
+                <div class="components-list" id="components-cortex-list"></div>
             </div>
         </article>
         <article class="card">
@@ -42,7 +42,7 @@
             <div style="display: flex; align-items: center; gap: 15px; margin-top: 10px;">
                 <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
                     <input type="checkbox" id="dev-components-toggle" style="width: 20px; height: 20px; cursor: pointer;">
-                    <span style="font-weight: 500;">Enable development components (interface_dev, plugins_dev, llm_engines_dev)</span>
+                    <span style="font-weight: 500;">Enable development components (interface_dev, plugins_dev, cortex/&lt;kind&gt;/dev)</span>
                 </label>
             </div>
             <div class="meta" style="margin-top: 10px;">

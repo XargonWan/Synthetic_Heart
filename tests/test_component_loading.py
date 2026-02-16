@@ -30,15 +30,17 @@ class TestComponentLoading(unittest.TestCase):
         self.db_patcher = patch("core.db.get_conn", new_callable=AsyncMock)
         self.db_patcher.start()
 
-        self.llm_patcher = patch(
-            "core.config.get_active_llm", return_value={"engine": "manual"}
+        self.cortex_patcher = patch(
+            "core.config.get_active_cortex_engine",
+            new_callable=AsyncMock,
+            return_value="manual",
         )
-        self.llm_patcher.start()
+        self.cortex_patcher.start()
 
     def tearDown(self):
         """Clean up patches."""
         self.db_patcher.stop()
-        self.llm_patcher.stop()
+        self.cortex_patcher.stop()
 
     @patch("core.notifier.set_notifier")
     def test_plugin_discovery(self, mock_set_notifier):
@@ -130,8 +132,8 @@ class TestComponentLoading(unittest.TestCase):
             mock_import.assert_called()
 
     @patch("core.notifier.set_notifier")
-    def test_llm_engine_discovery(self, mock_set_notifier):
-        """Test that LLM engines are discovered without real API calls."""
+    def test_cortex_engine_discovery(self, mock_set_notifier):
+        """Test that Cortex engines are discovered without real API calls."""
         from core.core_initializer import core_initializer
 
         # Mock the import system
@@ -148,8 +150,8 @@ class TestComponentLoading(unittest.TestCase):
             # Mock engine file discovery
             mock_file = MagicMock()
             mock_file.name = "test_engine.py"
-            mock_file.relative_to.return_value = "cortex/llm_engine/test_engine"
-            mock_file.with_suffix.return_value = "cortex.llm_engine.test_engine"
+            mock_file.relative_to.return_value = "cortex/selenium_engine/test_engine"
+            mock_file.with_suffix.return_value = "cortex.selenium_engine.test_engine"
             mock_rglob.return_value = [mock_file]
 
             # Mock module with PLUGIN_CLASS

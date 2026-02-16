@@ -59,21 +59,22 @@ class TestSmoke(unittest.TestCase):
         except ImportError as e:
             self.fail(f"Failed to import persona_manager: {e}")
 
-    def test_llm_engine_imports(self):
-        """Test that LLM engine modules can be imported."""
+    def test_cortex_engine_imports(self):
+        """Test that Cortex engine modules can be imported."""
         try:
             pass
         except Exception as e:
-            self.skipTest(f"LLM engine import failed: {e}")
+            self.skipTest(f"Cortex engine import failed: {e}")
 
     def test_config_loading(self):
         """Test that configuration can be loaded."""
         try:
-            from core.config import get_active_llm
+            import asyncio
+            from core.config import get_active_cortex_engine
 
             # Should not crash
-            llm = get_active_llm()
-            self.assertIsInstance(llm, dict)
+            engine = asyncio.run(get_active_cortex_engine())
+            self.assertIsInstance(engine, str)
         except Exception as e:
             self.skipTest(f"Config loading failed: {e}")
 
@@ -81,13 +82,13 @@ class TestSmoke(unittest.TestCase):
         """Test that registries can be initialized."""
         try:
             from core.interfaces_registry import get_interface_registry
-            from core.llm_registry import get_llm_registry
+            from core.cortex_registry import get_cortex_registry
 
             interface_registry = get_interface_registry()
-            llm_registry = get_llm_registry()
+            cortex_registry = get_cortex_registry()
 
             self.assertIsNotNone(interface_registry)
-            self.assertIsNotNone(llm_registry)
+            self.assertIsNotNone(cortex_registry)
         except Exception as e:
             self.skipTest(f"Registry initialization failed: {e}")
 

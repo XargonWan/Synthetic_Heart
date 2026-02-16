@@ -32,8 +32,8 @@ def register_injection_priority():
 register_injection_priority()
 
 from core.core_initializer import register_plugin
-from core.config import get_active_llm
-from core.llm_registry import get_llm_registry
+from core.config import get_active_cortex_engine
+from core.cortex_registry import get_cortex_registry
 
 # Global flag to track if the plugin is enabled
 PLUGIN_ENABLED = True
@@ -102,42 +102,44 @@ def get_max_diary_chars(
     """
     try:
         # Get limits directly from the active LLM engine
-        from core.config import get_active_llm
-        from core.llm_registry import get_llm_registry
+        from core.config import get_active_cortex_engine
+        from core.cortex_registry import get_cortex_registry
         import asyncio
 
-        # Handle async get_active_llm call safely
-        active_llm = None
+        # Handle async get_active_cortex_engine call safely
+        active_cortex = None
         try:
             # Try to get the event loop
             loop = asyncio.get_event_loop()
             if loop.is_running():
                 # We're in an async context, need to handle differently
                 log_debug(
-                    "[ai_diary] Already in async context, using sync fallback for get_active_llm"
+                    "[ai_diary] Already in async context, using sync fallback for get_active_cortex_engine"
                 )
                 # Use a simple fallback since we can't await here
-                active_llm = "manual"  # Safe fallback
+                active_cortex = "manual"  # Safe fallback
             else:
-                active_llm = loop.run_until_complete(get_active_llm())
+                active_cortex = loop.run_until_complete(get_active_cortex_engine())
         except RuntimeError:
             # No event loop exists, create one
             try:
-                active_llm = asyncio.run(get_active_llm())
+                active_cortex = asyncio.run(get_active_cortex_engine())
             except Exception as e:
-                log_debug(f"[ai_diary] Could not get active LLM: {e}")
-                active_llm = "manual"  # Safe fallback
+                log_debug(f"[ai_diary] Could not get active Cortex engine: {e}")
+                active_cortex = "manual"  # Safe fallback
         except Exception as e:
             log_debug(f"[ai_diary] Error in async handling: {e}")
-            active_llm = "manual"  # Safe fallback
+            active_cortex = "manual"  # Safe fallback
 
-        if not active_llm or active_llm == "manual":
+        if not active_cortex or active_cortex == "manual":
             log_debug(
                 "[ai_diary] Using manual fallback limits from Selenium engine if available"
             )
             # Try to get limits from active Selenium LLM engine first
             try:
-                from core.selenium_llm_base import get_active_selenium_limits
+                from cortex.selenium_engine.selenium_llm_base import (
+                    get_active_selenium_limits,
+                )
 
                 selenium_limits = get_active_selenium_limits()
                 max_selenium_chars = selenium_limits.get("max_prompt_chars", 128001)
@@ -145,16 +147,18 @@ def get_max_diary_chars(
             except Exception:
                 return 128001  # Safe fallback
 
-        registry = get_llm_registry()
-        engine = registry.get_engine(active_llm)
+        registry = get_cortex_registry()
+        engine = registry.get_engine(active_cortex)
 
         if not engine:
-            engine = registry.load_engine(active_llm)
+            engine = registry.load_engine(active_cortex)
 
         # Try to get limits from active Selenium LLM engine first
         max_prompt_chars = 128001  # Safe fallback default
         try:
-            from core.selenium_llm_base import get_active_selenium_limits
+            from cortex.selenium_engine.selenium_llm_base import (
+                get_active_selenium_limits,
+            )
 
             selenium_limits = get_active_selenium_limits()
             max_prompt_chars = selenium_limits.get("max_prompt_chars", 128001)
@@ -231,25 +235,27 @@ def should_include_diary(
     # Try to get max_prompt_chars from active LLM if not provided
     if max_prompt_chars <= 0:
         try:
-            active_llm = _run_sync(get_active_llm())
-            # Check that active_llm is not None before proceeding
-            if not active_llm:
-                log_debug("[ai_diary] Active LLM is None, skipping LLM limits lookup")
+            active_cortex = _run_sync(get_active_cortex_engine())
+            # Check that active_cortex is not None before proceeding
+            if not active_cortex:
+                log_debug(
+                    "[ai_diary] Active Cortex engine is None, skipping limits lookup"
+                )
                 return True  # Conservative: include diary if we can't determine LLM
 
-            registry = get_llm_registry()
-            engine = registry.get_engine(active_llm)
+            registry = get_cortex_registry()
+            engine = registry.get_engine(active_cortex)
 
             if not engine:
-                engine = registry.load_engine(active_llm)
+                engine = registry.load_engine(active_cortex)
 
             if engine and hasattr(engine, "get_max_prompt_chars"):
                 max_prompt_chars = engine.get_max_prompt_chars()
                 log_debug(
-                    f"[ai_diary] Got max_prompt_chars from LLM {active_llm}: {max_prompt_chars}"
+                    f"[ai_diary] Got max_prompt_chars from Cortex {active_cortex}: {max_prompt_chars}"
                 )
         except Exception as e:
-            log_debug(f"[ai_diary] Could not get LLM limits: {e}")
+            log_debug(f"[ai_diary] Could not get Cortex limits: {e}")
             return True  # Conservative: include diary if we can't determine limits
 
     if max_prompt_chars <= 0:

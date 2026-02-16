@@ -467,6 +467,8 @@ async def handle_incoming_message(
             f"[message_chain] 🔄 LOOP: attempt={attempt} source={source} chat={getattr(message, 'chat_id', None)} text_len={len(text) if text else 0}"
         )
 
+        actions = None
+
         # Quick JSON extraction with metadata to detect corruption
         parsed = None
         metadata = {}

@@ -8,10 +8,10 @@ Synth is even the name given to the digital person "speicement" that this projec
 This project is structured around a **core** with modular components:
 - **Core**: message chain, validation, dispatcher, DB, notifier. Includes automatic registration of validation rules from component actions.
 - **Plugins**: provide actions (must register them via `get_supported_actions()` or delegate to interfaces). Sometimes called ActionPlugins. Some subclass `AIPluginBase` for LLM-like behavior.
-- **LLM Engines**: interchangeable reasoning backends, implementing `AIPluginBase`.
+- **Cortex Engines**: interchangeable reasoning backends (LLM providers, Selenium engines, live adapters, agent engines) implementing `AIPluginBase`.
 - **Interfaces**: input/output handlers (e.g. Telegram, Discord). Register actions via `get_supported_actions()`.  
 
-The **core must never hardcode plugin, LLM, or interface logic**.  
+The **core must never hardcode plugin, Cortex, or interface logic**.  
 If a plugin/engine/interface is removed, the rest of the system should continue working.
 
 ---
@@ -43,7 +43,7 @@ If a plugin is missing:
 ## Background Agents (e.g., Grillo)
 Some functionality in SyntH is provided by long-running, scheduled "agents" implemented as plugins rather than simple action handlers. The canonical example is **G.R.I.L.L.O.** (the "Grillo" plugin), which performs periodic "beats" to drive internal introspection tasks such as tag elaboration, memory consolidation, self-reflection, curiosity probes, and relationship insights.
 
-In addition to Grillo, an **Agent plugin** can be implemented to give the SyntH a controlled "hand" to perform external tasks (e.g., shell commands, scheduled tasks) under policy-managed approval modes. The Agent plugin is intentionally **LLM-agnostic** and uses whatever active LLM the user configured; it enforces safety via configurable approval modes (always_approve, whitelist, always_ask, disabled) and container-aware defaults.
+In addition to Grillo, an **Agent plugin** can be implemented to give the SyntH a controlled "hand" to perform external tasks (e.g., shell commands, scheduled tasks) under policy-managed approval modes. The Agent plugin is intentionally **Cortex-agnostic** and uses whatever active Cortex engine the user configured; it enforces safety via configurable approval modes (always_approve, whitelist, always_ask, disabled) and container-aware defaults.
 
 Proposals created by the Agent are persisted to the `agent_activity_log` table (see `init-db.sql`) and execution records are stored in `agent_action_execs`. When `always_ask` is used or a whitelist block occurs, proposals are sent to the trainer's private chat via the existing trainer notification system so the trainer can approve or reject them.
 
@@ -62,10 +62,12 @@ Notes for contributors:
 
 ---
 
-## LLM Engines
+## Cortex Engines
 - Engines subclass `AIPluginBase`.
 - They handle reasoning and output JSON actions.
-- Interchangeable: multiple engines can coexist.
+- Interchangeable: multiple engines can coexist across kinds (`llm_provider`, `selenium_engine`, `live`, `agent`).
+- Base modules live in `cortex/<kind>/*_base.py` and must register their kind + children via `discover_and_register()`.
+- Dev engines live under `cortex/<kind>/dev` and are only discovered when dev components are enabled.
 
 ---
 
@@ -93,21 +95,22 @@ If you need to create some tsts please check the tests folder, do not create per
 If you need a throwaway test instead the root is good but please delete it when you finished.
 
 To run tests locally, the agent may:
-1. Create a Python virtual environment:
+1. Create a Python virtual environment (optional):
 ```bash
-   python -m venv venv
-   source venv/bin/activate
+  python -m venv venv
+  source venv/bin/activate
 ```
+`uv` can be used inside a venv if needed.
 
-2. Install requirements:
+2. Sync requirements with uv:
 
 ```bash
-   pip install -r requirements.txt
+  uv sync
 ```
 3. Run the test suite:
 
 ```bash
-   ./run_tests.sh
+  uv run pytest
 ```
 
 If you need to restar the dev container use:

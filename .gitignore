@@ -64,3 +64,4 @@ tmp/
 test_output*.txt
 db_check.txt
 git_*.txt
+.ruff_cache

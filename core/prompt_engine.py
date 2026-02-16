@@ -12,7 +12,7 @@ import asyncio
 # Default maximum prompt characters (CHARACTERS, NOT TOKENS)
 # This is used as a safe fallback when no LLM engine provides explicit limits.
 # The actual value comes from the active LLM engine's configuration.
-# For ChatGPT, see llm_engines/selenium_chatgpt.py MODEL_LIMITS_MAP["default"]
+# For ChatGPT, see cortex/selenium_engine/selenium_chatgpt.py MODEL_LIMITS_MAP["default"]
 DEFAULT_MAX_PROMPT_CHARS = None  # Will be set dynamically from LLM engine
 
 # Chat history limit
@@ -345,7 +345,11 @@ async def build_json_prompt(
         "timestamp": message.date.isoformat(),
         "privacy": "default",
         # Set `scope` to the effective history_scope when provided, otherwise keep legacy default
-        "scope": (effective_history_scope if ("effective_history_scope" in locals() and effective_history_scope) else "local"),
+        "scope": (
+            effective_history_scope
+            if ("effective_history_scope" in locals() and effective_history_scope)
+            else "local"
+        ),
     }
 
     # Add image data if present
@@ -501,15 +505,15 @@ async def build_json_prompt(
         if max_chars is None:
             try:
                 # Local imports to avoid module-level cycles
-                from core.config import get_active_llm
-                from core.llm_registry import get_llm_registry
+                from core.config import get_active_cortex_engine
+                from core.cortex_registry import get_cortex_registry
 
-                active_llm = await get_active_llm()
-                registry = get_llm_registry()
-                engine = registry.get_engine(active_llm)
+                active_cortex = await get_active_cortex_engine()
+                registry = get_cortex_registry()
+                engine = registry.get_engine(active_cortex)
 
                 if not engine:
-                    engine = registry.load_engine(active_llm)
+                    engine = registry.load_engine(active_cortex)
 
                 if engine and hasattr(engine, "get_interface_limits"):
                     limits = engine.get_interface_limits()

@@ -1,6 +1,6 @@
 import asyncio
 
-from core.selenium_llm_base import SeleniumLLMBase, FrozenDriverError
+from cortex.selenium_engine.selenium_llm_base import SeleniumLLMBase, FrozenDriverError
 from core.config_manager import config_registry
 
 

@@ -13,7 +13,11 @@ import re
 import asyncio
 import core.plugin_instance as plugin_instance
 from core.logging_utils import log_debug, log_info, log_warning, log_error
-from core.config import set_active_llm, list_available_llms, get_active_llm
+from core.config import (
+    switch_active_cortex_engine,
+    list_available_cortex_engines,
+    get_active_cortex_engine,
+)
 
 try:
     from dotenv import load_dotenv  # type: ignore
@@ -121,18 +125,20 @@ def escape_markdown(text):
 async def ensure_plugin_loaded(event):
     if plugin_instance.plugin is None:
         try:
-            current = await get_active_llm()
+            current = await get_active_cortex_engine()
             if current:
                 await plugin_instance.load_plugin(current)
         except Exception as e:
-            log_warning(f"[telethon_userbot] Failed to autoload LLM: {e}")
+            log_warning(f"[telethon_userbot] Failed to autoload Cortex: {e}")
         if plugin_instance.plugin is None:
             try:
                 await plugin_instance.load_plugin("manual")
                 log_warning("[telethon_userbot] Falling back to ManualAIPlugin")
             except Exception:
-                log_error("No LLM plugin loaded.")
-                await event.reply("⚠️ No active LLM plugin. Use .llm to select one.")
+                log_error("No Cortex plugin loaded.")
+                await event.reply(
+                    "⚠️ No active Cortex plugin. Use .cortex to select one."
+                )
                 return False
     return True
 
@@ -204,7 +210,7 @@ async def help_command(event):
     from core.context import get_context_state
 
     context_status = "active ✅" if get_context_state() else "inactive ❌"
-    llm_mode = "LLM managed centrally in initialize_core_components"
+    cortex_mode = "Cortex managed centrally in initialize_core_components"
     help_text = (
         f"🧞‍♀️ *synth – Available Commands*\n\n"
         "*🧠 Context Mode*\n"
@@ -216,42 +222,42 @@ async def help_command(event):
         "`.block <user_id>` – Block a user\n"
         "`.unblock <user_id>` – Unblock a user\n"
         "`.block_list` – List blocked users\n\n"
-        "*⚙️ LLM Mode*\n"
-        f"`.llm` – Show and select current engine (active: `{llm_mode}`)\n"
+        "*⚙️ Cortex Engine*\n"
+        f"`.cortex` – Show and select current engine (active: `{cortex_mode}`)\n"
         "\n*📋 Miscellaneous*\n"
         "`.last_chats` – Recent active chats\n"
     )
     await event.reply(help_text, parse_mode="md")
 
 
-@optional_on(events.NewMessage(pattern=r"\.llm(?: (.+))?"))
-async def llm_command(event):
+@optional_on(events.NewMessage(pattern=r"\.cortex(?: (.+))?"))
+async def cortex_command(event):
     if not is_trainer(event.sender_id):
         return
     args = event.pattern_match.group(1)
-    current = await get_active_llm()
-    available = list_available_llms()
+    current = await get_active_cortex_engine()
+    available = list_available_cortex_engines()
     if not args:
-        msg = f"*Active LLM:* `{current}`\n\n*Available:*"
+        msg = f"*Active Cortex:* `{current}`\n\n*Available:*"
         msg += "\n" + "\n".join(f"• `{name}`" for name in available)
-        msg += "\n\nTo change: `.llm <name>`"
+        msg += "\n\nTo change: `.cortex <name>`"
         await event.reply(msg, parse_mode="md")
         return
     choice = args.strip()
     if choice not in available:
-        await event.reply(f"❌ LLM `{choice}` not found.")
+        await event.reply(f"❌ Cortex `{choice}` not found.")
         return
     try:
-        await set_active_llm(choice)
+        await switch_active_cortex_engine(choice)
 
         # We don't load plugins here - that's the core's job
         # The system will restart with the new LLM on next restart
 
         await event.reply(
-            f"✅ LLM mode updated to `{choice}`. Restart to apply changes."
+            f"✅ Cortex engine updated to `{choice}`. Restart to apply changes."
         )
     except Exception as e:
-        await event.reply(f"❌ Error changing LLM: {e}")
+        await event.reply(f"❌ Error changing Cortex engine: {e}")
 
 
 # .say command removed — interactive forward-to-chat functionality deprecated.

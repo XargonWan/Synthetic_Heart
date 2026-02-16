@@ -727,17 +727,17 @@ def _plugins_for(action_type: str) -> List[Any]:
     return plugins
 
 
-def set_available_plugins(interfaces, llm_engine, plugins):
+def set_available_plugins(interfaces, cortex_engine, plugins):
     """Set available plugins and their details for the action parser."""
-    global ACTIVE_INTERFACES, ACTIVE_LLM_ENGINE, AVAILABLE_PLUGINS
+    global ACTIVE_INTERFACES, ACTIVE_CORTEX_ENGINE, AVAILABLE_PLUGINS
 
     # Set active interfaces
     ACTIVE_INTERFACES = set(interfaces)
     log_info("[action_parser] Active interfaces set.")
 
-    # Set active LLM engine
-    ACTIVE_LLM_ENGINE = llm_engine
-    log_info(f"[action_parser] Active LLM engine: {ACTIVE_LLM_ENGINE}")
+    # Set active Cortex engine
+    ACTIVE_CORTEX_ENGINE = cortex_engine
+    log_info(f"[action_parser] Active Cortex engine: {ACTIVE_CORTEX_ENGINE}")
 
     # Set available plugins
     AVAILABLE_PLUGINS = plugins
@@ -797,7 +797,7 @@ def _is_interface_message_action(action_type: str) -> bool:
 
 # Variables to store the state
 ACTIVE_INTERFACES = set()
-ACTIVE_LLM_ENGINE = None
+ACTIVE_CORTEX_ENGINE = None
 AVAILABLE_PLUGINS = []
 
 
@@ -1591,7 +1591,9 @@ async def _create_diary_entry_for_actions(processed_actions, context, original_m
             involved_users=involved_list,
             interface=interface_name,
             chat_id=str(chat_id) if chat_id else None,
-            grillo_activity_log_id=context.get("activity_log_id") if isinstance(context, dict) else None,
+            grillo_activity_log_id=context.get("activity_log_id")
+            if isinstance(context, dict)
+            else None,
             interaction_summary=llm_diary_payload.get("interaction_summary"),
             personal_thought=llm_diary_payload.get("personal_thought"),
             emotions=llm_diary_payload.get("emotions"),

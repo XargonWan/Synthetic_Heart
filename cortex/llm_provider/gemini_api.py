@@ -1,4 +1,4 @@
-# llm_engines/gemini_api.py
+# cortex/llm_provider/gemini_api.py
 """
 Gemini API LLM Engine for Synthetic Heart.
 
@@ -52,7 +52,7 @@ try:
         description="API key for Google Gemini models.",
         scope="llm",
         component="gemini_api",
-        tags=["llm_engine", "sensitive"],
+        tags=["cortex_engine", "sensitive"],
         needs_component_reload=True,
     )
     register_exposed_var(
@@ -64,7 +64,7 @@ try:
         description="Base URL for the Gemini REST API.",
         scope="llm",
         component="gemini_api",
-        tags=["llm_engine"],
+        tags=["cortex_engine"],
         advanced=True,
         needs_component_reload=True,
     )
@@ -90,7 +90,7 @@ GEMINI_API_BASE_URL = config_registry.get_var(
     value_type=str,
     group="llm",
     component="gemini_api",
-    tags=["llm_engine"],
+    tags=["cortex_engine"],
     advanced=True,
 )
 
@@ -164,7 +164,7 @@ try:
         description="Active Gemini model used by gemini_api.",
         scope="llm",
         component="gemini_api",
-        tags=["llm_engine"],
+        tags=["cortex_engine"],
         needs_component_reload=False,
     )
 except Exception:
@@ -178,7 +178,7 @@ GEMINI_MODEL = config_registry.get_var(
     value_type=str,
     group="llm",
     component="gemini_api",
-    tags=["llm_engine"],
+    tags=["cortex_engine"],
     constraints={"choices": list(MODEL_CONFIGS.keys())},
     getter=_get_gemini_model,
     setter=_set_gemini_model,

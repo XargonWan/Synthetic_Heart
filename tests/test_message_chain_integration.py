@@ -25,10 +25,12 @@ class TestMessageChainIntegration(unittest.TestCase):
         self.db_patcher = patch("core.db.get_conn", new_callable=AsyncMock)
         self.db_patcher.start()
 
-        self.llm_patcher = patch(
-            "core.config.get_active_llm", return_value={"engine": "manual"}
+        self.cortex_patcher = patch(
+            "core.config.get_active_cortex_engine",
+            new_callable=AsyncMock,
+            return_value="manual",
         )
-        self.llm_patcher.start()
+        self.cortex_patcher.start()
 
         self.interface_patcher = patch(
             "core.transport_layer.llm_to_interface", new_callable=AsyncMock
@@ -37,7 +39,7 @@ class TestMessageChainIntegration(unittest.TestCase):
 
     def tearDown(self):
         """Clean up patches."""
-        self.llm_patcher.stop()
+        self.cortex_patcher.stop()
         self.interface_patcher.stop()
         self.db_patcher.stop()
 

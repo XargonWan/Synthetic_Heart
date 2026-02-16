@@ -104,9 +104,12 @@ async def test_multiple_clusters_and_preserve_non_sources(monkeypatch):
             return FakeEngine()
 
     # Patch the llm registry function directly by module path
-    monkeypatch.setattr("core.llm_registry.get_llm_registry", lambda: FakeRegistry())
     monkeypatch.setattr(
-        "core.config.get_active_llm", lambda: asyncio.sleep(0, result="dummy")
+        "core.cortex_registry.get_cortex_registry", lambda: FakeRegistry()
+    )
+    monkeypatch.setattr(
+        "core.config.get_active_cortex_engine",
+        lambda: asyncio.sleep(0, result="dummy"),
     )
 
     # Run one cycle
@@ -190,9 +193,12 @@ async def test_dry_run_returns_proposed_clusters(monkeypatch):
             return FakeEngine2()
 
     # Patch the llm registry function directly by module path
-    monkeypatch.setattr("core.llm_registry.get_llm_registry", lambda: FakeRegistry2())
     monkeypatch.setattr(
-        "core.config.get_active_llm", lambda: asyncio.sleep(0, result="dummy")
+        "core.cortex_registry.get_cortex_registry", lambda: FakeRegistry2()
+    )
+    monkeypatch.setattr(
+        "core.config.get_active_cortex_engine",
+        lambda: asyncio.sleep(0, result="dummy"),
     )
 
     result = await p._run_one_compaction_cycle(dry_run=True)

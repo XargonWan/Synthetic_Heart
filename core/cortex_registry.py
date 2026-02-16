@@ -1,6 +1,6 @@
 # core/cortex_registry.py
 
-"""Registry to manage Cortex engines (llm, live, agent) without hardcoded dependencies."""
+"""Registry to manage Cortex engines via base-module discovery."""
 
 import importlib
 from typing import Dict, Any, Optional, List, TypedDict
@@ -16,10 +16,10 @@ class Capabilities(TypedDict, total=False):
 
 
 class CortexRegistry:
-    """Central registry for all Cortex engines (llm/live/agent).
+    """Central registry for all Cortex engines via base modules.
 
-    This mirrors the previous LLMRegistry semantics but adds support
-    for cortex kinds and capability flags.
+    Each cortex kind is discovered by locating a `*_base.py` module under
+    `cortex/<kind>/` and invoking its `discover_and_register()` callback.
     """
 
     def __init__(self):
@@ -28,12 +28,26 @@ class CortexRegistry:
         self._engine_meta: Dict[
             str, Dict[str, Any]
         ] = {}  # name -> {cortex, capabilities}
+        self._cortex_kinds: Dict[str, Dict[str, Any]] = {}
+
+    def register_cortex_kind(
+        self,
+        kind: str,
+        label: str,
+        capabilities: Optional[Capabilities] = None,
+    ) -> None:
+        """Register metadata for a cortex kind (from its base module)."""
+        self._cortex_kinds[kind] = {
+            "label": label or kind,
+            "capabilities": capabilities or {},
+        }
+        log_debug(f"[cortex_registry] Registered cortex kind: {kind} ({label or kind})")
 
     def register_engine_module(
         self,
         name: str,
         module_path: str,
-        cortex: str = "llm",
+        cortex: str = "llm_provider",
         capabilities: Optional[Capabilities] = None,
         label: str | None = None,
     ):
@@ -57,13 +71,13 @@ class CortexRegistry:
         self,
         name: str,
         module_path: str,
-        cortex: str = "llm",
+        cortex: str = "llm_provider",
         capabilities: Optional[Capabilities] = None,
     ):
         """Compatibility entrypoint (same as register_engine_module)."""
         return self.register_engine_module(name, module_path, cortex, capabilities)
 
-    def get_default_engine(self, cortex: str = "llm") -> str:
+    def get_default_engine(self, cortex: str = "llm_provider") -> str:
         """Get the default engine name for a cortex."""
         available = [
             n for n, meta in self._engine_meta.items() if meta.get("cortex") == cortex
@@ -101,30 +115,13 @@ class CortexRegistry:
         return None
 
     def load_engine(self, name: str, notify_fn=None) -> Any:
-        """Load an engine by name. Attempts dynamic loading using registered module or
-        by module path convention when not registered."""
+        """Load an engine by name using the registered module path."""
         if not name or not isinstance(name, str):
             error_msg = f"Invalid engine name: {repr(name)}. Engine name must be a non-empty string."
             log_error(f"[cortex_registry] ❌ {error_msg}")
             raise ValueError(error_msg)
 
-        module_path = None
-        if name in self._engine_modules:
-            module_path = self._engine_modules[name]
-        else:
-            # Fallback dynamic load: try both llm and live conventions
-            candidates = [f"cortex.llm_engine.{name}", f"cortex.live.{name}"]
-            log_debug(
-                f"[cortex_registry] Engine '{name}' not registered, attempting dynamic load from candidates: {candidates}"
-            )
-            for p in candidates:
-                try:
-                    importlib.import_module(p)
-                    module_path = p
-                    break
-                except ModuleNotFoundError:
-                    continue
-
+        module_path = self._engine_modules.get(name)
         if not module_path:
             raise ValueError(f"Unknown engine: {name}")
 
@@ -139,10 +136,7 @@ class CortexRegistry:
             raise ValueError(f"Plugin `{name}` does not define `PLUGIN_CLASS`.")
 
         plugin_class = getattr(module, "PLUGIN_CLASS")
-        # Defensive check: some migration shims set PLUGIN_CLASS = None. Treat
-        # that as an invalid plugin and raise a clear error instead of
-        # letting AttributeError bubble up later when attempting to access
-        # attributes on None.
+        # Defensive check for invalid PLUGIN_CLASS
         if plugin_class is None or not hasattr(plugin_class, "__name__"):
             error_msg = (
                 f"Plugin `{name}` exports `PLUGIN_CLASS` but it is None or invalid."
@@ -151,33 +145,20 @@ class CortexRegistry:
             raise ValueError(error_msg)
 
         # Verify display_name
-        # Historically this was enforced strictly, but to improve robustness we
-        # accept plugins missing `display_name` by deriving a friendly display
-        # name from the module/plugin class and logging a warning. This makes
-        # onboarding of legacy engines (migration shims) less brittle while
-        # encouraging authors to set an explicit `display_name`.
         if not hasattr(plugin_class, "display_name"):
-            fallback = name.replace("_", " ").title() or plugin_class.__name__
-            warning_msg = (
-                f"Plugin `{name}` (class `{plugin_class.__name__}`) does not define `display_name`. "
-                f"Using fallback display name: '{fallback}'."
-            )
-            log_warning(f"[cortex_registry] ⚠️ {warning_msg}")
-            display_name = fallback
-        else:
-            display_name = getattr(plugin_class, "display_name", "")
-            if (
-                not display_name
-                or not isinstance(display_name, str)
-                or not display_name.strip()
-            ):
-                fallback = name.replace("_", " ").title() or plugin_class.__name__
-                warning_msg = (
-                    f"Plugin `{name}` (class `{plugin_class.__name__}`) has invalid `display_name`: '{display_name}'. "
-                    f"Using fallback display name: '{fallback}'."
-                )
-                log_warning(f"[cortex_registry] ⚠️ {warning_msg}")
-                display_name = fallback
+            error_msg = f"Plugin `{name}` (class `{plugin_class.__name__}`) does not define `display_name`."
+            log_error(f"[cortex_registry] ❌ {error_msg}")
+            raise ValueError(error_msg)
+
+        display_name = getattr(plugin_class, "display_name", "")
+        if (
+            not display_name
+            or not isinstance(display_name, str)
+            or not display_name.strip()
+        ):
+            error_msg = f"Plugin `{name}` (class `{plugin_class.__name__}`) has invalid `display_name`: '{display_name}'."
+            log_error(f"[cortex_registry] ❌ {error_msg}")
+            raise ValueError(error_msg)
 
         try:
             plugin_args = plugin_class.__init__.__code__.co_varnames
@@ -215,11 +196,12 @@ def get_cortex_registry() -> CortexRegistry:
     return _cortex_registry
 
 
-def register_default_engines():
-    """Auto-discover and register engines from conventional folders.
+def register_default_engines(*, dev_enabled: bool = False) -> None:
+    """Auto-discover and register cortex base modules.
 
-    Scans both `cortex/llm_engine` and `cortex/live` for modules that define
-    `PLUGIN_CLASS` and auto-registers them under proper cortex kinds.
+    Each `cortex/<kind>/*_base.py` module is imported and asked to
+    `discover_and_register()` its own children. Dev-only plugins under
+    `cortex/<kind>/dev` are registered only when `dev_enabled=True`.
     """
     import os
     import pkgutil
@@ -234,72 +216,55 @@ def register_default_engines():
 
     try:
         base_path = os.path.dirname(cortex.__file__)
-        # Check llm_engine
-        llm_path = os.path.join(base_path, "llm_engine")
-        if os.path.isdir(llm_path):
-            for importer, module_name, is_pkg in pkgutil.iter_modules([llm_path]):
-                if not is_pkg and not module_name.startswith("_"):
-                    module_path = f"cortex.llm_engine.{module_name}"
-                    try:
-                        mod = importlib.import_module(module_path)
-                        if hasattr(mod, "PLUGIN_CLASS"):
-                            # Try to extract a short label from the module or PLUGIN_CLASS
-                            label = None
-                            try:
-                                label = getattr(mod, "ENGINE_LABEL", None)
-                            except Exception:
-                                label = None
-                            try:
-                                if not label and hasattr(mod, "PLUGIN_CLASS"):
-                                    label = getattr(
-                                        mod.PLUGIN_CLASS, "engine_label", None
-                                    )
-                            except Exception:
-                                pass
-                            registry.register_engine_module(
-                                module_name,
-                                module_path,
-                                cortex="llm",
-                                label=(label or None),
-                            )
-                            log_debug(
-                                f"[cortex_registry] Auto-registered llm engine: {module_name}"
-                            )
-                    except Exception as e:
-                        log_warning(
-                            f"[cortex_registry] Failed to auto-register llm engine {module_name}: {e}"
-                        )
-        # Check live engines
-        live_path = os.path.join(base_path, "live")
-        if os.path.isdir(live_path):
-            for importer, module_name, is_pkg in pkgutil.iter_modules([live_path]):
-                if not is_pkg and not module_name.startswith("_"):
-                    module_path = f"cortex.live.{module_name}"
-                    try:
-                        mod = importlib.import_module(module_path)
-                        if hasattr(mod, "PLUGIN_CLASS"):
-                            # If module exports CAPABILITIES dict, pick it up
-                            caps = getattr(mod, "CAPABILITIES", None)
-                            # Auto-discover label as well for live engines
-                            label = None
-                            try:
-                                label = getattr(mod, "ENGINE_LABEL", None)
-                            except Exception:
-                                label = None
-                            registry.register_engine_module(
-                                module_name,
-                                module_path,
-                                cortex="live",
-                                capabilities=caps,
-                                label=(label or None),
-                            )
-                            log_debug(
-                                f"[cortex_registry] Auto-registered live engine: {module_name}"
-                            )
-                    except Exception as e:
-                        log_warning(
-                            f"[cortex_registry] Failed to auto-register live engine {module_name}: {e}"
-                        )
+        for entry in os.scandir(base_path):
+            if not entry.is_dir():
+                continue
+            if entry.name.startswith("_"):
+                continue
+
+            kind_path = entry.path
+            base_modules = []
+            for _, module_name, is_pkg in pkgutil.iter_modules([kind_path]):
+                if is_pkg:
+                    continue
+                if module_name.endswith("_base"):
+                    base_modules.append(module_name)
+
+            if not base_modules:
+                continue
+            if len(base_modules) > 1:
+                log_warning(
+                    f"[cortex_registry] Multiple base modules found in {entry.name}: {base_modules}; using first."
+                )
+
+            base_module_name = base_modules[0]
+            module_path = f"cortex.{entry.name}.{base_module_name}"
+            try:
+                mod = importlib.import_module(module_path)
+            except Exception as e:
+                log_error(
+                    f"[cortex_registry] ❌ Failed to import cortex base module {module_path}: {e}",
+                    e,
+                )
+                continue
+
+            discover = getattr(mod, "discover_and_register", None)
+            if not callable(discover):
+                log_error(
+                    f"[cortex_registry] ❌ Base module {module_path} does not define discover_and_register()"
+                )
+                continue
+
+            try:
+                discover(registry, dev_enabled=dev_enabled)
+                log_debug(
+                    f"[cortex_registry] ✅ Cortex base discovery executed: {module_path}"
+                )
+            except Exception as e:
+                log_error(
+                    f"[cortex_registry] ❌ Base discovery failed for {module_path}: {e}",
+                    e,
+                )
 
         available_engines = registry.get_available_engines()
         log_info(
@@ -307,6 +272,3 @@ def register_default_engines():
         )
     except Exception as e:
         log_warning(f"[cortex_registry] Engine auto-discovery failed: {e}")
-        log_info(
-            "[cortex_registry] Continuing without pre-registration - engines will load dynamically on demand"
-        )
