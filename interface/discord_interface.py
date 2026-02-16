@@ -940,9 +940,13 @@ class DiscordInterface:
             # Default to awake (True) when not explicitly set
             is_explicit_trigger = is_wake_command or is_sleep_command
             if not is_explicit_trigger:
-                if "@" in content:
-                    is_explicit_trigger = True
+                # Treat as explicit trigger only for actual bot mentions, DMs, or replies to the bot.
+                # DO NOT treat a plain '@' character as an explicit trigger.
+                if entities:
+                    # `entities` is populated earlier only when the bot was actually mentioned
+                    is_explicit_trigger = any(getattr(e, "type", "") == "mention" for e in entities)
                 elif getattr(message, "guild", None) is None:
+                    # Direct messages always wake the bot
                     is_explicit_trigger = True
                 elif reply_to and bot_user:
                     if getattr(reply_to.from_user, "id", None) == getattr(

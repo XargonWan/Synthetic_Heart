@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 from interface.discord_interface import DiscordInterface
 
 
@@ -80,3 +81,94 @@ def test_send_dm_to_user_id(monkeypatch):
     loop.close()
 
     assert shared_user.sent == ["second dm"]
+
+
+async def _fake_add_message_to_context(*args, **kwargs):
+    return None
+
+
+@pytest.mark.asyncio
+async def test_plain_at_symbol_does_not_mark_explicit_trigger(monkeypatch):
+    """Typing a plain '@' (without Discord-style <@id> mention) must NOT wake Synth."""
+    di = DiscordInterface(bot_token="")
+
+    # Fake client with bot user set
+    di.client = SimpleNamespace(user=SimpleNamespace(id=999, name="SynthBot"))
+
+    # Fake message that contains a plain '@' but does NOT include a Discord mention token
+    class FakeChannel:
+        id = 12345
+        type = "text"
+
+    fake_message = SimpleNamespace(
+        content="hello @someone",
+        author=SimpleNamespace(id=2, name="user2", display_name="User Two"),
+        channel=FakeChannel(),
+        guild=SimpleNamespace(id=1),
+        mentions=[],
+        role_mentions=[],
+        reference=None,
+        created_at=SimpleNamespace(isoformat=lambda: "2026-01-01T00:00:00"),
+        id=111,
+        attachments=[],
+        content_raw=None,
+    )
+
+    captured = {}
+
+    async def fake_enqueue(bot, wrapped, **kwargs):
+        captured["wrapped"] = wrapped
+        return None
+
+    # Prevent external helpers from raising during the unit test
+    monkeypatch.setattr("core.chat_context_manager.add_message_to_context", _fake_add_message_to_context)
+    monkeypatch.setattr("interface.discord_interface.chat_link_store.update_names_from_resolver", (lambda *a, **k: _fake_add_message_to_context()))
+    monkeypatch.setattr("core.message_queue.enqueue", fake_enqueue)
+
+    await di._process_message(fake_message)
+
+    assert "wrapped" in captured
+    assert getattr(captured["wrapped"], "is_explicit_trigger", False) is False
+
+
+@pytest.mark.asyncio
+async def test_real_discord_mention_marks_explicit_trigger(monkeypatch):
+    """A real Discord-style mention (<@id>) should still mark explicit trigger."""
+    di = DiscordInterface(bot_token="")
+
+    # Fake client with bot user set
+    di.client = SimpleNamespace(user=SimpleNamespace(id=999, name="SynthBot"))
+
+    # Fake message that contains Discord mention token and mentions list contains bot
+    class FakeChannel:
+        id = 22222
+        type = "text"
+
+    fake_message = SimpleNamespace(
+        content=f"<@{999}> hello",
+        author=SimpleNamespace(id=3, name="user3", display_name="User Three"),
+        channel=FakeChannel(),
+        guild=SimpleNamespace(id=2),
+        mentions=[SimpleNamespace(id=999, name="SynthBot")],
+        role_mentions=[],
+        reference=None,
+        created_at=SimpleNamespace(isoformat=lambda: "2026-01-01T00:00:00"),
+        id=222,
+        attachments=[],
+    )
+
+    captured = {}
+
+    async def fake_enqueue(bot, wrapped, **kwargs):
+        captured["wrapped"] = wrapped
+        return None
+
+    # Prevent external helpers from raising during the unit test
+    monkeypatch.setattr("core.chat_context_manager.add_message_to_context", _fake_add_message_to_context)
+    monkeypatch.setattr("interface.discord_interface.chat_link_store.update_names_from_resolver", (lambda *a, **k: _fake_add_message_to_context()))
+    monkeypatch.setattr("core.message_queue.enqueue", fake_enqueue)
+
+    await di._process_message(fake_message)
+
+    assert "wrapped" in captured
+    assert getattr(captured["wrapped"], "is_explicit_trigger", False) is True
