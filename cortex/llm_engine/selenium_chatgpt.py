@@ -70,30 +70,29 @@ class SeleniumChatGPTPlugin(SeleniumLLMBase):
         # Set up ChatGPT-specific selectors - the base will use these for automation
         # IMPORTANT: Order matters - fast/working selectors first, general fallbacks last
         self.selectors["prompt_area"] = [
-            # Primary: Most reliable and specific for current ChatGPT UI
-            "textarea[data-testid='prompt-textarea']",
-            "div[data-testid='prompt-textarea'][contenteditable='true']",
-            "div.ProseMirror.ProseMirror-focused",
+            # Prefer ProseMirror-based selectors (observed reliable in logs)
             "div.ProseMirror",
-            # More recent ChatGPT versions - newer selectors
+            "div.ProseMirror.ProseMirror-focused",
+            # Contenteditable + placeholder (newer ChatGPT UI variants)
             "div[contenteditable='true'][data-placeholder]",
-            "textarea[placeholder*='Ask']",
-            "textarea[placeholder*='Message']",
-            # Secondary: ID-based selectors (very specific)
-            "div[id='prompt-textarea']",
+            "div[data-testid='prompt-textarea'][contenteditable='true']",
+            "textarea[data-testid='prompt-textarea']",
+            # ID-based selectors (specific)
             "#prompt-textarea",
-            # Tertiary: Placeholder-based (more reliable than generic)
-            "p[data-placeholder='Ask anything']",
-            "textarea[placeholder*='Ask']",
-            "textarea[placeholder*='Send a message']",
-            # Quaternary: Role-based selectors (generic but useful)
-            "div[contenteditable='true'][role='textbox']",
-            "div[role='textbox'][contenteditable='true']",
-            # Data-testid variations
+            "div[id='prompt-textarea']",
+            # data-testid variations commonly used in newer UI
             "div[data-testid='chat-input']",
             "div[data-testid='input-area']",
             "input[data-testid='prompt-input']",
-            # Fallbacks: Generic (slowest, try last)
+            # Placeholder-based fallbacks
+            "textarea[placeholder*='Ask']",
+            "textarea[placeholder*='Message']",
+            "textarea[placeholder*='Send a message']",
+            "p[data-placeholder='Ask anything']",
+            # Role-based selectors (generic but useful)
+            "div[contenteditable='true'][role='textbox']",
+            "div[role='textbox'][contenteditable='true']",
+            # Fallbacks: Generic (try last)
             "textarea",
             "div[contenteditable='true']",
         ]
@@ -227,9 +226,10 @@ class SeleniumChatGPTPlugin(SeleniumLLMBase):
         """
         return [
             "div.basis-auto > div > div.flex.flex-col > article > div > div > div.overflow-x-auto > div > div:first-child > div > button",
+            # Prefer the visible first-child button (less likely to be hidden/overlapped)
+            "article .flex > button:first-child",
             "article button[data-testid*='response']",
             "div.snap-x button",
-            "article .flex > button:first-child",
             "article button",
         ]
 
