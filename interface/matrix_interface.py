@@ -734,8 +734,16 @@ class MatrixInterface:
             # Read current values from ConfigVar wrappers
             new_homeserver = str(MATRIX_HOMESERVER).rstrip("/")
             new_user = str(MATRIX_USER)
-            new_password = MATRIX_PASSWORD.value if hasattr(MATRIX_PASSWORD, "value") else MATRIX_PASSWORD
-            new_token = MATRIX_ACCESS_TOKEN.value if hasattr(MATRIX_ACCESS_TOKEN, "value") else MATRIX_ACCESS_TOKEN
+            new_password = (
+                MATRIX_PASSWORD.value
+                if hasattr(MATRIX_PASSWORD, "value")
+                else MATRIX_PASSWORD
+            )
+            new_token = (
+                MATRIX_ACCESS_TOKEN.value
+                if hasattr(MATRIX_ACCESS_TOKEN, "value")
+                else MATRIX_ACCESS_TOKEN
+            )
             new_device_id = MATRIX_DEVICE_ID if MATRIX_DEVICE_ID else None
             new_device_name = str(MATRIX_DEVICE_NAME)
             new_store_path = MATRIX_STORE_PATH if MATRIX_STORE_PATH else None
@@ -764,14 +772,18 @@ class MatrixInterface:
                 try:
                     await self.start()
                 except Exception as exc:
-                    log_warning(f"[matrix_interface] Failed to start after config change: {exc}")
+                    log_warning(
+                        f"[matrix_interface] Failed to start after config change: {exc}"
+                    )
 
                 # Attempt a short sync to pick up pending invites/messages
                 try:
                     if self.client and getattr(self, "_logged_in", False):
                         await self.client.sync(timeout=1000, full_state=False)
                 except Exception as exc:
-                    log_debug(f"[matrix_interface] Short sync after reload failed: {exc}")
+                    log_debug(
+                        f"[matrix_interface] Short sync after reload failed: {exc}"
+                    )
 
             # If auth removed, stop the interface
             elif prev_auth and not new_auth_configured:
@@ -780,7 +792,9 @@ class MatrixInterface:
                 try:
                     await self.stop()
                 except Exception as exc:
-                    log_warning(f"[matrix_interface] Failed to stop after config change: {exc}")
+                    log_warning(
+                        f"[matrix_interface] Failed to stop after config change: {exc}"
+                    )
 
             # Auth unchanged: if we're logged in trigger a short sync so
             # invite/message state is re-evaluated under the new policies.
@@ -790,7 +804,9 @@ class MatrixInterface:
                     try:
                         await self.client.sync(timeout=1000, full_state=False)
                     except Exception as exc:
-                        log_debug(f"[matrix_interface] Short sync during config reload failed: {exc}")
+                        log_debug(
+                            f"[matrix_interface] Short sync during config reload failed: {exc}"
+                        )
 
         except Exception as exc:
             log_error(f"[matrix_interface] reload_from_config failed: {exc}")
