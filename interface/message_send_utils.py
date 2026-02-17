@@ -847,18 +847,24 @@ async def llm_response_send(
     # Dedupe: suppress duplicate sends within a short window
     try:
         from core.config_manager import config_registry
-        dedupe_window = int(config_registry.get_value('OUTGOING_DEDUPE_WINDOW', _DEFAULT_DEDUPE_WINDOW))
+
+        dedupe_window = int(
+            config_registry.get_value("OUTGOING_DEDUPE_WINDOW", _DEFAULT_DEDUPE_WINDOW)
+        )
     except Exception:
         dedupe_window = _DEFAULT_DEDUPE_WINDOW
 
     try:
         import time
+
         norm_text = " ".join(str(text).split())[:500]
         dedupe_key = f"{chat_id}:{norm_text}"
         last = _OUTGOING_DEDUPE.get(dedupe_key)
         now = time.time()
         if last and (now - last) < dedupe_window:
-            log_info(f"[llm_response_send] Suppressing duplicate send to {chat_id} (within {dedupe_window}s)")
+            log_info(
+                f"[llm_response_send] Suppressing duplicate send to {chat_id} (within {dedupe_window}s)"
+            )
             return None
         # Record this send
         _OUTGOING_DEDUPE[dedupe_key] = now

@@ -1,5 +1,4 @@
 import asyncio
-import time
 import pytest
 
 from core.selenium_llm_base import SeleniumLLMBase
@@ -15,9 +14,9 @@ async def test_selenium_queue_serialization():
     inst = Dummy()
 
     async def task_fn(n, delay=0.05):
-        results.append(('start', n))
+        results.append(("start", n))
         await asyncio.sleep(delay)
-        results.append(('end', n))
+        results.append(("end", n))
         return n
 
     # Enqueue two tasks concurrently
@@ -30,9 +29,9 @@ async def test_selenium_queue_serialization():
     assert r1 == 1 and r2 == 2
 
     # Ensure serialization: first 'start' for 1 must occur before 'start' for 2
-    starts = [r for r in results if r[0] == 'start']
+    starts = [r for r in results if r[0] == "start"]
     assert starts[0][1] == 1
     assert starts[1][1] == 2
 
     # Ensure ends are in the same overall order
-    assert results.index(('end', 1)) < results.index(('end', 2))
+    assert results.index(("end", 1)) < results.index(("end", 2))

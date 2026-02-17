@@ -1,7 +1,5 @@
-import pytest
 from fastapi.testclient import TestClient
 from core.webui import SynthWebUIInterface
-from unittest.mock import patch, AsyncMock
 
 
 def create_client():
@@ -16,10 +14,10 @@ def test_history_chat_returns_messages_and_interface_paths():
     # core.webui.get_conn_ctx to return a dummy that yields expected SQL rows but that's heavy.
     # Instead, we patch the internal function used in history_chat to return known rows by
     # patching the DB cursor execute/fetch used in the endpoint with AsyncMock via monkeypatch.
-    
+
     # Simpler: directly test the endpoint when no messages exist returns success and empty lists
-    r = client.get('/api/history/chat')
+    r = client.get("/api/history/chat")
     assert r.status_code == 200
     d = r.json()
-    assert 'messages' in d and isinstance(d['messages'], list)
-    assert 'interface_paths' in d and isinstance(d['interface_paths'], list)
+    assert "messages" in d and isinstance(d["messages"], list)
+    assert "interface_paths" in d and isinstance(d["interface_paths"], list)

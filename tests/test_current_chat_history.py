@@ -145,13 +145,17 @@ def test_local_global_separation(monkeypatch):
 
     async def _fake_global_load(limit=10):
         # Simulate DB returning both local and other messages
-        return deque([
-            {**local_msg, "interface_path": interface},
-            {**other_msg, "interface_path": "discord_bot/999"},
-        ])
+        return deque(
+            [
+                {**local_msg, "interface_path": interface},
+                {**other_msg, "interface_path": "discord_bot/999"},
+            ]
+        )
 
     monkeypatch.setattr("core.chat_history_cache.load_chat_history", _fake_cache_load)
-    monkeypatch.setattr("core.chat_history_cache.load_global_chat_history", _fake_global_load)
+    monkeypatch.setattr(
+        "core.chat_history_cache.load_global_chat_history", _fake_global_load
+    )
 
     message = SimpleNamespace(
         interface_path=interface,
@@ -162,12 +166,14 @@ def test_local_global_separation(monkeypatch):
     )
 
     res = asyncio.run(
-        prompt_engine.build_json_prompt(message, context_memory, interface_name="telegram")
+        prompt_engine.build_json_prompt(
+            message, context_memory, interface_name="telegram"
+        )
     )
 
     ctx = res["context"]
     assert "local_history" in ctx and "global_history" in ctx
-    assert any("Local message" in e for e in ctx["local_history"]) 
+    assert any("Local message" in e for e in ctx["local_history"])
     # global_history must NOT contain the local message
     assert all("Local message" not in e for e in ctx["global_history"])
     # global_history should include the other chat's message
@@ -194,7 +200,9 @@ def test_history_scope_local_only(monkeypatch):
         return deque([{**other_msg, "interface_path": "discord/1"}])
 
     monkeypatch.setattr("core.chat_history_cache.load_chat_history", _fake_cache_load)
-    monkeypatch.setattr("core.chat_history_cache.load_global_chat_history", _fake_global_load)
+    monkeypatch.setattr(
+        "core.chat_history_cache.load_global_chat_history", _fake_global_load
+    )
 
     message = SimpleNamespace(
         interface_path=interface,
@@ -225,7 +233,9 @@ def test_history_scope_local_only(monkeypatch):
     # Also verify that passing the scope via `context_memory` dict works equivalently
     context_memory_with_scope = {**context_memory, "history_scope": "local"}
     res2 = asyncio.run(
-        prompt_engine.build_json_prompt(message, context_memory_with_scope, interface_name="telegram")
+        prompt_engine.build_json_prompt(
+            message, context_memory_with_scope, interface_name="telegram"
+        )
     )
     ctx2 = res2["context"]
     assert any("External" in e for e in ctx2.get("global_history", []))

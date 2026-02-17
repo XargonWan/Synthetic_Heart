@@ -11,16 +11,18 @@ def test_plugin_with_none_plugin_class(monkeypatch):
     real_import = importlib.import_module
 
     def fake_import(name):
-        if name == 'cortex.llm_engine.invalid_none':
+        if name == "cortex.llm_engine.invalid_none":
             return fake_mod
         return real_import(name)
 
-    monkeypatch.setattr(importlib, 'import_module', fake_import)
+    monkeypatch.setattr(importlib, "import_module", fake_import)
 
-    reg.register_engine_module('invalid_none', 'cortex.llm_engine.invalid_none', cortex='llm')
+    reg.register_engine_module(
+        "invalid_none", "cortex.llm_engine.invalid_none", cortex="llm"
+    )
 
     try:
-        reg.load_engine('invalid_none')
-        assert False, 'Expected ValueError for invalid PLUGIN_CLASS'
+        reg.load_engine("invalid_none")
+        assert False, "Expected ValueError for invalid PLUGIN_CLASS"
     except ValueError as e:
-        assert 'PLUGIN_CLASS' in str(e) and 'None' in str(e)
+        assert "PLUGIN_CLASS" in str(e) and "None" in str(e)

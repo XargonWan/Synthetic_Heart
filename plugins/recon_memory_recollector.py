@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import List
 
 from core.config_manager import config_registry
-from core.logging_utils import log_debug, log_info, log_warning
+from core.logging_utils import log_info, log_warning
 from core.transport_layer import extract_json_from_text
 from core.synth_core_memory import search_memories
 
@@ -24,7 +24,7 @@ class ReconMemoryRecollectorPlugin:
     def get_recon_instruction(self) -> str:
         return (
             "Extract 2-6 short tags and 2-6 short keywords for memory search. "
-            "Return as an object: {\"tags\": [\"tag\"], \"keywords\": [\"kw\"]}."
+            'Return as an object: {"tags": ["tag"], "keywords": ["kw"]}.'
         )
 
     async def parse_recon_response(
@@ -141,7 +141,9 @@ class ReconMemoryRecollectorPlugin:
                 raw = list(context_memory.get(interface_path, []))
                 for item in raw[-6:]:
                     if isinstance(item, dict):
-                        sender = item.get("sender_name") or item.get("sender") or "unknown"
+                        sender = (
+                            item.get("sender_name") or item.get("sender") or "unknown"
+                        )
                         content = (
                             item.get("text")
                             or item.get("message_text")
@@ -154,7 +156,10 @@ class ReconMemoryRecollectorPlugin:
             pass
 
         try:
-            from core.chat_history_cache import load_chat_history, load_global_chat_history
+            from core.chat_history_cache import (
+                load_chat_history,
+                load_global_chat_history,
+            )
 
             if interface_path:
                 cached = await load_chat_history(interface_path)

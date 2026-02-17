@@ -1,4 +1,3 @@
-import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -20,7 +19,9 @@ async def test_message_chain_triggers_corrector_for_unregistered_action(monkeypa
     # Simulate LLM output containing an unregistered action type 'message'
     called = {"count": 0, "args": None}
 
-    async def fake_corrector(text, bot=None, context=None, chat_id=None, thread_id=None):
+    async def fake_corrector(
+        text, bot=None, context=None, chat_id=None, thread_id=None
+    ):
         called["count"] += 1
         called["args"] = {"text": text, "context": context, "chat_id": chat_id}
         # Simulate no correction returned
@@ -28,7 +29,20 @@ async def test_message_chain_triggers_corrector_for_unregistered_action(monkeypa
 
     async def fake_extract_json(text, return_metadata=False):
         # Return parsed JSON and empty metadata
-        return ({"actions": [{"type": "message", "payload": {"text": "hello", "interface_path": "telegram_bot/123"}}]}, {})
+        return (
+            {
+                "actions": [
+                    {
+                        "type": "message",
+                        "payload": {
+                            "text": "hello",
+                            "interface_path": "telegram_bot/123",
+                        },
+                    }
+                ]
+            },
+            {},
+        )
 
     # Ensure supported types do NOT include bare 'message'
     monkeypatch.setattr(
@@ -53,7 +67,11 @@ async def test_message_chain_triggers_corrector_for_unregistered_action(monkeypa
 
     # Call the message chain as if the source was LLM
     result = await message_chain.handle_incoming_message(
-        bot=None, message=msg, text='{"actions":[{"type":"message","payload":{"text":"hello","interface_path":"telegram_bot/123"}}]}', source='llm', context={}
+        bot=None,
+        message=msg,
+        text='{"actions":[{"type":"message","payload":{"text":"hello","interface_path":"telegram_bot/123"}}]}',
+        source="llm",
+        context={},
     )
 
     # Our fake corrector should have been called at least once
@@ -63,12 +81,16 @@ async def test_message_chain_triggers_corrector_for_unregistered_action(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_message_chain_triggers_corrector_for_unregistered_top_level_key(monkeypatch):
+async def test_message_chain_triggers_corrector_for_unregistered_top_level_key(
+    monkeypatch,
+):
     # Simulate LLM output with a valid actions array, but an unregistered top-level key "message".
     # This should be compared against the registry-driven allowed metadata keys and trigger correction.
     called = {"count": 0}
 
-    async def fake_corrector(text, bot=None, context=None, chat_id=None, thread_id=None):
+    async def fake_corrector(
+        text, bot=None, context=None, chat_id=None, thread_id=None
+    ):
         called["count"] += 1
         return None
 
@@ -90,7 +112,14 @@ async def test_message_chain_triggers_corrector_for_unregistered_top_level_key(m
     monkeypatch.setattr(
         action_parser,
         "get_supported_action_types",
-        lambda: set(["create_personal_diary_entry", "message_telegram_bot", "message_discord_bot", "use_animation"]),
+        lambda: set(
+            [
+                "create_personal_diary_entry",
+                "message_telegram_bot",
+                "message_discord_bot",
+                "use_animation",
+            ]
+        ),
     )
 
     monkeypatch.setattr(

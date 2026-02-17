@@ -252,7 +252,9 @@ async def send_llm_fallback_message(
                 # Some bots (or test fakes) don't accept 'message_thread_id'.
                 # Retry without mapping thread id to message_thread_id.
                 try:
-                    log_warning(f"[message_chain] send_message TypeError, retrying without message_thread_id: {te}")
+                    log_warning(
+                        f"[message_chain] send_message TypeError, retrying without message_thread_id: {te}"
+                    )
                     await universal_send(
                         bot.send_message,
                         chat_id,
@@ -262,7 +264,9 @@ async def send_llm_fallback_message(
                     )
                 except Exception as e:
                     # If retry fails, surface the error but continue gracefully
-                    log_error(f"[message_chain] Failed to send fallback message after retry: {e} (original: {te})")
+                    log_error(
+                        f"[message_chain] Failed to send fallback message after retry: {e} (original: {te})"
+                    )
         else:
             log_warning(
                 "[message_chain] Bot does not have send_message method, cannot send fallback"
@@ -569,7 +573,8 @@ async def handle_incoming_message(
                         from core.validation_registry import get_validation_registry
 
                         allowed_metadata = (
-                            get_validation_registry().get_response_metadata_keys() or set()
+                            get_validation_registry().get_response_metadata_keys()
+                            or set()
                         )
                         extra_keys = [
                             k
@@ -585,7 +590,9 @@ async def handle_incoming_message(
                                     if isinstance(value, dict)
                                     else {"value": value}
                                 )
-                                synthetic_actions.append({"type": key, "payload": payload})
+                                synthetic_actions.append(
+                                    {"type": key, "payload": payload}
+                                )
 
                             actions.extend(synthetic_actions)
                             log_info(
@@ -608,7 +615,9 @@ async def handle_incoming_message(
 
                     supported_action_types = get_supported_action_types() or set()
                 except Exception as e:
-                    log_warning(f"[message_chain] Could not load supported action types: {e}")
+                    log_warning(
+                        f"[message_chain] Could not load supported action types: {e}"
+                    )
                     supported_action_types = set()
 
                 # Only enforce this for LLM-originated responses
@@ -623,7 +632,9 @@ async def handle_incoming_message(
                                 {
                                     "index": idx,
                                     "action": act,
-                                    "errors": [f"Unsupported type '{atype}' - no plugin or interface found to handle it"],
+                                    "errors": [
+                                        f"Unsupported type '{atype}' - no plugin or interface found to handle it"
+                                    ],
                                 }
                             )
 

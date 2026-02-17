@@ -118,7 +118,6 @@ class GrilloDreamPlugin:
         """Query the database for the last dream beat and return its content."""
         try:
             from core.db import get_conn_ctx
-            import json
 
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
@@ -135,37 +134,40 @@ class GrilloDreamPlugin:
                         """
                     )
                     row = await cur.fetchone()
-                    
+
                     if not row:
                         return {
-                            "status": "success", 
-                            "dream_content": None, 
-                            "message": "No recent dreams found in the archives." 
+                            "status": "success",
+                            "dream_content": None,
+                            "message": "No recent dreams found in the archives.",
                         }
 
                     response_text, diary_content, prompt_text, executed_at = row
-                    
+
                     # Use diary content if available (most reliable), then response_text
                     final_content = diary_content or response_text
-                    
+
                     # If still nothing, maybe checkout the prompt or just report missing
                     if not final_content:
                         return {
                             "status": "success",
                             "dream_content": None,
-                            "message": "Found a dream record but the content appears to be missing."
+                            "message": "Found a dream record but the content appears to be missing.",
                         }
 
                     return {
                         "status": "success",
                         "dream_content": final_content,
                         "timestamp": executed_at.isoformat() if executed_at else None,
-                        "message": f"Recalled dream from {executed_at}"
+                        "message": f"Recalled dream from {executed_at}",
                     }
 
         except Exception as e:
             log_error(f"[grillo_dream] Failed to recall last dream: {e}")
-            return {"status": "error", "message": f"Database error recalling dream: {e}"}
+            return {
+                "status": "error",
+                "message": f"Database error recalling dream: {e}",
+            }
 
     async def start(self):
         if not self.enabled:
@@ -337,12 +339,12 @@ class GrilloDreamPlugin:
         """Filter out non-dream-relevant content (weather, system messages, etc.)."""
         if not text:
             return False
-            
+
         # Ignore system bots
         system_senders = ["System", "WeatherBot", "Scheduler", "Announcer"]
         if sender and sender in system_senders:
             return False
-            
+
         # Ignore common weather/system patterns
         # We use specific phrases to avoid blocking valid user queries about weather
         blocklist = [
@@ -359,20 +361,21 @@ class GrilloDreamPlugin:
             "Action schema",
             "[System Message]",
             "Analysis of recent memory",
-            "I have successfully processed"
+            "I have successfully processed",
         ]
-        
+
         text_lower = text.lower()
         for phrase in blocklist:
             if phrase.lower() in text_lower:
                 return False
-                
+
         # Ignore raw JSON/System outputs (starts and ends with braces/brackets)
         stripped = text.strip()
-        if (stripped.startswith("{") and stripped.endswith("}")) or \
-           (stripped.startswith("[") and stripped.endswith("]")):
+        if (stripped.startswith("{") and stripped.endswith("}")) or (
+            stripped.startswith("[") and stripped.endswith("]")
+        ):
             return False
-            
+
         return True
 
     async def _collect_fragments(self, limit: int) -> List[str]:
@@ -410,7 +413,7 @@ class GrilloDreamPlugin:
                                 # Filter irrelevant content
                                 if not self._is_dream_relevant(text, sender):
                                     continue
-                                    
+
                                 snippet = text.strip()
                                 if len(snippet) > 300:
                                     snippet = snippet[:300] + "..."
@@ -441,7 +444,7 @@ class GrilloDreamPlugin:
                             if not mem:
                                 continue
                             mem_str = str(mem)
-                            
+
                             # Filter irrelevant memories
                             if not self._is_dream_relevant(mem_str):
                                 continue

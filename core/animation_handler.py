@@ -1448,9 +1448,13 @@ class AnimationHandler:
                     mgr = None
 
                 emotions_raw = None
-                if mgr is not None and hasattr(mgr, 'get_emotion_state'):
+                if mgr is not None and hasattr(mgr, "get_emotion_state"):
                     emotions_raw_maybe = mgr.get_emotion_state()
-                    emotions_raw = await emotions_raw_maybe if asyncio.iscoroutine(emotions_raw_maybe) else emotions_raw_maybe
+                    emotions_raw = (
+                        await emotions_raw_maybe
+                        if asyncio.iscoroutine(emotions_raw_maybe)
+                        else emotions_raw_maybe
+                    )
 
                 if isinstance(emotions_raw, dict) and emotions_raw:
                     # Filter out near-zero values (decay tail) to avoid sending meaningless noise.

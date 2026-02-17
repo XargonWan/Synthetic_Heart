@@ -1296,6 +1296,19 @@ try {
                     const initialKind = (data.cortex && data.cortex.active_kind) || (data.cortex && data.cortex.available_kinds && data.cortex.available_kinds[0]) || 'llm';
                     renderForCortex(initialKind);
 
+                    const getEngineByName = (engineName) => {
+                        if (!engineName) return null;
+                        const byCortex = (data.cortex && data.cortex.by_cortex) || {};
+                        const all = [];
+                        Object.values(byCortex).forEach((list) => {
+                            if (Array.isArray(list)) all.push(...list);
+                        });
+                        if (!all.length && data.llm && Array.isArray(data.llm.engines)) {
+                            all.push(...data.llm.engines);
+                        }
+                        return all.find((e) => e && e.name === engineName) || null;
+                    };
+
                     // Bind llmSelect change to switch engine (backwards-compatible endpoint)
                     if (!llmSelect.dataset.bound) {
                         llmSelect.addEventListener('change', async () => {
@@ -1322,6 +1335,15 @@ try {
                                 const selected = llmSelect.value;
                                 if (!selected) return;
                                 try {
+                                    const engine = getEngineByName(selected);
+                                    const loginUrl = engine ? (engine.login_url || engine.service_url || '') : '';
+                                    if (loginUrl) {
+                                        try {
+                                            window.open(loginUrl, '_blank', 'noopener');
+                                        } catch (e) {
+                                            console.debug('[synth_webui] Failed to open login URL', e);
+                                        }
+                                    }
                                     const res = await fetch('/api/components/cortex/login', {
                                         method: 'POST',
                                         headers: { 'Content-Type': 'application/json' },
@@ -1399,6 +1421,66 @@ try {
                             status.className = 'component-status component-status-' + statusClass;
                             status.textContent = statusValue;
                             summaryActions.appendChild(status);
+
+                            // Special: provide an "Open Selkies" button for the built-in Selkies desktop
+                            // and for any interface explicitly marked as external with Selkies data.
+                            try {
+                                const isSelk = (item && (item.name === 'selkies_desktop' || item.is_external && (item.selkies_protocol || item.selkies_port)));
+                                if (isSelk) {
+                                    const openBtn = document.createElement('button');
+                                    openBtn.className = 'pill';
+                                    openBtn.textContent = 'Login';
+                                    openBtn.title = 'Open Selkies login page in a new tab';
+                                    openBtn.style.marginLeft = '8px';
+                                    openBtn.addEventListener('click', async (ev) => {
+                                        ev.stopPropagation();
+                                        ev.preventDefault();
+                                        openBtn.disabled = true;
+                                        try {
+                                            // Try to get authoritative Selkies host/ports from the server
+                                            let cfg = null;
+                                            try {
+                                                const r = await fetch('/api/selkies');
+                                                if (r.ok) cfg = await r.json();
+                                            } catch (e) {
+                                                console.debug('[synth_webui] /api/selkies not available, falling back to component data');
+                                            }
+
+                                            // Determine host (substitute loopback with page host for external access)
+                                            const rawHost = (cfg && cfg.host) || window.location.hostname || '127.0.0.1';
+                                            const loopback = (rawHost === '127.0.0.1' || rawHost === 'localhost' || rawHost === '0.0.0.0');
+                                            const host = loopback ? window.location.hostname : rawHost;
+
+                                            // Determine protocol/port preference (prefer HTTPS)
+                                            const detected = (cfg && cfg.detected_protocol) || null;
+                                            const hasHttps = (cfg && cfg.https_port) || item.selkies_protocol === 'https' || item.selkies_port;
+                                            const hasHttp = (cfg && cfg.http_port) || item.selkies_protocol === 'http' || item.selkies_port;
+
+                                            let proto = 'https';
+                                            let port = (cfg && cfg.https_port) || item.selkies_port || 3000;
+                                            if (detected === 'http' && !hasHttps) {
+                                                proto = 'http';
+                                                port = (cfg && cfg.http_port) || item.selkies_port || 3000;
+                                            } else if (!hasHttps && hasHttp) {
+                                                proto = 'http';
+                                                port = (cfg && cfg.http_port) || item.selkies_port || 3000;
+                                            }
+
+                                            // Prefer a dedicated login path if Selkies exposes it; otherwise open root
+                                            const loginPath = (cfg && cfg.login_path) || '/';
+                                            const url = `${proto}://${host}:${port}${loginPath}`;
+                                            window.open(url, '_blank');
+                                        } catch (err) {
+                                            console.error('[synth_webui] Failed to open Selkies login', err);
+                                            alert('Failed to open Selkies Web Desktop login page.');
+                                        } finally {
+                                            openBtn.disabled = false;
+                                        }
+                                    });
+                                    summaryActions.appendChild(openBtn);
+                                }
+                            } catch (e) { /* ignore UI helper errors */ }
+
                             summary.appendChild(summaryActions);
                             details.appendChild(summary);
 

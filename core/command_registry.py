@@ -537,6 +537,7 @@ register_command("purge_map", purge_map_command)
 
 # /say command removed from backend registry (function deprecated).
 
+
 async def logchat_command(*args, interface_context=None) -> str:
     """Set current chat as log chat."""
     if not interface_context:
@@ -615,7 +616,6 @@ async def cancel_command(*args, interface_context=None) -> str:
 
     except Exception as e:
         return f"❌ Error cancelling operations: {e}"
-
 
 
 register_command("cancel", cancel_command)

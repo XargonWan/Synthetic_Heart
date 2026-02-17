@@ -2344,7 +2344,9 @@ class SeleniumLLMBase(AIPluginBase):
                     if elements:
                         button = elements[0]
                         # Check if it's visible at least
-                        if button.is_displayed() and not _is_stop_button_element(button):
+                        if button.is_displayed() and not _is_stop_button_element(
+                            button
+                        ):
                             log_debug(
                                 f"[selenium] Found visible send button (but not clickable) with selector: {selector}"
                             )
@@ -2695,7 +2697,9 @@ class SeleniumLLMBase(AIPluginBase):
             # If the UI is still generating (stop button visible), wait briefly
             try:
                 if self._has_visible_stop_button(self.driver):
-                    log_debug("[selenium] Stop button visible before send; waiting for completion")
+                    log_debug(
+                        "[selenium] Stop button visible before send; waiting for completion"
+                    )
                     self.wait_for_response_completion(self.driver, timeout=10)
             except Exception:
                 pass

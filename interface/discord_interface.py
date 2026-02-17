@@ -11,8 +11,7 @@ except Exception:  # pragma: no cover - graceful fallback for tests without inst
     FFmpegPCMAudio = None
 
 from core.logging_utils import log_debug, log_error, log_info, log_warning
-from core.mention_utils import is_message_for_bot
-from core.chat_attention import set_attention, get_attention, evaluate_triggers
+from core.chat_attention import set_attention, evaluate_triggers
 from core.transport_layer import universal_send
 from core.core_initializer import register_interface
 from core.command_registry import execute_command
@@ -184,7 +183,12 @@ class DiscordInterface:
     @staticmethod
     def get_action_types() -> list[str]:
         """Return action types supported by this interface."""
-        return ["message_discord_bot", "join_voice_discord", "leave_voice_discord", "audio_discord_bot"]
+        return [
+            "message_discord_bot",
+            "join_voice_discord",
+            "leave_voice_discord",
+            "audio_discord_bot",
+        ]
 
     @staticmethod
     def get_supported_actions() -> dict:
@@ -308,7 +312,9 @@ class DiscordInterface:
             channel_id = payload.get("channel_id")
             interface_path = payload.get("interface_path")
             if not channel_id and not interface_path:
-                errors.append("payload.channel_id or payload.interface_path is required")
+                errors.append(
+                    "payload.channel_id or payload.interface_path is required"
+                )
             return errors
 
         if action_type == "leave_voice_discord":
@@ -322,7 +328,9 @@ class DiscordInterface:
             if not payload.get("audio"):
                 errors.append("payload.audio is required")
             if not payload.get("interface_path") and not payload.get("channel_id"):
-                errors.append("payload.interface_path or payload.channel_id is required")
+                errors.append(
+                    "payload.interface_path or payload.channel_id is required"
+                )
             return errors
 
         if action_type != "message_discord_bot":
@@ -522,7 +530,7 @@ class DiscordInterface:
                     channel = self.client.get_channel(int(channel_id))
                     if not channel:
                         channel = await self.client.fetch_channel(int(channel_id))
-                    
+
                     if channel and channel.guild and channel.guild.voice_client:
                         # We are connected to voice in this guild
                         # Verify if we are in the requested channel OR if the request was just for the guild context
@@ -535,12 +543,14 @@ class DiscordInterface:
                     log_debug(f"[discord_interface] Voice check failed: {e}")
 
             # Fallback to sending as file
-            log_debug("[discord_interface] Not in voice or lookup failed, sending as file attachment")
+            log_debug(
+                "[discord_interface] Not in voice or lookup failed, sending as file attachment"
+            )
             await self.send_message(
                 channel_id=channel_id,
                 text=caption,
                 audio=audio_path,
-                interface_path=interface_path
+                interface_path=interface_path,
             )
             return {"status": "success", "message": "Sent as file"}
 
@@ -550,7 +560,7 @@ class DiscordInterface:
         """Stream audio to voice client."""
         if not os.path.exists(audio_path):
             return {"status": "failed", "message": "Audio file not found"}
-        
+
         if voice_client.is_playing():
             voice_client.stop()
 
@@ -882,8 +892,6 @@ class DiscordInterface:
             text_lower_check = content.lower()
             _, _, is_wake_sleep_cmd = evaluate_triggers(text_lower_check)
 
-
-
             wrapped = SimpleNamespace(
                 message_id=getattr(message, "id", None),
                 chat_id=channel_id,  # In Discord, this is thread ID if in thread, channel ID otherwise
@@ -944,7 +952,9 @@ class DiscordInterface:
                 # DO NOT treat a plain '@' character as an explicit trigger.
                 if entities:
                     # `entities` is populated earlier only when the bot was actually mentioned
-                    is_explicit_trigger = any(getattr(e, "type", "") == "mention" for e in entities)
+                    is_explicit_trigger = any(
+                        getattr(e, "type", "") == "mention" for e in entities
+                    )
                 elif getattr(message, "guild", None) is None:
                     # Direct messages always wake the bot
                     is_explicit_trigger = True

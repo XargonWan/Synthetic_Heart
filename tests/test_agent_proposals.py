@@ -1,4 +1,4 @@
-import asyncio
+
 
 async def test_list_agent_proposals(monkeypatch):
     # Patch DB conn to return a sample proposed row
@@ -13,7 +13,8 @@ async def test_list_agent_proposals(monkeypatch):
 
         async def fetchall(self):
             import datetime
-            return [(101, 'ls -la', 'system', 'proposed', datetime.datetime.utcnow())]
+
+            return [(101, "ls -la", "system", "proposed", datetime.datetime.utcnow())]
 
     class FakeConn:
         def __init__(self):
@@ -38,13 +39,15 @@ async def test_list_agent_proposals(monkeypatch):
             return Ctx()
 
     fake_conn = FakeConn()
-    monkeypatch.setattr(dbmod, 'get_conn_ctx', lambda: fake_conn)
+    monkeypatch.setattr(dbmod, "get_conn_ctx", lambda: fake_conn)
 
     from core.webui import WebUI
+
     ui = WebUI(autostart=False)
     res = await ui.list_agent_proposals(limit=10)
-    body = res.body if hasattr(res, 'body') else res.body
+    body = res.body if hasattr(res, "body") else res.body
     import json
-    parsed = json.loads(res.body.decode()) if hasattr(res, 'body') else res
-    assert parsed.get('proposals')
-    assert parsed['proposals'][0]['id'] == 101
+
+    parsed = json.loads(res.body.decode()) if hasattr(res, "body") else res
+    assert parsed.get("proposals")
+    assert parsed["proposals"][0]["id"] == 101

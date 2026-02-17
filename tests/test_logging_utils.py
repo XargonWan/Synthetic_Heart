@@ -65,7 +65,9 @@ def test_timestamped_rotation_respects_backupcount():
         timestamped_files = [
             f
             for f in files
-            if f.startswith("test_lines.") and f.endswith(".log") and f != "test_lines.log"
+            if f.startswith("test_lines.")
+            and f.endswith(".log")
+            and f != "test_lines.log"
         ]
         # backupCount == 2 -> at most 2 timestamped backups should remain
         assert len(timestamped_files) <= 2

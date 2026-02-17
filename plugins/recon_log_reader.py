@@ -43,7 +43,7 @@ class ReconLogReaderPlugin:
     def get_recon_instruction(self) -> str:
         return (
             "Determine if the user is asking for system logs. "
-            "Return as an object: {\"needs_logs\": true|false}."
+            'Return as an object: {"needs_logs": true|false}.'
         )
 
     async def parse_recon_response(
@@ -107,9 +107,7 @@ class ReconLogReaderPlugin:
                 }
             )
 
-        log_info(
-            f"[recon_logs] Added {len(contributions) - 1} log snippet(s) to recon"
-        )
+        log_info(f"[recon_logs] Added {len(contributions) - 1} log snippet(s) to recon")
         return contributions
 
     async def get_recon_contributions(
@@ -210,9 +208,7 @@ class ReconLogReaderPlugin:
                 }
             )
 
-        log_info(
-            f"[recon_logs] Added {len(contributions) - 1} log snippet(s) to recon"
-        )
+        log_info(f"[recon_logs] Added {len(contributions) - 1} log snippet(s) to recon")
         return contributions
 
 

@@ -3,9 +3,12 @@ import pytest
 # Some test environments (local dev) may not have DB deps like aiomysql installed.
 # Skip this test module when aiomysql is unavailable to keep CI/dev runs stable.
 try:
-    import aiomysql  # type: ignore
+    pass  # type: ignore
 except Exception:
-    pytest.skip("aiomysql not installed; skipping grillo autostart tests", allow_module_level=True)
+    pytest.skip(
+        "aiomysql not installed; skipping grillo autostart tests",
+        allow_module_level=True,
+    )
 
 from core.core_initializer import core_initializer, PLUGIN_REGISTRY
 
@@ -15,6 +18,7 @@ import plugins.grillo.grillo_dream as gd
 @pytest.mark.asyncio
 async def test_grillo_dream_autostarts(monkeypatch):
     """Ensure that the Grillo Dream plugin is started when pending async plugins are processed."""
+
     # Replace the long-running dream loop with a short no-op to avoid sleeping
     async def fake_dream_loop(self):
         # Mark the scheduler as not running so the fake loop exits quickly

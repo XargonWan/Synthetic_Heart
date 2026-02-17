@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from core.config_manager import config_registry
-from core.logging_utils import log_debug, log_info, log_warning
+from core.logging_utils import log_info, log_warning
 from core.transport_layer import extract_json_from_text
 
 
@@ -93,7 +93,9 @@ class DebriefActionIntentPlugin:
     def _get_max_actions(self) -> int:
         try:
             return int(
-                config_registry.get_value("ACTION_INTENT_MAX_ACTIONS", 3, value_type=int)
+                config_registry.get_value(
+                    "ACTION_INTENT_MAX_ACTIONS", 3, value_type=int
+                )
                 or 3
             )
         except Exception:
@@ -147,7 +149,9 @@ class DebriefActionIntentPlugin:
         if not isinstance(llm_response, str) or not llm_response.strip():
             return None
 
-        if not (context.get("from_llm") or getattr(original_message, "from_llm", False)):
+        if not (
+            context.get("from_llm") or getattr(original_message, "from_llm", False)
+        ):
             return None
 
         user_message = (
@@ -165,7 +169,9 @@ class DebriefActionIntentPlugin:
                 normalize_action_schema,
             )
 
-            available_actions = core_initializer.actions_block.get("available_actions", {})
+            available_actions = core_initializer.actions_block.get(
+                "available_actions", {}
+            )
         except Exception as e:
             log_warning(f"[debrief_action_intent] Failed to load actions metadata: {e}")
             available_actions = {}
@@ -205,7 +211,11 @@ class DebriefActionIntentPlugin:
             if isinstance(a, dict)
         }
         failed_types = {
-            (a.get("action", {}).get("type") if isinstance(a.get("action"), dict) else a.get("type") or a.get("action"))
+            (
+                a.get("action", {}).get("type")
+                if isinstance(a.get("action"), dict)
+                else a.get("type") or a.get("action")
+            )
             for a in (failed_actions or [])
             if isinstance(a, dict)
         }
@@ -228,7 +238,7 @@ class DebriefActionIntentPlugin:
             "  missing details.\n"
             "- Output ONLY valid JSON with the exact schema below.\n\n"
             "Schema:\n"
-            "{\"recovery_actions\":[{\"action_type\":str,\"payload\":object,\"reason\":str,\"confidence\":\"low|medium|high\"}]}"
+            '{"recovery_actions":[{"action_type":str,"payload":object,"reason":str,"confidence":"low|medium|high"}]}'
         )
 
         user_prompt = json.dumps(

@@ -1,7 +1,5 @@
-import asyncio
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import core.core_initializer as core_init
 from plugins.message_plugin import MessagePlugin
@@ -30,7 +28,10 @@ class TestMessagePluginThreadHandling(unittest.IsolatedAsyncioTestCase):
 
             action = {
                 "type": "message_telegram_bot",
-                "payload": {"text": "Hey", "interface_path": "telegram_bot/-1002646330049/"},
+                "payload": {
+                    "text": "Hey",
+                    "interface_path": "telegram_bot/-1002646330049/",
+                },
             }
 
             original_message = SimpleNamespace()
@@ -38,9 +39,13 @@ class TestMessagePluginThreadHandling(unittest.IsolatedAsyncioTestCase):
             original_message.message_id = 50699
             # Telegram's native attribute (not 'thread_id')
             original_message.message_thread_id = 6
-            original_message.from_user = SimpleNamespace(id=2115971192, username="Alessandra15204")
+            original_message.from_user = SimpleNamespace(
+                id=2115971192, username="Alessandra15204"
+            )
 
-            await plugin._handle_message_action(action, context={}, bot=None, original_message=original_message)
+            await plugin._handle_message_action(
+                action, context={}, bot=None, original_message=original_message
+            )
 
             # Ensure interface send_message was called once
             self.assertEqual(len(fake_iface.sent), 1)

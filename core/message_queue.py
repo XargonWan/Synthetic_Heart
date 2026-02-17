@@ -92,9 +92,13 @@ async def enqueue(
     # an explicit history_scope was provided by the caller. This keeps the
     # behaviour implicit for interfaces and avoids touching all call sites.
     try:
-        if history_scope is None and (interface_id or (bot and hasattr(bot, "get_interface_id"))):
+        if history_scope is None and (
+            interface_id or (bot and hasattr(bot, "get_interface_id"))
+        ):
             history_scope = "local"
-            log_debug(f"[QUEUE] Defaulted history_scope to 'local' for interface {interface_id or getattr(bot, 'get_interface_id', lambda: None)()}")
+            log_debug(
+                f"[QUEUE] Defaulted history_scope to 'local' for interface {interface_id or getattr(bot, 'get_interface_id', lambda: None)()}"
+            )
     except Exception:
         pass
 
@@ -164,7 +168,9 @@ async def enqueue(
                 if directed and not explicit_trigger:
                     directed = False
                     reason = "asleep_state_no_trigger"
-                    log_debug(f"[QUEUE] Suppressed message due to Asleep state: {getattr(message, 'text', '')}")
+                    log_debug(
+                        f"[QUEUE] Suppressed message due to Asleep state: {getattr(message, 'text', '')}"
+                    )
                 elif not directed and explicit_trigger:
                     directed = True
                     reason = "explicit_trigger_asleep"
@@ -441,7 +447,12 @@ async def enqueue(
 
 
 async def enqueue_low_priority(
-    bot, message, context_memory=None, history_scope: str | None = None, interface_id: str = None, original_message=None
+    bot,
+    message,
+    context_memory=None,
+    history_scope: str | None = None,
+    interface_id: str = None,
+    original_message=None,
 ) -> None:
     """Enqueue a low-priority (background) message into the global queue.
 
@@ -466,7 +477,9 @@ async def enqueue_low_priority(
     try:
         if history_scope is None and interface_id:
             history_scope = "local"
-            log_debug(f"[QUEUE] Defaulted history_scope to 'local' for low-priority interface {interface_id}")
+            log_debug(
+                f"[QUEUE] Defaulted history_scope to 'local' for low-priority interface {interface_id}"
+            )
     except Exception:
         pass
 
@@ -763,7 +776,9 @@ async def _consumer_loop() -> None:
                         hs = final.get("history_scope")
                         if hs is not None:
                             context["history_scope"] = hs
-                            log_debug(f"[QUEUE] Propagated history_scope into context: {hs}")
+                            log_debug(
+                                f"[QUEUE] Propagated history_scope into context: {hs}"
+                            )
 
                         log_debug(
                             f"[QUEUE] Added interface_path to context: {interface_path}"
@@ -995,7 +1010,9 @@ async def _consumer_loop() -> None:
 
                             # Ensure generation_end hook is called when background task completes
                             processing_task.add_done_callback(
-                                lambda t: asyncio.create_task(_call_bot_generation_end(t))
+                                lambda t: asyncio.create_task(
+                                    _call_bot_generation_end(t)
+                                )
                             )
 
                             # Log any exceptions when done

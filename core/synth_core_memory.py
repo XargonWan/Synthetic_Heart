@@ -122,7 +122,9 @@ async def search_memories(
                 mem_conditions = []
                 mem_params: list = []
                 if tags:
-                    tag_conditions = " OR ".join(["JSON_CONTAINS(tags, %s)"] * len(tags))
+                    tag_conditions = " OR ".join(
+                        ["JSON_CONTAINS(tags, %s)"] * len(tags)
+                    )
                     mem_conditions.append(f"({tag_conditions})")
                     mem_params.extend([json.dumps(tag) for tag in tags])
                 if keywords:
@@ -147,7 +149,9 @@ async def search_memories(
                         if len(snippet) > 400:
                             snippet = snippet[:400] + "..."
                         try:
-                            ts_iso = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+                            ts_iso = (
+                                ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+                            )
                         except Exception:
                             ts_iso = str(ts)
                         try:
@@ -205,7 +209,9 @@ async def search_memories(
                         if len(snippet) > 400:
                             snippet = snippet[:400] + "..."
                         try:
-                            ts_iso = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+                            ts_iso = (
+                                ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+                            )
                         except Exception:
                             ts_iso = str(ts)
                         try:
@@ -244,11 +250,19 @@ async def search_memories(
                             rows = await cur.fetchall()
                             for r in rows:
                                 src, _id, ts, content, _ = r
-                                snippet = content if isinstance(content, str) else str(content)
+                                snippet = (
+                                    content
+                                    if isinstance(content, str)
+                                    else str(content)
+                                )
                                 if len(snippet) > 400:
                                     snippet = snippet[:400] + "..."
                                 try:
-                                    ts_iso = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+                                    ts_iso = (
+                                        ts.isoformat()
+                                        if hasattr(ts, "isoformat")
+                                        else str(ts)
+                                    )
                                 except Exception:
                                     ts_iso = str(ts)
                                 hits.append(
@@ -261,7 +275,9 @@ async def search_memories(
                                     }
                                 )
                         except Exception as e:
-                            log_debug(f"[search_memories] chat_history_cache query failed: {e}")
+                            log_debug(
+                                f"[search_memories] chat_history_cache query failed: {e}"
+                            )
     except Exception as e:
         log_warning(f"[search_memories] query failed: {e}")
         return []

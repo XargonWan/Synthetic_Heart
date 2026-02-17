@@ -21,24 +21,24 @@ async def test_agent_attaches_to_engine(monkeypatch):
     registry = get_cortex_registry()
 
     # Ensure no engine with name 'fakeengine' is present
-    registry._engines.pop('fakeengine', None)
+    registry._engines.pop("fakeengine", None)
 
     # Register fake engine instance
-    registry._engines['fakeengine'] = FakeEngine()
+    registry._engines["fakeengine"] = FakeEngine()
 
     # Patch get_active_llm to return 'fakeengine'
     import core.config as conf
 
     async def fake_get_active():
-        return 'fakeengine'
+        return "fakeengine"
 
-    monkeypatch.setattr(conf, 'get_active_cortex_engine', fake_get_active)
+    monkeypatch.setattr(conf, "get_active_cortex_engine", fake_get_active)
 
     # Instantiate plugin - attach happens async, wait a short tick
     plugin = AgentPlugin(notify_fn=lambda m: None)
 
     await asyncio.sleep(0.1)
 
-    assert hasattr(plugin, '_attached_engine')
-    assert plugin._attached_engine == 'fakeengine'
-    assert registry.get_engine('fakeengine').attached is True
+    assert hasattr(plugin, "_attached_engine")
+    assert plugin._attached_engine == "fakeengine"
+    assert registry.get_engine("fakeengine").attached is True

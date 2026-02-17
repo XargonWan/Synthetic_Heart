@@ -209,7 +209,6 @@ async def help_command(event):
         f"🧞‍♀️ *synth – Available Commands*\n\n"
         "*🧠 Context Mode*\n"
         f"`.context` – Toggle history in forwarded messages, currently *{context_status}*\n\n"
-
         "*🧩 Manual Mode*\n"
         "Reply to a forwarded message with text or content (stickers, photos, audio, files, etc.)\n"
         "`.cancel` – Cancel a pending send\n\n"
@@ -267,7 +266,6 @@ async def handle_message(event):
         return
     user_id = message.sender_id
     text = message.message or ""
-
 
     # Trainer reply to forwarded message
     if is_trainer(user_id) and message.is_reply:

@@ -17,7 +17,9 @@ class BadBot:
 @pytest.mark.asyncio
 async def test_universal_send_retries_without_message_thread_id():
     bot = BadBot()
-    await universal_send(bot.send_message, 42, text="fallback", interface_path="fake", thread_id=99)
+    await universal_send(
+        bot.send_message, 42, text="fallback", interface_path="fake", thread_id=99
+    )
     assert bot.messages == [(42, "fallback")]
 
 

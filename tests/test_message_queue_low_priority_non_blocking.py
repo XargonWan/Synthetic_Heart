@@ -9,16 +9,20 @@ class FastBot:
     def __init__(self):
         self.handled = []
 
-    async def on_generation_start(self, interface_path=None, context=None, message=None):
+    async def on_generation_start(
+        self, interface_path=None, context=None, message=None
+    ):
         return
 
-    async def on_generation_end(self, interface_path=None, success=None, context=None, message=None):
+    async def on_generation_end(
+        self, interface_path=None, success=None, context=None, message=None
+    ):
         return
 
 
 async def _fake_handle_incoming_message(bot, message, context, interface):
     # simulate a long running background task
-    if 'grillo' in (interface or ''):
+    if "grillo" in (interface or ""):
         await asyncio.sleep(1)
         return
     # fast handling
@@ -30,34 +34,34 @@ async def test_low_priority_does_not_block(monkeypatch):
     # Patch plugin_instance.handle_incoming_message to our fake
     import core.plugin_instance as pi
 
-    monkeypatch.setattr(pi, 'handle_incoming_message', _fake_handle_incoming_message)
+    monkeypatch.setattr(pi, "handle_incoming_message", _fake_handle_incoming_message)
 
     # Put a low-priority item first
     item1 = {
-        'bot': FastBot(),
-        'message': SimpleNamespace(chat_id=-1, text='grillo beat'),
-        'chat_id': -1,
-        'thread_id': None,
-        'interface': 'grillo',
-        'chat_name': None,
-        'message_thread_name': None,
-        'timestamp': 0,
-        'context': {},
-        'priority': False,
+        "bot": FastBot(),
+        "message": SimpleNamespace(chat_id=-1, text="grillo beat"),
+        "chat_id": -1,
+        "thread_id": None,
+        "interface": "grillo",
+        "chat_name": None,
+        "message_thread_name": None,
+        "timestamp": 0,
+        "context": {},
+        "priority": False,
     }
 
     # Then a normal message
     item2 = {
-        'bot': FastBot(),
-        'message': SimpleNamespace(chat_id=1, text='user message'),
-        'chat_id': 1,
-        'thread_id': None,
-        'interface': 'telegram_bot',
-        'chat_name': None,
-        'message_thread_name': None,
-        'timestamp': 0,
-        'context': {},
-        'priority': False,
+        "bot": FastBot(),
+        "message": SimpleNamespace(chat_id=1, text="user message"),
+        "chat_id": 1,
+        "thread_id": None,
+        "interface": "telegram_bot",
+        "chat_name": None,
+        "message_thread_name": None,
+        "timestamp": 0,
+        "context": {},
+        "priority": False,
     }
 
     # Put onto the queue using internal API

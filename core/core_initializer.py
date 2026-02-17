@@ -191,7 +191,9 @@ class CoreInitializer:
                 await self.start_pending_async_plugins()
                 log_debug("[core_initializer] start_pending_async_plugins completed")
             except Exception as e:
-                log_warning(f"[core_initializer] start_pending_async_plugins failed: {e}")
+                log_warning(
+                    f"[core_initializer] start_pending_async_plugins failed: {e}"
+                )
 
             # 3. Load core actions (like chat_link) if not already loaded
             log_debug("[core_initializer] 🔍 About to call _ensure_core_actions()")

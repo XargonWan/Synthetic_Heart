@@ -1,4 +1,3 @@
-import asyncio
 from datetime import datetime
 
 import pytest
@@ -22,10 +21,23 @@ class FakeReconPlugin:
 
     async def get_recon_contributions(self, **kwargs):
         return [
-            {"type": "memory", "content": {"source": "mem", "id": "m1", "snippet": "important memory"}, "priority": 5},
-            {"type": "instruction", "content": "Prefer concise answers.", "priority": 3},
+            {
+                "type": "memory",
+                "content": {"source": "mem", "id": "m1", "snippet": "important memory"},
+                "priority": 5,
+            },
+            {
+                "type": "instruction",
+                "content": "Prefer concise answers.",
+                "priority": 3,
+            },
             {"type": "language_hint", "language_code": "it", "priority": 8},
-            {"type": "tone_hint", "message_tone": "empathetic", "conversation_tone": "warm", "priority": 7},
+            {
+                "type": "tone_hint",
+                "message_tone": "empathetic",
+                "conversation_tone": "warm",
+                "priority": 7,
+            },
         ]
 
     def get_recon_key(self):
@@ -52,11 +64,15 @@ async def test_build_json_prompt_includes_recon_contributions(monkeypatch):
     async def fake_gather_recon_contributions(**kwargs):
         return await fake.get_recon_contributions(**kwargs)
 
-    monkeypatch.setattr(recon_mod, "gather_recon_contributions", fake_gather_recon_contributions)
+    monkeypatch.setattr(
+        recon_mod, "gather_recon_contributions", fake_gather_recon_contributions
+    )
 
     msg = FakeMessage(text="Questo è un test")
 
-    prompt = await build_json_prompt(message=msg, context_memory={}, interface_name="test")
+    prompt = await build_json_prompt(
+        message=msg, context_memory={}, interface_name="test"
+    )
 
     # Recon contributions should be present in context
     ctx = prompt.get("context", {})
@@ -92,11 +108,12 @@ async def test_recon_keyword_normalization(monkeypatch):
 
         async def parse_recon_response(self, data, **kwargs):
             # record what keywords the core passed to us
-            recorded['keywords'] = kwargs.get('keywords')
+            recorded["keywords"] = kwargs.get("keywords")
             return []
 
     from core.core_initializer import PLUGIN_REGISTRY
-    PLUGIN_REGISTRY['kw_plugin_test'] = KWPlugin()
+
+    PLUGIN_REGISTRY["kw_plugin_test"] = KWPlugin()
 
     import core.recon as recon_mod
 
@@ -111,8 +128,8 @@ async def test_recon_keyword_normalization(monkeypatch):
     )
 
     # Plugin should have received normalized single-word tokens (split on '_' and lowercased)
-    assert 'keywords' in recorded, "plugin did not receive keywords"
-    assert recorded['keywords'] == [
+    assert "keywords" in recorded, "plugin did not receive keywords"
+    assert recorded["keywords"] == [
         "narrative",
         "part",
         "behavior",
@@ -122,4 +139,4 @@ async def test_recon_keyword_normalization(monkeypatch):
     ]
 
     # cleanup
-    PLUGIN_REGISTRY.pop('kw_plugin_test', None)
+    PLUGIN_REGISTRY.pop("kw_plugin_test", None)

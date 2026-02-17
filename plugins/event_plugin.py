@@ -13,7 +13,6 @@ from core.auto_response import request_llm_delivery
 import traceback
 import asyncio
 import json
-import aiomysql
 from core.core_initializer import register_plugin
 from core.action_parser import CORRECTOR_RETRIES
 
@@ -134,6 +133,7 @@ class EventPlugin(AIPluginBase):
 
         try:
             from core.db import get_conn_ctx
+
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(

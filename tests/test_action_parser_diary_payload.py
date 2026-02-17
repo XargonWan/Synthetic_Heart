@@ -44,7 +44,13 @@ async def test_diary_uses_llm_payload_for_thoughts_and_emotions(monkeypatch):
 
     await ap._create_diary_entry_for_actions(actions, ctx, msg)
 
-    assert captured["interaction_summary"] == "Discussione emotiva con tensione relazionale"
-    assert captured["personal_thought"] == "Mi sento in conflitto e voglio riparare la fiducia"
+    assert (
+        captured["interaction_summary"]
+        == "Discussione emotiva con tensione relazionale"
+    )
+    assert (
+        captured["personal_thought"]
+        == "Mi sento in conflitto e voglio riparare la fiducia"
+    )
     assert captured["emotions"] == [{"type": "conflicted", "intensity": 7}]
     assert captured["context_tags"] == ["relationship", "conflict"]

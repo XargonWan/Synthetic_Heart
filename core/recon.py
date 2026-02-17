@@ -7,6 +7,7 @@ from core.config_manager import config_registry
 # Expose config flags
 try:
     from core.variables_engine import register_exposed_var
+
     register_exposed_var(
         "ENABLE_RECON",
         label="Enable Recon (preflight)",
@@ -211,7 +212,9 @@ async def _call_recon_plugin(plugin: Any, **kwargs) -> List[Dict[str, Any]]:
                     normalized.append(norm)
             return normalized
     except Exception as e:
-        log_warning(f"[recon] Plugin {plugin.__class__.__name__} recon hook failed: {e}")
+        log_warning(
+            f"[recon] Plugin {plugin.__class__.__name__} recon hook failed: {e}"
+        )
     return []
 
 
@@ -285,7 +288,7 @@ async def _normalize_keywords_list(raw_keywords: List[str] | None) -> List[str]:
 
     def _split_camel(s: str) -> List[str]:
         # Insert space between lower->upper transitions then split
-        parts = re.sub('([a-z0-9])([A-Z])', r"\1 \2", s).split()
+        parts = re.sub("([a-z0-9])([A-Z])", r"\1 \2", s).split()
         return parts
 
     seen = set()
@@ -326,20 +329,25 @@ async def gather_recon_contributions(
 
     try:
         if max_results is None:
-            max_results = int(config_registry.get_value("RECON_MAX_RESULTS", 5, value_type=int) or 5)
+            max_results = int(
+                config_registry.get_value("RECON_MAX_RESULTS", 5, value_type=int) or 5
+            )
         else:
             max_results = int(max_results)
     except Exception:
         max_results = 5
 
     try:
-        timeout = int(config_registry.get_value("RECON_TIMEOUT", 180, value_type=int) or 180)
+        timeout = int(
+            config_registry.get_value("RECON_TIMEOUT", 180, value_type=int) or 180
+        )
     except Exception:
         timeout = 180
 
     contributions: List[Dict[str, Any]] = []
     try:
         from core.core_initializer import PLUGIN_REGISTRY
+
         plugins = list(PLUGIN_REGISTRY.values())
     except Exception as e:
         log_warning(f"[recon] Failed to access PLUGIN_REGISTRY: {e}")
@@ -416,7 +424,9 @@ async def gather_recon_contributions(
         engine = None
 
     if not engine or not hasattr(engine, "generate_response"):
-        log_warning("[recon] Active LLM engine missing generate_response; skipping Recon")
+        log_warning(
+            "[recon] Active LLM engine missing generate_response; skipping Recon"
+        )
         return []
 
     try:
@@ -538,7 +548,9 @@ async def resolve_language(
         try:
             if not hasattr(plugin, "detect_language"):
                 return None
-            rval = plugin.detect_language(message=message, interface_path=interface_path)
+            rval = plugin.detect_language(
+                message=message, interface_path=interface_path
+            )
             if asyncio.iscoroutine(rval):
                 rval = await rval
             if rval:
@@ -566,9 +578,7 @@ async def resolve_language(
 
     if is_grillo_internal:
         return str(config_registry.get_value("DEFAULT_GRILLO_LANGUAGE", "en"))
-    return str(
-        config_registry.get_value("PROJECT_DEFAULT_LANGUAGE", "en") or "en"
-    )
+    return str(config_registry.get_value("PROJECT_DEFAULT_LANGUAGE", "en") or "en")
 
 
 async def resolve_tone(
@@ -604,8 +614,7 @@ async def resolve_tone(
     # Detector plugins
     try:
         timeout = int(
-            config_registry.get_value("TONE_DETECTOR_TIMEOUT", 2, value_type=int)
-            or 2
+            config_registry.get_value("TONE_DETECTOR_TIMEOUT", 2, value_type=int) or 2
         )
     except Exception:
         timeout = 2

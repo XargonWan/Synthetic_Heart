@@ -2,7 +2,6 @@
 """Tests for CoreInitializer behavior regarding plugin-enabled flag."""
 
 import asyncio
-from types import SimpleNamespace
 
 
 def test_disabled_plugin_actions_not_registered():

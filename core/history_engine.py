@@ -482,8 +482,10 @@ class HistoryEngine:
                 for m in unified_candidates[-verbosity:] if verbosity > 0 else []:
                     # Skip if this entry's text matches the current input
                     entry_text = (
-                        m.get("text") or m.get("message_text") or ""
-                    ).strip() if isinstance(m, dict) else ""
+                        (m.get("text") or m.get("message_text") or "").strip()
+                        if isinstance(m, dict)
+                        else ""
+                    )
                     if input_text and entry_text == input_text:
                         continue
 
@@ -495,8 +497,12 @@ class HistoryEngine:
                         continue
 
                     # Determine origin: prefer explicit interface_path/source_path fields
-                    entry_path = (m.get("interface_path") or m.get("source_path") or "")
-                    if entry_path and interface_path and str(entry_path) == str(interface_path):
+                    entry_path = m.get("interface_path") or m.get("source_path") or ""
+                    if (
+                        entry_path
+                        and interface_path
+                        and str(entry_path) == str(interface_path)
+                    ):
                         local_lines.append(line)
                     else:
                         other_lines.append(line)

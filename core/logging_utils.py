@@ -246,11 +246,15 @@ class TimestampedRotatingFileHandler(RotatingFileHandler):
         try:
             if getattr(self, "backupCount", 0) > 0:
                 pattern = f"{base}.*{ext}"
-                rotated = [p for p in glob.glob(pattern) if os.path.abspath(p) != os.path.abspath(self.baseFilename)]
+                rotated = [
+                    p
+                    for p in glob.glob(pattern)
+                    if os.path.abspath(p) != os.path.abspath(self.baseFilename)
+                ]
                 # Sort newest first by modification time
                 rotated.sort(key=os.path.getmtime, reverse=True)
                 # Remove files older than the requested backupCount
-                for old in rotated[self.backupCount:]:
+                for old in rotated[self.backupCount :]:
                     try:
                         os.remove(old)
                     except Exception:
