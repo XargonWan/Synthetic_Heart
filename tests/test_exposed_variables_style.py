@@ -33,7 +33,9 @@ def test_exposed_variable_label_and_description_style():
             if not desc[0].isupper():
                 desc_issues.append((key, f"description_not_capitalized: {desc}"))
             if not desc.endswith("."):
-                desc_issues.append((key, f"description_missing_terminal_period: {desc}"))
+                desc_issues.append(
+                    (key, f"description_missing_terminal_period: {desc}")
+                )
             if "  " in desc:
                 desc_issues.append((key, "description_contains_double_space"))
 

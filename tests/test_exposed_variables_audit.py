@@ -33,7 +33,9 @@ def test_exposed_variables_have_label_description_and_component():
         # Suggest component based on prefix
         for pfx, expected in prefix_map.items():
             if key.startswith(pfx) and comp != expected:
-                problems.append((key, f"unexpected_component (expected {expected}, got {comp})"))
+                problems.append(
+                    (key, f"unexpected_component (expected {expected}, got {comp})")
+                )
 
     if problems:
         summary_lines = [f"{k}: {reason}" for k, reason in problems]
