@@ -1138,6 +1138,38 @@ function pickAccentContrastFromHex(hex) {
                             const presetsEl = document.createElement('div');
                             presetsEl.style.display = 'flex';
                             presetsEl.style.gap = '0.4rem';
+
+                            // Local persist helper (color-picker scoped) so handlers don't rely on per-input saveValue
+                            const persist = async (val) => {
+                                try {
+                                    // disable controls while saving
+                                    colorInput.disabled = true;
+                                    Array.from(presetsEl.querySelectorAll('button')).forEach(b => b.disabled = true);
+                                    reset.disabled = true;
+                                    const payload = { key: item.key, value: val };
+                                    const res = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                                    if (!res.ok) {
+                                        const txt = await res.text();
+                                        try { window.showToast('Save failed: ' + txt, true); } catch (e) {}
+                                    } else {
+                                        try {
+                                            const out = await res.json();
+                                            try { window.showToast('Saved', false); } catch (e) {}
+                                            if (out && out.requires_reload) {
+                                                window.showToast(out.message || 'Component reload recommended', false);
+                                            }
+                                            try { await refreshConfig(); } catch (e) { /* ignore */ }
+                                        } catch (e) {
+                                            try { window.showToast('Saved', false); } catch (e) {}
+                                        }
+                                    }
+                                } catch (e) {
+                                    try { window.showToast('Save failed', true); } catch (e) {}
+                                } finally {
+                                    try { colorInput.disabled = !isEditable; Array.from(presetsEl.querySelectorAll('button')).forEach(b => b.disabled = !isEditable); reset.disabled = !isEditable; } catch (e) {}
+                                }
+                            };
+
                             presets.forEach((c) => {
                                 const b = document.createElement('button');
                                 b.type = 'button';
@@ -1148,7 +1180,7 @@ function pickAccentContrastFromHex(hex) {
                                 b.style.border = '1px solid rgba(255,255,255,0.06)';
                                 b.style.background = c;
                                 if (String(value).toLowerCase() === String(c).toLowerCase()) b.style.boxShadow = '0 0 0 3px rgba(0,0,0,0.12) inset';
-                                b.addEventListener('click', async () => { await saveValue(item.key, c); try { document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); } catch(e){} });
+                                b.addEventListener('click', async () => { await persist(c); try { document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); } catch(e){} });
                                 presetsEl.appendChild(b);
                             });
 
@@ -1156,13 +1188,13 @@ function pickAccentContrastFromHex(hex) {
                             colorInput.type = 'color';
                             colorInput.value = typeof value === 'string' && value ? value : (item.default || '#6bfefe');
                             colorInput.disabled = !isEditable;
-                            colorInput.addEventListener('input', async (ev) => { await saveValue(item.key, ev.target.value); try { const c = ev.target.value; document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); } catch(e){} });
+                            colorInput.addEventListener('input', async (ev) => { await persist(ev.target.value); try { const c = ev.target.value; document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); } catch(e){} });
 
                             const reset = document.createElement('button');
                             reset.type = 'button';
                             reset.textContent = 'Reset';
                             reset.disabled = !isEditable;
-                            reset.addEventListener('click', async () => { const def = item.default || '#6bfefe'; await saveValue(item.key, def); colorInput.value = def; try { document.documentElement.style.setProperty('--accent', def); const [r,g,b2] = _hexToRgb(def); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(def)); } catch(e){} });
+                            reset.addEventListener('click', async () => { const def = item.default || '#6bfefe'; await persist(def); colorInput.value = def; try { document.documentElement.style.setProperty('--accent', def); const [r,g,b2] = _hexToRgb(def); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(def)); } catch(e){} });
 
                             swatchWrap.appendChild(presetsEl);
                             swatchWrap.appendChild(colorInput);
