@@ -156,10 +156,13 @@ try {
       const accent = window.__SYNTH_CONFIG.WEBUI_ACCENT_COLOR;
       if (accent) {
         document.documentElement.style.setProperty('--accent', accent);
-        // set a soft variant at ~16% alpha
+        // set a soft variant at ~16% alpha and compute readable contrast color
         const hexToRgb = (h) => { const c = h.replace('#',''); const bigint = parseInt(c.length===3?c.split('').map(x=>x+x).join(''):c,16); return [(bigint>>16)&255, (bigint>>8)&255, bigint&255]; };
         const [r,g,b] = hexToRgb(accent);
         document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b}, 0.16)`);
+        const brightness = (r * 299 + g * 587 + b * 114) / 1000;
+        const contrastColor = brightness > 150 ? '#07070c' : '#ffffff';
+        document.documentElement.style.setProperty('--accent-contrast', contrastColor);
       }
     } catch (e) { /* ignore */ }
   }
@@ -1131,7 +1134,7 @@ try {
                                 b.style.border = '1px solid rgba(255,255,255,0.06)';
                                 b.style.background = c;
                                 if (String(value).toLowerCase() === String(c).toLowerCase()) b.style.boxShadow = '0 0 0 3px rgba(0,0,0,0.12) inset';
-                                b.addEventListener('click', async () => { await saveValue(item.key, c); try { document.documentElement.style.setProperty('--accent', c); const rgb = c.replace('#',''); const bigint = parseInt(rgb.length===3?rgb.split('').map(x=>x+x).join(''):rgb,16); const r=(bigint>>16)&255,g=(bigint>>8)&255,b2=bigint&255; document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); } catch(e){} });
+                                b.addEventListener('click', async () => { await saveValue(item.key, c); try { document.documentElement.style.setProperty('--accent', c); const rgb = c.replace('#',''); const bigint = parseInt(rgb.length===3?rgb.split('').map(x=>x+x).join(''):rgb,16); const r=(bigint>>16)&255, g=(bigint>>8)&255, b2=bigint&255; document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); const brightness = (r * 299 + g * 587 + b2 * 114) / 1000; const contrastColor = brightness > 150 ? '#07070c' : '#ffffff'; document.documentElement.style.setProperty('--accent-contrast', contrastColor); } catch(e){} });
                                 presetsEl.appendChild(b);
                             });
 
@@ -1139,13 +1142,13 @@ try {
                             colorInput.type = 'color';
                             colorInput.value = typeof value === 'string' && value ? value : (item.default || '#6bfefe');
                             colorInput.disabled = !isEditable;
-                            colorInput.addEventListener('input', async (ev) => { await saveValue(item.key, ev.target.value); try { document.documentElement.style.setProperty('--accent', ev.target.value); const c = ev.target.value.replace('#',''); const bigint = parseInt(c.length===3?c.split('').map(x=>x+x).join(''):c,16); const r=(bigint>>16)&255,g=(bigint>>8)&255,b2=bigint&255; document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); } catch(e){} });
+                            colorInput.addEventListener('input', async (ev) => { await saveValue(item.key, ev.target.value); try { document.documentElement.style.setProperty('--accent', ev.target.value); const c = ev.target.value.replace('#',''); const bigint = parseInt(c.length===3?c.split('').map(x=>x+x).join(''):c,16); const r=(bigint>>16)&255, g=(bigint>>8)&255, b2=bigint&255; document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); const brightness = (r * 299 + g * 587 + b2 * 114) / 1000; const contrastColor = brightness > 150 ? '#07070c' : '#ffffff'; document.documentElement.style.setProperty('--accent-contrast', contrastColor); } catch(e){} });
 
                             const reset = document.createElement('button');
                             reset.type = 'button';
                             reset.textContent = 'Reset';
                             reset.disabled = !isEditable;
-                            reset.addEventListener('click', async () => { const def = item.default || '#6bfefe'; await saveValue(item.key, def); colorInput.value = def; try { document.documentElement.style.setProperty('--accent', def); const c = def.replace('#',''); const bigint = parseInt(c.length===3?c.split('').map(x=>x+x).join(''):c,16); const r=(bigint>>16)&255,g=(bigint>>8)&255,b2=bigint&255; document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); } catch(e){} });
+                            reset.addEventListener('click', async () => { const def = item.default || '#6bfefe'; await saveValue(item.key, def); colorInput.value = def; try { document.documentElement.style.setProperty('--accent', def); const c = def.replace('#',''); const bigint = parseInt(c.length===3?c.split('').map(x=>x+x).join(''):c,16); const r=(bigint>>16)&255, g=(bigint>>8)&255, b2=bigint&255; document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); const brightness = (r * 299 + g * 587 + b2 * 114) / 1000; const contrastColor = brightness > 150 ? '#07070c' : '#ffffff'; document.documentElement.style.setProperty('--accent-contrast', contrastColor); } catch(e){} });
 
                             swatchWrap.appendChild(presetsEl);
                             swatchWrap.appendChild(colorInput);

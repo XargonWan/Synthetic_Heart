@@ -112,12 +112,39 @@ test('accent color picker in settings updates --accent CSS variable', async ({ p
       const colorInput = await row.$('input[type=color]');
       expect(colorInput).not.toBeNull();
 
-      // change to a new color and verify CSS var updated
+          // change to a new color and verify CSS vars + UI updated immediately
       await colorInput.fill('#00ff88');
       await colorInput.evaluate((el) => el.dispatchEvent(new Event('input', { bubbles: true })));
       await page.waitForTimeout(300);
       const accent = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--accent').trim());
       expect(accent.toLowerCase()).toBe('#00ff88');
+
+      // contrast variable must be set (for #00ff88 we expect dark text)
+      const contrast = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--accent-contrast').trim());
+      expect(contrast.toLowerCase()).toBe('#07070c');
+
+      // active nav button should use accent as background
+      const navBg = await page.evaluate(() => getComputedStyle(document.querySelector('.nav-btn.active')).backgroundColor);
+      expect(navBg).toContain('0, 255, 136');
+
+      // toggles should reflect accent immediately (find nearest toggle slider for notify-toggle)
+      const toggleBg = await page.evaluate(() => {
+        const chk = document.querySelector('#notify-toggle');
+        if (!chk) return null;
+        const slider = chk.nextElementSibling || chk.parentElement && chk.parentElement.querySelector('.toggle-slider');
+        return slider ? getComputedStyle(slider).backgroundImage || getComputedStyle(slider).backgroundColor : null;
+      });
+      expect(toggleBg).not.toBeNull();
+      expect(toggleBg).toContain('0, 255, 136');
+
+      // create the chat WinBox and verify its header uses the accent + contrast text
+      await page.evaluate(() => window.SynthWindowManager.ensureChatWindow());
+      await page.waitForSelector('.winbox.synth-winbox .wb-title', { timeout: 2000 });
+      const winHeaderBg = await page.evaluate(() => getComputedStyle(document.querySelector('.winbox.synth-winbox .wb-title')).backgroundImage || getComputedStyle(document.querySelector('.winbox.synth-winbox .wb-title')).background);
+      const winHeaderColor = await page.evaluate(() => getComputedStyle(document.querySelector('.winbox.synth-winbox .wb-title')).color);
+      expect(winHeaderBg).toContain('0, 255, 136');
+      expect(winHeaderColor).toContain('7, 7, 12');
+
       break;
     }
   }
