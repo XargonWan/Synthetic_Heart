@@ -13,6 +13,8 @@ Supports multimodal inputs:
 - Documents: PDF, TXT, HTML, CSS, JS, Python, Markdown, JSON, XML, CSV
 """
 
+from __future__ import annotations
+
 from core.ai_plugin_base import AIPluginBase
 from core.config_manager import config_registry
 from core.logging_utils import log_debug, log_info, log_warning, log_error
@@ -22,6 +24,10 @@ import requests
 import base64
 import mimetypes
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from core.live_session_manager import LiveSessionManager
 import tempfile
 import subprocess
 import os
@@ -462,6 +468,69 @@ class GeminiAPIPlugin(AIPluginBase):
             log_error(f"[gemini_api] Error in handle_live_processing (standard): {e}")
             return None
 
+    # ------------------------------------------------------------------
+    # Gemini Live API (WebSocket) — Discord voice integration
+    # ------------------------------------------------------------------
+
+    def get_live_session_manager(self) -> "LiveSessionManager | None":
+        """Return the LiveSessionManager instance, creating it lazily.
+
+        Returns None if the google-genai SDK is unavailable or no API key is set.
+        """
+        if not _HAS_GENAI_SDK or not GEMINI_API_KEY:
+            return None
+
+        if not hasattr(self, "_live_session_manager"):
+            from core.live_session_manager import LiveSessionManager
+
+            self._live_session_manager = LiveSessionManager(
+                api_key=str(GEMINI_API_KEY).strip()
+            )
+            log_info("[gemini_api] LiveSessionManager created")
+
+        return self._live_session_manager
+
+    async def start_live_voice_session(
+        self,
+        guild_id: int,
+        channel_id: int,
+        system_instruction: str | None = None,
+    ) -> bool:
+        """Start a Live API session for Discord voice.
+
+        If no system_instruction is provided, one is built automatically
+        from the current persona via prompt_engine.
+
+        Args:
+            guild_id: Discord guild ID.
+            channel_id: Discord voice channel ID.
+            system_instruction: Optional pre-built system instruction text.
+
+        Returns:
+            True if the session was started successfully.
+        """
+        manager = self.get_live_session_manager()
+        if not manager:
+            log_error("[gemini_api] Cannot start live session — SDK or API key missing")
+            return False
+
+        if not system_instruction:
+            from core.prompt_engine import build_live_system_instruction
+
+            system_instruction = await build_live_system_instruction()
+
+        return await manager.start_session(
+            guild_id=guild_id,
+            channel_id=channel_id,
+            system_instruction=system_instruction,
+        )
+
+    async def stop_live_voice_session(self, guild_id: int) -> None:
+        """Stop the Live API session for a guild."""
+        manager = self.get_live_session_manager()
+        if manager:
+            await manager.stop_session(guild_id)
+
     async def _extract_frames(self, video_path: str) -> list[bytes]:
         """Extract frames from video at ~1fps as JPEGs."""
         frames = []
@@ -705,7 +774,7 @@ class GeminiAPIPlugin(AIPluginBase):
 
             # --- Multimodal Support: Extract parts and redact text prompt ---
             # Extract heavy multimodal parts (images, audio) to be sent as native Gemini parts
-            multimodal_parts = self._extract_multimodal_parts(prompt)
+            multimodal_parts = await self._extract_multimodal_parts(prompt)
 
             # ALWAYS redact heavy base64 data from the text prompt, even if no parts were extracted.
             # This prevents unsupported mime-types or raw chunks from leaking into the text prompt
@@ -1162,7 +1231,7 @@ class GeminiAPIPlugin(AIPluginBase):
             or mime_type in self.SUPPORTED_DOCUMENT_TYPES
         )
 
-    def _extract_multimodal_parts(self, prompt: dict | str) -> list[dict]:
+    async def _extract_multimodal_parts(self, prompt: dict | str) -> list[dict]:
         """Extract multimodal parts from the prompt context recursively.
 
         Recursively searches for attachments in the prompt dict under keys like:
@@ -1174,9 +1243,15 @@ class GeminiAPIPlugin(AIPluginBase):
 
         These can appear at any nesting level in the prompt structure.
 
-        Returns a list of Gemini API inline_data parts.
+        Video attachments are decomposed into temporally-interleaved frames +
+        audio chunks so the model perceives visual and audio content in parallel
+        with explicit timestamp markers.
+
+        Returns a list of Gemini API inline_data / text parts.
         """
-        parts = []
+        from core.multimodal_attachment import decompose_video_to_frames_and_audio
+
+        parts: list[dict] = []
 
         if isinstance(prompt, str):
             try:
@@ -1191,9 +1266,9 @@ class GeminiAPIPlugin(AIPluginBase):
         MULTIMODAL_KEYS = {"attachments", "images", "audio", "documents", "videos"}
 
         # Collect all attachments from all locations
-        attachments = []
+        attachments: list[dict] = []
 
-        def collect_attachments_recursive(container) -> None:
+        def collect_attachments_recursive(container: dict | list | str) -> None:
             """Recursively collect multimodal attachments from any level."""
             if isinstance(container, dict):
                 # Check for multimodal list keys at this level
@@ -1231,6 +1306,12 @@ class GeminiAPIPlugin(AIPluginBase):
         # Start recursive collection from root
         collect_attachments_recursive(prompt)
 
+        # Flag: set to True when at least one video was successfully decomposed.
+        # When set, companion audio files (named *_audio.ogg by
+        # _extract_audio_from_video) are skipped because their content is
+        # already interleaved in the decomposed frame+audio parts.
+        any_video_decomposed: bool = False
+
         # Process each collected attachment
         for attachment in attachments:
             if not isinstance(attachment, dict):
@@ -1239,6 +1320,7 @@ class GeminiAPIPlugin(AIPluginBase):
             # Get or determine MIME type
             mime_type = attachment.get("mime_type") or attachment.get("mimeType")
             file_path = attachment.get("path") or attachment.get("file_path")
+            filename = attachment.get("filename", "")
 
             if file_path and not mime_type:
                 mime_type = self._get_mime_type(file_path)
@@ -1263,7 +1345,93 @@ class GeminiAPIPlugin(AIPluginBase):
                 log_warning(f"[gemini_api] No data for attachment: {attachment}")
                 continue
 
-            # Create inline_data part for Gemini API
+            # --- Skip companion audio for already-decomposed videos -------------
+            # Companion audio files are created by _extract_audio_from_video and
+            # always named "<something>_audio.ogg".  The video filename may use
+            # the original file name (e.g. IMG_4830.MP4) while the companion
+            # audio uses the Telegram file_unique_id, so stem matching is
+            # unreliable.  Instead, skip any *_audio.ogg when a video in this
+            # request was successfully decomposed.
+            if (
+                any_video_decomposed
+                and mime_type in self.SUPPORTED_AUDIO_TYPES
+                and filename
+            ):
+                stem = Path(filename).stem
+                if stem.endswith("_audio"):
+                    log_debug(
+                        f"[gemini_api] Skipping companion audio {filename} "
+                        f"(already interleaved in decomposed video)"
+                    )
+                    continue
+
+            # --- Video decomposition: interleave frames + audio -----------------
+            if mime_type in self.SUPPORTED_VIDEO_TYPES:
+                video_bytes = base64.b64decode(base64_data)
+                source_label = filename or "video"
+                decomposed = await decompose_video_to_frames_and_audio(
+                    video_bytes, source_label
+                )
+                if decomposed:
+                    any_video_decomposed = True
+
+                    total_frames = sum(len(s["frames_b64"]) for s in decomposed)
+                    total_duration = float(len(decomposed))
+                    for sec in decomposed:
+                        ts = sec["ts"]
+                        end_ts = ts + 1.0
+                        has_audio = sec["audio_b64"] is not None
+                        if has_audio:
+                            marker = (
+                                f"[Video frame at T={ts:.1f}s, "
+                                f"audio spans {ts:.1f}\u2013{end_ts:.1f}s]"
+                            )
+                        else:
+                            marker = f"[Video frame at T={ts:.1f}s, no audio]"
+                        parts.append({"text": marker})
+
+                        for frame_b64 in sec["frames_b64"]:
+                            parts.append(
+                                {
+                                    "inline_data": {
+                                        "mime_type": "image/jpeg",
+                                        "data": frame_b64,
+                                    }
+                                }
+                            )
+
+                        if has_audio:
+                            parts.append(
+                                {
+                                    "inline_data": {
+                                        "mime_type": "audio/wav",
+                                        "data": sec["audio_b64"],
+                                    }
+                                }
+                            )
+
+                    parts.append(
+                        {
+                            "text": (
+                                f"[End of video \u2014 {total_frames} frames, "
+                                f"{total_duration:.1f}s total duration]"
+                            )
+                        }
+                    )
+                    log_debug(
+                        f"[gemini_api] Interleaved video {source_label}: "
+                        f"{total_frames} frames + {sum(1 for s in decomposed if s['audio_b64'])} "
+                        f"audio chunks over {total_duration:.1f}s"
+                    )
+                    continue  # Skip the default blob path
+                else:
+                    log_debug(
+                        f"[gemini_api] Video decomposition failed for "
+                        f"{source_label}, falling back to blob"
+                    )
+                    # Fall through to default inline_data handling below
+
+            # --- Default: create inline_data part for Gemini API ----------------
             parts.append(
                 {
                     "inline_data": {

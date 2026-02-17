@@ -1,4 +1,7 @@
 import os
+import asyncio
+import audioop
+import io
 from collections import deque
 from types import SimpleNamespace
 from typing import List, Any
@@ -9,6 +12,15 @@ try:  # pragma: no cover - import may fail if dependency missing
 except Exception:  # pragma: no cover - graceful fallback for tests without install
     discord = None
     FFmpegPCMAudio = None
+
+# Optional: voice receive extension for listening to users in voice channels
+try:
+    from discord.ext import voice_recv  # type: ignore
+
+    _HAS_VOICE_RECV = True
+except ImportError:
+    voice_recv = None  # type: ignore[assignment]
+    _HAS_VOICE_RECV = False
 
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.chat_attention import set_attention, evaluate_triggers
@@ -188,6 +200,8 @@ class DiscordInterface:
             "join_voice_discord",
             "leave_voice_discord",
             "audio_discord_bot",
+            "start_live_voice_discord",
+            "stop_live_voice_discord",
         ]
 
     @staticmethod
@@ -214,6 +228,16 @@ class DiscordInterface:
                 "description": "Send audio to Discord. Streams if in voice, otherwise sends as file.",
                 "required_fields": ["audio"],
                 "optional_fields": ["interface_path", "channel_id", "caption"],
+            },
+            "start_live_voice_discord": {
+                "description": "Start a Gemini Live API voice session in the current voice channel. Enables real-time bidirectional voice conversation.",
+                "required_fields": ["channel_id"],
+                "optional_fields": ["interface_path"],
+            },
+            "stop_live_voice_discord": {
+                "description": "Stop the active Gemini Live API voice session.",
+                "required_fields": ["guild_id"],
+                "optional_fields": ["interface_path"],
             },
         }
 
@@ -298,6 +322,28 @@ class DiscordInterface:
                         "example": "Listen to this!",
                         "description": "Optional caption (for file messages only).",
                         "optional": True,
+                    },
+                },
+            }
+        if action_name == "start_live_voice_discord":
+            return {
+                "description": "Start a real-time Gemini Live voice session in a voice channel. Enables bidirectional voice conversation with the persona.",
+                "payload": {
+                    "channel_id": {
+                        "type": "string",
+                        "example": "123456789",
+                        "description": "The ID of the voice channel to start the live session in.",
+                    },
+                },
+            }
+        if action_name == "stop_live_voice_discord":
+            return {
+                "description": "Stop the active Gemini Live voice session in a guild.",
+                "payload": {
+                    "guild_id": {
+                        "type": "string",
+                        "example": "1234567890",
+                        "description": "The ID of the guild to stop the live session in.",
                     },
                 },
             }
@@ -554,6 +600,44 @@ class DiscordInterface:
             )
             return {"status": "success", "message": "Sent as file"}
 
+        elif action_type == "start_live_voice_discord":
+            channel_id = payload.get("channel_id")
+            interface_path = payload.get("interface_path")
+
+            if not channel_id and interface_path:
+                try:
+                    from core.interface_path_utils import parse_interface_path
+
+                    _, levels = parse_interface_path(interface_path)
+                    if len(levels) >= 2:
+                        channel_id = levels[1]
+                except Exception:
+                    pass
+
+            if not channel_id:
+                return {"status": "failed", "message": "Missing channel_id"}
+
+            return await self._start_live_voice(channel_id)
+
+        elif action_type == "stop_live_voice_discord":
+            guild_id = payload.get("guild_id")
+            interface_path = payload.get("interface_path")
+
+            if not guild_id and interface_path:
+                try:
+                    from core.interface_path_utils import parse_interface_path
+
+                    _, levels = parse_interface_path(interface_path)
+                    if len(levels) >= 1:
+                        guild_id = levels[0]
+                except Exception:
+                    pass
+
+            if not guild_id:
+                return {"status": "failed", "message": "Missing guild_id"}
+
+            return await self._stop_live_voice(int(guild_id))
+
         return {"status": "failed", "message": f"Unknown action {action_type}"}
 
     async def _stream_audio(self, voice_client, audio_path):
@@ -624,6 +708,164 @@ class DiscordInterface:
                 return {"status": "success", "message": "Not in a voice channel"}
         except Exception as e:
             log_error(f"[discord_interface] Failed to leave voice: {e}")
+            return {"status": "failed", "message": str(e)}
+
+    # ------------------------------------------------------------------
+    # Gemini Live API voice session management
+    # ------------------------------------------------------------------
+
+    async def _start_live_voice(self, channel_id: str | int) -> dict[str, str]:
+        """Start a Gemini Live API voice session in a Discord voice channel.
+
+        Joins the voice channel (using VoiceRecvClient if available for
+        audio reception), starts a Live API WebSocket session with the
+        current persona, and begins bidirectional audio streaming.
+        """
+        if not self.client:
+            return {"status": "failed", "message": "Discord client not initialized"}
+
+        if not _HAS_VOICE_RECV:
+            return {
+                "status": "failed",
+                "message": "discord-ext-voice-recv not installed. Install with: uv add discord-ext-voice-recv",
+            }
+
+        try:
+            channel = self.client.get_channel(int(channel_id))
+            if not channel:
+                channel = await self.client.fetch_channel(int(channel_id))
+            if not channel:
+                return {"status": "failed", "message": "Channel not found"}
+
+            guild = channel.guild
+            guild_id = guild.id
+
+            # Get or create the Live session manager from the Gemini engine
+            from core.plugin_instance import plugin as active_engine
+
+            if not active_engine or not hasattr(
+                active_engine, "get_live_session_manager"
+            ):
+                return {
+                    "status": "failed",
+                    "message": "Active LLM engine does not support Live API",
+                }
+
+            manager = active_engine.get_live_session_manager()
+            if not manager:
+                return {
+                    "status": "failed",
+                    "message": "Live session manager unavailable (check API key / SDK)",
+                }
+
+            # Connect to voice channel with VoiceRecvClient for audio reception
+            vc = guild.voice_client
+            if vc:
+                if vc.channel.id != channel.id:
+                    await vc.move_to(channel)
+                # If already connected but not a VoiceRecvClient, reconnect
+                if not isinstance(vc, voice_recv.VoiceRecvClient):
+                    await vc.disconnect()
+                    vc = await channel.connect(cls=voice_recv.VoiceRecvClient)
+            else:
+                vc = await channel.connect(cls=voice_recv.VoiceRecvClient)
+
+            # Build persona system instruction
+            from core.prompt_engine import build_live_system_instruction
+
+            system_instruction = await build_live_system_instruction()
+
+            # Set up audio output callback: Live API → Discord voice
+            audio_buffer = LiveAudioBuffer()
+
+            async def on_audio_from_model(gid: int, pcm_data: bytes) -> None:
+                """Receive 24kHz mono PCM from Gemini, buffer for Discord playback."""
+                audio_buffer.write(pcm_data)
+
+            async def on_text_from_model(gid: int, text: str) -> None:
+                """Log text responses from the live model (for debugging/diary)."""
+                log_info(f"[live_voice] Model text for guild {gid}: {text[:200]}")
+
+            manager.set_audio_callback(on_audio_from_model)
+            manager.set_text_callback(on_text_from_model)
+
+            # Start the Live API session
+            started = await manager.start_session(
+                guild_id=guild_id,
+                channel_id=channel.id,
+                system_instruction=system_instruction,
+            )
+            if not started:
+                return {
+                    "status": "failed",
+                    "message": "Failed to start Live API session",
+                }
+
+            # Start playing audio from the Live API model to Discord
+            source = LivePCMAudioSource(audio_buffer)
+            if vc.is_playing():
+                vc.stop()
+            vc.play(source)
+
+            # Start listening to Discord voice → forward to Live API
+            sink = LiveVoiceAudioSink(manager, guild_id)
+            vc.listen(sink)
+
+            # Store state for cleanup
+            if not hasattr(self, "_live_voice_state"):
+                self._live_voice_state: dict[int, dict] = {}
+            self._live_voice_state[guild_id] = {
+                "channel_id": channel.id,
+                "audio_buffer": audio_buffer,
+                "sink": sink,
+                "source": source,
+            }
+
+            log_info(
+                f"[discord_interface] Live voice session started in "
+                f"guild {guild_id} channel {channel.name}"
+            )
+            return {
+                "status": "success",
+                "message": f"Live voice session started in {channel.name}",
+            }
+
+        except Exception as e:
+            log_error(f"[discord_interface] Failed to start live voice: {e}")
+            return {"status": "failed", "message": str(e)}
+
+    async def _stop_live_voice(self, guild_id: int) -> dict[str, str]:
+        """Stop the Gemini Live API voice session for a guild."""
+        try:
+            # Stop the Live API session
+            from core.plugin_instance import plugin as active_engine
+
+            if active_engine and hasattr(active_engine, "stop_live_voice_session"):
+                await active_engine.stop_live_voice_session(guild_id)
+
+            # Stop listening and playing
+            if self.client:
+                guild = self.client.get_guild(guild_id)
+                if guild and guild.voice_client:
+                    vc = guild.voice_client
+                    if hasattr(vc, "stop_listening"):
+                        vc.stop_listening()
+                    if vc.is_playing():
+                        vc.stop()
+
+            # Clean up state
+            if hasattr(self, "_live_voice_state"):
+                state = self._live_voice_state.pop(guild_id, None)
+                if state and state.get("audio_buffer"):
+                    state["audio_buffer"].close()
+
+            log_info(
+                f"[discord_interface] Live voice session stopped for guild {guild_id}"
+            )
+            return {"status": "success", "message": "Live voice session stopped"}
+
+        except Exception as e:
+            log_error(f"[discord_interface] Failed to stop live voice: {e}")
             return {"status": "failed", "message": str(e)}
 
     async def _discord_send(
@@ -1162,6 +1404,147 @@ class DiscordInterface:
             log_warning(
                 f"[discord_interface] Failed to register custom validation: {e}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Gemini Live API audio processing classes
+# ---------------------------------------------------------------------------
+
+# Discord voice uses 48kHz stereo 16-bit PCM (960 samples/frame = 20ms).
+# Gemini Live API expects 16kHz mono 16-bit PCM input and outputs 24kHz mono.
+_DISCORD_RATE = 48000
+_DISCORD_CHANNELS = 2
+_DISCORD_SAMPLE_WIDTH = 2  # 16-bit
+_GEMINI_INPUT_RATE = 16000
+_GEMINI_OUTPUT_RATE = 24000
+_DISCORD_FRAME_SIZE = 3840  # 20ms at 48kHz stereo 16-bit = 960*2*2
+
+
+class LiveAudioBuffer:
+    """Thread-safe circular buffer for PCM audio from Gemini → Discord.
+
+    Receives 24kHz mono PCM from the Live API, resamples to 48kHz stereo
+    for Discord voice playback.
+    """
+
+    def __init__(self) -> None:
+        self._buffer = io.BytesIO()
+        self._lock = asyncio.Lock()
+        self._closed = False
+
+    def write(self, pcm_24k_mono: bytes) -> None:
+        """Write 24kHz mono PCM data, converting to 48kHz stereo."""
+        if self._closed or not pcm_24k_mono:
+            return
+        try:
+            # 24kHz → 48kHz (ratio 2:1)
+            upsampled = audioop.ratecv(
+                pcm_24k_mono,
+                _DISCORD_SAMPLE_WIDTH,
+                1,
+                _GEMINI_OUTPUT_RATE,
+                _DISCORD_RATE,
+                None,
+            )[0]
+            # Mono → Stereo (duplicate channel)
+            stereo = audioop.tostereo(upsampled, _DISCORD_SAMPLE_WIDTH, 1, 1)
+            self._buffer.write(stereo)
+        except Exception:
+            pass
+
+    def read(self, nbytes: int) -> bytes:
+        """Read up to nbytes of 48kHz stereo PCM for Discord playback."""
+        data = self._buffer.getvalue()
+        if len(data) < nbytes:
+            # Not enough data yet — return silence
+            return b"\x00" * nbytes
+        # Consume the requested amount
+        result = data[:nbytes]
+        remaining = data[nbytes:]
+        self._buffer = io.BytesIO(remaining)
+        return result
+
+    def close(self) -> None:
+        self._closed = True
+
+
+class LivePCMAudioSource(discord.AudioSource if discord else object):  # type: ignore[misc]
+    """Discord AudioSource that reads from a LiveAudioBuffer.
+
+    Provides 20ms frames of 48kHz stereo 16-bit PCM to discord.py's
+    voice client for playback.
+    """
+
+    def __init__(self, buffer: LiveAudioBuffer) -> None:
+        self._buffer = buffer
+
+    def read(self) -> bytes:
+        """Return 20ms of audio (3840 bytes at 48kHz stereo 16-bit)."""
+        return self._buffer.read(_DISCORD_FRAME_SIZE)
+
+    def is_opus(self) -> bool:
+        return False
+
+    def cleanup(self) -> None:
+        pass
+
+
+if _HAS_VOICE_RECV and voice_recv is not None:
+
+    class LiveVoiceAudioSink(voice_recv.AudioSink):  # type: ignore[misc]
+        """AudioSink that forwards received Discord voice audio to Gemini Live API.
+
+        Receives 48kHz stereo 16-bit PCM from Discord, converts to 16kHz mono,
+        and sends to the Live API session.
+        """
+
+        def __init__(self, manager: Any, guild_id: int) -> None:
+            super().__init__()
+            self._manager = manager
+            self._guild_id = guild_id
+
+        def wants_opus(self) -> bool:
+            return False  # We want decoded PCM
+
+        def write(self, user: Any, data: voice_recv.VoiceData) -> None:  # type: ignore[name-defined]
+            """Process incoming audio from a Discord user.
+
+            Args:
+                user: The Discord user who spoke.
+                data: VoiceData containing PCM audio bytes.
+            """
+            pcm_48k_stereo = data.pcm
+            if not pcm_48k_stereo:
+                return
+
+            try:
+                # Stereo → Mono (mix down)
+                mono = audioop.tomono(pcm_48k_stereo, _DISCORD_SAMPLE_WIDTH, 0.5, 0.5)
+                # 48kHz → 16kHz (ratio 3:1)
+                downsampled = audioop.ratecv(
+                    mono,
+                    _DISCORD_SAMPLE_WIDTH,
+                    1,
+                    _DISCORD_RATE,
+                    _GEMINI_INPUT_RATE,
+                    None,
+                )[0]
+                # Send to Live API (fire-and-forget via the event loop)
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(
+                        self._manager.send_audio(self._guild_id, downsampled)
+                    )
+            except Exception:
+                pass
+
+        def cleanup(self) -> None:
+            pass
+
+
+else:
+    # Stub when voice_recv is not installed
+    LiveVoiceAudioSink = None  # type: ignore[assignment, misc]
 
 
 # Expose class for dynamic loading

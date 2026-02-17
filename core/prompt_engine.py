@@ -1196,3 +1196,49 @@ def reduce_json_text_for_transmission(json_text: str, max_chars: int) -> str:
     except Exception as e:
         log_error(f"[transmission_reduce] Failed to reduce JSON: {e}")
         return json_text
+
+
+# ---------------------------------------------------------------------------
+# Live API persona builder
+# ---------------------------------------------------------------------------
+
+
+async def build_live_system_instruction(
+    message: object = None,
+    context_memory: object = None,
+) -> str:
+    """Build a condensed system instruction for Gemini Live API sessions.
+
+    The Live API has a smaller context window (128k tokens) and system
+    instructions are set once at session start.  This produces a compact
+    persona string without the full JSON-action scaffolding.
+
+    Returns:
+        A plain-text system instruction containing the persona identity,
+        emotional state, and conversational guidelines.
+    """
+    # Gather the persona injection (same path as build_json_prompt)
+    static_persona = ""
+    try:
+        from core.action_parser import gather_static_injections
+
+        injections = await gather_static_injections(message, context_memory)
+        if isinstance(injections, dict) and "persona" in injections:
+            static_persona = injections.pop("persona", "")
+    except Exception as e:
+        log_warning(f"[live_prompt] Failed to gather persona for Live API: {e}")
+
+    parts: list[str] = []
+
+    if static_persona:
+        parts.append(static_persona)
+
+    # Conversational guidelines (no JSON scaffolding for voice)
+    parts.append(
+        "You are in a live voice conversation. Speak naturally and conversationally. "
+        "Keep responses concise — a few sentences at most unless asked for detail. "
+        "You can express emotions through tone and word choice. "
+        "Do not output JSON, markdown, or structured data — just speak naturally."
+    )
+
+    return "\n\n".join(parts)
