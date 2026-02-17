@@ -342,6 +342,19 @@ export function initChatUI() {
                 ws.onmessage = (event) => {
                     try {
                         const data = JSON.parse(event.data);
+
+                        // Server-provided persistent session id (set early so restoreChatState can use it)
+                        if (data && data.type === 'session' && data.session_id) {
+                            try {
+                                window.sessionId = data.session_id;
+                                if (typeof sessionId !== 'undefined') sessionId = data.session_id;
+                                console.debug('[chat-window] session id set from WS:', data.session_id);
+                                // Attempt immediate restore now that sessionId is known
+                                try { if (typeof restoreChatState === 'function') restoreChatState(); } catch (e) { /* ignore */ }
+                            } catch (e) { /* ignore */ }
+                            return;
+                        }
+
                         if (data && data.type === 'message') {
                             const ts = data.ts || data.timestamp || Date.now();
                             appendMessage(messages, data.sender === 'synth' ? 'synth' : 'user', data.text || '', ts);

@@ -2791,7 +2791,18 @@ class SynthWebUIInterface:
             self._set_active_vrm(synth_vrm.name)
             return synth_vrm.name
 
-        # Otherwise use first available from temp
+        # Prefer Rei model from skins/ only when there are NO user-uploaded VRMs
+        # This prevents overriding a user's uploaded model when no marker is present.
+        rei_vrm = Path(__file__).resolve().parent.parent / "skins" / "Rei" / "model.vrm"
+        if not available_vrms and rei_vrm.exists():
+            log_info(f"{LOG_PREFIX} Using Rei model from skins as default (no user VRMs present)")
+            try:
+                web_path = rei_vrm.relative_to(Path(__file__).resolve().parent.parent)
+                return f"/{web_path.as_posix()}"
+            except ValueError:
+                return f"/skins/Rei/model.vrm"
+
+        # Otherwise use first available from temp (user-uploaded VRMs take precedence)
         for candidate in available_vrms:
             log_info(
                 f"{LOG_PREFIX} Using first available VRM from temp: {candidate.name}"

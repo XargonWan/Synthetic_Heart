@@ -475,20 +475,82 @@ async def get_conn() -> aiomysql.Connection:
                 def __init__(self, real):
                     self._real = real
                     self._cursor = None
+                    self._entered_cm = None
+
+                def _wrap_cursor_obj(self, inner_cur):
+                    """Return a proxy cursor that intercepts execute/executemany and
+                    attempts an idempotent auto-heal (ensure_core_tables/ensure_plugin_tables)
+                    on schema-related errors (1146 / 1054) before retrying once.
+                    """
+                    import inspect as _inspect
+                    import os as _os
+                    from core.logging_utils import log_info as _log_info, log_warning as _log_warning
+
+                    AUTO_HEAL = _os.getenv("DB_AUTO_HEAL", "1") not in ("0", "false", "False")
+
+                    async def _exec_wrapper(method, *a, **kw):
+                        try:
+                            res = method(*a, **kw)
+                            if _inspect.isawaitable(res):
+                                return await res
+                            return res
+                        except Exception as exc:
+                            msg = str(exc) or ""
+                            is_schema_error = (
+                                "1146" in msg
+                                or "doesn't exist" in msg
+                                or "1054" in msg
+                                or "Unknown column" in msg
+                            )
+                            if AUTO_HEAL and is_schema_error:
+                                _log_warning(f"[db] Schema error detected during DB execute: {msg}. Attempting auto-heal.")
+                                try:
+                                    await ensure_core_tables()
+                                    await ensure_plugin_tables()
+                                    _log_info("[db] Auto-heal applied; retrying query once")
+                                except Exception as heal_err:
+                                    _log_warning(f"[db] Auto-heal failed: {heal_err}")
+                                    raise
+                                # retry once
+                                res2 = method(*a, **kw)
+                                if _inspect.isawaitable(res2):
+                                    return await res2
+                                return res2
+                            raise
+
+                    class _ProxyCursor:
+                        def __init__(self, inner):
+                            self._inner = inner
+
+                        def __getattr__(self, name):
+                            # Intercept execute/executemany only; forward everything else
+                            if name in ("execute", "executemany"):
+                                orig = getattr(self._inner, name)
+
+                                async def _wrapped(*args, **kwargs):
+                                    return await _exec_wrapper(orig, *args, **kwargs)
+
+                                return _wrapped
+                            return getattr(self._inner, name)
+
+                        async def close(self):
+                            close_fn = getattr(self._inner, "close", None)
+                            if close_fn:
+                                res = close_fn()
+                                if _inspect.isawaitable(res):
+                                    await res
+
+                    return _ProxyCursor(inner_cur)
 
                 def __await__(self):
                     async def _get():
-                        # Case 1: the underlying call is awaitable and returns a cursor
+                        # Awaitable underlying call (e.g. await conn.cursor())
                         if inspect.isawaitable(self._real):
                             cur = await self._real
-                            self._cursor = cur
-                            return cur
+                            self._cursor = self._wrap_cursor_obj(cur)
+                            return self._cursor
 
-                        # Case 2: the underlying object is an async context manager
-                        # (e.g., contextlib._AsyncGeneratorContextManager). In this
-                        # case we enter it and return a small proxy that forwards
-                        # attribute access to the real cursor but also ensures we
-                        # call __aexit__ when the proxy's async close() is invoked.
+                        # Underlying object is an async context manager
                         if hasattr(self._real, "__aenter__"):
                             cm = self._real
                             enter_res = cm.__aenter__()
@@ -497,80 +559,42 @@ async def get_conn() -> aiomysql.Connection:
                             else:
                                 cur = enter_res
 
-                            self._cursor = cur
+                            self._cursor = self._wrap_cursor_obj(cur)
                             self._entered_cm = cm
+                            return self._cursor
 
-                            class _ProxyCursor:
-                                def __init__(self, inner_cur, cm_obj):
-                                    self._inner = inner_cur
-                                    self._cm = cm_obj
-
-                                def __getattr__(self, name):
-                                    return getattr(self._inner, name)
-
-                                async def close(self):
-                                    # Close inner cursor if possible
-                                    try:
-                                        close_fn = getattr(self._inner, "close", None)
-                                        if close_fn:
-                                            res = close_fn()
-                                            if inspect.isawaitable(res):
-                                                await res
-                                    except Exception:
-                                        pass
-
-                                    # Exit the context manager to release resources
-                                    try:
-                                        exit_fn = getattr(self._cm, "__aexit__", None)
-                                        if exit_fn:
-                                            res = exit_fn(None, None, None)
-                                            if inspect.isawaitable(res):
-                                                await res
-                                    except Exception:
-                                        pass
-
-                                # Provide sync-compatible close for callers that do not await
-                                def close_sync(self):
-                                    try:
-                                        close = getattr(self._inner, "close", None)
-                                        if close:
-                                            close()
-                                    except Exception:
-                                        pass
-                                    try:
-                                        exit_fn = getattr(self._cm, "__aexit__", None)
-                                        if exit_fn:
-                                            # Best-effort: call without awaiting
-                                            exit_fn(None, None, None)
-                                    except Exception:
-                                        pass
-
-                            return _ProxyCursor(cur, cm)
-
-                        # Case 3: plain object (cursor already returned)
+                        # Plain cursor object
                         cur = self._real
-                        self._cursor = cur
-                        return cur
+                        self._cursor = self._wrap_cursor_obj(cur)
+                        return self._cursor
 
                     return _get().__await__()
 
                 async def __aenter__(self):
-                    # Ensure we have the resolved cursor instance
-                    if self._cursor is None:
-                        self._cursor = await self
-
-                    # If the underlying cursor is itself an async context manager,
-                    # prefer to delegate to its __aenter__ for any setup logic.
                     try:
-                        enter_fn = getattr(self._cursor, "__aenter__", None)
-                        if enter_fn:
-                            res = enter_fn()
-                            if inspect.isawaitable(res):
-                                return await res
-                            return res
+                        # If underlying call returned a coroutine that needs awaiting,
+                        # handle that first and wrap the resulting cursor.
+                        if self._cursor is None and inspect.isawaitable(self._real):
+                            cur = await self._real
+                            self._cursor = self._wrap_cursor_obj(cur)
+
+                        # If the underlying cursor is itself an async context manager,
+                        # prefer to delegate to its __aenter__ for any setup logic.
+                        try:
+                            enter_fn = getattr(self._cursor, "__aenter__", None)
+                            if enter_fn:
+                                res = enter_fn()
+                                if inspect.isawaitable(res):
+                                    await res
+                                return self._cursor
+                        except Exception:
+                            pass
+
+                        return self._cursor
                     except Exception:
-                        pass
-                    return self._cursor
+                        # Reset partially-initialized state on error
+                        self._cursor = None
+                        raise
 
                 async def __aexit__(self, exc_type, exc, tb):
                     # If the underlying cursor provides __aexit__, use it.
@@ -735,6 +759,154 @@ async def ensure_core_tables() -> None:
             except Exception as e:
                 log_warning(f"[db] Failed to initialize chat history cache table: {e}")
             _db_initialized = True
+
+
+async def ensure_plugin_tables() -> None:
+    """Ensure plugin-managed tables exist (idempotent).
+
+    This is a startup *preflight* that creates tables normally created
+    lazily by plugins or present in init-db.sql so fresh installs won't
+    hit 1146 "Table doesn't exist" errors.
+    """
+    try:
+        # Some plugin tables reference `ai_diary` — ensure diary table first if available
+        try:
+            from plugins.ai_diary import init_diary_table
+
+            await init_diary_table()
+        except Exception:
+            # No-op if plugin not present or init failed; we'll still attempt CREATE TABLE IF NOT EXISTS below
+            log_debug("[db] init_diary_table not available or failed (continuing)")
+
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                # bio (plugin)
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS bio (
+                        id VARCHAR(255) PRIMARY KEY,
+                        known_as TEXT DEFAULT '[]',
+                        likes TEXT DEFAULT '[]',
+                        not_likes TEXT DEFAULT '[]',
+                        information TEXT DEFAULT '',
+                        past_events TEXT DEFAULT '[]',
+                        feelings TEXT DEFAULT '[]',
+                        contacts TEXT DEFAULT '{}',
+                        social_accounts TEXT DEFAULT '[]',
+                        privacy TEXT DEFAULT 'default',
+                        created_at VARCHAR(50),
+                        last_accessed VARCHAR(50)
+                    )
+                    """
+                )
+
+                # recent_chats (plugin)
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS recent_chats (
+                        chat_id VARCHAR(255) PRIMARY KEY,
+                        last_active DOUBLE NOT NULL,
+                        metadata TEXT,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        INDEX idx_last_active (last_active)
+                    )
+                    """
+                )
+
+                # grillo tables (init-db.sql + plugin may expect them)
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS grillo_activity_log (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        beat_type VARCHAR(50) NOT NULL,
+                        prompt_text TEXT NOT NULL,
+                        response_text LONGTEXT,
+                        diary_entry_id INT,
+                        executed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        metadata JSON,
+                        suppressed_count INT DEFAULT 0,
+                        INDEX idx_executed_at (executed_at),
+                        INDEX idx_beat_type (beat_type),
+                        INDEX idx_diary_entry (diary_entry_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+                    """
+                )
+
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS grillo_action_execs (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        activity_log_id INT NOT NULL,
+                        action_index INT NOT NULL,
+                        action_type VARCHAR(150) NOT NULL,
+                        payload JSON,
+                        status ENUM('pending','processed','failed') NOT NULL DEFAULT 'pending',
+                        error_text TEXT,
+                        result JSON,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        INDEX idx_activity_log_id (activity_log_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+                    """
+                )
+
+                # agent tables (init-db.sql)
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS agent_activity_log (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        command TEXT NOT NULL,
+                        proposer VARCHAR(100),
+                        status ENUM('proposed','approved','rejected','executed') NOT NULL DEFAULT 'proposed',
+                        trainer_id VARCHAR(100),
+                        request_ts DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        response_ts DATETIME,
+                        result LONGTEXT,
+                        metadata JSON
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+                    """
+                )
+
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS agent_action_execs (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        activity_log_id INT NOT NULL,
+                        command TEXT NOT NULL,
+                        status ENUM('pending','executed','failed') NOT NULL DEFAULT 'pending',
+                        error_text TEXT,
+                        result JSON,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        INDEX idx_activity_log_id (activity_log_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+                    """
+                )
+
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS agent_tasks (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        engine VARCHAR(64),
+                        status ENUM('pending','running','waiting_for_approval','paused','completed','failed','cancelled') NOT NULL DEFAULT 'pending',
+                        input JSON,
+                        iterations_meta JSON,
+                        output JSON,
+                        trainer_id VARCHAR(64),
+                        metadata JSON,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+                    """
+                )
+
+                try:
+                    await conn.commit()
+                except Exception:
+                    pass
+        log_debug("[db] ensure_plugin_tables completed")
+    except Exception as e:
+        log_warning(f"[db] ensure_plugin_tables failed: {e}")
 
 
 # 🧠 Insert a new memory into the database

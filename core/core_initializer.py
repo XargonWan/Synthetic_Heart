@@ -177,6 +177,15 @@ class CoreInitializer:
             # 2. Load generic plugins (this may load additional plugins)
             self._load_plugins()
 
+            # 2.1 Ensure plugin-managed DB tables exist (preflight)
+            try:
+                from core.db import ensure_plugin_tables
+
+                await ensure_plugin_tables()
+                log_debug("[core_initializer] ✅ ensure_plugin_tables() completed")
+            except Exception as e:
+                log_warning(f"[core_initializer] ensure_plugin_tables failed: {e}")
+
             # 2.5. Auto-register validation rules from loaded components
             log_debug(
                 "[core_initializer] 🔍 About to call _register_component_validation_rules()"

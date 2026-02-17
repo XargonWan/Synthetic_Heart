@@ -1583,6 +1583,16 @@ try {
                         panel.setAttribute('aria-hidden', 'true');
                     }
                 });
+
+                // Ensure About tab init is called when this tab becomes active
+                try {
+                    if (tab === 'about') {
+                        if (window.SynthWebUI && typeof window.SynthWebUI.initAboutTab === 'function') {
+                            window.SynthWebUI.initAboutTab();
+                        }
+                    }
+                } catch (e) { /* ignore */ }
+
                 if (tab === 'home' && typeof window.resizeVRMRenderer === 'function') {
                     setTimeout(() => {
                         try { window.resizeVRMRenderer(); } catch (e) { /* ignore */ }
@@ -2045,6 +2055,17 @@ try {
                 } catch (e) { /* ignore */ }
 
                 window.__synth_about_initialized = true;
+
+                // Show the inline Ko‑fi button inside About (no global overlay). The
+                // `.kofi-button` anchor is styled in the About template and remains
+                // visible only when the About tab is active.
+                try {
+                    const fallbackEl = document.querySelector('.kofi-button');
+                    if (fallbackEl) {
+                        fallbackEl.style.display = 'inline-flex';
+                        fallbackEl.setAttribute('aria-label', 'Support the project on Ko‑fi');
+                    }
+                } catch (e) { /* ignore */ }
             }
 
             function formatUptime(seconds) {

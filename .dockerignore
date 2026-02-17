@@ -18,3 +18,4 @@ GitVersion.yml
 skins/Rekku
 skins/temp
 node_modules/
+*.vroid
