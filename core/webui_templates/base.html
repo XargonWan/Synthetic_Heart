@@ -26,6 +26,7 @@
             --border-strong: rgba(255, 255, 255, 0.18);
             --accent: #6bfefe;
             --accent-soft: rgba(107, 254, 254, 0.16);
+            --accent-dark: #3aa8a8;
             --accent-contrast: #07070c;
             --text: #f5f5ff;
             --text-soft: #b9badc;
@@ -531,7 +532,7 @@
            e.g. <input /><label class="toggle-switch"><span class="toggle-slider"></span></label> */
         input[type="checkbox"]:checked + .toggle-switch .toggle-slider,
         input[type="checkbox"]:checked + label .toggle-slider {
-            background: linear-gradient(135deg, var(--accent), rgba(114,137,218,0.25));
+            background: linear-gradient(135deg, var(--accent), var(--accent-dark, rgba(114,137,218,0.25)));
             border-color: var(--accent);
         }
         input[type="checkbox"]:checked + .toggle-slider:before,

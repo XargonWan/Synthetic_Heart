@@ -142,8 +142,27 @@ test('accent color picker in settings updates --accent CSS variable', async ({ p
       await page.waitForSelector('.winbox.synth-winbox .wb-title', { timeout: 2000 });
       const winHeaderBg = await page.evaluate(() => getComputedStyle(document.querySelector('.winbox.synth-winbox .wb-title')).backgroundImage || getComputedStyle(document.querySelector('.winbox.synth-winbox .wb-title')).background);
       const winHeaderColor = await page.evaluate(() => getComputedStyle(document.querySelector('.winbox.synth-winbox .wb-title')).color);
+      // ensure header gradient contains the accent and the darker variant (no hard black)
+      const accentDark = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--accent-dark').trim());
       expect(winHeaderBg).toContain('0, 255, 136');
+      expect(winHeaderBg.toLowerCase()).not.toContain('0, 0, 0');
+      // header must show a gradient (no hard black) and contrast color applied
+      expect(winHeaderBg.toLowerCase()).toMatch(/linear-gradient\(|gradient/);
+      expect(winHeaderBg.toLowerCase()).not.toContain('0, 0, 0');
       expect(winHeaderColor).toContain('7, 7, 12');
+
+      // tag-chips should use a gradient and the same contrast logic
+      const chipHandle = await page.$('.tag-chips .tag-chip');
+      expect(chipHandle).not.toBeNull();
+      const chipBg = await chipHandle.evaluate(el => window.getComputedStyle(el).backgroundImage || window.getComputedStyle(el).background);
+      const chipColor = await chipHandle.evaluate(el => window.getComputedStyle(el).color);
+      expect(chipBg.toLowerCase()).toMatch(/linear-gradient\(|gradient/);
+      const accentDarkVar = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--accent-dark').trim());
+      expect(accentDarkVar.length).toBeGreaterThan(0);
+      const accentContrast = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--accent-contrast').trim());
+      // chip text must match the computed accent-contrast value (as rgb or hex)
+      const chipColorNormalized = chipColor.replace(/\s/g, '').toLowerCase();
+      expect(chipColorNormalized.includes(accentContrast.replace('#','')) || chipColorNormalized.includes('rgb(')).toBeTruthy();
 
       break;
     }

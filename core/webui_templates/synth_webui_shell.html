@@ -20,6 +20,7 @@
             --border-strong: rgba(255, 255, 255, 0.18);
             --accent: #6bfefe;
             --accent-soft: rgba(107, 254, 254, 0.16);
+            --accent-dark: #3aa8a8;
             --accent-contrast: #07070c;
             --text: #f5f5ff;
             --text-soft: #b9badc;
@@ -239,16 +240,16 @@
         #chat { position: fixed; }
         #chat.synth-window-managed { /* WinBox controls chrome */ }
         .winbox.synth-winbox .wb-title {
-            color: var(--text);
+            color: var(--accent-contrast);
             font-weight: 700;
             font-size: 1.05rem;
         }
         .winbox.synth-winbox .wb-control {
-            color: var(--text-soft);
+            color: var(--accent-contrast);
         }
         .winbox.synth-winbox .wb-control:hover,
         .winbox.synth-winbox .wb-control:focus {
-                color: var(--text);
+                color: var(--accent-contrast);
                 font-weight: 700;
         }
         .winbox.synth-winbox.debug-window .wb-min {
@@ -424,7 +425,7 @@
             opacity: 0.85;
         }
         .bubble.user { align-self: flex-end; background: rgba(255, 255, 255, 0.08); }
-        .bubble.synth { align-self: flex-start; background: linear-gradient(135deg, var(--accent), rgba(114,137,218,0.25)); color: var(--accent-contrast); }
+        .bubble.synth { align-self: flex-start; background: linear-gradient(135deg, var(--accent), var(--accent-dark, rgba(114,137,218,0.25))); color: var(--accent-contrast); }
         .typing-indicator {
             display: flex;
             gap: 0.3rem;
@@ -851,7 +852,7 @@
             gap: 0.45rem;
             padding: 0.25rem 0.6rem;
             border-radius: 999px;
-            background: var(--accent-soft);
+            background: linear-gradient(135deg, var(--accent), var(--accent-dark, rgba(0,0,0,0.12)));
             color: var(--accent-contrast);
             font-weight: 600;
             font-size: 0.85rem;
@@ -866,8 +867,8 @@
             width: 18px;
             height: 18px;
             border-radius: 50%;
-            background: rgba(255,255,255,0.03);
-            color: var(--text);
+            background: rgba(255,255,255,0.06);
+            color: var(--accent-contrast);
             font-size: 0.78rem;
             cursor: pointer;
             margin-left: 0.25rem;
@@ -889,7 +890,7 @@
 
         /* WinBox / floating windows: use accent gradient for headers */
         .winbox .wb-head, .winbox .wb-title {
-            background: linear-gradient(135deg, var(--accent), rgba(114,137,218,0.25));
+            background: linear-gradient(135deg, var(--accent), var(--accent-dark, rgba(114,137,218,0.25)));
             color: var(--accent-contrast);
         }
 
@@ -927,7 +928,7 @@
         input[type="checkbox"]:checked + .toggle-slider,
         input[type="checkbox"]:checked + .toggle-switch .toggle-slider,
         input[type="checkbox"]:checked + label .toggle-slider {
-            background: linear-gradient(135deg, var(--accent), rgba(114,137,218,0.25));
+            background: linear-gradient(135deg, var(--accent), var(--accent-dark, rgba(114,137,218,0.25)));
             border-color: var(--accent);
         }
         input[type="checkbox"]:checked + .toggle-slider:before,

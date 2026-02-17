@@ -161,6 +161,7 @@ try {
         const [r,g,b] = hexToRgb(accent);
         document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b}, 0.16)`);
         try { document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(accent)); } catch(e) { document.documentElement.style.setProperty('--accent-contrast', '#07070c'); }
+        try { document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(accent)); } catch(e) { document.documentElement.style.setProperty('--accent-dark', '#5b5b6b'); }
       }
     } catch (e) { /* ignore */ }
   }
@@ -181,6 +182,60 @@ function pickAccentContrastFromHex(hex) {
     return (crWhite >= crBlack) ? '#ffffff' : '#07070c';
   } catch(e) { return '#07070c'; }
 }
+
+// Darken a color (hex) using HSL lightness reduction to generate gradient end
+function _rgbToHsl(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  let h, s;
+  const l = (max + min) / 2;
+  if (max === min) {
+    h = s = 0; // achromatic
+  } else {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    switch (max) {
+      case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+      case g: h = (b - r) / d + 2; break;
+      case b: h = (r - g) / d + 4; break;
+    }
+    h /= 6;
+  }
+  return [h * 360, s, l];
+}
+function _hslToRgb(h, s, l) {
+  h /= 360;
+  let r, g, b;
+  if (s === 0) {
+    r = g = b = l; // achromatic
+  } else {
+    const hue2rgb = (p, q, t) => {
+      if (t < 0) t += 1;
+      if (t > 1) t -= 1;
+      if (t < 1/6) return p + (q - p) * 6 * t;
+      if (t < 1/2) return q;
+      if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+      return p;
+    };
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    r = hue2rgb(p, q, h + 1/3);
+    g = hue2rgb(p, q, h);
+    b = hue2rgb(p, q, h - 1/3);
+  }
+  return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
+}
+function _rgbToHex(r, g, b) { return '#' + [r, g, b].map(x => x.toString(16).padStart(2, '0')).join(''); }
+function darkenHex(hex, amount = 0.28) {
+  try {
+    const [r, g, b] = _hexToRgb(hex);
+    const [h, s, l] = _rgbToHsl(r, g, b);
+    const nl = Math.max(0, l - amount);
+    const [nr, ng, nb] = _hslToRgb(h, s, nl);
+    return _rgbToHex(nr, ng, nb);
+  } catch (e) { return '#4b4b4b'; }
+}
+function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
         // Configuration values from server
         window.__synthLipSyncAnalyser = null;
@@ -1180,7 +1235,7 @@ function pickAccentContrastFromHex(hex) {
                                 b.style.border = '1px solid rgba(255,255,255,0.06)';
                                 b.style.background = c;
                                 if (String(value).toLowerCase() === String(c).toLowerCase()) b.style.boxShadow = '0 0 0 3px rgba(0,0,0,0.12) inset';
-                                b.addEventListener('click', async () => { await persist(c); try { document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); } catch(e){} });
+                                b.addEventListener('click', async () => { await persist(c); try { document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch(e){} });
                                 presetsEl.appendChild(b);
                             });
 
@@ -1188,13 +1243,13 @@ function pickAccentContrastFromHex(hex) {
                             colorInput.type = 'color';
                             colorInput.value = typeof value === 'string' && value ? value : (item.default || '#6bfefe');
                             colorInput.disabled = !isEditable;
-                            colorInput.addEventListener('input', async (ev) => { await persist(ev.target.value); try { const c = ev.target.value; document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); } catch(e){} });
+                            colorInput.addEventListener('input', async (ev) => { await persist(ev.target.value); try { const c = ev.target.value; document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch(e){} });
 
                             const reset = document.createElement('button');
                             reset.type = 'button';
                             reset.textContent = 'Reset';
                             reset.disabled = !isEditable;
-                            reset.addEventListener('click', async () => { const def = item.default || '#6bfefe'; await persist(def); colorInput.value = def; try { document.documentElement.style.setProperty('--accent', def); const [r,g,b2] = _hexToRgb(def); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(def)); } catch(e){} });
+                            reset.addEventListener('click', async () => { const def = item.default || '#6bfefe'; await persist(def); colorInput.value = def; try { document.documentElement.style.setProperty('--accent', def); const [r,g,b2] = _hexToRgb(def); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(def)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(def)); } catch(e){} });
 
                             swatchWrap.appendChild(presetsEl);
                             swatchWrap.appendChild(colorInput);
