@@ -150,6 +150,98 @@ def encode_bytes_to_base64(data: bytes) -> str:
     return base64.b64encode(data).decode("utf-8")
 
 
+async def _extract_audio_from_video(
+    video_bytes: bytes, source_label: str
+) -> bytes | None:
+    """Extract the audio track from a video file using ffmpeg.
+
+    Gemini tends to focus on the visual track when a video is sent as a single
+    inline_data blob, so we extract the audio separately and send it alongside
+    the video to ensure the model attends to both modalities.
+
+    Returns raw OGG Opus bytes, or None if extraction fails or there is no
+    audio track.
+    """
+    import asyncio
+    import subprocess
+    import tempfile
+    import os
+
+    tmp_in = None
+    tmp_out = None
+    try:
+        # Write video bytes to a temp file (ffmpeg needs seekable input)
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+            f.write(video_bytes)
+            tmp_in = f.name
+
+        tmp_out = tmp_in + ".audio.ogg"
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            tmp_in,
+            "-vn",  # discard video
+            "-c:a",
+            "libopus",  # encode to Opus
+            "-b:a",
+            "64k",  # moderate bitrate — keeps size small
+            "-ac",
+            "1",  # mono
+            "-ar",
+            "16000",  # 16 kHz
+            tmp_out,
+        ]
+
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+
+        if process.returncode != 0:
+            stderr_text = stderr.decode(errors="replace") if stderr else ""
+            # "does not contain any stream" means no audio track — not an error
+            if "does not contain any stream" in stderr_text:
+                log_debug(f"[multimodal] No audio track in video ({source_label})")
+            else:
+                log_debug(
+                    f"[multimodal] ffmpeg audio extraction failed for {source_label}: {stderr_text[:300]}"
+                )
+            return None
+
+        if not os.path.exists(tmp_out) or os.path.getsize(tmp_out) == 0:
+            log_debug(
+                f"[multimodal] Audio extraction produced empty output for {source_label}"
+            )
+            return None
+
+        with open(tmp_out, "rb") as f:
+            audio_bytes = f.read()
+
+        log_debug(
+            f"[multimodal] Extracted audio track from {source_label}: {len(audio_bytes)} bytes"
+        )
+        return audio_bytes
+
+    except FileNotFoundError:
+        log_debug("[multimodal] ffmpeg not available — skipping video audio extraction")
+        return None
+    except Exception as e:
+        log_warning(f"[multimodal] Audio extraction error for {source_label}: {e}")
+        return None
+    finally:
+        # Clean up temp files
+        for p in (tmp_in, tmp_out):
+            if p:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+
 async def extract_multimodal_from_telegram(
     bot: Any,
     message: Any,
@@ -294,12 +386,12 @@ async def extract_multimodal_from_telegram(
                 else:
                     try:
                         file = await bot.get_file(video.file_id)
-                        file_bytes = await file.download_as_bytearray()
+                        file_bytes = bytes(await file.download_as_bytearray())
 
                         attachments.append(
                             {
                                 "mime_type": mime_type,
-                                "data": encode_bytes_to_base64(bytes(file_bytes)),
+                                "data": encode_bytes_to_base64(file_bytes),
                                 "filename": video.file_name
                                 or f"video_{video.file_unique_id}.mp4",
                             }
@@ -307,6 +399,21 @@ async def extract_multimodal_from_telegram(
                         log_debug(
                             f"[multimodal] Extracted Telegram video: {video.file_unique_id} ({mime_type})"
                         )
+
+                        # Extract audio track separately so the model attends to
+                        # both visual and audio content (Gemini under-weights audio
+                        # when it is embedded inside a video container).
+                        audio_bytes = await _extract_audio_from_video(
+                            file_bytes, f"video_{video.file_unique_id}"
+                        )
+                        if audio_bytes:
+                            attachments.append(
+                                {
+                                    "mime_type": "audio/ogg",
+                                    "data": encode_bytes_to_base64(audio_bytes),
+                                    "filename": f"video_{video.file_unique_id}_audio.ogg",
+                                }
+                            )
                     except Exception as e:
                         log_warning(
                             f"[multimodal] Failed to download Telegram video: {e}"
@@ -322,18 +429,31 @@ async def extract_multimodal_from_telegram(
             if file_size <= 20 * 1024 * 1024:  # 20MB limit
                 try:
                     file = await bot.get_file(video_note.file_id)
-                    file_bytes = await file.download_as_bytearray()
+                    file_bytes = bytes(await file.download_as_bytearray())
 
                     attachments.append(
                         {
                             "mime_type": "video/mp4",
-                            "data": encode_bytes_to_base64(bytes(file_bytes)),
+                            "data": encode_bytes_to_base64(file_bytes),
                             "filename": f"video_note_{video_note.file_unique_id}.mp4",
                         }
                     )
                     log_debug(
                         f"[multimodal] Extracted Telegram video note: {video_note.file_unique_id}"
                     )
+
+                    # Extract audio track separately (same reasoning as video above)
+                    audio_bytes = await _extract_audio_from_video(
+                        file_bytes, f"video_note_{video_note.file_unique_id}"
+                    )
+                    if audio_bytes:
+                        attachments.append(
+                            {
+                                "mime_type": "audio/ogg",
+                                "data": encode_bytes_to_base64(audio_bytes),
+                                "filename": f"video_note_{video_note.file_unique_id}_audio.ogg",
+                            }
+                        )
                 except Exception as e:
                     log_warning(
                         f"[multimodal] Failed to download Telegram video note: {e}"
