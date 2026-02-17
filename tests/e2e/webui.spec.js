@@ -95,3 +95,42 @@ test('tag lists render as rounded accent chips', async ({ page }) => {
   }
   expect(found).toBeTruthy();
 });
+
+test('accent color picker in settings updates --accent CSS variable', async ({ page }) => {
+  await page.goto(BASE, { waitUntil: 'networkidle' });
+  await page.click('.nav-btn[data-tab="settings"]');
+  await page.waitForSelector('#config-general-list .config-row', { timeout: 3000 });
+
+  // Find the Accent Color row
+  const rows = await page.$$('#config-general-list .config-row');
+  let found = false;
+  for (const row of rows) {
+    const label = await row.$eval('.config-label-line', el => (el.textContent || '').trim());
+    if (label.includes('Accent Color')) {
+      found = true;
+      // color input
+      const colorInput = await row.$('input[type=color]');
+      expect(colorInput).not.toBeNull();
+
+      // change to a new color and verify CSS var updated
+      await colorInput.fill('#00ff88');
+      await colorInput.evaluate((el) => el.dispatchEvent(new Event('input', { bubbles: true })));
+      await page.waitForTimeout(300);
+      const accent = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--accent').trim());
+      expect(accent.toLowerCase()).toBe('#00ff88');
+      break;
+    }
+  }
+  expect(found).toBeTruthy();
+});
+
+test('settings group variables by component (Matrix example)', async ({ page }) => {
+  await page.goto(BASE, { waitUntil: 'networkidle' });
+  await page.click('.nav-btn[data-tab="settings"]');
+  await page.waitForSelector('#config-general-list .config-section', { timeout: 3000 });
+
+  const headers = await page.$$eval('#config-general-list .config-section h3', els => els.map(e => e.textContent.trim()));
+  // Expect a Matrix-related section header to be present
+  const hasMatrix = headers.some(h => /matrix/i.test(h));
+  expect(hasMatrix).toBeTruthy();
+});

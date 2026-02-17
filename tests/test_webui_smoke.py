@@ -15,6 +15,10 @@ def test_index_includes_main_js_and_config():
     assert "/js/main.js" in text
     assert "window.__SYNTH_CONFIG" in text
     assert "RESPONSE_TIMEOUT" in text
+    # Accent color runtime config exposed by server
+    assert "WEBUI_ACCENT_COLOR" in text
+    assert "#6bfefe" in text
+    assert "WEBUI_ACCENT_PRESETS" in text
 
 
 def test_templates_skins_served():

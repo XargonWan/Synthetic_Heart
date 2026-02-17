@@ -18,8 +18,8 @@
             --panel-bg: rgba(18, 18, 28, 0.92);
             --border: rgba(255, 255, 255, 0.08);
             --border-strong: rgba(255, 255, 255, 0.18);
-            --accent: #ff6bd6;
-            --accent-soft: rgba(255, 107, 214, 0.16);
+            --accent: #6bfefe;
+            --accent-soft: rgba(107, 254, 254, 0.16);
             --text: #f5f5ff;
             --text-soft: #b9badc;
             --success: #18c98c;
@@ -885,6 +885,12 @@
             border-radius: 6px;
         }
 
+        /* WinBox / floating windows: use accent gradient for headers */
+        .winbox .wb-head, .winbox .wb-title {
+            background: linear-gradient(135deg, var(--accent), rgba(114,137,218,0.25));
+            color: #fff;
+        }
+
         .toggle-switch {
             position: relative;
             display: inline-block;
@@ -1094,7 +1100,9 @@ window.__SYNTH_CONFIG = {
     BRAND_NAME: "%%BRAND_NAME%%",
     SYNTH_NAME: "%%SYNTH_NAME%%",
   WEB_DEBUG: '%%WEB_DEBUG%%' === '1',
-  CHAT_RESIZABLE: '%%CHAT_RESIZABLE%%' === 'true'
+  CHAT_RESIZABLE: '%%CHAT_RESIZABLE%%' === 'true',
+  WEBUI_ACCENT_COLOR: "%%WEBUI_ACCENT_COLOR%%",
+  WEBUI_ACCENT_PRESETS: %%WEBUI_ACCENT_PRESETS%%
 };
 </script>
 

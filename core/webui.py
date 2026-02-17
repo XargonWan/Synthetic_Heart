@@ -978,6 +978,17 @@ class SynthWebUIInterface:
                 else "false",
             }
 
+            # Accent color config + presets (exposed to client as runtime config)
+            try:
+                accent = str(config_registry.get_value("WEBUI_ACCENT_COLOR", "#6bfefe"))
+            except Exception:
+                accent = "#6bfefe"
+            presets = ["#6bfefe", "#ff6bd6", "#18c98c", "#ffd166", "#ff9ecb"]
+            replacements["%%WEBUI_ACCENT_COLOR%%"] = accent
+            import json
+
+            replacements["%%WEBUI_ACCENT_PRESETS%%"] = json.dumps(presets)
+
             # Apply replacements
             for placeholder, value in replacements.items():
                 template = template.replace(placeholder, value)

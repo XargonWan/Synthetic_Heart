@@ -24,6 +24,7 @@ API compatibility:
 # - `tags`    → tag-list editor (array persisted as JSON)
 # - `tag-combobox` → tag-list with suggestion support (uses `options`)
 # - `file`    → file upload control
+# - `color`   → color picker with optional preset swatches
 #
 # When registering exposed variables prefer setting `value_type` to a native
 # Python type (e.g. `int`, `bool`, or the special string `'json'`) so the API
@@ -414,6 +415,23 @@ def register_all():
         scope="synth",
         component="animation",
         readonly=True,
+    )
+
+    # WebUI accent color (picker + presets)
+    register_exposed_var(
+        "WEBUI_ACCENT_COLOR",
+        label="Accent Color",
+        default="#6bfefe",
+        value_type=str,
+        ui_type="color",
+        description=(
+            "Primary accent color used across the WebUI. Choose one of the presets or a custom color. "
+            "Click Reset to restore the default (#6bfefe)."
+        ),
+        scope="webui",
+        component="synth_webui",
+        tags=["ui", "appearance"],
+        options=["#6bfefe", "#ff6bd6", "#18c98c", "#ffd166", "#ff9ecb"],
     )
 
     # Expose SYNTH_AUTONOMY_MODE as a combobox for better UX (choices shown and selectable)

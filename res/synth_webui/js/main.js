@@ -150,6 +150,18 @@ try {
     if (window.__SYNTH_CONFIG.RESPONSE_TIMEOUT !== undefined) window.RESPONSE_TIMEOUT = window.__SYNTH_CONFIG.RESPONSE_TIMEOUT;
     if (window.__SYNTH_CONFIG.FAILED_MESSAGE_TEXT !== undefined) window.FAILED_MESSAGE_TEXT = window.__SYNTH_CONFIG.FAILED_MESSAGE_TEXT;
     if (window.__SYNTH_CONFIG.WEB_DEBUG !== undefined) window.__synth_web_debug_enabled = window.__SYNTH_CONFIG.WEB_DEBUG;
+
+    // Apply accent color from server-rendered runtime config (if provided)
+    try {
+      const accent = window.__SYNTH_CONFIG.WEBUI_ACCENT_COLOR;
+      if (accent) {
+        document.documentElement.style.setProperty('--accent', accent);
+        // set a soft variant at ~16% alpha
+        const hexToRgb = (h) => { const c = h.replace('#',''); const bigint = parseInt(c.length===3?c.split('').map(x=>x+x).join(''):c,16); return [(bigint>>16)&255, (bigint>>8)&255, bigint&255]; };
+        const [r,g,b] = hexToRgb(accent);
+        document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b}, 0.16)`);
+      }
+    } catch (e) { /* ignore */ }
   }
 } catch (e) { console.warn('[synth_webui] config init failed', e); }
 
@@ -1097,6 +1109,49 @@ try {
                             textarea.disabled = !isEditable;
                             inputEl = textarea;
 
+                        // --- Color picker: presets + custom color input ---
+                        } else if (item.ui_type === 'color') {
+                            const swatchWrap = document.createElement('div');
+                            swatchWrap.style.display = 'flex';
+                            swatchWrap.style.alignItems = 'center';
+                            swatchWrap.style.gap = '0.5rem';
+
+                            // Presets: prefer server-provided runtime presets
+                            const presets = (window.__SYNTH_CONFIG && window.__SYNTH_CONFIG.WEBUI_ACCENT_PRESETS) || ['#6bfefe','#ff6bd6','#18c98c','#ffd166','#ff9ecb'];
+                            const presetsEl = document.createElement('div');
+                            presetsEl.style.display = 'flex';
+                            presetsEl.style.gap = '0.4rem';
+                            presets.forEach((c) => {
+                                const b = document.createElement('button');
+                                b.type = 'button';
+                                b.title = c;
+                                b.style.width = '22px';
+                                b.style.height = '22px';
+                                b.style.borderRadius = '50%';
+                                b.style.border = '1px solid rgba(255,255,255,0.06)';
+                                b.style.background = c;
+                                if (String(value).toLowerCase() === String(c).toLowerCase()) b.style.boxShadow = '0 0 0 3px rgba(0,0,0,0.12) inset';
+                                b.addEventListener('click', async () => { await saveValue(item.key, c); try { document.documentElement.style.setProperty('--accent', c); const rgb = c.replace('#',''); const bigint = parseInt(rgb.length===3?rgb.split('').map(x=>x+x).join(''):rgb,16); const r=(bigint>>16)&255,g=(bigint>>8)&255,b2=bigint&255; document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); } catch(e){} });
+                                presetsEl.appendChild(b);
+                            });
+
+                            const colorInput = document.createElement('input');
+                            colorInput.type = 'color';
+                            colorInput.value = typeof value === 'string' && value ? value : (item.default || '#6bfefe');
+                            colorInput.disabled = !isEditable;
+                            colorInput.addEventListener('input', async (ev) => { await saveValue(item.key, ev.target.value); try { document.documentElement.style.setProperty('--accent', ev.target.value); const c = ev.target.value.replace('#',''); const bigint = parseInt(c.length===3?c.split('').map(x=>x+x).join(''):c,16); const r=(bigint>>16)&255,g=(bigint>>8)&255,b2=bigint&255; document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); } catch(e){} });
+
+                            const reset = document.createElement('button');
+                            reset.type = 'button';
+                            reset.textContent = 'Reset';
+                            reset.disabled = !isEditable;
+                            reset.addEventListener('click', async () => { const def = item.default || '#6bfefe'; await saveValue(item.key, def); colorInput.value = def; try { document.documentElement.style.setProperty('--accent', def); const c = def.replace('#',''); const bigint = parseInt(c.length===3?c.split('').map(x=>x+x).join(''):c,16); const r=(bigint>>16)&255,g=(bigint>>8)&255,b2=bigint&255; document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); } catch(e){} });
+
+                            swatchWrap.appendChild(presetsEl);
+                            swatchWrap.appendChild(colorInput);
+                            swatchWrap.appendChild(reset);
+                            inputEl = swatchWrap;
+
                         // --- Combobox: free-text input with datalist suggestions ---
                         } else if (item.ui_type === 'combobox') {
                             const input = document.createElement('input');
@@ -1284,10 +1339,44 @@ try {
                     });
                 };
 
+                const groupByComponent = (list) => {
+                    return list.reduce((acc, it) => {
+                        const comp = it.component_label || it.component || 'Other';
+                        acc[comp] = acc[comp] || [];
+                        acc[comp].push(it);
+                        return acc;
+                    }, {});
+                };
+
+                const renderGrouped = (list, container) => {
+                    container.innerHTML = '';
+                    const groups = groupByComponent(list);
+                    const keys = Object.keys(groups).sort();
+                    if (!keys.length) {
+                        const empty = document.createElement('div');
+                        empty.className = 'meta';
+                        empty.textContent = 'No configuration entries found.';
+                        container.appendChild(empty);
+                        return;
+                    }
+                    keys.forEach((comp) => {
+                        const section = document.createElement('div');
+                        section.className = 'config-section';
+                        const h = document.createElement('h3');
+                        h.textContent = comp;
+                        section.appendChild(h);
+                        const listEl = document.createElement('div');
+                        listEl.className = 'config-list';
+                        section.appendChild(listEl);
+                        container.appendChild(section);
+                        renderList(groups[comp], listEl);
+                    });
+                };
+
                 const general = items.filter((item) => !item.advanced);
                 const advanced = items.filter((item) => item.advanced);
-                renderList(general, configGeneralListEl);
-                renderList(advanced, configAdvancedListEl);
+                renderGrouped(general, configGeneralListEl);
+                renderGrouped(advanced, configAdvancedListEl);
             } catch (e) {
                 console.error('[synth_webui] Failed to load configuration', e);
                 const configGeneralListEl = document.getElementById('config-general-list');
