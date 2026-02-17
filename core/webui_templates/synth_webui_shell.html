@@ -48,8 +48,8 @@
             display: flex;
             flex-direction: column;
             background:
-                radial-gradient(circle at 20% 0%, rgba(114, 137, 218, 0.18), transparent 55%),
-                radial-gradient(circle at 80% 100%, rgba(255, 107, 214, 0.22), transparent 55%),
+                radial-gradient(circle at 20% 0%, rgba(var(--accent-r,114), var(--accent-g,137), var(--accent-b,218), 0.10), transparent 55%),
+                radial-gradient(circle at 80% 100%, rgba(var(--accent-r,114), var(--accent-g,137), var(--accent-b,218), 0.06), transparent 55%),
                 var(--bg);
             color: var(--text);
         }
@@ -62,7 +62,8 @@
             align-items: center;
             justify-content: flex-start;
             padding: 0.9rem min(4vw, 2.4rem);
-            background: linear-gradient(135deg, rgba(12, 12, 20, 0.78), rgba(34, 30, 46, 0.78));
+            /* subtle accent tint blended with original dark gradient */
+            background: linear-gradient(135deg, rgba(var(--accent-r,114), var(--accent-g,137), var(--accent-b,218), 0.06), rgba(12, 12, 20, 0.78));
             border-bottom: 1px solid var(--border);
             backdrop-filter: blur(18px);
             /* Allow the top-bar to wrap (brand + nav) when the viewport is narrow */
@@ -107,17 +108,21 @@
             font-size: 0.95rem;
             letter-spacing: 0.05em;
             cursor: pointer;
-            transition: transform 0.15s ease, background 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
+            transition: transform 0.15s ease, background 0.2s ease, color 0.2s ease, box-shadow 0.2s ease, border 0.2s ease;
             white-space: nowrap;
             /* Allow buttons to shrink and wrap to a new line when there is not enough space */
             flex: 0 1 auto;
             max-width: 100%;
         }
+        .nav-btn:hover, .nav-btn:focus {
+            border: 1px solid transparent;
+            border-image: linear-gradient(90deg, var(--accent), var(--accent-dark)) 1;
+        }
         .nav-btn .icon { font-size: 1.05rem; }
         .nav-btn.active {
             background: var(--accent);
             color: var(--accent-contrast);
-            box-shadow: 0 18px 35px -24px rgba(255, 107, 214, 0.95);
+            box-shadow: 0 18px 35px -24px rgba(var(--accent-r,255), var(--accent-g,107), var(--accent-b,214), 0.95);
         }
 
         /* Default: ensure dropdowns/selects use dark background and text by default */
@@ -280,8 +285,9 @@
             margin-left: auto;
         }
         .winbox.synth-winbox .synth-wb-tool-btn {
-            border: 1px solid rgba(255, 255, 255, 0.22);
-            background: rgba(255, 107, 214, 0.22);
+            border: 1px solid transparent;
+            border-image: linear-gradient(90deg, var(--accent), var(--accent-dark)) 1;
+            background: rgba(var(--accent-r,255), var(--accent-g,107), var(--accent-b,214), 0.12);
             color: var(--text);
             border-radius: 8px;
             height: 22px;
@@ -295,7 +301,7 @@
                 min-height: 0;
         }
         .winbox.synth-winbox .synth-wb-tool-btn:hover {
-            border-color: var(--accent);
+            border-image: linear-gradient(90deg, var(--accent), var(--accent-dark)) 1;
             color: var(--accent);
         }
 
@@ -329,7 +335,8 @@
             justify-content: flex-end;
             padding: 0.6rem 1rem;
             background: rgba(12, 12, 20, 0.72);
-            border-top: 1px solid rgba(255, 255, 255, 0.06);
+            border-top: 1px solid transparent;
+            border-image: linear-gradient(90deg, var(--accent), var(--accent-dark)) 1;
             flex-shrink: 0;
         }
         #synth-advanced-debug {
@@ -490,7 +497,8 @@
             width: 56px;
             height: 56px;
             border-radius: 50%;
-            border: 2px solid var(--border);
+            border: 2px solid transparent;
+            border-image: linear-gradient(90deg, var(--accent), var(--accent-dark)) 1;
             background: rgba(12, 12, 20, 0.95);
             backdrop-filter: blur(10px);
             -webkit-backdrop-filter: blur(10px);
@@ -505,12 +513,20 @@
         }
         .chat-toggle-btn:hover {
             transform: scale(1.1);
-            background: rgba(255, 107, 214, 0.15);
-            border-color: var(--accent);
-            box-shadow: 0 12px 32px rgba(255, 107, 214, 0.4);
+            background: rgba(var(--accent-r,255), var(--accent-g,107), var(--accent-b,214), 0.15);
+            border-image: linear-gradient(90deg, var(--accent), var(--accent-dark)) 1;
+            box-shadow: 0 12px 32px rgba(var(--accent-r,255), var(--accent-g,107), var(--accent-b,214), 0.4);
         }
         .chat-toggle-btn:active {
             transform: scale(0.95);
+        }
+
+        /* generic thin separators use accent gradient */
+        hr, .section-divider {
+            border: 0;
+            height: 1px;
+            background: linear-gradient(90deg, var(--accent), var(--accent-dark));
+            opacity: 0.10;
         }
         #synth-install-btn {
             position: fixed;
@@ -614,7 +630,7 @@
             justify-content: center;
             padding: 0.55rem 1.1rem;
             border-radius: 999px;
-            border: 1px solid rgba(255, 107, 214, 0.4);
+            border: 1px solid rgba(var(--accent-r,255), var(--accent-g,107), var(--accent-b,214), 0.4);
             background: var(--accent-soft);
             color: inherit;
             cursor: pointer;

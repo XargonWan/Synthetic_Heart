@@ -48,8 +48,8 @@
             display: flex;
             flex-direction: column;
             background:
-                radial-gradient(circle at 20% 0%, rgba(114, 137, 218, 0.18), transparent 55%),
-                radial-gradient(circle at 80% 100%, rgba(255, 107, 214, 0.22), transparent 55%),
+                radial-gradient(circle at 20% 0%, rgba(var(--accent-r,114), var(--accent-g,137), var(--accent-b,218), 0.10), transparent 55%),
+                radial-gradient(circle at 80% 100%, rgba(var(--accent-r,114), var(--accent-g,137), var(--accent-b,218), 0.06), transparent 55%),
                 var(--bg);
             color: var(--text);
         }
@@ -62,9 +62,11 @@
             align-items: center;
             justify-content: space-between;
             padding: 1.2rem min(4vw, 2.4rem);
-            background: linear-gradient(135deg, rgba(12, 12, 20, 0.78), rgba(34, 30, 46, 0.78));
-            /* remove hard bottom border so full-screen 3D content is not visually clipped */
-            border-bottom: none;
+            /* subtle accent overlay + dark gradient */
+            background: linear-gradient(135deg, rgba(var(--accent-r,114), var(--accent-g,137), var(--accent-b,218), 0.04), rgba(12, 12, 20, 0.78));
+            /* make bottom border use accent gradient */
+            border-bottom: 1px solid transparent;
+            border-image: linear-gradient(90deg, var(--accent), var(--accent-dark)) 1;
             /* expose a CSS variable for the header height so content can size itself */
             --topbar-height: 80px;
             backdrop-filter: blur(18px);
@@ -113,10 +115,15 @@
         .nav-btn .icon {
             font-size: 1.05rem;
         }
+        .nav-btn:hover, .nav-btn:focus {
+            border-image: linear-gradient(90deg, var(--accent), var(--accent-dark)) 1;
+            border-color: transparent;
+            box-shadow: 0 12px 30px -20px var(--accent-soft);
+        }
         .nav-btn.active {
             background: var(--accent);
             color: var(--accent-contrast);
-            box-shadow: 0 18px 35px -24px rgba(255, 107, 214, 0.95);
+            box-shadow: 0 18px 35px -24px rgba(var(--accent-r,255), var(--accent-g,107), var(--accent-b,214), 0.95);
         }
         .nav-btn.active .icon {
             transform: scale(1.08);
@@ -174,7 +181,7 @@
         #chat.synth-window-managed { /* WinBox handles chrome */ }
         #send:hover:enabled {
             transform: translateY(-1px);
-            box-shadow: 0 18px 30px -18px rgba(255, 107, 214, 0.85);
+            box-shadow: 0 18px 30px -18px rgba(var(--accent-r,255), var(--accent-g,107), var(--accent-b,214), 0.85);
         }
         .home-vrm {
             position: relative;
@@ -191,7 +198,8 @@
             width: 56px;
             height: 56px;
             border-radius: 50%;
-            border: 2px solid var(--border);
+            border: 2px solid transparent;
+            border-image: linear-gradient(90deg, var(--accent), var(--accent-dark)) 1;
             background: rgba(12, 12, 20, 0.95);
             backdrop-filter: blur(10px);
             -webkit-backdrop-filter: blur(10px);
@@ -206,9 +214,9 @@
         }
         .chat-toggle-btn:hover {
             transform: scale(1.1);
-            background: rgba(255, 107, 214, 0.15);
+            background: rgba(var(--accent-r,255), var(--accent-g,107), var(--accent-b,214), 0.15);
             border-color: var(--accent);
-            box-shadow: 0 12px 32px rgba(255, 107, 214, 0.4);
+            box-shadow: 0 12px 32px rgba(var(--accent-r,255), var(--accent-g,107), var(--accent-b,214), 0.4);
         }
         .chat-toggle-btn:active {
             transform: scale(0.95);
@@ -267,10 +275,12 @@
             border-radius: 14px;
             padding: 0.6rem 1.1rem;
             cursor: pointer;
-            transition: background 0.2s ease;
+            transition: background 0.2s ease, border 0.2s ease;
         }
         .log-controls button:hover {
             background: var(--accent-soft);
+            border: 1px solid transparent;
+            border-image: linear-gradient(90deg, var(--accent), var(--accent-dark)) 1;
         }
         .log-controls label {
             display: inline-flex;
@@ -690,7 +700,7 @@
         }
         .diary-entry.archived {
             opacity: 0.7;
-            background: rgba(255, 107, 214, 0.05);
+            background: rgba(var(--accent-r,255), var(--accent-g,107), var(--accent-b,214), 0.05);
         }
         .settings-grid {
             display: flex;
@@ -772,7 +782,7 @@
             justify-content: center;
             padding: 0.55rem 1.1rem;
             border-radius: 999px;
-            border: 1px solid rgba(255, 107, 214, 0.4);
+            border: 1px solid rgba(var(--accent-r,255), var(--accent-g,107), var(--accent-b,214), 0.4);
             background: var(--accent-soft);
             color: inherit;
             cursor: pointer;
@@ -780,7 +790,7 @@
             transition: background 0.2s ease, transform 0.15s ease;
         }
         .pill:hover {
-            background: rgba(255, 107, 214, 0.24);
+            background: rgba(var(--accent-r,255), var(--accent-g,107), var(--accent-b,214), 0.24);
             transform: translateY(-1px);
         }
         .pill.secondary {
@@ -813,8 +823,8 @@
             font-size: 0.9rem;
         }
         .vrm-list li.active {
-            border-color: rgba(255, 107, 214, 0.65);
-            background: rgba(255, 107, 214, 0.16);
+            border-color: rgba(var(--accent-r,114), var(--accent-g,137), var(--accent-b,218), 0.65);
+            background: rgba(var(--accent-r,114), var(--accent-g,137), var(--accent-b,218), 0.16);
         }
         .vrm-list li .name {
             flex: 1;
@@ -886,8 +896,8 @@
             transition: border 0.2s ease, background 0.2s ease;
         }
         .links a:hover {
-            border-color: rgba(255, 107, 214, 0.6);
-            background: rgba(255, 107, 214, 0.16);
+            border-color: rgba(var(--accent-r,114), var(--accent-g,137), var(--accent-b,218), 0.6);
+            background: rgba(var(--accent-r,114), var(--accent-g,137), var(--accent-b,218), 0.16);
         }
         dl {
             margin: 0;
@@ -1305,8 +1315,8 @@
                         updateDebug(`panel[${idx}]=${p.dataset.tab||p.id||'?'} class=${Array.from(p.classList).join('|')} display=${display} vis=${vis} size=${w}x${h}`);
                         // lightly highlight panels so the user can see their bounds
                         try {
-                            p.style.outline = '2px dashed rgba(255,107,214,0.35)';
-                            p.style.background = p.style.background || 'rgba(255,107,214,0.02)';
+                            p.style.outline = `2px dashed rgba(${getComputedStyle(document.documentElement).getPropertyValue('--accent-r') || 255}, ${getComputedStyle(document.documentElement).getPropertyValue('--accent-g') || 107}, ${getComputedStyle(document.documentElement).getPropertyValue('--accent-b') || 214}, 0.35)`;
+                            p.style.background = p.style.background || `rgba(${getComputedStyle(document.documentElement).getPropertyValue('--accent-r') || 255}, ${getComputedStyle(document.documentElement).getPropertyValue('--accent-g') || 107}, ${getComputedStyle(document.documentElement).getPropertyValue('--accent-b') || 214}, 0.02)`;
                         } catch (e) {}
                     });
                 }

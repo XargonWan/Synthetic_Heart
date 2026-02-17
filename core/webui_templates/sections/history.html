@@ -126,7 +126,8 @@
         padding: 0.5rem;
         background: rgba(12, 12, 20, 0.3);
         border-radius: 8px;
-        border: 1px solid var(--border);
+        border: 1px solid transparent;
+        border-image: linear-gradient(90deg, var(--accent), var(--accent-dark)) 1;
       }
 
       .sub-nav-btn {
@@ -194,7 +195,8 @@
         gap: 0.75rem;
         padding: 1rem;
         background: rgba(12, 12, 20, 0.2);
-        border-bottom: 1px solid var(--border);
+        border-bottom: 1px solid transparent;
+        border-image: linear-gradient(90deg, var(--accent), var(--accent-dark)) 1;
         flex-wrap: wrap;
       }
 
@@ -233,8 +235,17 @@
 
       /* Visual highlight when content is populated to aid debugging */
       .history-container.history-populated {
-        outline: 3px solid rgba(255, 215, 0, 0.5);
+        position: relative;
         border-radius: 8px;
+      }
+      .history-container.history-populated::before {
+        content: "";
+        position: absolute;
+        left: 0; right: 0; top: 0;
+        height: 3px;
+        background: linear-gradient(90deg, var(--accent), var(--accent-dark));
+        border-radius: 4px;
+        pointer-events: none;
       }
 
       .loading-state {
@@ -250,7 +261,9 @@
         width: 40px;
         height: 40px;
         border: 3px solid var(--border);
-        border-top: 3px solid var(--accent);
+        /* use gradient border instead of flat accent color */
+        border-top: 3px solid transparent;
+        border-image: linear-gradient(90deg, var(--accent), var(--accent-dark)) 1;
         border-radius: 50%;
         animation: spin 1s linear infinite;
         margin-bottom: 1rem;
@@ -348,7 +361,9 @@
 
       .grillo-prompt {
         background: rgba(12, 12, 20, 0.4);
-        border-left: 3px solid var(--accent);
+        /* use gradient border for accent-left */
+        border-left: 3px solid transparent;
+        border-image: linear-gradient(180deg, var(--accent), var(--accent-dark)) 1;
         padding: 0.75rem;
         margin-top: 0.5rem;
         border-radius: 4px;
@@ -574,13 +589,15 @@
         align-items: center;
         gap: 0.5rem;
         padding: 1rem;
-        border-top: 1px solid var(--border);
+        border-top: 1px solid transparent;
+        border-image: linear-gradient(90deg, var(--accent), var(--accent-dark)) 1;
       }
 
       .pagination-btn {
         padding: 0.5rem 1rem;
         border-radius: 6px;
-        border: 1px solid var(--border);
+        border: 1px solid transparent;
+        border-image: linear-gradient(90deg, var(--accent), var(--accent-dark)) 1;
         background: rgba(12, 12, 20, 0.58);
         color: var(--text);
         cursor: pointer;
