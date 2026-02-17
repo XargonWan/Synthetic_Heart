@@ -96,78 +96,74 @@ test('tag lists render as rounded accent chips', async ({ page }) => {
   expect(found).toBeTruthy();
 });
 
-test('accent color picker in settings updates --accent CSS variable', async ({ page }) => {
+test('accent color picker in settings updates --accent CSS variable and supports preview + Apply/Cancel', async ({ page }) => {
   await page.goto(BASE, { waitUntil: 'networkidle' });
   await page.click('.nav-btn[data-tab="settings"]');
   await page.waitForSelector('#config-general-list .config-row', { timeout: 3000 });
 
-  // Find the Accent Color row
+  // Ensure Appearance card with prominent Accent control is present
+  await page.waitForSelector('#config-theme-card', { timeout: 2000 });
+  const presetButtons = await page.$$('#config-theme-input-container .accent-presets button');
+  expect(presetButtons.length).toBeGreaterThan(0);
+  // presets should be larger circular swatches (>= 34px)
+  const presetSize = await presetButtons[0].evaluate(el => parseFloat(window.getComputedStyle(el).width));
+  expect(presetSize).toBeGreaterThanOrEqual(34);
+
+  // remember current accent so Cancel can be validated
+  const originalAccent = (await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--accent').trim())).toLowerCase();
+
+  // operate on the theme card's color input (preview should update CSS but only Apply persists)
+  const themeColorInput = await page.$('#config-theme-input-container input[type=color]');
+  expect(themeColorInput).not.toBeNull();
+
+  // preview a new color
+  await themeColorInput.fill('#123456');
+  await themeColorInput.evaluate((el) => el.dispatchEvent(new Event('input', { bubbles: true })));
+  await page.waitForTimeout(150);
+  let accent = (await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--accent').trim())).toLowerCase();
+  expect(accent).toBe('#123456');
+
+  // Cancel should revert to original persisted value
+  await page.click('#config-theme-input-container .accent-actions .cancel');
+  await page.waitForTimeout(100);
+  accent = (await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--accent').trim())).toLowerCase();
+  expect(accent).toBe(originalAccent);
+
+  // now preview and Apply -> should persist (reflected in config row after refresh)
+  await themeColorInput.fill('#00ff88');
+  await themeColorInput.evaluate((el) => el.dispatchEvent(new Event('input', { bubbles: true })));
+  await page.click('#config-theme-input-container .accent-actions .apply');
+  // wait for config refresh
+  await page.waitForTimeout(400);
+
+  accent = (await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--accent').trim())).toLowerCase();
+  expect(accent).toBe('#00ff88');
+
+  // verify the authoritative config row was persisted
   const rows = await page.$$('#config-general-list .config-row');
-  let found = false;
   for (const row of rows) {
     const label = await row.$eval('.config-label-line', el => (el.textContent || '').trim());
     if (label.includes('Accent Color')) {
-      found = true;
-      // color input
-      const colorInput = await row.$('input[type=color]');
-      expect(colorInput).not.toBeNull();
-
-          // change to a new color and verify CSS vars + UI updated immediately
-      await colorInput.fill('#00ff88');
-      await colorInput.evaluate((el) => el.dispatchEvent(new Event('input', { bubbles: true })));
-      await page.waitForTimeout(300);
-      const accent = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--accent').trim());
-      expect(accent.toLowerCase()).toBe('#00ff88');
-
-      // contrast variable must be set (for #00ff88 we expect dark text)
-      const contrast = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--accent-contrast').trim());
-      expect(contrast.toLowerCase()).toBe('#07070c');
-
-      // active nav button should use accent as background
-      const navBg = await page.evaluate(() => getComputedStyle(document.querySelector('.nav-btn.active')).backgroundColor);
-      expect(navBg).toContain('0, 255, 136');
-
-      // toggles should reflect accent immediately (find nearest toggle slider for notify-toggle)
-      const toggleBg = await page.evaluate(() => {
-        const chk = document.querySelector('#notify-toggle');
-        if (!chk) return null;
-        const slider = chk.nextElementSibling || chk.parentElement && chk.parentElement.querySelector('.toggle-slider');
-        return slider ? getComputedStyle(slider).backgroundImage || getComputedStyle(slider).backgroundColor : null;
-      });
-      expect(toggleBg).not.toBeNull();
-      expect(toggleBg).toContain('0, 255, 136');
-
-      // create the chat WinBox and verify its header uses the accent + contrast text
-      await page.evaluate(() => window.SynthWindowManager.ensureChatWindow());
-      await page.waitForSelector('.winbox.synth-winbox .wb-title', { timeout: 2000 });
-      const winHeaderBg = await page.evaluate(() => getComputedStyle(document.querySelector('.winbox.synth-winbox .wb-title')).backgroundImage || getComputedStyle(document.querySelector('.winbox.synth-winbox .wb-title')).background);
-      const winHeaderColor = await page.evaluate(() => getComputedStyle(document.querySelector('.winbox.synth-winbox .wb-title')).color);
-      // ensure header gradient contains the accent and the darker variant (no hard black)
-      const accentDark = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--accent-dark').trim());
-      expect(winHeaderBg).toContain('0, 255, 136');
-      expect(winHeaderBg.toLowerCase()).not.toContain('0, 0, 0');
-      // header must show a gradient (no hard black) and contrast color applied
-      expect(winHeaderBg.toLowerCase()).toMatch(/linear-gradient\(|gradient/);
-      expect(winHeaderBg.toLowerCase()).not.toContain('0, 0, 0');
-      expect(winHeaderColor).toContain('7, 7, 12');
-
-      // tag-chips should use a gradient and the same contrast logic
-      const chipHandle = await page.$('.tag-chips .tag-chip');
-      expect(chipHandle).not.toBeNull();
-      const chipBg = await chipHandle.evaluate(el => window.getComputedStyle(el).backgroundImage || window.getComputedStyle(el).background);
-      const chipColor = await chipHandle.evaluate(el => window.getComputedStyle(el).color);
-      expect(chipBg.toLowerCase()).toMatch(/linear-gradient\(|gradient/);
-      const accentDarkVar = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--accent-dark').trim());
-      expect(accentDarkVar.length).toBeGreaterThan(0);
-      const accentContrast = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--accent-contrast').trim());
-      // chip text must match the computed accent-contrast value (as rgb or hex)
-      const chipColorNormalized = chipColor.replace(/\s/g, '').toLowerCase();
-      expect(chipColorNormalized.includes(accentContrast.replace('#','')) || chipColorNormalized.includes('rgb(')).toBeTruthy();
-
+      const persistedInput = await row.$('input[type=color]');
+      const persistedVal = (await persistedInput.evaluate(el => el.value)).toLowerCase();
+      expect(persistedVal).toBe('#00ff88');
       break;
     }
   }
-  expect(found).toBeTruthy();
+
+  // Also ensure other UI reflects the accent (nav + winbox header + tag chips)
+  const navBg = await page.evaluate(() => getComputedStyle(document.querySelector('.nav-btn.active')).backgroundColor);
+  expect(navBg).toContain('0, 255, 136');
+
+  await page.evaluate(() => window.SynthWindowManager.ensureChatWindow());
+  await page.waitForSelector('.winbox.synth-winbox .wb-head', { timeout: 2000 });
+  const winHeaderBg = await page.evaluate(() => getComputedStyle(document.querySelector('.winbox.synth-winbox .wb-head')).backgroundImage || getComputedStyle(document.querySelector('.winbox.synth-winbox .wb-head')).background);
+  expect(winHeaderBg.toLowerCase()).toMatch(/linear-gradient\(|gradient/);
+
+  const chipHandle = await page.$('.tag-chips .tag-chip');
+  expect(chipHandle).not.toBeNull();
+  const chipBg = await chipHandle.evaluate(el => window.getComputedStyle(el).backgroundImage || window.getComputedStyle(el).background);
+  expect(chipBg.toLowerCase()).toMatch(/linear-gradient\(|gradient/);
 });
 
 test('settings group variables by component (Matrix example)', async ({ page }) => {

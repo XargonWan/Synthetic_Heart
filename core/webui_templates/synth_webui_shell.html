@@ -904,9 +904,15 @@
             border-radius: 6px;
         }
 
-        /* WinBox / floating windows: use accent gradient for headers */
-        .winbox .wb-head, .winbox .wb-title {
+        /* WinBox / floating windows: use accent gradient for the header container only.
+           NOTE: avoid applying the background to the title element itself to prevent
+           a thin duplicated-gradient artifact beneath the title text. */
+        .winbox .wb-head {
             background: linear-gradient(135deg, var(--accent), var(--accent-dark, rgba(114,137,218,0.25)));
+            color: var(--accent-contrast);
+        }
+        .winbox .wb-title {
+            background: transparent; /* title should inherit header background only */
             color: var(--accent-contrast);
         }
 

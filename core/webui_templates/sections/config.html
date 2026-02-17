@@ -23,6 +23,19 @@
                     </div>
                 </div>
 
+                <!-- Theme / Accent preview (rendered from JS if WEBUI_ACCENT_COLOR is exposed) -->
+                <article class="card config-section" id="config-theme-card" style="display:none;">
+                    <h3>Appearance</h3>
+                    <div class="config-list" style="gap:1rem;">
+                        <div class="config-row">
+                            <div class="config-label-line"><span>Accent Color</span></div>
+                            <div class="config-input" id="config-theme-input-container">
+                                <!-- JS will render a larger preset swatches + color picker + Apply/Cancel here -->
+                            </div>
+                        </div>
+                    </div>
+                </article>
+
                 <div class="config-sections-container" id="config-sections-container">
                     <!-- Plugin/component sections will be loaded here -->
                 </div>
@@ -88,7 +101,7 @@
             }
             
             .accordion-header:hover {
-                background: rgba(255, 107, 214, 0.08);
+                background: rgba(var(--accent-r,255), var(--accent-g,107), var(--accent-b,214), 0.08);
             }
             
             /* decorative caret removed (was .accordion-toggle) */
@@ -173,6 +186,19 @@
                 flex: 1;
                 min-width: 0;
             }
+
+            /* Theme card: larger swatches and preview controls */
+            #config-theme-card { padding: 1rem; border-radius: 12px; border: 1px solid var(--border); background: linear-gradient(180deg, rgba(255,255,255,0.01), transparent); }
+            #config-theme-input-container { display:flex; align-items:center; gap:1rem; }
+            #config-theme-input-container .accent-presets { display:flex; gap:0.75rem; align-items:center; }
+            #config-theme-input-container .accent-presets button { width:34px; height:34px; border-radius:50%; border:1px solid rgba(255,255,255,0.06); cursor:pointer; }
+            #config-theme-input-container input[type=color] { width:48px; height:48px; padding:0; border-radius:8px; border:1px solid var(--border); background:transparent; }
+            #config-theme-input-container .accent-actions { display:flex; gap:0.5rem; margin-left:6px; }
+            #config-theme-input-container .accent-actions button { padding:0.45rem 0.65rem; border-radius:8px; border:1px solid transparent; cursor:pointer; }
+            #config-theme-input-container .accent-actions .apply { background:var(--accent); color:var(--accent-contrast); }
+            #config-theme-input-container .accent-actions .cancel { background:transparent; color:var(--text); border:1px solid rgba(255,255,255,0.06); }
+            #config-theme-input-container .accent-preview { width:68px; height:40px; border-radius:8px; border:1px solid transparent; box-shadow: 0 6px 18px rgba(0,0,0,0.45); background: linear-gradient(90deg, var(--accent), var(--accent-dark)); }
+
             
             .config-label-text {
                 font-weight: 500;
