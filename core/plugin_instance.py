@@ -475,6 +475,16 @@ async def handle_incoming_message(
                     f"[plugin_instance] Image not processed (access denied or error) for user {user_id}"
                 )
 
+        # Unified multimodal extraction (extract BEFORE prompt building so
+        # attachments flow through the pipeline with full context)
+        attachments = await _extract_multimodal_attachments(
+            bot, message, interface_name
+        )
+        if attachments:
+            log_info(
+                f"[plugin_instance] Message contains {len(attachments)} attachments from user {user_id}"
+            )
+
         if isinstance(context_memory_or_prompt, str):
             try:
                 import json
@@ -519,6 +529,7 @@ async def handle_incoming_message(
                     {},
                     interface_name,
                     image_data=processed_image_data,
+                    attachments=attachments,
                     max_chars=max_chars,
                 )
         else:
@@ -570,24 +581,15 @@ async def handle_incoming_message(
                 context_memory_or_prompt,
                 interface_name,
                 image_data=processed_image_data,
+                attachments=attachments,
                 max_chars=max_chars,
             )
 
-    # Extract multimodal attachments (images, audio, documents) for LLM engines
-    # that support multimodal input (e.g., gemini_api)
-    multimodal_attachments = await _extract_multimodal_attachments(
-        bot, message, interface_name
-    )
-    if multimodal_attachments:
+    # Multimodal attachments already extracted and passed to build_json_prompt above
+    if attachments:
         log_info(
-            f"[plugin_instance] Extracted {len(multimodal_attachments)} multimodal attachment(s)"
+            f"[plugin_instance] Processing {len(attachments)} multimodal attachment(s)"
         )
-        # Add attachments to the prompt for LLM engines to consume
-        if isinstance(prompt, dict):
-            if "input" in prompt and isinstance(prompt["input"], dict):
-                prompt["input"]["attachments"] = multimodal_attachments
-            else:
-                prompt["attachments"] = multimodal_attachments
 
     prompt = sanitize_for_json(prompt)
     log_debug("🌐 JSON PROMPT built for the plugin:")

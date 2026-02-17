@@ -96,6 +96,7 @@ async def build_json_prompt(
     context_memory,
     interface_name: str | None = None,
     image_data: dict | None = None,
+    attachments: list[dict] | None = None,
     max_chars: int | None = None,
     history_scope: str | None = None,
 ) -> dict:
@@ -357,6 +358,13 @@ async def build_json_prompt(
         input_payload["image"] = image_data
         log_debug(
             f"[json_prompt] Including image data in prompt: {image_data.get('type', 'unknown')}"
+        )
+
+    # Add multimodal attachments if present
+    if attachments:
+        input_payload["attachments"] = attachments
+        log_debug(
+            f"[json_prompt] Including {len(attachments)} multimodal attachments in prompt"
         )
 
     reply = getattr(message, "reply_to_message", None)
