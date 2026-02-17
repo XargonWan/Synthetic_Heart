@@ -53,4 +53,3 @@ def test_profile_prohibits_canned_assistant_phrases():
     pm = persona_manager.PersonaManager(config={})
     pj, profile = _assemble_for_skin(pm, "Rekku")
     assert "canned" in profile.lower()
-

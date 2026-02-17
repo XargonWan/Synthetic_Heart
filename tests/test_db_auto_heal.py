@@ -1,5 +1,3 @@
-import os
-import asyncio
 import pytest
 
 import core.db as db_module
@@ -11,7 +9,9 @@ class FakeCursor:
 
     async def execute(self, query, *args, **kwargs):
         # allow session-setting queries used in get_conn() to succeed
-        if isinstance(query, str) and query.strip().upper().startswith("SET SESSION MAX_EXECUTION_TIME"):
+        if isinstance(query, str) and query.strip().upper().startswith(
+            "SET SESSION MAX_EXECUTION_TIME"
+        ):
             return None
 
         # Simulate schema error on first real query, then succeed on retry

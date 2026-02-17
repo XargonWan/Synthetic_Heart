@@ -169,7 +169,6 @@ class ManualAIPlugin(AIPluginBase):
 
         # /say support removed — no interactive trainer forwarding (previously forwarded trainer text to target chat)
 
-
         try:
             from core import config as _config
 

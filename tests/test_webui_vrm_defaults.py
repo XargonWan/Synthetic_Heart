@@ -43,4 +43,8 @@ def test_rei_used_when_no_user_vrms_and_no_marker(tmp_path, monkeypatch):
     ui = SynthWebUIInterface(autostart=False)
 
     # Assert: active_vrm resolves to Rei web path (not a temp file)
-    assert ui.active_vrm is None or str(ui.active_vrm).startswith("/skins/Rei") or "Rei" in str(ui.active_vrm)
+    assert (
+        ui.active_vrm is None
+        or str(ui.active_vrm).startswith("/skins/Rei")
+        or "Rei" in str(ui.active_vrm)
+    )

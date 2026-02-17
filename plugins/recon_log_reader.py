@@ -10,6 +10,33 @@ from core.transport_layer import extract_json_from_text
 
 display_name = "Recon Log Reader"
 
+# Expose UI config for the plugin
+try:
+    from core.variables_engine import register_exposed_var
+
+    register_exposed_var(
+        "RECON_LOG_READER_RECON_ENABLED",
+        label="Enable Recon Log Reader",
+        default=True,
+        value_type=bool,
+        ui_type="bool",
+        description="Enable the Recon Log Reader plugin (include log snippets in Recon).",
+        scope="agent",
+        component="agent",
+    )
+except Exception:
+    from core.config_manager import config_registry
+
+    config_registry.get_var(
+        "RECON_LOG_READER_RECON_ENABLED",
+        True,
+        value_type=bool,
+        label="Enable Recon Log Reader",
+        description="Enable the Recon Log Reader plugin (include log snippets in Recon).",
+        group="agent",
+        component="agent",
+    )
+
 LOG_DIR = os.getenv("SYNTH_LOG_DIR", "logs")
 ALLOWED_FILES = [
     "synth.log",

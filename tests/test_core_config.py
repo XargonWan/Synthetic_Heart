@@ -2,7 +2,6 @@ import sys
 import builtins
 
 
-
 def test_aiomysql_import_fails(monkeypatch):
     """Simula l'assenza di 'aiomysql' e verifica che l'import di core.config non fallisca."""
     # Force ImportError when trying to import aiomysql

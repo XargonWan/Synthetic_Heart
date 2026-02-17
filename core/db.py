@@ -484,9 +484,16 @@ async def get_conn() -> aiomysql.Connection:
                     """
                     import inspect as _inspect
                     import os as _os
-                    from core.logging_utils import log_info as _log_info, log_warning as _log_warning
+                    from core.logging_utils import (
+                        log_info as _log_info,
+                        log_warning as _log_warning,
+                    )
 
-                    AUTO_HEAL = _os.getenv("DB_AUTO_HEAL", "1") not in ("0", "false", "False")
+                    AUTO_HEAL = _os.getenv("DB_AUTO_HEAL", "1") not in (
+                        "0",
+                        "false",
+                        "False",
+                    )
 
                     async def _exec_wrapper(method, *a, **kw):
                         try:
@@ -503,11 +510,15 @@ async def get_conn() -> aiomysql.Connection:
                                 or "Unknown column" in msg
                             )
                             if AUTO_HEAL and is_schema_error:
-                                _log_warning(f"[db] Schema error detected during DB execute: {msg}. Attempting auto-heal.")
+                                _log_warning(
+                                    f"[db] Schema error detected during DB execute: {msg}. Attempting auto-heal."
+                                )
                                 try:
                                     await ensure_core_tables()
                                     await ensure_plugin_tables()
-                                    _log_info("[db] Auto-heal applied; retrying query once")
+                                    _log_info(
+                                        "[db] Auto-heal applied; retrying query once"
+                                    )
                                 except Exception as heal_err:
                                     _log_warning(f"[db] Auto-heal failed: {heal_err}")
                                     raise

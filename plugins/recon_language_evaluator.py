@@ -9,6 +9,33 @@ from core.transport_layer import extract_json_from_text
 
 display_name = "Recon Language Evaluator"
 
+# UI-exposed switch for enabling language evaluator recon contributions
+try:
+    from core.variables_engine import register_exposed_var
+
+    register_exposed_var(
+        "RECON_LANGUAGE_EVALUATOR_RECON_ENABLED",
+        label="Enable Recon Language Evaluator",
+        default=True,
+        value_type=bool,
+        ui_type="bool",
+        description="Enable the Recon Language Evaluator plugin (produce language hints for Recon).",
+        scope="agent",
+        component="agent",
+    )
+except Exception:
+    from core.config_manager import config_registry
+
+    config_registry.get_var(
+        "RECON_LANGUAGE_EVALUATOR_RECON_ENABLED",
+        True,
+        value_type=bool,
+        label="Enable Recon Language Evaluator",
+        description="Enable the Recon Language Evaluator plugin (produce language hints for Recon).",
+        group="agent",
+        component="agent",
+    )
+
 
 class ReconLanguageEvaluatorPlugin:
     display_name = display_name

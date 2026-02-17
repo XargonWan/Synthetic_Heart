@@ -652,7 +652,9 @@ class GeminiAPIPlugin(AIPluginBase):
         if not GEMINI_API_KEY:
             # Return a plain, user-readable string instead of a `system_message` action
             # which the message_chain treats as a blocked/unsupported action type.
-            log_warning("[gemini_api] GEMINI_API_KEY not configured; returning plain error string")
+            log_warning(
+                "[gemini_api] GEMINI_API_KEY not configured; returning plain error string"
+            )
             return "⚠️ Gemini API Key not configured. Please set GEMINI_API_KEY in settings or .env"
 
         try:
