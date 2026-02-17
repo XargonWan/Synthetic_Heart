@@ -1501,6 +1501,24 @@ try {
                         panel.setAttribute('aria-hidden', 'true');
                     }
                 });
+
+                // Ko‑fi: init when About tab becomes active; remove overlay when About is hidden
+                try {
+                    if (tab === 'about') {
+                        if (window.SynthWebUI && typeof window.SynthWebUI.initAboutTab === 'function') {
+                            window.SynthWebUI.initAboutTab();
+                        }
+                    } else {
+                        if (window.__kofi_widget_loaded) {
+                            try { if (window.kofiWidgetOverlay && typeof window.kofiWidgetOverlay.close === 'function') window.kofiWidgetOverlay.close(); } catch (e) { /* ignore */ }
+                            try { Array.from(document.querySelectorAll('[id*="kofi-widget-overlay"], .kofi-widget-overlay, .kofiimg, [id^="kofi-widget"]')).forEach(n => n.remove()); } catch (e) { /* ignore */ }
+                            try { const fallbackEl = document.querySelector('.kofi-button'); if (fallbackEl) fallbackEl.style.display = ''; } catch (e) { /* ignore */ }
+                            window.__kofi_widget_loaded = false;
+                            window.__kofi_widget_loading = false;
+                        }
+                    }
+                } catch (e) { /* ignore */ }
+
                 if (tab === 'home' && typeof window.resizeVRMRenderer === 'function') {
                     setTimeout(() => {
                         try { window.resizeVRMRenderer(); } catch (e) { /* ignore */ }
@@ -1963,6 +1981,71 @@ try {
                 } catch (e) { /* ignore */ }
 
                 window.__synth_about_initialized = true;
+
+                // --- Ko‑fi overlay: load only when About tab is initialized; fallback uses the existing
+                //     `kofi-button` anchor in the About template if the CDN/script isn't available.
+                (function loadKofiForAbout(){
+                    const USER = 'xargon';
+                    const fallbackEl = document.querySelector('.kofi-button');
+
+                    if (window.__kofi_widget_loading || window.__kofi_widget_loaded) return;
+                    window.__kofi_widget_loading = true;
+
+                    function showFallback() {
+                        if (fallbackEl) fallbackEl.style.display = '';
+                    }
+                    function hideFallback() {
+                        if (fallbackEl) fallbackEl.style.display = 'none';
+                    }
+                    function removeOverlayDom() {
+                        // Remove DOM nodes the Ko‑fi overlay creates (best-effort)
+                        try {
+                            const nodes = Array.from(document.querySelectorAll('[id*="kofi-widget-overlay"], .kofi-widget-overlay, .kofiimg, [id^="kofi-widget"]'));
+                            nodes.forEach(n => n.remove());
+                        } catch (e) { /* ignore */ }
+                        window.__kofi_widget_loaded = false;
+                        window.__kofi_widget_loading = false;
+                        showFallback();
+                    }
+
+
+                    // dynamic script loader for Ko‑fi overlay
+                    const s = document.createElement('script');
+                    s.src = 'https://storage.ko-fi.com/cdn/scripts/overlay-widget.js';
+                    s.async = true;
+                    s.onload = function() {
+                        try {
+                            if (window.kofiWidgetOverlay && typeof window.kofiWidgetOverlay.draw === 'function') {
+                                window.kofiWidgetOverlay.draw(USER, {
+                                    'type': 'floating-chat',
+                                    'floating-chat.donateButton.text': 'Support me',
+                                    'floating-chat.donateButton.background-color': '#00b9fe',
+                                    'floating-chat.donateButton.text-color': '#fff'
+                                });
+                                window.__kofi_widget_loaded = true;
+                                window.__kofi_widget_loading = false;
+                                // hide the fallback About button while the overlay is active
+                                hideFallback();
+                            } else {
+                                showFallback();
+                                window.__kofi_widget_loading = false;
+                            }
+                        } catch (e) {
+                            console.warn('[synth_webui] Ko‑fi overlay init failed', e);
+                            showFallback();
+                            window.__kofi_widget_loading = false;
+                        }
+                    };
+                    s.onerror = function() {
+                        console.warn('[synth_webui] Ko‑fi overlay script failed to load; showing fallback About button');
+                        showFallback();
+                        window.__kofi_widget_loading = false;
+                    };
+                    document.head.appendChild(s);
+
+                    // safety timeout -> show fallback if not loaded quickly
+                    setTimeout(function(){ if (!window.__kofi_widget_loaded) showFallback(); }, 2500);
+                })();
             }
 
             function formatUptime(seconds) {
