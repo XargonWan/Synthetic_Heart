@@ -32,6 +32,18 @@ DISPLAY_WIDTH, DISPLAY_HEIGHT
 - **Default**: 1280x720
 - **Recommendation**: Leave defaults for local dev; set to higher values if you need a larger remote desktop.
 
+SYNTH_X11_WAIT_SECONDS
+~~~~~~~~~~~~~~~~~~~~~~
+- **Purpose**: Number of seconds the container will wait for the X11 socket (`/tmp/.X11-unix/X1`) before continuing startup.
+- **Default**: 30
+- **Recommendation**: Leave at default for most setups. Lower to `0` for headless-only deployments or increase if your host X server takes longer to appear.
+
+SYNTH_CREATE_X11_PLACEHOLDER
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+- **Purpose**: When set to `1` (default) the container will create a placeholder file at `/tmp/.X11-unix/X1` after the timeout so startup can continue even if the host X socket isn't mounted. Set to `0` to make the container proceed without creating the placeholder (fail-fast behavior).
+- **Default**: `1`
+- **Recommendation**: Keep `1` to avoid the container blocking in environments where a host X socket isn't present; set to `0` if you require the container to fail early when X is missing.
+
 SYNTH_WEBUI_HTTP_PORT, SYNTH_WEBUI_HTTPS_PORT
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 - **Purpose**: Ports used by the Synthetic Heart Web UI (HTTP/HTTPS).
@@ -61,6 +73,12 @@ DB_HOST
 - **Purpose**: Hostname of the MariaDB service used by the application.
 - **Default**: `synth-db` (compose fallback)
 - **Recommendation**: For multi-container setups keep `synth-db` or set this to an external host if you run the DB elsewhere.
+
+DB_AUTO_HEAL
+~~~~~~~~~~~~
+- **Purpose**: When enabled, the DB layer will attempt an automatic, idempotent "schema heal" if a query fails with a missing table/column error (e.g. error 1146 / 1054). The heal runs core/plugin table-ensurers and retries the failed statement once.
+- **Default**: `1` (enabled)
+- **Recommendation**: Leave enabled for development and restore/upgrade resilience; set to `0` to disable automatic repairs in locked-down production environments where implicit schema changes are undesired.
 
 CLI_SERVER_PORT
 ~~~~~~~~~~~~~~~

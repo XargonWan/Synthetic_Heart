@@ -5,11 +5,28 @@ set -e
 mkdir -p /config/.config/
 sudo chmod a+rwx -R /config
 
-echo "[S6 synth] Attendo /tmp/.X11-unix/X1..."
-while [ ! -e /tmp/.X11-unix/X1 ]; do
-    sleep 2
-    echo "[S6 synth] Still waiting for /tmp/.X11-unix/X1..."
+echo "[S6 synth] Waiting for /tmp/.X11-unix/X1 (up to ${SYNTH_X11_WAIT_SECONDS:-30}s)..."
+# Configurable wait with a safe default; if the socket doesn't appear we'll
+# either create a harmless placeholder file (default) or proceed without X11.
+WAIT_SECONDS=${SYNTH_X11_WAIT_SECONDS:-30}
+SLEEP_INTERVAL=2
+ELAPSED=0
+while [ ! -e /tmp/.X11-unix/X1 ] && [ "$ELAPSED" -lt "$WAIT_SECONDS" ]; do
+    sleep $SLEEP_INTERVAL
+    ELAPSED=$((ELAPSED + SLEEP_INTERVAL))
+    echo "[S6 synth] Still waiting for /tmp/.X11-unix/X1... (${ELAPSED}/${WAIT_SECONDS}s)"
 done
+
+if [ ! -e /tmp/.X11-unix/X1 ]; then
+    echo "[S6 synth] Timeout waiting for /tmp/.X11-unix/X1 (${WAIT_SECONDS}s)."
+    if [ "${SYNTH_CREATE_X11_PLACEHOLDER:-1}" = "1" ]; then
+        echo "[S6 synth] Creating placeholder /tmp/.X11-unix/X1 to allow startup (set SYNTH_CREATE_X11_PLACEHOLDER=0 to disable)."
+        mkdir -p /tmp/.X11-unix
+        touch /tmp/.X11-unix/X1
+    else
+        echo "[S6 synth] Proceeding without X11 socket (GUI/selenium may fail)."
+    fi
+fi
 
 # Set DISPLAY environment variable for X11 applications (including Chromium/Selenium)
 export DISPLAY=:1

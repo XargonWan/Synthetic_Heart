@@ -62,6 +62,7 @@ export function createArchiveModal() {
                 <div class="archive-title">Archives</div>
                 <div class="archive-controls">
                     <button id="archive-refresh" class="pill secondary">Refresh</button>
+                    <button id="archive-close" class="pill ghost" title="Close" style="margin-left:6px;font-weight:700;">✕</button>
                 </div>
             </div>
             <div class="archive-list" id="archive-list" style="flex:1 1 auto;overflow:auto;padding:12px;">
@@ -114,7 +115,8 @@ export function createArchiveModal() {
                     mount: panel,
                     dockLabel: 'Archives',
                     dockClass: 'archive-toggle-btn',
-                    className: 'synth-winbox no-close'
+                    // allow close button for the Archives window (no-full keeps fullscreen control hidden)
+                    className: 'synth-winbox no-full'
                 };
                 opts.width = 720;
                 opts.height = 520;
@@ -172,6 +174,7 @@ export function createArchiveModal() {
             const refreshBtn = panel.querySelector('#archive-refresh');
             const editBtn = panel.querySelector('#archive-edit');
             const deleteBtn = panel.querySelector('#archive-delete-btn');
+            const closeBtn = panel.querySelector('#archive-close');
 
             const updateEditState = () => {
                 try {
@@ -320,6 +323,21 @@ export function createArchiveModal() {
                     await load();
                 } catch (e) { /* ignore */ }
             });
+
+            // Close/hide handler (works for both WinBox and legacy panel)
+            if (closeBtn) {
+                closeBtn.addEventListener('click', () => {
+                    try {
+                        if (archiveWinbox && typeof archiveWinbox.close === 'function') {
+                            archiveWinbox.close();
+                        } else if (panel && panel.style) {
+                            panel.style.display = 'none';
+                        }
+                        try { window.__archive_modal_instance = null; } catch (e) {}
+                        try { window.__archive_modal_winbox = null; } catch (e) {}
+                    } catch (e) { /* ignore */ }
+                });
+            }
 
             // Restore selected archive(s)
             const restoreBtn = panel.querySelector('#archive-restore-btn');
