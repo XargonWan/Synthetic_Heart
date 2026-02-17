@@ -637,7 +637,10 @@ class GeminiAPIPlugin(AIPluginBase):
             str: The LLM response text
         """
         if not GEMINI_API_KEY:
-            return '{"actions": [{"type": "system_message", "payload": {"text": "⚠️ Gemini API Key not configured. Please set GEMINI_API_KEY in settings or .env"}}]}'
+            # Return a plain, user-readable string instead of a `system_message` action
+            # which the message_chain treats as a blocked/unsupported action type.
+            log_warning("[gemini_api] GEMINI_API_KEY not configured; returning plain error string")
+            return "⚠️ Gemini API Key not configured. Please set GEMINI_API_KEY in settings or .env"
 
         try:
             # Handle different prompt formats

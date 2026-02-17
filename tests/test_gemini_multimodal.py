@@ -219,6 +219,30 @@ class TestGeminiMultimodal:
             redacted["input"]["attachments"][1]["base64"] == "<redacted: 10000 chars>"
         )
 
+
+async def test_generate_response_no_api_key(monkeypatch):
+    """When GEMINI_API_KEY is not set, generate_response must return a plain string (no system_message JSON)."""
+    import json
+
+    from llm_engines import gemini_api
+
+    # Force module-level GEMINI_API_KEY to falsy
+    monkeypatch.setattr(gemini_api, "GEMINI_API_KEY", None)
+
+    plugin = gemini_api.GeminiAPIPlugin()
+
+    resp = await plugin.generate_response("hello")
+
+    assert isinstance(resp, str)
+    assert "Gemini API Key not configured" in resp
+    # should NOT be a JSON object containing a system_message/actions payload
+    assert "system_message" not in resp
+    try:
+        parsed = json.loads(resp)
+    except Exception:
+        parsed = None
+    assert not (isinstance(parsed, dict) and "actions" in parsed)
+
     def test_copy_and_redact_data_nested(self):
         """Test that nested attachment data is properly redacted."""
         from llm_engines.gemini_api import GeminiAPIPlugin
