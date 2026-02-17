@@ -11,6 +11,24 @@ API compatibility:
   populate known variables (same behavior as the previous pair of files).
 """
 
+# Supported ui_type values (how the WebUI renders them):
+#
+# - `string`  → single-line text input
+# - `password` → password input (masked)
+# - `number`  → numeric input
+# - `bool` / `boolean` → toggle-switch (checkbox rendered as slider)
+# - `select`  → dropdown/select list
+# - `combobox` → free-text input with suggestions (HTML `datalist`)
+# - `textarea` → multi-line text area
+# - `json`    → textarea prefilled with JSON (WebUI treats `value_type==\'json\'` as JSON)
+# - `tags`    → tag-list editor (array persisted as JSON)
+# - `tag-combobox` → tag-list with suggestion support (uses `options`)
+# - `file`    → file upload control
+#
+# When registering exposed variables prefer setting `value_type` to a native
+# Python type (e.g. `int`, `bool`, or the special string `'json'`) so the API
+# and WebUI can properly serialize/deserialize values.
+
 from typing import Any, Callable, Dict, Optional, Iterable
 import re
 
@@ -271,7 +289,7 @@ def register_all():
         default=True,
         value_type=bool,
         ui_type="bool",
-        description="Activate bot when synth's aliases are mentioned in messages",
+        description="Activate bot when synth's aliases are mentioned in messages.",
         scope="synth",
         tags=["persona"],
     )
@@ -282,7 +300,7 @@ def register_all():
         default=True,
         value_type=bool,
         ui_type="bool",
-        description="Activate bot when synth's interests are mentioned in messages",
+        description="Activate bot when synth's interests are mentioned in messages.",
         scope="synth",
         tags=["persona"],
     )
@@ -293,7 +311,7 @@ def register_all():
         default=False,
         value_type=bool,
         ui_type="bool",
-        description="Activate bot when synth's likes are mentioned in messages",
+        description="Activate bot when synth's likes are mentioned in messages.",
         scope="synth",
         tags=["persona"],
     )
@@ -304,7 +322,7 @@ def register_all():
         default=False,
         value_type=bool,
         ui_type="bool",
-        description="Activate bot when synth's dislikes are mentioned in messages",
+        description="Activate bot when synth's dislikes are mentioned in messages.",
         scope="synth",
         tags=["persona"],
     )
@@ -315,7 +333,7 @@ def register_all():
         default=SYNTH_BASE_PROFILE_TEMPLATE.format(name="SyntH"),
         value_type=str,
         ui_type="textarea",
-        description="Core personality description of the current synth",
+        description="Core personality description of the current synth.",
         scope="synth",
         component="persona",
         tags=["persona"],
@@ -344,7 +362,7 @@ def register_all():
         default=["SyntH", "Synthetic Heart"],
         value_type="json",
         ui_type="tags",
-        description="Alternative names the synth responds to",
+        description="Alternative names the synth responds to.",
         scope="synth",
         component="persona",
         tags=["persona"],
@@ -356,7 +374,7 @@ def register_all():
         default=[],
         value_type="json",
         ui_type="tags",
-        description="List of the synth's likes (used by triggers and persona context)",
+        description="List of the synth's likes (used by triggers and persona context).",
         scope="synth",
         component="persona",
         tags=["persona"],
@@ -368,7 +386,7 @@ def register_all():
         default=[],
         value_type="json",
         ui_type="tags",
-        description="List of the synth's dislikes (used by triggers and persona context)",
+        description="List of the synth's dislikes (used by triggers and persona context).",
         scope="synth",
         component="persona",
         tags=["persona"],
@@ -380,7 +398,7 @@ def register_all():
         default=["SyntH", "Synthetic Heart"],
         value_type="json",
         ui_type="tags",
-        description="Canonical alias list (base aliases + current name + additional aliases)",
+        description="Canonical alias list (base aliases + current name + additional aliases).",
         scope="synth",
         component="persona",
         tags=["persona"],
@@ -392,7 +410,7 @@ def register_all():
         default="idle",
         value_type=str,
         ui_type="string",
-        description="Current animation being played (idle, thinking, talking, etc)",
+        description="Current animation being played (idle, thinking, talking, etc).",
         scope="synth",
         component="animation",
         readonly=True,

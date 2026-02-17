@@ -68,3 +68,30 @@ test('editing a config entry and pressing Enter shows saved toast', async ({ pag
   const txt = await page.innerText('#synth-toast-container > div');
   expect(txt.toLowerCase()).toContain('saved');
 });
+
+test('tag lists render as rounded accent chips', async ({ page }) => {
+  await page.goto(BASE, { waitUntil: 'networkidle' });
+  await page.click('.nav-btn[data-tab="settings"]');
+  await page.waitForSelector('#config-general-list .config-row .config-input', { timeout: 3000 });
+
+  // Find the "Synth Aliases" row and assert chip styling
+  const rows = await page.$$('#config-general-list .config-row');
+  let found = false;
+  for (const row of rows) {
+    const label = await row.$eval('.config-label-line', el => (el.textContent || '').trim());
+    if (label.includes('Synth Aliases')) {
+      found = true;
+      const chipHandle = await row.$('.tag-chips .tag-chip');
+      expect(chipHandle).not.toBeNull();
+
+      const radius = await chipHandle.evaluate(el => window.getComputedStyle(el).borderRadius);
+      const bg = await chipHandle.evaluate(el => window.getComputedStyle(el).backgroundColor);
+
+      // Expect a pill-like radius and an accent-derived background
+      expect(parseFloat(radius)).toBeGreaterThan(8);
+      expect(bg).toMatch(/rgba?\(/);
+      break;
+    }
+  }
+  expect(found).toBeTruthy();
+});

@@ -294,7 +294,7 @@ SYNTH_ALIASES_TRIGGER = config_registry.get_var(
     True,
     value_type="bool",
     label="Activate on Synth's Aliases",
-    description="Activate bot when synth's aliases are mentioned in messages",
+    description="Activate bot when synth's aliases are mentioned in messages.",
     group="synth",
     component="core",
 )
@@ -304,7 +304,7 @@ SYNTH_INTERESTS_TRIGGER = config_registry.get_var(
     True,
     value_type="bool",
     label="Activate on Synth's Interests",
-    description="Activate bot when synth's interests are mentioned in messages",
+    description="Activate bot when synth's interests are mentioned in messages.",
     group="synth",
     component="core",
 )
@@ -314,7 +314,7 @@ SYNTH_LIKES_TRIGGER = config_registry.get_var(
     False,
     value_type="bool",
     label="Activate on Synth's Likes",
-    description="Activate bot when synth's likes are mentioned in messages",
+    description="Activate bot when synth's likes are mentioned in messages.",
     group="synth",
     component="core",
 )
@@ -324,7 +324,7 @@ SYNTH_DISLIKES_TRIGGER = config_registry.get_var(
     False,
     value_type="bool",
     label="Activate on Synth's Dislikes",
-    description="Activate bot when synth's dislikes are mentioned in messages",
+    description="Activate bot when synth's dislikes are mentioned in messages.",
     group="synth",
     component="persona",
 )
@@ -333,7 +333,7 @@ SYNTH_PROFILE = config_registry.get_var(
     "SYNTH_PROFILE",
     SYNTH_BASE_PROFILE_TEMPLATE.format(name="SyntH"),
     label="Synth Profile",
-    description="Core personality description of the current synth",
+    description="Core personality description of the current synth.",
     group="synth",
     component="persona",
 )
@@ -445,7 +445,7 @@ SYNTH_ALIASES = config_registry.get_var(
     "SYNTH_ALIASES",
     ["SyntH", "Synthetic Heart"],
     label="Synth Aliases",
-    description="Alternative names the synth responds to",
+    description="Alternative names the synth responds to.",
     group="synth",
     component="persona",
     value_type="json",

@@ -1090,12 +1090,123 @@ try {
                             fileWrap.appendChild(uploadBtn);
 
                             inputEl = fileWrap;
-                        } else if (item.ui_type === 'textarea' || item.value_type === 'json') {
+                        } else if (item.ui_type === 'textarea' || (item.value_type === 'json' && item.ui_type !== 'tags' && item.ui_type !== 'tag-combobox')) {
                             const textarea = document.createElement('textarea');
                             textarea.rows = 3;
                             textarea.value = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
                             textarea.disabled = !isEditable;
                             inputEl = textarea;
+
+                        // --- Combobox: free-text input with datalist suggestions ---
+                        } else if (item.ui_type === 'combobox') {
+                            const input = document.createElement('input');
+                            input.type = 'text';
+                            input.value = typeof value === 'string' ? value : '';
+                            input.disabled = !isEditable;
+                            if (Array.isArray(item.options) && item.options.length) {
+                                const dlId = `datalist-${item.key}`;
+                                const dl = document.createElement('datalist');
+                                dl.id = dlId;
+                                item.options.forEach((opt) => {
+                                    const o = document.createElement('option');
+                                    o.value = opt;
+                                    dl.appendChild(o);
+                                });
+                                // Ensure unique id by attaching to document.body
+                                document.body.appendChild(dl);
+                                input.setAttribute('list', dlId);
+                            }
+                            inputEl = input;
+
+                        // --- Tags / tag-combobox: array editor with add/remove chips ---
+                        } else if (item.ui_type === 'tags' || item.ui_type === 'tag-combobox') {
+                            const wrap = document.createElement('div');
+                            wrap.className = 'tag-list-input';
+
+                            // Normalize incoming value to an array
+                            let tags = [];
+                            try {
+                                if (Array.isArray(value)) tags = value.slice();
+                                else if (typeof value === 'string' && value.trim() !== '') {
+                                    try { tags = JSON.parse(value); } catch (e) { tags = value.split(',').map(s => s.trim()).filter(Boolean); }
+                                }
+                            } catch (e) { tags = []; }
+
+                            const chips = document.createElement('div');
+                            chips.className = 'tag-chips';
+
+                            const input = document.createElement('input');
+                            input.type = 'text';
+                            input.className = 'tag-input-field';
+                            input.placeholder = 'Add tag and press Enter';
+                            input.disabled = !isEditable;
+
+                            // Optionally provide suggestions for tag-combobox
+                            if (item.ui_type === 'tag-combobox' && Array.isArray(item.options) && item.options.length) {
+                                const dlId = `tags-datalist-${item.key}`;
+                                const dl = document.createElement('datalist');
+                                dl.id = dlId;
+                                item.options.forEach((opt) => {
+                                    const o = document.createElement('option');
+                                    o.value = opt;
+                                    dl.appendChild(o);
+                                });
+                                document.body.appendChild(dl);
+                                input.setAttribute('list', dlId);
+                            }
+
+                            const renderChips = () => {
+                                chips.innerHTML = '';
+                                tags.forEach((t, idx) => {
+                                    const chip = document.createElement('span');
+                                    chip.className = 'tag-chip';
+                                    chip.textContent = String(t);
+                                    if (isEditable) {
+                                        const rem = document.createElement('button');
+                                        rem.type = 'button';
+                                        rem.className = 'tag-remove';
+                                        rem.textContent = '×';
+                                        rem.addEventListener('click', () => {
+                                            tags.splice(idx, 1);
+                                            renderChips();
+                                            // Persist tags array
+                                            saveValue(tags);
+                                        });
+                                        chip.appendChild(rem);
+                                    }
+                                    chips.appendChild(chip);
+                                });
+                            };
+
+                            input.addEventListener('keydown', (ev) => {
+                                if (ev.key === 'Enter') {
+                                    ev.preventDefault();
+                                    const v = input.value.trim();
+                                    if (v) {
+                                        if (!tags.includes(v)) tags.push(v);
+                                        input.value = '';
+                                        renderChips();
+                                        saveValue(tags);
+                                    }
+                                }
+                            });
+
+                            input.addEventListener('blur', () => {
+                                // Persist on blur in case user typed but didn't press Enter
+                                const v = input.value.trim();
+                                if (v) {
+                                    if (!tags.includes(v)) tags.push(v);
+                                    input.value = '';
+                                }
+                                renderChips();
+                                saveValue(tags);
+                            });
+
+                            renderChips();
+                            wrap.appendChild(chips);
+                            wrap.appendChild(input);
+                            inputEl = wrap;
+
                         } else {
                             const input = document.createElement('input');
                             input.type = item.ui_type === 'password' ? 'password' : (item.value_type === 'int' || item.value_type === 'float' || item.ui_type === 'number' ? 'number' : 'text');
@@ -1186,6 +1297,30 @@ try {
             }
         }
         window.refreshConfig = window.refreshConfig || refreshConfig;
+
+        // If the settings page is opened very early during startup the server may
+        // still be populating configuration from the DB. Provide a short retry
+        // so the UI will pick up DB-backed values when they become available.
+        async function refreshConfigWithRetries(retries = 2, delayMs = 600) {
+            await refreshConfig();
+            for (let i = 0; i < retries; i++) {
+                // If any config row still equals its default, attempt a re-fetch
+                const anyDefault = Array.from(document.querySelectorAll('.config-row')).some((r) => {
+                    try {
+                        const inp = r.querySelector('.config-input input, .config-input textarea, .config-input select');
+                        if (!inp) return false;
+                        const defaultAttr = r.getAttribute('data-default');
+                        if (!defaultAttr) return false;
+                        // Compare rendered value to default string
+                        return String(inp.value || '').trim() === String(defaultAttr || '').trim();
+                    } catch (e) { return false; }
+                });
+                if (!anyDefault) break;
+                await new Promise((res) => setTimeout(res, delayMs));
+                await refreshConfig();
+            }
+        }
+        window.refreshConfigWithRetries = window.refreshConfigWithRetries || refreshConfigWithRetries;
 
         // -----------------------------------------------------------------------------
         // Core UI wiring (navigation + chat controls + WebSocket)
