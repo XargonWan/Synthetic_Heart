@@ -348,7 +348,12 @@ class LiveSessionManager:
             state.is_active = False
 
     async def _reconnect(self, guild_id: int) -> None:
-        """Reconnect a session approaching the time limit."""
+        """Reconnect a session approaching the time limit.
+
+        Rebuilds the system instruction from the current persona and
+        re-discovers tool declarations so function calling is preserved
+        across session boundaries.
+        """
         lock = self._reconnect_locks.get(guild_id)
         if not lock:
             return
@@ -372,10 +377,23 @@ class LiveSessionManager:
             from core.prompt_engine import build_live_system_instruction
 
             instruction = await build_live_system_instruction()
+
+            # Re-discover tool declarations so function calling persists
+            tools: list[dict[str, Any]] | None = None
+            try:
+                from interface.discord_interface import _build_gemini_tool_declarations
+
+                tools = _build_gemini_tool_declarations()
+            except Exception as e:
+                log_warning(
+                    f"[live_session] Could not rebuild tool declarations on reconnect: {e}"
+                )
+
             await self.start_session(
                 guild_id=guild_id,
                 channel_id=channel_id,
                 system_instruction=instruction,
+                tools=tools,
             )
 
     async def reconnect_with_instruction(

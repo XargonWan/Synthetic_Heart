@@ -82,6 +82,10 @@ class DiscordInterface:
                 )
                 await self._process_message(message)
 
+            @self.client.event
+            async def on_voice_state_update(member, before, after):
+                await self._handle_voice_state_update(member, before, after)
+
             async def _resolver(guild_id, channel_id, bot_instance=None):
                 b = bot_instance or self.client
                 guild_name = None
@@ -775,6 +779,9 @@ class DiscordInterface:
 
             system_instruction = await build_live_system_instruction()
 
+            # Build Gemini function declarations from the SyntH action registry
+            tools = _build_gemini_tool_declarations()
+
             # Set up audio output callback: Live API → Discord voice
             audio_buffer = LiveAudioBuffer()
 
@@ -786,14 +793,20 @@ class DiscordInterface:
                 """Log text responses from the live model (for debugging/diary)."""
                 log_info(f"[live_voice] Model text for guild {gid}: {text[:200]}")
 
+            async def on_tool_call(gid: int, call_dict: dict) -> dict:
+                """Route Gemini function calls to the SyntH action pipeline."""
+                return await _handle_live_tool_call(gid, call_dict, self.client)
+
             manager.set_audio_callback(on_audio_from_model)
             manager.set_text_callback(on_text_from_model)
+            manager.set_tool_call_callback(on_tool_call)
 
             # Start the Live API session
             started = await manager.start_session(
                 guild_id=guild_id,
                 channel_id=channel.id,
                 system_instruction=system_instruction,
+                tools=tools,
             )
             if not started:
                 return {
@@ -867,6 +880,78 @@ class DiscordInterface:
         except Exception as e:
             log_error(f"[discord_interface] Failed to stop live voice: {e}")
             return {"status": "failed", "message": str(e)}
+
+    async def _handle_voice_state_update(
+        self,
+        member: Any,
+        before: Any,
+        after: Any,
+    ) -> None:
+        """Handle voice state changes — clean up Live API sessions on disconnect.
+
+        Triggers cleanup when:
+        - The bot itself is disconnected/kicked from voice.
+        - All human users leave the voice channel the bot is in.
+        """
+        if not self.client:
+            return
+
+        bot_user = self.client.user
+        if not bot_user:
+            return
+
+        guild = getattr(member, "guild", None)
+        if not guild:
+            return
+
+        guild_id = guild.id
+
+        # Check if we even have a live session for this guild
+        if (
+            not hasattr(self, "_live_voice_state")
+            or guild_id not in self._live_voice_state
+        ):
+            return
+
+        # Case 1: The bot itself left the voice channel
+        if (
+            member.id == bot_user.id
+            and before.channel is not None
+            and after.channel is None
+        ):
+            log_info(
+                f"[discord_interface] Bot left voice in guild {guild_id}, "
+                "cleaning up live session"
+            )
+            await self._stop_live_voice(guild_id)
+            return
+
+        # Case 2: The bot was moved to a different channel
+        if (
+            member.id == bot_user.id
+            and before.channel is not None
+            and after.channel is not None
+            and before.channel.id != after.channel.id
+        ):
+            log_info(
+                f"[discord_interface] Bot moved channels in guild {guild_id}, "
+                "cleaning up live session"
+            )
+            await self._stop_live_voice(guild_id)
+            return
+
+        # Case 3: A user left, check if the bot is alone in the channel
+        if before.channel is not None:
+            state = self._live_voice_state.get(guild_id)
+            if state and state.get("channel_id") == before.channel.id:
+                # Count non-bot members remaining in the channel
+                human_members = [m for m in before.channel.members if not m.bot]
+                if not human_members:
+                    log_info(
+                        f"[discord_interface] All users left voice in guild {guild_id}, "
+                        "auto-stopping live session"
+                    )
+                    await self._stop_live_voice(guild_id)
 
     async def _discord_send(
         self, channel_id, text, reply_to_message_id=None, audio_path=None
@@ -1404,6 +1489,134 @@ class DiscordInterface:
             log_warning(
                 f"[discord_interface] Failed to register custom validation: {e}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Gemini Live API — tool/function calling bridge
+# ---------------------------------------------------------------------------
+
+
+def _build_gemini_tool_declarations() -> list[Any] | None:
+    """Build Gemini function declarations from the SyntH action registry.
+
+    Queries all plugins and interfaces via ``get_supported_actions()`` /
+    ``get_prompt_instructions()`` and converts them into the
+    ``google.genai.types.FunctionDeclaration`` format expected by the
+    Gemini Live API ``tools`` parameter.
+
+    Returns:
+        A list containing a single ``types.Tool`` wrapping all function
+        declarations, or ``None`` if no declarations could be built.
+    """
+    try:
+        from google.genai import types as genai_types
+    except ImportError:
+        log_warning(
+            "[live_voice] google-genai SDK unavailable, skipping tool declarations"
+        )
+        return None
+
+    from core.action_parser import get_action_plugin_instructions
+
+    instructions = get_action_plugin_instructions()
+    if not instructions:
+        return None
+
+    declarations: list[Any] = []
+    for action_name, instr in instructions.items():
+        if not isinstance(instr, dict):
+            continue
+
+        # Build a JSON Schema-style properties dict from the payload spec
+        payload_spec = instr.get("payload", {})
+        properties: dict[str, Any] = {}
+        required_fields: list[str] = []
+
+        for field_name, field_meta in payload_spec.items():
+            if not isinstance(field_meta, dict):
+                continue
+            prop: dict[str, str] = {
+                "type": field_meta.get("type", "string").upper(),
+            }
+            desc = field_meta.get("description", "")
+            if desc:
+                prop["description"] = desc
+            properties[field_name] = prop
+
+            # Treat as required unless explicitly marked optional
+            if not field_meta.get("optional", False):
+                required_fields.append(field_name)
+
+        description = instr.get("description", f"Execute {action_name} action")
+
+        try:
+            schema: dict[str, Any] = {
+                "type": "OBJECT",
+                "properties": properties,
+            }
+            if required_fields:
+                schema["required"] = required_fields
+
+            fd = genai_types.FunctionDeclaration(
+                name=action_name,
+                description=description,
+                parameters=schema,
+            )
+            declarations.append(fd)
+        except Exception as e:
+            log_warning(
+                f"[live_voice] Failed to build function declaration for {action_name}: {e}"
+            )
+
+    if not declarations:
+        return None
+
+    log_info(
+        f"[live_voice] Built {len(declarations)} Gemini function declarations: "
+        f"{[d.name for d in declarations]}"
+    )
+    return [genai_types.Tool(function_declarations=declarations)]
+
+
+async def _handle_live_tool_call(
+    guild_id: int,
+    call_dict: dict[str, Any],
+    bot: Any,
+) -> dict[str, Any]:
+    """Route a Gemini Live API function call to the SyntH action pipeline.
+
+    Args:
+        guild_id: The Discord guild the live session belongs to.
+        call_dict: Dict with ``name``, ``id``, and ``args`` from the model.
+        bot: The Discord client instance (passed as ``bot`` to ``run_action``).
+
+    Returns:
+        A result dict to send back to Gemini as the function response.
+    """
+    from core.action_parser import run_action
+
+    action_name: str = call_dict.get("name", "")
+    args: dict[str, Any] = call_dict.get("args", {}) or {}
+
+    log_info(f"[live_voice] Tool call from guild {guild_id}: {action_name}({args})")
+
+    action = {
+        "type": action_name,
+        "payload": args,
+    }
+    context: dict[str, Any] = {
+        "source": "live_voice",
+        "guild_id": guild_id,
+    }
+
+    try:
+        result = await run_action(action, context, bot, None)
+        if isinstance(result, dict):
+            return result
+        return {"status": "ok"}
+    except Exception as e:
+        log_error(f"[live_voice] Tool call execution failed: {e}")
+        return {"status": "error", "message": str(e)}
 
 
 # ---------------------------------------------------------------------------
