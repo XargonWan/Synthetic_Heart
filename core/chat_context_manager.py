@@ -28,6 +28,7 @@ CONTEXT_LINK_MAP = config_registry.get_var(
     ),
     group="core",
     component="chat_context_manager",
+    hidden=True,
 )
 
 

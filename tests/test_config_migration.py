@@ -1,4 +1,3 @@
-
 import pytest
 
 from core.db import ensure_core_tables, get_conn_ctx

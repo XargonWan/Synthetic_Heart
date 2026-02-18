@@ -155,6 +155,12 @@
                 font-weight: 600;
                 color: var(--accent);
             }
+
+            .config-section-note {
+                margin: -0.6rem 0 0.9rem 0;
+                font-size: 0.88rem;
+                color: var(--text-soft);
+            }
             
             .config-list {
                 display: flex;
@@ -234,6 +240,34 @@
             .config-input textarea {
                 resize: vertical;
                 min-height: 60px;
+            }
+
+            .repeatable-list {
+                display: flex;
+                flex-direction: column;
+                gap: 0.6rem;
+            }
+
+            .repeatable-list-rows {
+                display: flex;
+                flex-direction: column;
+                gap: 0.5rem;
+            }
+
+            .repeatable-row {
+                display: grid;
+                grid-template-columns: minmax(140px, 1fr) minmax(160px, 1fr) auto;
+                gap: 0.5rem;
+                align-items: center;
+            }
+
+            .repeatable-row--action {
+                grid-template-columns: minmax(220px, 1fr) auto;
+            }
+
+            .repeatable-row select,
+            .repeatable-row input {
+                width: 100%;
             }
             .config-disclaimer {
                 display: flex;

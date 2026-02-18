@@ -10,7 +10,7 @@ from typing import Any
 from core.logging_utils import log_info, log_error, log_warning, log_debug
 from core.config import list_available_cortex_engines
 from dataclasses import dataclass, field
-from typing import List, Dict
+from typing import List, Dict, Optional
 from enum import Enum
 
 # Import exposed variables EARLY to ensure correct type registrations
@@ -387,10 +387,14 @@ class CoreInitializer:
                     "CHAT_UPDATE_CHECKER_AUTO_START",
                     False,
                     label="Auto-start chat update checker",
-                    description="If True, start the chat update checker background loop at core startup",
+                    description=(
+                        "Start the background chat update checker at core startup. "
+                        "Keep disabled unless a plugin (like Grillo Observer) needs it running continuously."
+                    ),
                     value_type=bool,
                     group="scheduling",
                     component="core",
+                    advanced=True,
                 )
                 if auto_start:
                     from core.chat_update_checker import start_chat_update_checker
@@ -473,7 +477,7 @@ class CoreInitializer:
         name: str,
         component_type: str,
         status: ComponentStatus = ComponentStatus.LOADING,
-        actions: List[str] = None,
+        actions: Optional[List[str]] = None,
         error: str = "",
         details: str = "",
     ):
@@ -491,7 +495,7 @@ class CoreInitializer:
         )
 
     def mark_component_success(
-        self, name: str, actions: List[str] = None, details: str = ""
+        self, name: str, actions: Optional[List[str]] = None, details: str = ""
     ):
         """Mark a component as successfully loaded."""
         if name in self.components:
@@ -572,10 +576,19 @@ class CoreInitializer:
             try:
                 # Note: variables_engine is already imported earlier (step 3.5),
                 # so exposed variables are already registered at this point.
-                from core.exposed_migration import migrate_all_registered_configs
-
-                migrate_all_registered_configs()
-                log_debug("[core_initializer] Exposed variables migration completed")
+                migration_module = importlib.import_module("core.exposed_migration")
+                migrate_fn = getattr(
+                    migration_module, "migrate_all_registered_configs", None
+                )
+                if callable(migrate_fn):
+                    migrate_fn()
+                    log_debug(
+                        "[core_initializer] Exposed variables migration completed"
+                    )
+                else:
+                    log_warning(
+                        "[core_initializer] Exposed variables migration skipped: missing migrate_all_registered_configs"
+                    )
             except Exception as _e:
                 log_warning(
                     f"[core_initializer] Exposed variables migration failed: {_e}"
@@ -913,7 +926,13 @@ class CoreInitializer:
         for dir_name in directories_to_scan:
             try:
                 module = importlib.import_module(dir_name)
-                module_path = os.path.dirname(module.__file__)
+                module_file = getattr(module, "__file__", None)
+                if not module_file:
+                    log_warning(
+                        f"[core_initializer] Skipping {dir_name} scan: module has no __file__"
+                    )
+                    continue
+                module_path = os.path.dirname(module_file)
 
                 log_debug(
                     f"[core_initializer] Scanning {dir_name} directory: {module_path}"
@@ -1026,10 +1045,9 @@ class CoreInitializer:
 
         # After attempting initialization, dump registry and startup errors for diagnostics
         try:
-            from core.core_initializer import INTERFACE_REGISTRY as _ir
-
             log_info(
-                f"[core_initializer] Diagnostic: INTERFACE_REGISTRY keys after initialization: {list(_ir.keys())}"
+                "[core_initializer] Diagnostic: INTERFACE_REGISTRY keys after initialization: "
+                f"{list(INTERFACE_REGISTRY.keys())}"
             )
         except Exception:
             pass
@@ -1240,8 +1258,6 @@ class CoreInitializer:
 
         self._building_actions_block = True
         log_debug("[core_initializer] Starting _build_actions_block")
-        from core.core_initializer import PLUGIN_REGISTRY, INTERFACE_REGISTRY
-
         available_actions = {}
         log_debug("[core_initializer] Initialized available_actions dict")
 
@@ -1616,8 +1632,6 @@ class CoreInitializer:
             self.loaded_plugins.append(plugin_name)
 
             # Check if the plugin exposes action schemas and log them
-            from core.core_initializer import PLUGIN_REGISTRY
-
             plugin_obj = PLUGIN_REGISTRY.get(plugin_name)
             actions = []
 
@@ -1686,7 +1700,7 @@ class CoreInitializer:
         if "chat_link" not in PLUGIN_REGISTRY:
             try:
                 # Import chat_link_actions to trigger registration
-                import core.chat_link_actions  # noqa: F401
+                import core.chat_link_actions  # type: ignore[unresolved-import]  # noqa: F401
 
                 log_debug("[core_initializer] Core chat_link actions loaded")
             except Exception as e:
@@ -1777,7 +1791,7 @@ def register_action(action_type: str, handler: Any) -> None:
     try:
         from core import action_parser
 
-        action_parser._ACTION_HANDLERS = None
+        action_parser._ACTION_HANDLERS = None  # type: ignore[unresolved-attribute]
         action_parser._INTERFACE_ACTIONS = None
         # Don't auto-rebuild here to prevent infinite loops
         # The rebuild will happen when _build_actions_block() is explicitly called

@@ -49,22 +49,22 @@ register_exposed_var(
 
 register_exposed_var(
     "ENABLE_HISTORY_CURRENT_CHAT",
-    label="Enable history_current_chat",
+    label="Enable Current Chat History",
     default=1,
     value_type=int,
     ui_type="bool",
-    description="Enable current-chat history recap contribution.",
+    description="Include a recap of the active chat in prompt context.",
     scope="core",
     component="history_engine",
 )
 
 register_exposed_var(
     "ENABLE_HISTORY_RECENT",
-    label="Enable history_recent",
+    label="Enable Recent Chats History",
     default=1,
     value_type=int,
     ui_type="bool",
-    description="Enable recent-history contribution.",
+    description="Include a recap of recent chats outside the current one.",
     scope="core",
     component="history_engine",
 )
@@ -153,7 +153,7 @@ def _format_ts(ts: Any) -> str:
             return dt.strftime("%d/%m/%y:%H%M")
         if hasattr(ts, "isoformat"):
             # datetime
-            return ts.strftime("%d/%m/%y:%H%M")  # type: ignore[attr-defined]
+            return ts.strftime("%d/%m/%y:%H%M")
     except Exception:
         pass
     return str(ts or "")

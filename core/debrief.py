@@ -15,7 +15,7 @@ try:
         ui_type="bool",
         description="Enable Debrief postflight hooks from plugins",
         scope="agent",
-        component="agent",
+        component="debrief",
         needs_component_reload=False,
     )
     register_exposed_var(
@@ -23,11 +23,15 @@ try:
         label="Auto Recovery Policy",
         default="require_review",
         value_type=str,
-        ui_type="string",
-        description="Policy for debrief recovery actions: require_review | auto_under_policy | auto_always",
+        ui_type="select",
+        description=(
+            "Policy for debrief recovery actions: require_review | auto_under_policy | auto_always"
+        ),
         scope="agent",
-        component="agent",
+        component="debrief",
         needs_component_reload=False,
+        advanced=True,
+        options=["require_review", "auto_under_policy", "auto_always"],
     )
     register_exposed_var(
         "AUTO_RECOVERY_TIME_WINDOW",
@@ -37,8 +41,9 @@ try:
         ui_type="number",
         description="How far back Debrief should consider unresolved promises for recovery actions",
         scope="agent",
-        component="agent",
+        component="debrief",
         needs_component_reload=False,
+        advanced=True,
     )
 except Exception:
     pass

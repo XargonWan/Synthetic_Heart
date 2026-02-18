@@ -1091,8 +1091,37 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         const value = item.value === null || item.value === undefined ? '' : item.value;
                         const isEditable = !!item.editable && !item.env_override;
 
+                        const persistValue = async (val, controls = []) => {
+                            const targets = Array.isArray(controls) ? controls.filter(Boolean) : [];
+                            try {
+                                targets.forEach((el) => { try { if (typeof el.disabled !== 'undefined') el.disabled = true; } catch (e) {} });
+                                const payload = { key: item.key, value: val };
+                                const res = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                                if (!res.ok) {
+                                    const txt = await res.text();
+                                    try { window.showToast('Save failed: ' + txt, true); } catch (e) {}
+                                } else {
+                                    try {
+                                        const out = await res.json();
+                                        window.showToast('Saved', false);
+                                        if (out && out.requires_reload) {
+                                            window.showToast(out.message || 'Component reload recommended', false);
+                                        }
+                                        try { await refreshConfig(); } catch (e) { /* ignore */ }
+                                    } catch (e) {
+                                        window.showToast('Saved', false);
+                                    }
+                                }
+                            } catch (e) {
+                                try { window.showToast('Save failed', true); } catch (e) {}
+                            } finally {
+                                targets.forEach((el) => { try { if (typeof el.disabled !== 'undefined') el.disabled = !isEditable; } catch (e) {} });
+                            }
+                        };
+
                         let inputEl = null;
                         let extraEl = null;
+                        let skipAutoSave = false;
                         if (item.ui_type === 'bool' || item.value_type === 'bool') {
                             const checkbox = document.createElement('input');
                             const key = item.key || item.label || `bool-${Math.random().toString(36).slice(2)}`;
@@ -1360,10 +1389,217 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             }
                             inputEl = input;
 
+                        // --- Action list: dropdown rows with add/remove ---
+                        } else if (item.ui_type === 'action-list') {
+                            const wrap = document.createElement('div');
+                            wrap.className = 'repeatable-list';
+                            skipAutoSave = true;
+
+                            const options = Array.isArray(item.options) ? item.options.slice() : [];
+                            const parseList = () => {
+                                if (Array.isArray(value)) return value.slice();
+                                if (typeof value === 'string' && value.trim()) {
+                                    try { const parsed = JSON.parse(value); if (Array.isArray(parsed)) return parsed; } catch (e) {}
+                                    return value.split(',').map((v) => v.trim()).filter(Boolean);
+                                }
+                                return [];
+                            };
+
+                            let actions = parseList();
+                            const list = document.createElement('div');
+                            list.className = 'repeatable-list-rows';
+
+                            const emptyNote = document.createElement('div');
+                            emptyNote.className = 'meta';
+                            emptyNote.textContent = options.length ? 'Add actions to whitelist.' : 'No unsafe actions discovered yet.';
+
+                            const addBtn = document.createElement('button');
+                            addBtn.type = 'button';
+                            addBtn.className = 'btn-ghost';
+                            addBtn.textContent = '+ Add action';
+                            addBtn.disabled = !isEditable || !options.length;
+
+                            const renderRows = () => {
+                                list.innerHTML = '';
+                                if (!actions.length) {
+                                    list.appendChild(emptyNote);
+                                }
+                                actions.forEach((action, idx) => {
+                                    const rowEl = document.createElement('div');
+                                    rowEl.className = 'repeatable-row repeatable-row--action';
+
+                                    const select = document.createElement('select');
+                                    if (!options.length) {
+                                        const opt = document.createElement('option');
+                                        opt.value = '';
+                                        opt.textContent = 'No actions available';
+                                        select.appendChild(opt);
+                                        select.disabled = true;
+                                    } else {
+                                        options.forEach((opt) => {
+                                            const option = document.createElement('option');
+                                            option.value = opt;
+                                            option.textContent = opt;
+                                            if (String(action) === String(opt)) option.selected = true;
+                                            select.appendChild(option);
+                                        });
+                                        select.disabled = !isEditable;
+                                    }
+
+                                    const removeBtn = document.createElement('button');
+                                    removeBtn.type = 'button';
+                                    removeBtn.className = 'btn-ghost';
+                                    removeBtn.textContent = 'Remove';
+                                    removeBtn.disabled = !isEditable;
+
+                                    select.addEventListener('change', () => {
+                                        actions[idx] = select.value;
+                                        persistValue(actions.filter(Boolean), [select, removeBtn, addBtn]);
+                                    });
+
+                                    removeBtn.addEventListener('click', () => {
+                                        actions.splice(idx, 1);
+                                        renderRows();
+                                        persistValue(actions.filter(Boolean), [select, removeBtn, addBtn]);
+                                    });
+
+                                    rowEl.appendChild(select);
+                                    rowEl.appendChild(removeBtn);
+                                    list.appendChild(rowEl);
+                                });
+                            };
+
+                            addBtn.addEventListener('click', () => {
+                                if (!options.length) return;
+                                actions.push(options[0]);
+                                renderRows();
+                                persistValue(actions.filter(Boolean), [addBtn]);
+                            });
+
+                            renderRows();
+                            wrap.appendChild(list);
+                            wrap.appendChild(addBtn);
+                            inputEl = wrap;
+
+                        // --- Trainer IDs: interface + id rows with add/remove ---
+                        } else if (item.ui_type === 'trainer-ids') {
+                            const wrap = document.createElement('div');
+                            wrap.className = 'repeatable-list';
+                            skipAutoSave = true;
+
+                            const interfaceOptions = Array.isArray(item.options) ? item.options.slice() : [];
+                            const parseTrainerIds = () => {
+                                if (Array.isArray(value)) return value;
+                                if (typeof value !== 'string' || !value.trim()) return [];
+                                return value.split(',').map((entry) => {
+                                    const trimmed = entry.trim();
+                                    if (!trimmed) return null;
+                                    const parts = trimmed.split(':');
+                                    if (parts.length < 2) return null;
+                                    return { iface: parts[0].trim(), id: parts.slice(1).join(':').trim() };
+                                }).filter(Boolean);
+                            };
+
+                            let entries = parseTrainerIds();
+                            const list = document.createElement('div');
+                            list.className = 'repeatable-list-rows';
+
+                            const emptyNote = document.createElement('div');
+                            emptyNote.className = 'meta';
+                            emptyNote.textContent = 'Add interface + trainer id pairs.';
+
+                            const addBtn = document.createElement('button');
+                            addBtn.type = 'button';
+                            addBtn.className = 'btn-ghost';
+                            addBtn.textContent = '+ Add trainer';
+                            addBtn.disabled = !isEditable || !interfaceOptions.length;
+
+                            const serializeEntries = () => {
+                                return entries
+                                    .filter((e) => e && e.iface && e.id)
+                                    .map((e) => `${e.iface}:${e.id}`)
+                                    .join(',');
+                            };
+
+                            const renderRows = () => {
+                                list.innerHTML = '';
+                                if (!entries.length) {
+                                    list.appendChild(emptyNote);
+                                }
+                                entries.forEach((entry, idx) => {
+                                    const rowEl = document.createElement('div');
+                                    rowEl.className = 'repeatable-row';
+
+                                    const select = document.createElement('select');
+                                    if (!interfaceOptions.length) {
+                                        const opt = document.createElement('option');
+                                        opt.value = '';
+                                        opt.textContent = 'No interfaces available';
+                                        select.appendChild(opt);
+                                        select.disabled = true;
+                                    } else {
+                                        interfaceOptions.forEach((opt) => {
+                                            const option = document.createElement('option');
+                                            option.value = opt;
+                                            option.textContent = opt;
+                                            if (entry && String(entry.iface) === String(opt)) option.selected = true;
+                                            select.appendChild(option);
+                                        });
+                                        select.disabled = !isEditable;
+                                    }
+
+                                    const idInput = document.createElement('input');
+                                    idInput.type = 'text';
+                                    idInput.placeholder = 'Trainer ID';
+                                    idInput.value = entry && entry.id ? entry.id : '';
+                                    idInput.disabled = !isEditable;
+
+                                    const removeBtn = document.createElement('button');
+                                    removeBtn.type = 'button';
+                                    removeBtn.className = 'btn-ghost';
+                                    removeBtn.textContent = 'Remove';
+                                    removeBtn.disabled = !isEditable;
+
+                                    select.addEventListener('change', () => {
+                                        entries[idx] = { iface: select.value, id: idInput.value };
+                                        persistValue(serializeEntries(), [select, idInput, removeBtn, addBtn]);
+                                    });
+
+                                    idInput.addEventListener('blur', () => {
+                                        entries[idx] = { iface: select.value, id: idInput.value.trim() };
+                                        persistValue(serializeEntries(), [select, idInput, removeBtn, addBtn]);
+                                    });
+
+                                    removeBtn.addEventListener('click', () => {
+                                        entries.splice(idx, 1);
+                                        renderRows();
+                                        persistValue(serializeEntries(), [select, idInput, removeBtn, addBtn]);
+                                    });
+
+                                    rowEl.appendChild(select);
+                                    rowEl.appendChild(idInput);
+                                    rowEl.appendChild(removeBtn);
+                                    list.appendChild(rowEl);
+                                });
+                            };
+
+                            addBtn.addEventListener('click', () => {
+                                const fallback = interfaceOptions[0] || '';
+                                entries.push({ iface: fallback, id: '' });
+                                renderRows();
+                                persistValue(serializeEntries(), [addBtn]);
+                            });
+
+                            renderRows();
+                            wrap.appendChild(list);
+                            wrap.appendChild(addBtn);
+                            inputEl = wrap;
+
                         // --- Tags / tag-combobox: array editor with add/remove chips ---
                         } else if (item.ui_type === 'tags' || item.ui_type === 'tag-combobox') {
                             const wrap = document.createElement('div');
                             wrap.className = 'tag-list-input';
+                            skipAutoSave = true;
 
                             // Normalize incoming value to an array
                             let tags = [];
@@ -1412,7 +1648,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                             tags.splice(idx, 1);
                                             renderChips();
                                             // Persist tags array
-                                            saveValue(tags);
+                                            persistValue(tags, [input]);
                                         });
                                         chip.appendChild(rem);
                                     }
@@ -1428,7 +1664,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                         if (!tags.includes(v)) tags.push(v);
                                         input.value = '';
                                         renderChips();
-                                        saveValue(tags);
+                                        persistValue(tags, [input]);
                                     }
                                 }
                             });
@@ -1441,7 +1677,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                     input.value = '';
                                 }
                                 renderChips();
-                                saveValue(tags);
+                                persistValue(tags, [input]);
                             });
 
                             renderChips();
@@ -1462,62 +1698,33 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
                         // Attach save handlers for editable inputs so pressing Enter or changing
                         // selects/checkboxes persists values via the /api/config endpoint
-                        if (isEditable && inputEl) {
-                            const saveValue = async (val) => {
-                                try {
-                                    // Provide immediate visual feedback by disabling control
-                                    if (inputEl && typeof inputEl.disabled !== 'undefined') inputEl.disabled = true;
-                                    const payload = { key: item.key, value: val };
-                                    const res = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-                                    if (!res.ok) {
-                                        const txt = await res.text();
-                                        try { window.showToast('Save failed: ' + txt, true); } catch (e) {}
-                                    } else {
-                                        try {
-                                            const out = await res.json();
-                                            window.showToast('Saved', false);
-                                            if (out && out.requires_reload) {
-                                                window.showToast(out.message || 'Component reload recommended', false);
-                                            }
-                                            // Refresh configuration so UI reflects authoritative values
-                                            try { await refreshConfig(); } catch (e) { /* ignore */ }
-                                        } catch (e) {
-                                            window.showToast('Saved', false);
-                                        }
-                                    }
-                                } catch (e) {
-                                    try { window.showToast('Save failed', true); } catch (e) {}
-                                } finally {
-                                    try { if (inputEl && typeof inputEl.disabled !== 'undefined') inputEl.disabled = false; } catch (e) {}
-                                }
-                            };
-
+                        if (isEditable && inputEl && !skipAutoSave) {
                             // Checkbox
                             if (inputEl.tagName && inputEl.tagName.toLowerCase() === 'input' && inputEl.type === 'checkbox') {
-                                inputEl.addEventListener('change', () => { saveValue(inputEl.checked); });
+                                inputEl.addEventListener('change', () => { persistValue(inputEl.checked, [inputEl]); });
                             } else if (inputEl.tagName && inputEl.tagName.toLowerCase() === 'select') {
-                                inputEl.addEventListener('change', () => { saveValue(inputEl.value); });
+                                inputEl.addEventListener('change', () => { persistValue(inputEl.value, [inputEl]); });
                             } else if (inputEl.tagName && inputEl.tagName.toLowerCase() === 'textarea') {
                                 // Ctrl+Enter to submit JSON/textarea; blur to auto-save
                                 let debounced = null;
                                 inputEl.addEventListener('keydown', (ev) => {
                                     if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) {
                                         ev.preventDefault();
-                                        saveValue(inputEl.value);
+                                        persistValue(inputEl.value, [inputEl]);
                                     }
                                     // simple debounce to avoid excessive saves on blur
                                     if (debounced) clearTimeout(debounced);
                                 });
-                                inputEl.addEventListener('blur', () => { debounced = setTimeout(() => saveValue(inputEl.value), 150); });
+                                inputEl.addEventListener('blur', () => { debounced = setTimeout(() => persistValue(inputEl.value, [inputEl]), 150); });
                             } else {
                                 // Default: single-line inputs — Enter to save, blur to save
                                 inputEl.addEventListener('keydown', (ev) => {
                                     if (ev.key === 'Enter' && !ev.shiftKey && !ev.ctrlKey && !ev.metaKey) {
                                         ev.preventDefault();
-                                        saveValue(inputEl.value);
+                                        persistValue(inputEl.value, [inputEl]);
                                     }
                                 });
-                                inputEl.addEventListener('blur', () => { saveValue(inputEl.value); });
+                                inputEl.addEventListener('blur', () => { persistValue(inputEl.value, [inputEl]); });
                             }
                         }
 
@@ -1552,6 +1759,13 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         const h = document.createElement('h3');
                         h.textContent = comp;
                         section.appendChild(h);
+                        const sectionNote = (groups[comp] && groups[comp][0] && groups[comp][0].component_description) ? groups[comp][0].component_description : '';
+                        if (sectionNote) {
+                            const note = document.createElement('div');
+                            note.className = 'config-section-note';
+                            note.textContent = sectionNote;
+                            section.appendChild(note);
+                        }
                         const listEl = document.createElement('div');
                         listEl.className = 'config-list';
                         section.appendChild(listEl);
@@ -1560,103 +1774,110 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     });
                 };
 
-                const general = items.filter((item) => !item.advanced);
-                const advanced = items.filter((item) => item.advanced);
+                const accentItem = items.find(it => (it.key && it.key === 'WEBUI_ACCENT_COLOR') || (it.label && /accent\s*color/i.test(it.label)));
+                const accentCard = document.getElementById('config-accent-card');
+                const accentContainer = document.getElementById('config-accent-input-container');
+                const themeCard = document.getElementById('config-theme-card');
+                const themeContainer = document.getElementById('config-theme-input-container');
+                const omitAccent = !!accentItem && ((accentCard && accentContainer) || (themeCard && themeContainer));
+
+                const general = items.filter((item) => !item.advanced && (!omitAccent || item.key !== 'WEBUI_ACCENT_COLOR'));
+                const advanced = items.filter((item) => item.advanced && (!omitAccent || item.key !== 'WEBUI_ACCENT_COLOR'));
                 renderGrouped(general, configGeneralListEl);
                 renderGrouped(advanced, configAdvancedListEl);
 
                 // --- Render a prominent Accent control at the top of Settings (Appearance card)
                 try {
-                    const themeCard = document.getElementById('config-theme-card');
-                    const themeContainer = document.getElementById('config-theme-input-container');
-                    if (themeCard && themeContainer) {
-                        // Find the accent config item from the authoritative items list
-                        const accentItem = items.find(it => (it.key && it.key === 'WEBUI_ACCENT_COLOR') || (it.label && /accent\s*color/i.test(it.label)));
-                        if (accentItem) {
-                            themeCard.style.display = 'block';
-                            themeContainer.innerHTML = '';
-                            const current = (typeof accentItem.value === 'string' && accentItem.value) ? accentItem.value : (accentItem.default || '#6bfefe');
-                            let previewVal = null;
+                    const renderAccentControl = async (card, container) => {
+                        if (!card || !container || !accentItem) return;
+                        card.style.display = 'block';
+                        container.innerHTML = '';
+                        const current = (typeof accentItem.value === 'string' && accentItem.value) ? accentItem.value : (accentItem.default || '#6bfefe');
+                        let previewVal = null;
 
-                            const presets = (window.__SYNTH_CONFIG && window.__SYNTH_CONFIG.WEBUI_ACCENT_PRESETS) || ['#6bfefe','#ff6bd6','#18c98c','#ffd166','#ff9ecb'];
-                            const presetsWrap = document.createElement('div');
-                            presetsWrap.className = 'accent-presets';
-                            presets.forEach((c) => {
-                                const b = document.createElement('button');
-                                b.type = 'button';
-                                b.style.background = c;
-                                b.title = c;
-                                b.addEventListener('click', () => {
-                                    previewVal = c;
-                                    try { document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch(e){}
-                                });
-                                presetsWrap.appendChild(b);
+                        const presets = (window.__SYNTH_CONFIG && window.__SYNTH_CONFIG.WEBUI_ACCENT_PRESETS) || ['#6bfefe','#ff6bd6','#18c98c','#ffd166','#ff9ecb'];
+                        const presetsWrap = document.createElement('div');
+                        presetsWrap.className = 'accent-presets';
+                        presets.forEach((c) => {
+                            const b = document.createElement('button');
+                            b.type = 'button';
+                            b.style.background = c;
+                            b.title = c;
+                            b.addEventListener('click', () => {
+                                previewVal = c;
+                                try { document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch(e){}
                             });
+                            presetsWrap.appendChild(b);
+                        });
 
-                            const colorInput = document.createElement('input');
-                            colorInput.type = 'color';
-                            colorInput.value = current;
-                            colorInput.addEventListener('input', (ev) => {
-                                previewVal = ev.target.value;
-                                try { const c = previewVal; document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch(e){}
-                            });
+                        const colorInput = document.createElement('input');
+                        colorInput.type = 'color';
+                        colorInput.value = current;
+                        colorInput.addEventListener('input', (ev) => {
+                            previewVal = ev.target.value;
+                            try { const c = previewVal; document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch(e){}
+                        });
 
-                            const previewBox = document.createElement('div');
-                            previewBox.className = 'accent-preview';
-                            previewBox.title = 'Preview';
+                        const previewBox = document.createElement('div');
+                        previewBox.className = 'accent-preview';
+                        previewBox.title = 'Preview';
 
-                            const applyBtn = document.createElement('button');
-                            applyBtn.type = 'button';
-                            applyBtn.className = 'apply';
-                            applyBtn.textContent = 'Apply';
-                            applyBtn.addEventListener('click', async () => {
-                                const val = previewVal || colorInput.value;
-                                try {
-                                    const payload = { key: accentItem.key, value: val };
-                                    const res = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-                                    if (res.ok) {
-                                        await refreshConfig();
-                                    } else {
-                                        const txt = await res.text();
-                                        window.showToast && window.showToast('Save failed: ' + txt, true);
-                                    }
-                                } catch (e) {
-                                    window.showToast && window.showToast('Save failed', true);
+                        const applyBtn = document.createElement('button');
+                        applyBtn.type = 'button';
+                        applyBtn.className = 'apply';
+                        applyBtn.textContent = 'Apply';
+                        applyBtn.addEventListener('click', async () => {
+                            const val = previewVal || colorInput.value;
+                            try {
+                                const payload = { key: accentItem.key, value: val };
+                                const res = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                                if (res.ok) {
+                                    await refreshConfig();
+                                } else {
+                                    const txt = await res.text();
+                                    window.showToast && window.showToast('Save failed: ' + txt, true);
                                 }
-                            });
+                            } catch (e) {
+                                window.showToast && window.showToast('Save failed', true);
+                            }
+                        });
 
-                            const cancelBtn = document.createElement('button');
-                            cancelBtn.type = 'button';
-                            cancelBtn.className = 'cancel';
-                            cancelBtn.textContent = 'Cancel';
-                            cancelBtn.addEventListener('click', () => {
-                                previewVal = null;
-                                colorInput.value = current;
-                                try { const c = current; document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch(e){}
-                            });
+                        const cancelBtn = document.createElement('button');
+                        cancelBtn.type = 'button';
+                        cancelBtn.className = 'cancel';
+                        cancelBtn.textContent = 'Cancel';
+                        cancelBtn.addEventListener('click', () => {
+                            previewVal = null;
+                            colorInput.value = current;
+                            try { const c = current; document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch(e){}
+                        });
 
-                            const resetBtn = document.createElement('button');
-                            resetBtn.type = 'button';
-                            resetBtn.textContent = 'Reset';
-                            resetBtn.addEventListener('click', async () => {
-                                const def = accentItem.default || '#6bfefe';
-                                try { const payload = { key: accentItem.key, value: def }; const res = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); if (res.ok) await refreshConfig(); } catch (e) { window.showToast && window.showToast('Save failed', true); }
-                            });
+                        const resetBtn = document.createElement('button');
+                        resetBtn.type = 'button';
+                        resetBtn.textContent = 'Reset';
+                        resetBtn.addEventListener('click', async () => {
+                            const def = accentItem.default || '#6bfefe';
+                            try { const payload = { key: accentItem.key, value: def }; const res = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); if (res.ok) await refreshConfig(); } catch (e) { window.showToast && window.showToast('Save failed', true); }
+                        });
 
-                            // assemble
-                            const actions = document.createElement('div');
-                            actions.className = 'accent-actions';
-                            actions.appendChild(applyBtn);
-                            actions.appendChild(cancelBtn);
-                            actions.appendChild(resetBtn);
+                        const actions = document.createElement('div');
+                        actions.className = 'accent-actions';
+                        actions.appendChild(applyBtn);
+                        actions.appendChild(cancelBtn);
+                        actions.appendChild(resetBtn);
 
-                            themeContainer.appendChild(presetsWrap);
-                            themeContainer.appendChild(colorInput);
-                            themeContainer.appendChild(actions);
-                            themeContainer.appendChild(previewBox);
-                        } else {
-                            themeCard.style.display = 'none';
-                        }
+                        container.appendChild(presetsWrap);
+                        container.appendChild(colorInput);
+                        container.appendChild(actions);
+                        container.appendChild(previewBox);
+                    };
+
+                    if (accentItem) {
+                        await renderAccentControl(accentCard, accentContainer);
+                        await renderAccentControl(themeCard, themeContainer);
+                    } else {
+                        if (accentCard) accentCard.style.display = 'none';
+                        if (themeCard) themeCard.style.display = 'none';
                     }
                 } catch (e) {
                     console.error('[synth_webui] Failed to render theme preview', e);
@@ -2015,18 +2236,22 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             }
 
                             if (Array.isArray(item.actions) && item.actions.length) {
-                                const actionsWrap = document.createElement('div');
-                                actionsWrap.className = 'component-actions';
-                                const heading = document.createElement('div');
-                                heading.className = 'component-actions-heading';
-                                heading.textContent = `Actions (${item.actions.length})`;
-                                actionsWrap.appendChild(heading);
-                                const list = document.createElement('ul');
-                                list.className = 'component-action-list';
-                                item.actions.forEach((action) => {
-                                    const li = document.createElement('li');
-                                    const title = document.createElement('div');
-                                    title.className = 'component-action-title';
+                            const actions = document.createElement('div');
+                            actions.className = 'accent-actions';
+                            actions.appendChild(applyBtn);
+                            actions.appendChild(cancelBtn);
+                            actions.appendChild(resetBtn);
+
+                            container.appendChild(presetsWrap);
+                            container.appendChild(colorInput);
+                            container.appendChild(actions);
+                            container.appendChild(previewBox);
+                        };
+
+                        if (accentItem) {
+                            await renderAccentControl(accentCard, accentContainer);
+                            await renderAccentControl(themeCard, themeContainer);
+                        }
                                     title.textContent = action.type || action.name || 'Action';
                                     li.appendChild(title);
                                     if (action.description) {

@@ -93,7 +93,19 @@ def is_action_allowed_for_execution(
 
         # 4) Allow payload override if configured (human-origin actions only)
         allow_safe_override = bool(
-            config_registry.get_value("ALLOW_SAFE_FLAG_OVERRIDE", False)
+            config_registry.get_value(
+                "ALLOW_SAFE_FLAG_OVERRIDE",
+                False,
+                label="Allow Safe Flag Override",
+                description=(
+                    "Allow payload-level 'safe' overrides for human-origin actions. "
+                    "Keep disabled unless you understand the security implications."
+                ),
+                value_type=bool,
+                group="core",
+                component="action_safety",
+                advanced=True,
+            )
         )
 
         # 5) Origin and mode

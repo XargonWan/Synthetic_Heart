@@ -103,7 +103,7 @@ def _register_logging_config():
                     label="Logging Level",
                     description="Minimum log level to record: DEBUG, INFO, WARNING, ERROR",
                     group="logging",
-                    component="core",
+                    component="logging",
                     constraints={"choices": ["DEBUG", "INFO", "WARNING", "ERROR"]},
                     tags=["logs_only"],
                 ).upper()
@@ -116,7 +116,7 @@ def _register_logging_config():
                     label="LogChat Notification Level",
                     description="Send log notifications to LogChat (configure with /logchat command in your chat)",
                     group="logging",
-                    component="core",
+                    component="logchat",
                     constraints={"choices": ["DEBUG", "INFO", "WARNING", "ERROR"]},
                     tags=["logs_only"],
                 ).upper()

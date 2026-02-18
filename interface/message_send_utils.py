@@ -849,7 +849,16 @@ async def llm_response_send(
         from core.config_manager import config_registry
 
         dedupe_window = int(
-            config_registry.get_value("OUTGOING_DEDUPE_WINDOW", _DEFAULT_DEDUPE_WINDOW)
+            config_registry.get_value(
+                "OUTGOING_DEDUPE_WINDOW",
+                _DEFAULT_DEDUPE_WINDOW,
+                label="Outgoing Message Dedupe Window (s)",
+                description="Seconds to suppress duplicate outbound messages to the same chat.",
+                value_type=int,
+                group="core",
+                component="message_send",
+                advanced=True,
+            )
         )
     except Exception:
         dedupe_window = _DEFAULT_DEDUPE_WINDOW

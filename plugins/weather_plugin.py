@@ -46,7 +46,31 @@ register_exposed_var(
     default=False,
     value_type=bool,
     ui_type="boolean",
-    description="Send a daily weather announcement at 06:00 local time",
+    description="Send a daily weather announcement at the configured local time",
+    scope="plugins",
+    component="weather_plugin",
+    tags=["plugin"],
+)
+
+register_exposed_var(
+    "WEATHER_DAILY_REPORT_TIME",
+    label="Daily Weather Report Time",
+    default="06:00",
+    value_type=str,
+    ui_type="string",
+    description="Local time (HH:MM) for the daily weather announcement",
+    scope="plugins",
+    component="weather_plugin",
+    tags=["plugin"],
+)
+
+register_exposed_var(
+    "WEATHER_DAILY_REPORT_LANGUAGE",
+    label="Daily Weather Report Language",
+    default="",
+    value_type=str,
+    ui_type="string",
+    description="Language for the daily weather announcement (e.g., Italian)",
     scope="plugins",
     component="weather_plugin",
     tags=["plugin"],
@@ -92,8 +116,28 @@ class WeatherPlugin:
             "WEATHER_DAILY_REPORT_ENABLED",
             False,
             label="Daily Weather Report",
-            description="Send a daily weather announcement at 06:00 local time",
+            description="Send a daily weather announcement at the configured local time",
             value_type=bool,
+            group="plugins",
+            component="weather_plugin",
+            advanced=False,
+        )
+        self.daily_report_time = config_registry.get_value(
+            "WEATHER_DAILY_REPORT_TIME",
+            "06:00",
+            label="Daily Weather Report Time",
+            description="Local time (HH:MM) for the daily weather announcement",
+            value_type=str,
+            group="plugins",
+            component="weather_plugin",
+            advanced=False,
+        )
+        self.daily_report_language = config_registry.get_value(
+            "WEATHER_DAILY_REPORT_LANGUAGE",
+            "",
+            label="Daily Weather Report Language",
+            description="Language for the daily weather announcement (e.g., Italian)",
+            value_type=str,
             group="plugins",
             component="weather_plugin",
             advanced=False,
@@ -142,11 +186,30 @@ class WeatherPlugin:
             except Exception:
                 self.daily_report_interface = ""
 
+        def _update_daily_report_time(value):
+            try:
+                self.daily_report_time = str(value) if value else "06:00"
+            except Exception:
+                self.daily_report_time = "06:00"
+            self._apply_daily_report_time()
+
+        def _update_daily_report_language(value):
+            try:
+                self.daily_report_language = str(value) if value else ""
+            except Exception:
+                self.daily_report_language = ""
+
         config_registry.add_listener(
             "WEATHER_DAILY_REPORT_ENABLED", _update_daily_report_enabled
         )
         config_registry.add_listener(
             "WEATHER_DAILY_REPORT_INTERFACE", _update_daily_report_interface
+        )
+        config_registry.add_listener(
+            "WEATHER_DAILY_REPORT_TIME", _update_daily_report_time
+        )
+        config_registry.add_listener(
+            "WEATHER_DAILY_REPORT_LANGUAGE", _update_daily_report_language
         )
 
         # Use a dedicated executor so we don't depend on the event loop's default executor
@@ -156,6 +219,32 @@ class WeatherPlugin:
         self._scheduler_task = None
         self._scheduler_running = False
         self._last_daily_report_date = None
+        self._daily_report_hour = 6
+        self._daily_report_minute = 0
+        self._apply_daily_report_time()
+
+    def _apply_daily_report_time(self) -> None:
+        raw = str(self.daily_report_time or "").strip()
+        hour = 6
+        minute = 0
+        if raw:
+            try:
+                parts = raw.split(":")
+                if len(parts) >= 2:
+                    hour = int(parts[0])
+                    minute = int(parts[1])
+                elif len(parts) == 1:
+                    hour = int(parts[0])
+                    minute = 0
+            except Exception:
+                hour = 6
+                minute = 0
+        if hour < 0 or hour > 23:
+            hour = 6
+        if minute < 0 or minute > 59:
+            minute = 0
+        self._daily_report_hour = hour
+        self._daily_report_minute = minute
 
     # Plugin action registration
     def get_supported_action_types(self):
@@ -395,9 +484,13 @@ class WeatherPlugin:
                 try:
                     await self._ensure_weather()
                     if self.daily_report_enabled:
+                        self._apply_daily_report_time()
                         now_local = utc_to_local(datetime.utcnow())
                         today_key = now_local.date().isoformat()
-                        if now_local.hour == 6 and now_local.minute == 0:
+                        if (
+                            now_local.hour == self._daily_report_hour
+                            and now_local.minute == self._daily_report_minute
+                        ):
                             if self._last_daily_report_date != today_key:
                                 if await self._trigger_daily_report():
                                     self._last_daily_report_date = today_key
@@ -438,8 +531,13 @@ class WeatherPlugin:
 
             from core.auto_response import request_llm_delivery
 
+            language_hint = ""
+            if self.daily_report_language:
+                language_hint = f"Write the update in {self.daily_report_language}. "
+
             prompt = (
-                "It is 6:00 AM local time. Use the weather data provided in context to create "
+                f"It is {self.daily_report_time or '06:00'} local time. "
+                f"{language_hint}Use the weather data provided in context to create "
                 "a short, friendly daily weather update. Keep it concise and professional. "
                 f"Weather data: {self._cached_weather}"
             )

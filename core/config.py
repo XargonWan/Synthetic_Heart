@@ -12,7 +12,6 @@ except Exception:  # pragma: no cover - fallback when dotenv not installed
         return False
 
 
-
 # aiomysql is optional at import time — make the import lazy/fail-safe so
 # importing core.config doesn't raise in environments where aiomysql isn't
 # installed (e.g., lightweight tests or build-time checks). Modules that need
@@ -64,7 +63,9 @@ _TRAINER_IDS_RAW = config_registry.get_var(
     "TRAINER_IDS",
     "",
     label="Trainer IDs",
-    description="Comma separated mapping of interface trainer IDs. Example: telegram_bot:123456,discord_interface:654321",
+    description=(
+        "Trainer IDs by interface (each entry is interface name + trainer id)."
+    ),
     group="core",
     component="core",
     tags=["key_value_list"],
@@ -104,7 +105,7 @@ BASE_CORTEX = config_registry.get_var(
     label="Base Cortex",
     description="Default cortex engine used system-wide unless overridden by scope.",
     group="core",
-    component="core",
+    component="cortex",
 )
 
 GRILLO_CORTEX = config_registry.get_var(
@@ -113,7 +114,7 @@ GRILLO_CORTEX = config_registry.get_var(
     label="Grillo Cortex",
     description="Cortex engine used for Grillo (Default means Base Cortex).",
     group="core",
-    component="core",
+    component="cortex",
 )
 
 TRAINER_CORTEX = config_registry.get_var(
@@ -124,7 +125,7 @@ TRAINER_CORTEX = config_registry.get_var(
     "Default"
     " means Base Cortex).",
     group="core",
-    component="core",
+    component="cortex",
 )
 
 # --- LogChat configuration (use config_registry so exposed-variable APIs are consistent)
@@ -134,7 +135,7 @@ LOG_CHAT_INTERFACE = config_registry.get_var(
     label="Log Chat Interface",
     description="Interface used for system/trainer log messages.",
     group="core",
-    component="core",
+    component="logchat",
     hidden=True,
 )
 LOG_CHAT_ID = config_registry.get_var(
@@ -143,7 +144,7 @@ LOG_CHAT_ID = config_registry.get_var(
     label="Log Chat ID",
     description="Chat ID used for system/trainer notifications.",
     group="core",
-    component="core",
+    component="logchat",
     value_type=int,
     hidden=True,
 )
@@ -153,7 +154,7 @@ LOG_CHAT_THREAD_ID = config_registry.get_var(
     label="Log Chat Thread ID",
     description="Thread ID for the log chat (if supported by interface).",
     group="core",
-    component="core",
+    component="logchat",
     value_type=int,
     hidden=True,
 )

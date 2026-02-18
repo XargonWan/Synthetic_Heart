@@ -78,7 +78,7 @@ class SynthWebUIInterface:
 
     def __init__(self, autostart: bool = True) -> None:
         self.app = FastAPI(title=BRAND_NAME, version="1.0")
-        self.start_time = datetime.utcnow()
+        self.start_time = datetime.now(tz=timezone.utc)
 
         # Lightweight request logger middleware to capture client static/resource requests
         try:
@@ -104,7 +104,7 @@ class SynthWebUIInterface:
                         pass
                     return response
 
-            self.app.add_middleware(_RequestLoggerMiddleware)
+            self.app.add_middleware(_RequestLoggerMiddleware)  # type: ignore[arg-type]
         except Exception:
             # Don't fail initialization if middleware cannot be added
             pass
@@ -118,7 +118,7 @@ class SynthWebUIInterface:
         self._mate_outbox_lock = _asyncio.Lock()
         # Generic integration outboxes keyed by source (e.g., 'mate', 'other')
         self._integration_outboxes: Dict[str, Deque[dict]] = {}
-        self._integration_outbox_locks: Dict[str, asyncio.Lock] = {}
+        self._integration_outbox_locks: Dict[str, Any] = {}
         # Helper to create per-source outbox (see ensure_integration_outbox method)
         # Track pending THINKING actions per session so we can deterministically
         # switch THINK -> WRITE -> IDLE when the async response is actually sent.
@@ -186,7 +186,8 @@ class SynthWebUIInterface:
 
         if "SELKIES_HTTP_PORT" in os.environ:
             try:
-                self.selkies_http_port = int(os.getenv("SELKIES_HTTP_PORT"))
+                raw_http_port = os.getenv("SELKIES_HTTP_PORT")
+                self.selkies_http_port = int(raw_http_port) if raw_http_port else None
             except Exception:
                 self.selkies_http_port = None
         else:
@@ -1072,7 +1073,12 @@ class SynthWebUIInterface:
             # unexpectedly disable the UX. The variable is still configurable
             # via exposed variables and the config API.
             val = config_registry.get_var(
-                "WEBUI_CHAT_RESIZABLE", True, component="synth_webui"
+                "WEBUI_CHAT_RESIZABLE",
+                True,
+                label="WebUI Chat Resizable",
+                description="Allow resizing the chat window in WebUI.",
+                component="synth_webui",
+                hidden=True,
             )
             return bool(val)
         except Exception:
@@ -3112,6 +3118,7 @@ class SynthWebUIInterface:
             from core.cortex_registry import get_cortex_registry
 
             cortex_reg = get_cortex_registry()
+            available_cortex_engines = sorted(list(cortex_reg.get_available_engines()))
             for name in cortex_reg.get_available_engines():
                 try:
                     if cortex_reg.get_engine(name) is not None:
@@ -3119,7 +3126,33 @@ class SynthWebUIInterface:
                 except Exception:
                     pass
         except Exception:
+            available_cortex_engines = []
             pass
+
+        interface_options = []
+        try:
+            from core.core_initializer import INTERFACE_REGISTRY
+
+            interface_options = sorted(list(INTERFACE_REGISTRY.keys()))
+        except Exception:
+            interface_options = []
+
+        component_descriptions = {
+            "core": "Core runtime configuration for the Synthetic Heart system.",
+            "persona": "Persona identity, triggers, and autonomy preferences.",
+            "recon": "Recon preflight controls (language/tone hints and timeouts).",
+            "debrief": "Debrief postflight recovery and audit behavior.",
+            "grillo": "Grillo scheduling and internal beat behavior.",
+            "grillo_chat_observer": "Grillo chat observer scheduling and sampling.",
+            "history_engine": "History context assembly and trimming controls.",
+            "logchat": "LogChat notification and logging thresholds.",
+            "logging": "General logging verbosity and output controls.",
+            "message_chain": "Message handling and outbound action detection rules.",
+            "message_send": "Outbound message delivery tuning.",
+            "action_safety": "Action execution safety policy settings.",
+            "weather_plugin": "Weather plugin scheduling and delivery settings.",
+            "cortex": "Cortex engine selection for base, trainer, and Grillo scopes.",
+        }
 
         try:
             from core.plugin_instance import plugin as active_plugin
@@ -3133,6 +3166,10 @@ class SynthWebUIInterface:
         for entry in definitions:
             # Skip bootstrap-tagged items (not meant for UI)
             if "bootstrap" in entry.get("tags", []):
+                continue
+
+            # Skip hidden entries (API-only)
+            if entry.get("hidden"):
                 continue
 
             # Hide Cortex-engine-specific variables unless their engine is loaded
@@ -3158,6 +3195,21 @@ class SynthWebUIInterface:
                 log_info(
                     f"{LOG_PREFIX} AUTONOMY_ALLOWED_ACTIONS options populated: {len(options)} actions found. {options}"
                 )
+
+            # Cortex selection dropdowns (registered cortex engines)
+            if entry.get("key") in ("BASE_CORTEX", "GRILLO_CORTEX", "TRAINER_CORTEX"):
+                ui_type = "select"
+                if entry.get("key") in ("GRILLO_CORTEX", "TRAINER_CORTEX"):
+                    options = ["Default"] + available_cortex_engines
+                else:
+                    options = available_cortex_engines
+                if not options and entry.get("value"):
+                    options = [str(entry.get("value"))]
+
+            # Trainer IDs: render a structured list with interface dropdown
+            if entry.get("key") == "TRAINER_IDS":
+                ui_type = "trainer-ids"
+                options = interface_options
 
             # Derive optional subgroup labels for nicer grouping in the UI (e.g. GRILLO_DREAM_* → 'Grillo Dream')
             subgroup = None
@@ -3185,6 +3237,9 @@ class SynthWebUIInterface:
                     "group": entry["group"],
                     "component": entry["component"],
                     "component_label": component_label,
+                    "component_description": component_descriptions.get(
+                        entry["component"], f"Settings for {component_label}."
+                    ),
                     "subgroup": subgroup,
                     "advanced": entry["advanced"],
                     "sensitive": entry["sensitive"],
@@ -5663,6 +5718,7 @@ class SynthWebUIInterface:
             "synth_webui": "Synthetic Heart",
             "synth-webui": "Synthetic Heart",
             "synth_webui_interface": "Synthetic Heart",
+            "logchat": "LogChat",
         }
         key = str(raw_name)
         lower_key = key.lower()
@@ -6604,7 +6660,7 @@ class SynthWebUIInterface:
                         f"{LOG_PREFIX} TLS requested but failed to prepare certificates: {tls_exc}"
                     )
                     self.tls_enabled = False
-            config_kwargs = dict(
+            config_kwargs: dict[str, Any] = dict(
                 app=self.app,
                 host=self.host,
                 port=self.port,

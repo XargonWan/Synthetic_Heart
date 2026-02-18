@@ -714,7 +714,9 @@ async def handle_incoming_message(
                             "MESSAGE_ACTION_TYPES",
                             [],
                             label="Message action types",
-                            description="List of action types considered as outbound user messages.",
+                            description=(
+                                "Action types treated as outbound user-visible messages (used for response detection and logging)."
+                            ),
                             group="core",
                             component="message_chain",
                         )

@@ -16,7 +16,7 @@ try:
         ui_type="bool",
         description="Enable Recon preflight contributions from plugins",
         scope="agent",
-        component="agent",
+        component="recon",
         needs_component_reload=False,
     )
     register_exposed_var(
@@ -27,7 +27,7 @@ try:
         ui_type="number",
         description="Maximum number of recon contributions to use per plugin",
         scope="agent",
-        component="agent",
+        component="recon",
         needs_component_reload=False,
     )
     register_exposed_var(
@@ -38,7 +38,7 @@ try:
         ui_type="number",
         description="Timeout in seconds for recon plugin calls",
         scope="agent",
-        component="agent",
+        component="recon",
         needs_component_reload=False,
     )
     register_exposed_var(
@@ -49,8 +49,9 @@ try:
         ui_type="number",
         description="Timeout in seconds for language detector hooks",
         scope="agent",
-        component="agent",
+        component="recon",
         needs_component_reload=False,
+        advanced=True,
     )
     register_exposed_var(
         "TONE_DETECTOR_TIMEOUT",
@@ -60,8 +61,9 @@ try:
         ui_type="number",
         description="Timeout in seconds for tone detector hooks",
         scope="agent",
-        component="agent",
+        component="recon",
         needs_component_reload=False,
+        advanced=True,
     )
     register_exposed_var(
         "INTERFACE_LANGUAGE_OVERRIDES",
@@ -71,8 +73,9 @@ try:
         ui_type="json",
         description="Mapping interface_path -> language_code",
         scope="agent",
-        component="agent",
+        component="recon",
         needs_component_reload=False,
+        hidden=True,
     )
     register_exposed_var(
         "INTERFACE_TONE_OVERRIDES",
@@ -82,8 +85,9 @@ try:
         ui_type="json",
         description="Mapping interface_path -> tone",
         scope="agent",
-        component="agent",
+        component="recon",
         needs_component_reload=False,
+        hidden=True,
     )
     register_exposed_var(
         "DEFAULT_GRILLO_LANGUAGE",
@@ -93,8 +97,9 @@ try:
         ui_type="string",
         description="Default language for Grillo/internal prompts",
         scope="agent",
-        component="agent",
+        component="recon",
         needs_component_reload=False,
+        advanced=True,
     )
     register_exposed_var(
         "DEFAULT_GRILLO_TONE",
@@ -104,8 +109,9 @@ try:
         ui_type="string",
         description="Default tone for Grillo/internal prompts",
         scope="agent",
-        component="agent",
+        component="recon",
         needs_component_reload=False,
+        advanced=True,
     )
     register_exposed_var(
         "PROJECT_DEFAULT_LANGUAGE",
@@ -115,8 +121,9 @@ try:
         ui_type="string",
         description="Fallback language when no hints are provided",
         scope="agent",
-        component="agent",
+        component="recon",
         needs_component_reload=False,
+        advanced=True,
     )
     register_exposed_var(
         "PROJECT_DEFAULT_TONE",
@@ -126,7 +133,7 @@ try:
         ui_type="string",
         description="Fallback tone when no hints are provided",
         scope="agent",
-        component="agent",
+        component="recon",
         needs_component_reload=False,
     )
 except Exception:
@@ -570,7 +577,8 @@ async def resolve_language(
     for r in results:
         if isinstance(r, Exception) or not r:
             continue
-        detector_results.append(r)
+        if isinstance(r, tuple) and len(r) == 2:
+            detector_results.append((int(r[0]), str(r[1])))
 
     if detector_results:
         detector_results.sort(key=lambda x: x[0], reverse=True)
@@ -652,7 +660,8 @@ async def resolve_tone(
     for r in results:
         if isinstance(r, Exception) or not r:
             continue
-        detector_results.append(r)
+        if isinstance(r, tuple) and len(r) == 2:
+            detector_results.append((int(r[0]), r[1]))
 
     if detector_results:
         detector_results.sort(key=lambda x: x[0], reverse=True)

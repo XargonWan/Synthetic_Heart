@@ -170,7 +170,11 @@ class MessagePlugin:
                     "GRILLO_SUPPRESS_INACTIVE",
                     True,
                     label="Suppress Grillo outbound messages when last message is from synth",
+                    description=(
+                        "When enabled, Grillo will skip outbound messages if the most recent message in the target chat was sent by the synth."
+                    ),
                     group="grillo",
+                    component="grillo",
                 )
             except Exception:
                 suppress_enabled = True

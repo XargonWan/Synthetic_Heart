@@ -19,9 +19,9 @@ import json
 import asyncio
 import re
 import random
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 
 from core.plugin_base import PluginBase
 from core.db import get_conn_ctx
@@ -121,8 +121,9 @@ def _get_persona_name():
         except:
             pass
 
-    if _persona_manager_instance and _persona_manager_instance._current_persona:
-        return _persona_manager_instance._current_persona.name
+    current_persona = getattr(_persona_manager_instance, "_current_persona", None)
+    if current_persona:
+        return current_persona.name
     return "SyntH"
 
 
@@ -144,8 +145,9 @@ def _get_persona_profile():
         except:
             pass
 
-    if _persona_manager_instance and _persona_manager_instance._current_persona:
-        return _persona_manager_instance._current_persona.profile
+    current_persona = getattr(_persona_manager_instance, "_current_persona", None)
+    if current_persona:
+        return current_persona.profile
     return SYNTH_BASE_PROFILE_TEMPLATE.format(name="SyntH")
 
 
@@ -167,12 +169,11 @@ def _get_persona_aliases():
         except:
             pass
 
-    if _persona_manager_instance and _persona_manager_instance._current_persona:
+    current_persona = getattr(_persona_manager_instance, "_current_persona", None)
+    if current_persona:
         # Use canonical builder to produce the aliases list
         global CANONICAL_ALIASES
-        CANONICAL_ALIASES = build_canonical_aliases(
-            _persona_manager_instance._current_persona
-        )
+        CANONICAL_ALIASES = build_canonical_aliases(current_persona)
         return list(CANONICAL_ALIASES)
     # Return default aliases if manager not ready
     return ["SyntH", "Synthetic Heart"]
@@ -477,6 +478,13 @@ except Exception:
         value_type="json",
     )
 
+# Ensure SYNTH_FULL_ALIASES is read-only if definition exists
+if "SYNTH_FULL_ALIASES" in config_registry._definitions:
+    try:
+        config_registry._definitions["SYNTH_FULL_ALIASES"].readonly = True
+    except Exception:
+        pass
+
 SYNTH_CURRENT_ANIMATION = config_registry.get_var(
     "SYNTH_CURRENT_ANIMATION",
     "idle",
@@ -523,12 +531,12 @@ class PersonaData:
 
     id: str = "default"
     name: str = ""
-    aliases: List[str] = None
+    aliases: List[str] = field(default_factory=list)
     profile: str = ""  # Core personality description - who this SyntH is
-    likes: List[str] = None
-    dislikes: List[str] = None
-    interests: List[str] = None
-    emotive_state: List[EmotiveState] = None
+    likes: List[str] = field(default_factory=list)
+    dislikes: List[str] = field(default_factory=list)
+    interests: List[str] = field(default_factory=list)
+    emotive_state: List[EmotiveState] = field(default_factory=list)
     current_animation: Optional[str] = (
         None  # Current animation state (idle, think, write, talk)
     )
@@ -725,8 +733,8 @@ class PersonaManager(PluginBase):
                     ],
                     emotive_state=[],
                     current_animation="idle",
-                    created_at=datetime.utcnow().isoformat(),
-                    last_updated=datetime.utcnow().isoformat(),
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                    last_updated=datetime.now(timezone.utc).isoformat(),
                 )
                 success = await self.save_persona(default_persona)
                 if success:
@@ -1112,8 +1120,8 @@ class PersonaManager(PluginBase):
                 "interests": [],
                 "emotive_state": [],
                 "current_animation": "idle",
-                "created_at": datetime.utcnow().isoformat(),
-                "last_updated": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "last_updated": datetime.now(timezone.utc).isoformat(),
             }
 
             return PersonaData.from_dict(persona_data)

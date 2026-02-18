@@ -73,7 +73,7 @@ class ExposedVarDefinition:
         key: str,
         label: str,
         default: Any = "",
-        value_type: type = str,
+        value_type: type | str = str,
         ui_type: str = "string",
         description: str = "",
         scope: str = "global",
@@ -206,8 +206,8 @@ class ExposedVariableRegistry:
     def get_definition(self, key: str) -> Optional[ExposedVarDefinition]:
         return self._defs.get(key)
 
-    def get_value(self, key: str) -> Any:
-        return config_registry.get_value(key)
+    def get_value(self, key: str, default: Any = None) -> Any:
+        return config_registry.get_value(key, default)
 
     async def set_value(self, key: str, value: Any) -> None:
         """Validate and set the exposed variable via the config registry.
@@ -241,7 +241,7 @@ def register_exposed_var(
     key: str,
     label: str,
     default: Any = "",
-    value_type: type = str,
+    value_type: type | str = str,
     ui_type: str = "string",
     description: str = "",
     scope: str = "global",
@@ -292,6 +292,7 @@ def register_all():
         ui_type="bool",
         description="Activate bot when synth's aliases are mentioned in messages.",
         scope="synth",
+        component="persona",
         tags=["persona"],
     )
 
@@ -303,6 +304,7 @@ def register_all():
         ui_type="bool",
         description="Activate bot when synth's interests are mentioned in messages.",
         scope="synth",
+        component="persona",
         tags=["persona"],
     )
 
@@ -314,6 +316,7 @@ def register_all():
         ui_type="bool",
         description="Activate bot when synth's likes are mentioned in messages.",
         scope="synth",
+        component="persona",
         tags=["persona"],
     )
 
@@ -325,6 +328,7 @@ def register_all():
         ui_type="bool",
         description="Activate bot when synth's dislikes are mentioned in messages.",
         scope="synth",
+        component="persona",
         tags=["persona"],
     )
 
@@ -346,9 +350,9 @@ def register_all():
         label="Autonomy Allowed Actions",
         default=[],
         value_type="json",
-        ui_type="tag-combobox",
+        ui_type="action-list",
         description=(
-            "List of action types the synth may execute autonomously when in 'whitelisted' or 'autonomous' modes. "
+            "Action types the synth may execute autonomously when in 'whitelisted' or 'autonomous' modes. "
             "Options are dynamically populated from actions declared with 'safe: false' by plugins, interfaces and LLM engines."
         ),
         scope="synth",
@@ -399,10 +403,14 @@ def register_all():
         default=["SyntH", "Synthetic Heart"],
         value_type="json",
         ui_type="tags",
-        description="Canonical alias list (base aliases + current name + additional aliases).",
+        description=(
+            "Canonical alias list (base aliases + current name + additional aliases). "
+            "This list is computed automatically and cannot be edited directly."
+        ),
         scope="synth",
         component="persona",
         tags=["persona"],
+        readonly=True,
     )
 
     register_exposed_var(
@@ -434,13 +442,13 @@ def register_all():
         options=["#6bfefe", "#ff6bd6", "#18c98c", "#ffd166", "#ff9ecb"],
     )
 
-    # Expose SYNTH_AUTONOMY_MODE as a combobox for better UX (choices shown and selectable)
+    # Expose SYNTH_AUTONOMY_MODE as a select so the dropdown stays in sync
     register_exposed_var(
         "SYNTH_AUTONOMY_MODE",
         label="Synth Autonomy Mode",
         default="suggest",
         value_type=str,
-        ui_type="combobox",
+        ui_type="select",
         description=(
             "Autonomy level: 'passive' (respond only), 'suggest' (propose actions), "
             "'whitelisted' (automatically execute ONLY actions listed in AUTONOMY_ALLOWED_ACTIONS), "
@@ -460,7 +468,9 @@ def register_all():
         default="",
         value_type=str,
         ui_type="string",
-        description="Comma-separated list of trainer IDs for each interface (format: interface_name:user_id)",
+        description=(
+            "Trainer IDs by interface (each entry is interface name + trainer id)."
+        ),
         scope="core",
         component="core",
         tags=["key_value_list"],
@@ -487,6 +497,33 @@ def register_all():
         description="Maximum time in seconds to wait for LLM responses before sending fallback message. (Advanced)",
         scope="core",
         component="core",
+        advanced=True,
+    )
+
+    register_exposed_var(
+        "ALLOW_SAFE_FLAG_OVERRIDE",
+        label="Allow Safe Flag Override",
+        default=False,
+        value_type=bool,
+        ui_type="bool",
+        description=(
+            "Allow payload-level 'safe' overrides for human-origin actions. "
+            "Keep disabled unless you understand the security implications."
+        ),
+        scope="core",
+        component="action_safety",
+        advanced=True,
+    )
+
+    register_exposed_var(
+        "OUTGOING_DEDUPE_WINDOW",
+        label="Outgoing Message Dedupe Window (s)",
+        default=30,
+        value_type=int,
+        ui_type="number",
+        description="Seconds to suppress duplicate outbound messages to the same chat.",
+        scope="core",
+        component="message_send",
         advanced=True,
     )
 
@@ -682,7 +719,7 @@ def register_all():
         ui_type="bool",
         description="Enable periodic chat observation and proposal beat.",
         scope="grillo",
-        component="grillo",
+        component="grillo_chat_observer",
         advanced=False,
     )
 
@@ -694,7 +731,7 @@ def register_all():
         ui_type="number",
         description="Seconds between observer runs (default 3600 = 1 hour).",
         scope="grillo",
-        component="grillo",
+        component="grillo_chat_observer",
         advanced=False,
     )
 
@@ -706,7 +743,7 @@ def register_all():
         ui_type="number",
         description="Number of recent chat snippets to include in the observer prompt.",
         scope="grillo",
-        component="grillo",
+        component="grillo_chat_observer",
         advanced=False,
     )
 
@@ -718,7 +755,7 @@ def register_all():
         ui_type="bool",
         description="When True, the observer will instruct the LLM to propose actions only (no auto-execution).",
         scope="grillo",
-        component="grillo",
+        component="grillo_chat_observer",
         advanced=False,
     )
 
@@ -832,6 +869,20 @@ def register_all():
         ),
         scope="core",
         component="core",
+        hidden=True,
+    )
+
+    register_exposed_var(
+        "GRILLO_SUPPRESS_INACTIVE",
+        label="Suppress Grillo Outbound When Last Message Is Synth",
+        default=True,
+        value_type=bool,
+        ui_type="bool",
+        description=(
+            "When enabled, Grillo will skip outbound messages if the most recent message in the target chat was sent by the synth."
+        ),
+        scope="grillo",
+        component="grillo",
     )
 
     log_info("[variables_engine] Completed explicit exposed var registrations")
