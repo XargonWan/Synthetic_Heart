@@ -2808,9 +2808,22 @@ class SeleniumLLMBase(AIPluginBase):
             # Try to find and click send button first
             send_button = self._find_send_button(self.driver, timeout=3)
             if send_button:
-                log_debug(
-                    f"[selenium] Send button found: {send_button.tag_name} with text: '{send_button.text}'"
-                )
+                try:
+                    aria_attr = send_button.get_attribute("aria-label") or ""
+                    data_testid = send_button.get_attribute("data-testid") or ""
+                    outer_html = ""
+                    try:
+                        outer_html = self.driver.execute_script(
+                            "return arguments[0].outerHTML;", send_button
+                        )
+                    except Exception:
+                        outer_html = ""
+                    short_outer = (outer_html[:200] + "...") if outer_html else ""
+                    log_debug(
+                        f"[selenium] Send button found: {send_button.tag_name} text='{send_button.text}' aria='{aria_attr}' data-testid='{data_testid}' outerHTML={short_outer}"
+                    )
+                except Exception as ex_attr:
+                    log_debug(f"[selenium] Could not read send_button attributes: {ex_attr}")
 
                 # Check if button is enabled
                 is_enabled = send_button.is_enabled()
@@ -2968,6 +2981,62 @@ class SeleniumLLMBase(AIPluginBase):
                     log_error(
                         f"[selenium] CRITICAL: Textarea still contains text after send attempt ({len(current_text)} chars). Send may have failed!"
                     )
+
+                    # --- Debugging snapshot: save screenshot + page source + send-button snapshot ---
+                    try:
+                        ts = int(time.time())
+                        png = f"/tmp/selenium_send_failure_{ts}.png"
+                        html = f"/tmp/selenium_send_failure_{ts}.html"
+                        try:
+                            if getattr(self, "driver", None) is not None:
+                                try:
+                                    self.driver.save_screenshot(png)
+                                    log_info(f"[selenium] Saved screenshot for failed send: {png}")
+                                except Exception as sc_err:
+                                    log_debug(f"[selenium] Could not save screenshot on send failure: {sc_err}")
+                        except Exception:
+                            pass
+
+                        try:
+                            if getattr(self, "driver", None) is not None:
+                                src = self.driver.page_source
+                                with open(html, "w", encoding="utf-8") as fh:
+                                    fh.write(src)
+                                log_info(f"[selenium] Saved page source for failed send: {html}")
+                        except Exception as ps_err:
+                            log_debug(f"[selenium] Could not save page source on send failure: {ps_err}")
+
+                        # Try to re-locate send button and log details (helpful when selectors mismatch)
+                        try:
+                            btn = None
+                            try:
+                                btn = self._find_send_button(self.driver, timeout=0)
+                            except Exception:
+                                btn = None
+
+                            if btn:
+                                try:
+                                    a = btn.get_attribute("aria-label") or ""
+                                    d = btn.get_attribute("data-testid") or ""
+                                    log_debug(
+                                        f"[selenium] Debug send_button on failure: aria=\"{a}\" data-testid=\"{d}\" text=\"{btn.text}\""
+                                    )
+                                    try:
+                                        outer = self.driver.execute_script(
+                                            "return arguments[0].outerHTML;", btn
+                                        )
+                                        log_debug(
+                                            f"[selenium] send_button outerHTML (truncated): {outer[:1000]}"
+                                        )
+                                    except Exception:
+                                        pass
+                                except Exception as b_err:
+                                    log_debug(f"[selenium] Could not inspect send_button on failure: {b_err}")
+                        except Exception:
+                            pass
+                    except Exception as snap_err:
+                        log_debug(f"[selenium] Error during failure snapshot: {snap_err}")
+
                 else:
                     log_debug("[selenium] Textarea is empty, send likely succeeded")
                 # Continue anyway - the message might have been sent
