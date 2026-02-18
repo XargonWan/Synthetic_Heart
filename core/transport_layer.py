@@ -652,6 +652,40 @@ async def _grillo_fire_and_forget(
                             f"[grillo] Failed to persist quarantined actions: {e}"
                         )
 
+            # Filter out action types already present in the original LLM reply.
+            # The checker's role is to ADD missing actions, not re-execute ones the LLM
+            # already generated (those are handled by the main message_chain flow).
+            # Without this filter, a Grillo beat can double-send to Telegram:
+            # (1) checker auto-executes suggested message_telegram_bot, then
+            # (2) the main correction loop also executes the same action.
+            try:
+                original_json, _ = extract_json_from_text(
+                    llm_reply, return_metadata=True
+                )
+                if original_json and isinstance(original_json, dict):
+                    original_actions = original_json.get("actions", [])
+                    original_types = {
+                        a.get("type") or a.get("action")
+                        for a in original_actions
+                        if isinstance(a, dict)
+                    }
+                    if original_types:
+                        before_count = len(actions_to_exec)
+                        actions_to_exec = [
+                            a
+                            for a in actions_to_exec
+                            if (a.get("type") or a.get("action")) not in original_types
+                        ]
+                        skipped = before_count - len(actions_to_exec)
+                        if skipped:
+                            log_info(
+                                f"[grillo] Skipped {skipped} checker-suggested action(s) already present in original LLM reply (prevents double-send): {original_types}"
+                            )
+            except Exception as e:
+                log_debug(
+                    f"[grillo] Error filtering duplicate actions from LLM reply: {e}"
+                )
+
             # If no remaining actions to auto-execute, return early
             if not actions_to_exec:
                 log_info(

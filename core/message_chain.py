@@ -983,11 +983,41 @@ async def handle_incoming_message(
                             )
 
                     if not has_user_response:
-                        log_debug(
-                            "[message_chain] LLM chose not to send user message (diary/internal only)"
-                        )
+                        if (
+                            is_user_facing
+                            and not is_grillo_internal
+                            and not is_internal_chat
+                        ):
+                            log_warning(
+                                f"[message_chain] ⚠️ LLM generated no outbound message action for user-facing interface '{interface_path}' — user will receive no reply"
+                            )
+                        else:
+                            log_debug(
+                                "[message_chain] LLM chose not to send user message (diary/internal only)"
+                            )
                     else:
-                        log_debug("[message_chain] LLM will send message to user")
+                        # Check if the originating interface has a corresponding action
+                        iface_prefix = (interface_path or "").split("/")[0]
+                        expected_action = _INTERFACE_TO_MESSAGE_ACTION.get(iface_prefix)
+                        action_types_in_response = {
+                            a.get("type") or a.get("action")
+                            for a in (actions or [])
+                            if isinstance(a, dict)
+                        }
+                        if (
+                            expected_action
+                            and expected_action not in action_types_in_response
+                            and is_user_facing
+                            and not is_grillo_internal
+                            and not is_internal_chat
+                        ):
+                            log_warning(
+                                f"[message_chain] ⚠️ LLM replied but not to the originating interface '{iface_prefix}' "
+                                f"(expected '{expected_action}', got {action_types_in_response & set(_INTERFACE_TO_MESSAGE_ACTION.values())}) "
+                                f"— user may not receive reply on {iface_prefix}"
+                            )
+                        else:
+                            log_debug("[message_chain] LLM will send message to user")
 
                         # CRITICAL FIX: Merge text into TTS when both are present
                         # This ensures text+audio are sent in the SAME message
