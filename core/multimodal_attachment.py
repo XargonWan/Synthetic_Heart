@@ -242,6 +242,219 @@ async def _extract_audio_from_video(
                     pass
 
 
+def _split_mjpeg_stream(data: bytes) -> list[bytes]:
+    """Split a concatenated MJPEG stream into individual JPEG frames.
+
+    ffmpeg ``image2pipe`` outputs each frame as a complete JPEG back-to-back.
+    We split on the SOI marker (``FF D8``) that begins each frame.
+    """
+    SOI = b"\xff\xd8"
+    frames: list[bytes] = []
+    start = data.find(SOI)
+    while start != -1:
+        next_start = data.find(SOI, start + 2)
+        if next_start == -1:
+            frames.append(data[start:])
+        else:
+            frames.append(data[start:next_start])
+        start = next_start
+    return frames
+
+
+def _make_wav_header(
+    data_size: int,
+    sample_rate: int = 16000,
+    channels: int = 1,
+    bits_per_sample: int = 16,
+) -> bytes:
+    """Build a 44-byte RIFF/WAV header for raw PCM data."""
+    import struct
+
+    byte_rate = sample_rate * channels * bits_per_sample // 8
+    block_align = channels * bits_per_sample // 8
+    return struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF",
+        36 + data_size,
+        b"WAVE",
+        b"fmt ",
+        16,  # sub-chunk size
+        1,  # PCM format
+        channels,
+        sample_rate,
+        byte_rate,
+        block_align,
+        bits_per_sample,
+        b"data",
+        data_size,
+    )
+
+
+async def decompose_video_to_frames_and_audio(
+    video_bytes: bytes, source_label: str, fps: int = 2
+) -> list[dict] | None:
+    """Decompose a video into temporally-aligned frame + audio chunk pairs.
+
+    Extracts visual frames at *fps* frames-per-second and splits the audio
+    track into 1-second WAV chunks so that downstream engines can interleave
+    them.  This lets the model "see and hear" each second of the video in
+    parallel with explicit temporal grounding.
+
+    All heavy output is piped through memory — only a single temporary file
+    is written for the input video (MP4 demuxing requires seeking).
+
+    Returns a list of per-second dicts::
+
+        [
+            {
+                "ts": 0.0,
+                "frames_b64": ["<b64>", "<b64>"],   # *fps* frames
+                "audio_b64": "<b64>" | None,         # 1-second WAV chunk
+            },
+            ...
+        ]
+
+    Returns ``None`` on any failure (caller should fall back to blob
+    behaviour).
+    """
+    import asyncio
+    import subprocess
+    import tempfile
+    import os
+
+    # MP4 demuxing requires a seekable input — one temp file is unavoidable.
+    tmp_path: str | None = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(suffix=".mp4", prefix="synth_vdec_")
+        os.write(fd, video_bytes)
+        os.close(fd)
+
+        # --- Extract frames via image2pipe (all output to stdout) ---------------
+        frame_cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            tmp_path,
+            "-vf",
+            f"fps={fps},scale=640:-1",
+            "-q:v",
+            "5",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "mjpeg",
+            "pipe:1",
+        ]
+        fproc = await asyncio.create_subprocess_exec(
+            *frame_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        frame_stdout, frame_stderr = await fproc.communicate()
+
+        if fproc.returncode != 0:
+            log_debug(
+                f"[multimodal] Frame extraction failed for {source_label}: "
+                f"{(frame_stderr.decode(errors='replace'))[:300]}"
+            )
+            return None
+
+        frame_bytes_list = _split_mjpeg_stream(frame_stdout)
+        if not frame_bytes_list:
+            log_debug(f"[multimodal] No frames extracted for {source_label}")
+            return None
+
+        # --- Extract audio as raw PCM to stdout ---------------------------------
+        # 16 kHz, mono, s16le → 32 000 bytes per second
+        SAMPLE_RATE = 16000
+        BYTES_PER_SECOND = SAMPLE_RATE * 1 * 2  # mono, 16-bit
+
+        audio_cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            tmp_path,
+            "-vn",
+            "-f",
+            "s16le",
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            str(SAMPLE_RATE),
+            "-ac",
+            "1",
+            "pipe:1",
+        ]
+        aproc = await asyncio.create_subprocess_exec(
+            *audio_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        audio_stdout, audio_stderr = await aproc.communicate()
+
+        # Split raw PCM into 1-second chunks and wrap in WAV headers
+        audio_chunks: list[bytes] = []
+        has_audio = aproc.returncode == 0 and len(audio_stdout) > 0
+        if has_audio:
+            offset = 0
+            while offset < len(audio_stdout):
+                chunk_pcm = audio_stdout[offset : offset + BYTES_PER_SECOND]
+                wav_header = _make_wav_header(len(chunk_pcm), sample_rate=SAMPLE_RATE)
+                audio_chunks.append(wav_header + chunk_pcm)
+                offset += BYTES_PER_SECOND
+        else:
+            stderr_text = audio_stderr.decode(errors="replace") if audio_stderr else ""
+            if "does not contain any stream" in stderr_text:
+                log_debug(f"[multimodal] No audio track in {source_label}, frames-only")
+            else:
+                log_debug(
+                    f"[multimodal] Audio extraction failed for {source_label}: "
+                    f"{stderr_text[:300]}"
+                )
+
+        # --- Group frames by second and pair with audio chunks ------------------
+        total_frames = len(frame_bytes_list)
+        total_seconds = (total_frames + fps - 1) // fps  # ceiling division
+        result: list[dict] = []
+
+        for sec_idx in range(total_seconds):
+            start_frame = sec_idx * fps
+            end_frame = min(start_frame + fps, total_frames)
+            sec_frames = frame_bytes_list[start_frame:end_frame]
+
+            audio_chunk = audio_chunks[sec_idx] if sec_idx < len(audio_chunks) else None
+
+            result.append(
+                {
+                    "ts": float(sec_idx),
+                    "frames_b64": [encode_bytes_to_base64(fb) for fb in sec_frames],
+                    "audio_b64": (
+                        encode_bytes_to_base64(audio_chunk) if audio_chunk else None
+                    ),
+                }
+            )
+
+        log_debug(
+            f"[multimodal] Decomposed {source_label}: {total_frames} frames, "
+            f"{len(audio_chunks)} audio chunks, {total_seconds} seconds "
+            f"(in-memory, single temp input)"
+        )
+        return result
+
+    except FileNotFoundError:
+        log_debug("[multimodal] ffmpeg not available — skipping video decomposition")
+        return None
+    except Exception as e:
+        log_warning(f"[multimodal] Video decomposition error for {source_label}: {e}")
+        return None
+    finally:
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
 async def extract_multimodal_from_telegram(
     bot: Any,
     message: Any,
