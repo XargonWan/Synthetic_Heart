@@ -39,6 +39,7 @@ dependencies = [
     "websockets>=15.0.1",
     "webdriver-manager>=4.0.1",
     "setuptools>=70.0.0",
+    "discord-ext-voice-recv>=0.5.2a179",
 ]
 
 [dependency-groups]

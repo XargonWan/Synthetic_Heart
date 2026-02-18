@@ -96,6 +96,7 @@ async def build_json_prompt(
     context_memory,
     interface_name: str | None = None,
     image_data: dict | None = None,
+    attachments: list[dict] | None = None,
     max_chars: int | None = None,
     history_scope: str | None = None,
 ) -> dict:
@@ -358,6 +359,56 @@ async def build_json_prompt(
         log_debug(
             f"[json_prompt] Including image data in prompt: {image_data.get('type', 'unknown')}"
         )
+
+    # Add multimodal attachments if present
+    if attachments:
+        input_payload["attachments"] = attachments
+        log_debug(
+            f"[json_prompt] Including {len(attachments)} multimodal attachments in prompt"
+        )
+
+        # Synthesise a structured "video" metadata block (mirrors the "image" block)
+        # so that the model gets the same level of context for video as for images.
+        for att in attachments:
+            media_meta = att.get("media_metadata")
+            if not media_meta:
+                continue
+            if media_meta.get("type") not in ("video", "video_note"):
+                continue
+            input_payload["video"] = {
+                "type": media_meta["type"],
+                "source": {
+                    "interface": interface_name,
+                    "user_id": getattr(getattr(message, "from_user", None), "id", None),
+                    "chat_id": getattr(message, "chat", None)
+                    and getattr(message.chat, "id", None),
+                    "message_id": getattr(message, "message_id", None),
+                },
+                "video_data": {
+                    "type": media_meta["type"],
+                    "filename": att.get("filename", ""),
+                    "mime_type": att.get("mime_type", "video/mp4"),
+                    "duration": media_meta.get("duration", 0),
+                    "width": media_meta.get("width", 0),
+                    "height": media_meta.get("height", 0),
+                    "file_size": media_meta.get("file_size", 0),
+                    "has_audio": media_meta.get("has_audio", False),
+                    "caption": att.get("caption", ""),
+                },
+                "metadata": {
+                    "timestamp": getattr(message, "date", None)
+                    and message.date.isoformat(),
+                    "caption": att.get("caption", ""),
+                    "mime_type": att.get("mime_type", "video/mp4"),
+                    "file_size": media_meta.get("file_size", 0),
+                    "duration": media_meta.get("duration", 0),
+                },
+            }
+            log_debug(
+                f"[json_prompt] Including video metadata in prompt: "
+                f"{media_meta['type']}, {media_meta.get('duration', 0)}s"
+            )
+            break  # Only attach metadata for the first video
 
     reply = getattr(message, "reply_to_message", None)
     if reply:
@@ -922,6 +973,42 @@ def build_minified_json_instructions() -> dict:
     return {"instructions": instructions, "actions": actions}
 
 
+def _estimate_attachment_data_size(prompt: dict) -> int:
+    """Estimate the total size of base64 attachment data in the prompt.
+
+    LLM engines extract attachment binary data and send it as native
+    multimodal parts (inline_data).  The text prompt that reaches the
+    model no longer contains these heavy strings, so the reducer should
+    exclude them from its budget calculations.
+    """
+    total = 0
+    data_fields = {"data", "base64"}
+    multimodal_keys = {"attachments", "images", "audio", "documents", "videos"}
+
+    def _walk(obj: object) -> None:
+        nonlocal total
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if key in multimodal_keys and isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, dict):
+                            for df in data_fields:
+                                v = item.get(df)
+                                if isinstance(v, str) and len(v) > 1024:
+                                    total += len(v)
+                elif isinstance(value, (dict, list)):
+                    _walk(value)
+        elif isinstance(obj, list):
+            for item in obj:
+                _walk(item)
+
+    try:
+        _walk(prompt)
+    except Exception:
+        pass
+    return total
+
+
 def reduce_prompt_for_llm_limit(prompt: dict, max_chars: int) -> dict:
     """Reduce the prompt if it exceeds the LLM character limit.
 
@@ -934,6 +1021,12 @@ def reduce_prompt_for_llm_limit(prompt: dict, max_chars: int) -> dict:
     3. Remove `memories` entirely if needed
     4. Remove other context sections (but KEEP any protected fields)
     5. FINAL EMERGENCY: Remove entire context (but KEEP instructions)
+
+    Note: attachment base64 data is excluded from size calculations because
+    LLM engines extract it and send it as native multimodal parts.  Without
+    this, a single video attachment (~1 MB base64) would cause the reducer
+    to strip all context even though the text prompt would be well under
+    the limit after redaction.
 
     Args:
         prompt: The JSON prompt dictionary
@@ -958,8 +1051,17 @@ def reduce_prompt_for_llm_limit(prompt: dict, max_chars: int) -> dict:
     # Make a copy to avoid modifying the original
     reduced_prompt = copy.deepcopy(prompt)
 
-    # Check current size
-    current_size = len(json_dumps(reduced_prompt))
+    # Subtract attachment base64 data from size calculations — LLM engines
+    # will extract and send it separately, so it doesn't count against the
+    # text prompt budget.
+    attachment_data_offset = _estimate_attachment_data_size(reduced_prompt)
+    if attachment_data_offset > 0:
+        log_debug(
+            f"[reduce_prompt] Excluding ~{attachment_data_offset} chars of attachment base64 data from budget"
+        )
+
+    # Check current size (excluding attachment data that won't be in the text prompt)
+    current_size = len(json_dumps(reduced_prompt)) - attachment_data_offset
     if current_size <= max_chars:
         log_debug(
             f"[reduce_prompt] Prompt size {current_size} <= {max_chars}, no reduction needed"
@@ -989,7 +1091,7 @@ def reduce_prompt_for_llm_limit(prompt: dict, max_chars: int) -> dict:
             history_recent.pop(0)  # Remove oldest
         except Exception:
             break
-        current_size = len(json_dumps(reduced_prompt))
+        current_size = len(json_dumps(reduced_prompt)) - attachment_data_offset
         log_debug(
             f"[reduce_prompt] Trimmed history_recent, {len(history_recent)} remaining, now {current_size} chars"
         )
@@ -1004,7 +1106,7 @@ def reduce_prompt_for_llm_limit(prompt: dict, max_chars: int) -> dict:
             history_current.pop(0)  # Remove oldest
         except Exception:
             break
-        current_size = len(json_dumps(reduced_prompt))
+        current_size = len(json_dumps(reduced_prompt)) - attachment_data_offset
         log_debug(
             f"[reduce_prompt] Trimmed history_current_chat, {len(history_current)} remaining, now {current_size} chars"
         )
@@ -1017,7 +1119,7 @@ def reduce_prompt_for_llm_limit(prompt: dict, max_chars: int) -> dict:
                 f"[reduce_prompt] Removing memories section ({len(memories)} entries, ~{len(json_dumps(memories))} chars)"
             )
             del context["memories"]
-            current_size = len(json_dumps(reduced_prompt))
+            current_size = len(json_dumps(reduced_prompt)) - attachment_data_offset
             log_debug(f"[reduce_prompt] After removing memories: {current_size} chars")
 
     # === STEP 4: Remove other context sections (but KEEP protected fields) ===
@@ -1030,21 +1132,21 @@ def reduce_prompt_for_llm_limit(prompt: dict, max_chars: int) -> dict:
             if key in context:
                 log_warning(f"[reduce_prompt] Removing context field: {key}")
                 del context[key]
-                current_size = len(json_dumps(reduced_prompt))
+                current_size = len(json_dumps(reduced_prompt)) - attachment_data_offset
                 log_debug(f"[reduce_prompt] After removing {key}: {current_size} chars")
 
     # === STEP 5: Emergency - remove entire context (instructions are preserved at top-level) ===
     if current_size > max_chars and "context" in reduced_prompt:
         log_error("[reduce_prompt] 🚨 Emergency: removing entire context")
         del reduced_prompt["context"]
-        current_size = len(json_dumps(reduced_prompt))
+        current_size = len(json_dumps(reduced_prompt)) - attachment_data_offset
         log_debug(
             f"[reduce_prompt] After emergency context removal: {current_size} chars"
         )
 
     # === FINAL CHECK: Instructions, instructions_verbose (if present) AND Persona are ALWAYS kept ===
     # If we're still over, something is very wrong - log error but don't remove instructions or persona
-    final_size = len(json_dumps(reduced_prompt))
+    final_size = len(json_dumps(reduced_prompt)) - attachment_data_offset
     if final_size > max_chars:
         log_error(
             f"[reduce_prompt] CRITICAL: Could not reduce prompt below {max_chars} chars, final size: {final_size}"
@@ -1188,3 +1290,49 @@ def reduce_json_text_for_transmission(json_text: str, max_chars: int) -> str:
     except Exception as e:
         log_error(f"[transmission_reduce] Failed to reduce JSON: {e}")
         return json_text
+
+
+# ---------------------------------------------------------------------------
+# Live API persona builder
+# ---------------------------------------------------------------------------
+
+
+async def build_live_system_instruction(
+    message: object = None,
+    context_memory: object = None,
+) -> str:
+    """Build a condensed system instruction for Gemini Live API sessions.
+
+    The Live API has a smaller context window (128k tokens) and system
+    instructions are set once at session start.  This produces a compact
+    persona string without the full JSON-action scaffolding.
+
+    Returns:
+        A plain-text system instruction containing the persona identity,
+        emotional state, and conversational guidelines.
+    """
+    # Gather the persona injection (same path as build_json_prompt)
+    static_persona = ""
+    try:
+        from core.action_parser import gather_static_injections
+
+        injections = await gather_static_injections(message, context_memory)
+        if isinstance(injections, dict) and "persona" in injections:
+            static_persona = injections.pop("persona", "")
+    except Exception as e:
+        log_warning(f"[live_prompt] Failed to gather persona for Live API: {e}")
+
+    parts: list[str] = []
+
+    if static_persona:
+        parts.append(static_persona)
+
+    # Conversational guidelines (no JSON scaffolding for voice)
+    parts.append(
+        "You are in a live voice conversation. Speak naturally and conversationally. "
+        "Keep responses concise — a few sentences at most unless asked for detail. "
+        "You can express emotions through tone and word choice. "
+        "Do not output JSON, markdown, or structured data — just speak naturally."
+    )
+
+    return "\n\n".join(parts)
