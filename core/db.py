@@ -720,18 +720,9 @@ async def init_db() -> None:
     """Asynchronously initialize essential MariaDB tables (core only)."""
     async with get_conn_ctx() as conn:
         try:
+            # Ensure we have a cursor to run schema creation for core tables
             async with conn.cursor() as cur:
-                # settings table for configuration values - core functionality
-                await cur.execute(
-                    """
-                CREATE TABLE IF NOT EXISTS settings (
-                    `setting_key` VARCHAR(255) PRIMARY KEY,
-                    `value` TEXT NOT NULL,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-                )
-                """
-                )
+                pass
 
             await cur.execute(
                 """
@@ -744,20 +735,20 @@ async def init_db() -> None:
                 """
             )
 
-            # Insert default settings if they don't exist
+            # Insert default config entries if they don't exist (use `config` table)
             await cur.execute(
                 """
-                INSERT IGNORE INTO settings (`setting_key`, `value`) VALUES ('base_cortex', 'selenium_chatgpt')
+                INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('BASE_CORTEX', 'selenium_chatgpt')
                 """
             )
             await cur.execute(
                 """
-                INSERT IGNORE INTO settings (`setting_key`, `value`) VALUES ('grillo_cortex', 'Default')
+                INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('GRILLO_CORTEX', 'Default')
                 """
             )
             await cur.execute(
                 """
-                INSERT IGNORE INTO settings (`setting_key`, `value`) VALUES ('trainer_cortex', 'Default')
+                INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('TRAINER_CORTEX', 'Default')
                 """
             )
         except Exception as e:
