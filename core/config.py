@@ -12,7 +12,6 @@ except Exception:  # pragma: no cover - fallback when dotenv not installed
         return False
 
 
-from core.db import get_conn_ctx
 
 # aiomysql is optional at import time — make the import lazy/fail-safe so
 # importing core.config doesn't raise in environments where aiomysql isn't
@@ -328,7 +327,9 @@ async def get_log_chat_id() -> int | None:
                     _log_chat_id = int(raw)
                 except Exception:
                     _log_chat_id = None
-            log_debug(f"[config] 📥 Loaded LOG_CHAT_ID via config_registry: {_log_chat_id}")
+            log_debug(
+                f"[config] 📥 Loaded LOG_CHAT_ID via config_registry: {_log_chat_id}"
+            )
         except Exception as e:
             log_error(f"[config] ❌ Error in get_log_chat_id(): {repr(e)}")
     return _log_chat_id
@@ -341,7 +342,9 @@ async def get_log_chat_interface() -> str | None:
         try:
             raw = config_registry.get_value("LOG_CHAT_INTERFACE", "")
             _log_chat_interface = raw if raw else None
-            log_debug(f"[config] 📥 Loaded LOG_CHAT_INTERFACE via config_registry: {_log_chat_interface}")
+            log_debug(
+                f"[config] 📥 Loaded LOG_CHAT_INTERFACE via config_registry: {_log_chat_interface}"
+            )
         except Exception as e:
             log_error(f"[config] ❌ Error in get_log_chat_interface(): {repr(e)}")
     return _log_chat_interface
@@ -371,7 +374,9 @@ async def get_log_chat_thread_id() -> int | None:
                     _log_chat_thread_id = int(raw)
                 except Exception:
                     _log_chat_thread_id = None
-            log_debug(f"[config] 📥 Loaded LOG_CHAT_THREAD_ID via config_registry: {_log_chat_thread_id}")
+            log_debug(
+                f"[config] 📥 Loaded LOG_CHAT_THREAD_ID via config_registry: {_log_chat_thread_id}"
+            )
         except Exception as e:
             log_error(f"[config] ❌ Error in get_log_chat_thread_id(): {repr(e)}")
     return _log_chat_thread_id
@@ -458,6 +463,7 @@ def list_available_llms():
 # These functions provide a backward-compatible shim for older WebUI code
 # that expects simple helpers in core.config. They delegate to the
 # CortexRegistry where possible to avoid duplicating discovery logic.
+
 
 def list_available_cortexs():
     """Return a sorted list of known cortex kinds."""

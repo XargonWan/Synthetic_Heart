@@ -19,7 +19,6 @@ class Capabilities(TypedDict, total=False):
     low_latency: bool
 
 
-
 class CortexRegistry:
     """Central registry for all Cortex engines via base modules.
 
@@ -47,6 +46,7 @@ class CortexRegistry:
             "capabilities": capabilities or {},
         }
         log_debug(f"[cortex_registry] Registered cortex kind: {kind} ({label or kind})")
+
     def register_engine_module(
         self,
         name: str,

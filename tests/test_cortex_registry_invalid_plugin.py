@@ -12,7 +12,10 @@ def test_plugin_with_none_plugin_class(monkeypatch):
 
     def fake_import(name):
         # Accept both new and legacy import paths
-        if name in ("cortex.llm_provider.invalid_none", "cortex.llm_engine.invalid_none"):
+        if name in (
+            "cortex.llm_provider.invalid_none",
+            "cortex.llm_engine.invalid_none",
+        ):
             return fake_mod
         return real_import(name)
 

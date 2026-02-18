@@ -333,7 +333,9 @@ async def cortex_command(*args) -> str:
             lines.append(f"\n{k}:")
             for e in sorted(engines):
                 lines.append(f"• `{k}/{e}`")
-        lines.append("\nTo change: `/cortex <kind>/<engine>` or `/cortex <engine>` (if unambiguous)")
+        lines.append(
+            "\nTo change: `/cortex <kind>/<engine>` or `/cortex <engine>` (if unambiguous)"
+        )
         return "\n".join(lines)
 
     choice_raw = str(args[0]).strip()
@@ -342,7 +344,9 @@ async def cortex_command(*args) -> str:
     if "/" in choice_raw:
         parts = choice_raw.split("/", 1)
         if len(parts) != 2:
-            return "❌ Invalid format. Use `/cortex <kind>/<engine>` or `/cortex <engine>`"
+            return (
+                "❌ Invalid format. Use `/cortex <kind>/<engine>` or `/cortex <engine>`"
+            )
         kind, name = parts[0], parts[1]
         if kind not in kind_map:
             return f"❌ Cortex kind `{kind}` not recognised. Available kinds: {', '.join(sorted(kind_map.keys()))}"
@@ -351,7 +355,9 @@ async def cortex_command(*args) -> str:
         selected_engine = name
     else:
         # Short-name resolution: find exact or substring matches across all engines
-        candidates = [e for e in all_engines if e == choice_raw or choice_raw.lower() in e.lower()]
+        candidates = [
+            e for e in all_engines if e == choice_raw or choice_raw.lower() in e.lower()
+        ]
         # Prefer exact match
         exact = [e for e in candidates if e == choice_raw]
         if len(exact) == 1:
@@ -366,9 +372,7 @@ async def cortex_command(*args) -> str:
                 for kk in sorted(ks):
                     opts.append(f"{kk}/{e}")
             hint = "\n".join(f"/cortex {o}" for o in opts)
-            return (
-                f"❌ Found multiple matching engines for '{choice_raw}'. Which one did you mean?\n{hint}"
-            )
+            return f"❌ Found multiple matching engines for '{choice_raw}'. Which one did you mean?\n{hint}"
         else:
             return f"❌ Cortex `{choice_raw}` not found."
 
@@ -398,6 +402,7 @@ async def llm_alias(*args) -> str:
 
 # Deprecated alias (kept for backward compatibility)
 register_command("llm", llm_alias)
+
 
 async def model_command(*args) -> str:
     """Handle model switching command."""

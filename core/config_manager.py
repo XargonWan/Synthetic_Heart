@@ -642,13 +642,18 @@ class ConfigRegistry:
             # an idempotent ensure_core_tables() and retry the SELECT once.
             msg = str(e) or ""
             is_schema_error = (
-                "1146" in msg or "doesn't exist" in msg or "1054" in msg or "Unknown column" in msg
+                "1146" in msg
+                or "doesn't exist" in msg
+                or "1054" in msg
+                or "Unknown column" in msg
             )
             if is_schema_error:
                 try:
                     from core.db import ensure_core_tables
 
-                    log_debug(f"[config] Schema error while loading '{key}': {msg}; running ensure_core_tables() and retrying")
+                    log_debug(
+                        f"[config] Schema error while loading '{key}': {msg}; running ensure_core_tables() and retrying"
+                    )
                     await ensure_core_tables()
                     # retry once
                     async with get_conn_ctx() as conn:
@@ -660,7 +665,9 @@ class ConfigRegistry:
                             if row:
                                 return row[0]
                 except Exception as retry_exc:
-                    log_error(f"[config] Retry after ensure_core_tables() failed for key '{key}': {retry_exc}")
+                    log_error(
+                        f"[config] Retry after ensure_core_tables() failed for key '{key}': {retry_exc}"
+                    )
             log_error(f"[config] Error loading from DB for key '{key}': {e}")
             return None
 
@@ -753,13 +760,18 @@ class ConfigRegistry:
                     # ensure_core_tables() and retry the REPLACE/INSERT once.
                     msg = str(e) or ""
                     is_schema_error = (
-                        "1146" in msg or "doesn't exist" in msg or "1054" in msg or "Unknown column" in msg
+                        "1146" in msg
+                        or "doesn't exist" in msg
+                        or "1054" in msg
+                        or "Unknown column" in msg
                     )
                     if is_schema_error:
                         try:
                             from core.db import ensure_core_tables
 
-                            log_debug(f"[config] Schema error persisting '{key}': {msg}; running ensure_core_tables() and retrying persist")
+                            log_debug(
+                                f"[config] Schema error persisting '{key}': {msg}; running ensure_core_tables() and retrying persist"
+                            )
                             await ensure_core_tables()
                             # retry the same persist steps once
                             recreated = False
@@ -778,21 +790,27 @@ class ConfigRegistry:
                                         (key, value),
                                     )
                                     await conn.commit()
-                                log_debug(f"[config] REPLACE (retry) succeeded for key='{key}'")
+                                log_debug(
+                                    f"[config] REPLACE (retry) succeeded for key='{key}'"
+                                )
                                 if recreated:
                                     log_warning(
                                         f"[config] Config key '{key}' was missing and has been recreated on retry"
                                     )
                                 return True
                             except Exception:
-                                log_debug(f"[config] REPLACE (retry) failed for key='{key}', attempting INSERT fallback")
+                                log_debug(
+                                    f"[config] REPLACE (retry) failed for key='{key}', attempting INSERT fallback"
+                                )
                                 async with conn.cursor() as cur:
                                     await cur.execute(
                                         "INSERT INTO config (config_key, value) VALUES (%s, %s) ON DUPLICATE KEY UPDATE value = VALUES(value)",
                                         (key, value),
                                     )
                                     await conn.commit()
-                                log_debug(f"[config] Fallback INSERT (retry) succeeded for key='{key}'")
+                                log_debug(
+                                    f"[config] Fallback INSERT (retry) succeeded for key='{key}'"
+                                )
                                 if recreated:
                                     log_warning(
                                         f"[config] Config key '{key}' was missing and has been recreated on retry (fallback path)"

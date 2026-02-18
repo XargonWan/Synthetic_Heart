@@ -27,7 +27,9 @@ async def test_custom_sleep_trigger_puts_chat_to_sleep(monkeypatch):
 
     trainer_id = 555
     msg = SimpleNamespace(
-        from_user=SimpleNamespace(id=trainer_id, username="Xargon", full_name="Xargon Test"),
+        from_user=SimpleNamespace(
+            id=trainer_id, username="Xargon", full_name="Xargon Test"
+        ),
         chat=SimpleNamespace(id=chat_id, type="private"),
         text="bye 2b",
         message_id=1,
@@ -85,7 +87,9 @@ async def test_empty_config_does_not_trigger_sleep(monkeypatch):
 
     trainer_id = 555
     msg = SimpleNamespace(
-        from_user=SimpleNamespace(id=trainer_id, username="Xargon", full_name="Xargon Test"),
+        from_user=SimpleNamespace(
+            id=trainer_id, username="Xargon", full_name="Xargon Test"
+        ),
         chat=SimpleNamespace(id=chat_id, type="private"),
         text="bye 2b",
         message_id=1,

@@ -46,6 +46,7 @@ getting started.
    vrm_animations
    animation_system
    webui_debug
+   webui_controls
    webui_desktop_iframe
    window_manager
    interfaces

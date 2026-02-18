@@ -1,4 +1,3 @@
-import asyncio
 
 import pytest
 
@@ -16,7 +15,9 @@ async def test_set_base_cortex_persists_to_config_table():
     # Ensure config table contains the entry
     async with get_conn_ctx() as conn:
         async with conn.cursor() as cur:
-            await cur.execute("SELECT value FROM config WHERE config_key = %s", ("BASE_CORTEX",))
+            await cur.execute(
+                "SELECT value FROM config WHERE config_key = %s", ("BASE_CORTEX",)
+            )
             row = await cur.fetchone()
             assert row and row[0] == "selenium_gemini"
 

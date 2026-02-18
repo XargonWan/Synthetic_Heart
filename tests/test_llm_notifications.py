@@ -14,9 +14,7 @@ def ensure_default_cortexs():
     # Keep existing registrations but add minimal fallbacks if missing
     reg._engine_meta.setdefault("manual", {"cortex": "llm_provider"})
     reg._engine_modules.setdefault("manual", "cortex.llm_provider.manual")
-    reg._engine_meta.setdefault(
-        "selenium_chatgpt", {"cortex": "selenium_engine"}
-    )
+    reg._engine_meta.setdefault("selenium_chatgpt", {"cortex": "selenium_engine"})
     reg._engine_modules.setdefault(
         "selenium_chatgpt", "cortex.selenium_engine.selenium_chatgpt"
     )
@@ -102,10 +100,16 @@ async def test_cortex_command_lists_engines():
     from core import command_registry
 
     with (
-        patch("core.config.get_active_cortex_engine", new=AsyncMock(return_value="manual")),
-        patch("core.config.list_available_cortexs", return_value=["llm_provider", "selenium_engine"]),
+        patch(
+            "core.config.get_active_cortex_engine", new=AsyncMock(return_value="manual")
+        ),
+        patch(
+            "core.config.list_available_cortexs",
+            return_value=["llm_provider", "selenium_engine"],
+        ),
         patch("core.config.list_available_cortex_engines") as mock_list_engines,
     ):
+
         def _list(kind=None):
             if kind == "llm_provider":
                 return ["manual", "gpt"]
@@ -132,11 +136,15 @@ async def test_cortex_command_fqdn_sets_engine():
     mock_reg.get_available_engines = Mock(return_value=["manual"])
 
     with (
-        patch("core.config.get_active_cortex_engine", new=AsyncMock(return_value="manual")),
+        patch(
+            "core.config.get_active_cortex_engine", new=AsyncMock(return_value="manual")
+        ),
         patch("core.config.list_available_cortexs", return_value=["llm_provider"]),
         patch("core.config.list_available_cortex_engines", return_value=["manual"]),
         patch("core.cortex_registry.get_cortex_registry", return_value=mock_reg),
-        patch("core.config.switch_active_cortex_engine", new=AsyncMock()) as mock_switch,
+        patch(
+            "core.config.switch_active_cortex_engine", new=AsyncMock()
+        ) as mock_switch,
     ):
         res = await command_registry.cortex_command("llm_provider/manual")
         mock_switch.assert_awaited_with("manual", use_hot_swap=False)
@@ -153,13 +161,23 @@ async def test_cortex_command_ambiguous_shortname():
         "gemini_live": {"cortex": "llm_provider"},
         "selenium_gemini": {"cortex": "selenium_engine"},
     }
-    mock_reg.get_available_engines = Mock(return_value=["gemini_live", "selenium_gemini"])
+    mock_reg.get_available_engines = Mock(
+        return_value=["gemini_live", "selenium_gemini"]
+    )
 
     with (
         patch("core.cortex_registry.get_cortex_registry", return_value=mock_reg),
-        patch("core.config.get_active_cortex_engine", new=AsyncMock(return_value="manual")),
-        patch("core.config.list_available_cortexs", return_value=["llm_provider", "selenium_engine"]),
-        patch("core.config.list_available_cortex_engines", return_value=["gemini_live", "selenium_gemini"]),
+        patch(
+            "core.config.get_active_cortex_engine", new=AsyncMock(return_value="manual")
+        ),
+        patch(
+            "core.config.list_available_cortexs",
+            return_value=["llm_provider", "selenium_engine"],
+        ),
+        patch(
+            "core.config.list_available_cortex_engines",
+            return_value=["gemini_live", "selenium_gemini"],
+        ),
     ):
         res = await command_registry.cortex_command("gemini")
         assert "Found multiple matching engines for 'gemini'" in res

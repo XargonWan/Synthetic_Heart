@@ -45,11 +45,11 @@ def test_try_catch_balance_in_main_js():
     text = p.read_text(encoding="utf-8")
 
     # Remove template literals and quoted strings to avoid counting 'try {' inside them
-    text_no_templates = re.sub(r'`(?:\\.|[^`])*`', '', text)
-    text_no_strings = re.sub(r'(["\'])(?:\\.|(?!\1).)*\1', '', text_no_templates)
+    text_no_templates = re.sub(r"`(?:\\.|[^`])*`", "", text)
+    text_no_strings = re.sub(r'(["\'])(?:\\.|(?!\1).)*\1', "", text_no_templates)
 
     # Strip single-line comments
-    clean_lines = [ln.split('//', 1)[0] for ln in text_no_strings.splitlines()]
+    clean_lines = [ln.split("//", 1)[0] for ln in text_no_strings.splitlines()]
     clean_text = "\n".join(clean_lines)
 
     tries = clean_text.count("try {")

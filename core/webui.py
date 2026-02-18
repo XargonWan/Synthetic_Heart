@@ -6210,7 +6210,9 @@ class SynthWebUIInterface:
             ) from exc
 
         if not engine:
-            raise HTTPException(status_code=404, detail=f"Cortex engine '{name}' not loaded")
+            raise HTTPException(
+                status_code=404, detail=f"Cortex engine '{name}' not loaded"
+            )
 
         try:
             from cortex.selenium_engine.selenium_llm_base import SeleniumLLMBase

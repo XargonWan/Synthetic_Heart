@@ -2117,6 +2117,31 @@ class SeleniumLLMBase(AIPluginBase):
                             return text
 
                 except Exception as e:
+                    # Detect driver-level failures (connection/session problems) and escalate so
+                    # the outer workflow can trigger driver recovery/restart. Non-driver
+                    # selector errors remain non-fatal and will continue to the next selector.
+                    msg = str(e).lower() if e is not None else ""
+                    fatal_indicators = (
+                        "connection refused",
+                        "failed to establish a new connection",
+                        "max retries exceeded",
+                        "invalid session id",
+                        "no such window",
+                        "session not created",
+                        "session not created exception",
+                        "disconnected",
+                        "connection reset by peer",
+                    )
+                    if any(ind in msg for ind in fatal_indicators):
+                        log_warning(
+                            f"[selenium] Driver-level error detected while running selector '{selector}': {e}"
+                        )
+                        # Propagate as FrozenDriverError to trigger the existing recovery logic
+                        raise FrozenDriverError(
+                            f"Driver appears dead during selector '{selector}': {e}"
+                        )
+
+                    # Otherwise treat it as a non-fatal selector error and continue
                     log_debug(f"[selenium] Selector '{selector}' failed: {e}")
                     continue
 
@@ -2823,7 +2848,9 @@ class SeleniumLLMBase(AIPluginBase):
                         f"[selenium] Send button found: {send_button.tag_name} text='{send_button.text}' aria='{aria_attr}' data-testid='{data_testid}' outerHTML={short_outer}"
                     )
                 except Exception as ex_attr:
-                    log_debug(f"[selenium] Could not read send_button attributes: {ex_attr}")
+                    log_debug(
+                        f"[selenium] Could not read send_button attributes: {ex_attr}"
+                    )
 
                 # Check if button is enabled
                 is_enabled = send_button.is_enabled()
@@ -2991,9 +3018,13 @@ class SeleniumLLMBase(AIPluginBase):
                             if getattr(self, "driver", None) is not None:
                                 try:
                                     self.driver.save_screenshot(png)
-                                    log_info(f"[selenium] Saved screenshot for failed send: {png}")
+                                    log_info(
+                                        f"[selenium] Saved screenshot for failed send: {png}"
+                                    )
                                 except Exception as sc_err:
-                                    log_debug(f"[selenium] Could not save screenshot on send failure: {sc_err}")
+                                    log_debug(
+                                        f"[selenium] Could not save screenshot on send failure: {sc_err}"
+                                    )
                         except Exception:
                             pass
 
@@ -3002,9 +3033,13 @@ class SeleniumLLMBase(AIPluginBase):
                                 src = self.driver.page_source
                                 with open(html, "w", encoding="utf-8") as fh:
                                     fh.write(src)
-                                log_info(f"[selenium] Saved page source for failed send: {html}")
+                                log_info(
+                                    f"[selenium] Saved page source for failed send: {html}"
+                                )
                         except Exception as ps_err:
-                            log_debug(f"[selenium] Could not save page source on send failure: {ps_err}")
+                            log_debug(
+                                f"[selenium] Could not save page source on send failure: {ps_err}"
+                            )
 
                         # Try to re-locate send button and log details (helpful when selectors mismatch)
                         try:
@@ -3019,7 +3054,7 @@ class SeleniumLLMBase(AIPluginBase):
                                     a = btn.get_attribute("aria-label") or ""
                                     d = btn.get_attribute("data-testid") or ""
                                     log_debug(
-                                        f"[selenium] Debug send_button on failure: aria=\"{a}\" data-testid=\"{d}\" text=\"{btn.text}\""
+                                        f'[selenium] Debug send_button on failure: aria="{a}" data-testid="{d}" text="{btn.text}"'
                                     )
                                     try:
                                         outer = self.driver.execute_script(
@@ -3031,11 +3066,15 @@ class SeleniumLLMBase(AIPluginBase):
                                     except Exception:
                                         pass
                                 except Exception as b_err:
-                                    log_debug(f"[selenium] Could not inspect send_button on failure: {b_err}")
+                                    log_debug(
+                                        f"[selenium] Could not inspect send_button on failure: {b_err}"
+                                    )
                         except Exception:
                             pass
                     except Exception as snap_err:
-                        log_debug(f"[selenium] Error during failure snapshot: {snap_err}")
+                        log_debug(
+                            f"[selenium] Error during failure snapshot: {snap_err}"
+                        )
 
                 else:
                     log_debug("[selenium] Textarea is empty, send likely succeeded")

@@ -161,3 +161,27 @@ def test_set_active_selenium_limits_with_empty_name():
     slb.set_active_selenium_limits(1000, "")
     assert slb.get_active_selenium_limits()["llm_name"] == ""
     assert slb._llm_name_for_logs() == "LLM"
+
+
+def test_extract_response_text_raises_frozen_on_driver_connection_errors():
+    """When find_elements raises a connection/session error we must escalate to FrozenDriverError
+
+    This ensures the existing recovery/restart logic is exercised instead of silently
+    swallowing driver-level failures.
+    """
+    import pytest
+
+    slb = _import_sandboxed_selenium_llm_base()
+    obj = slb.SeleniumLLMBase()
+
+    class DummyDriver:
+        def find_elements(self, by, selector):
+            # Simulate the requests/selenium ConnectionRefused-style error seen in logs
+            raise Exception(
+                "HTTPConnectionPool(host='localhost', port=33767): Max retries exceeded with url: /session/8842672dbe8362292546b2bee618b88b/elements (Caused by NewConnectionError(\"HTTPConnection(host='localhost', port=33767): Failed to establish a new connection: [Errno 111] Connection refused\"))"
+            )
+
+    dummy = DummyDriver()
+
+    with pytest.raises(slb.FrozenDriverError):
+        obj._extract_response_text(dummy)

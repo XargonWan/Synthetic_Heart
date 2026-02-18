@@ -61,6 +61,10 @@ action.play();
 
 These modules are imported via `core/webui_templates/synth_webui_shell.html` and the section templates:
 
+> WebUI configuration control types are documented in the project documentation — see `docs/webui_controls.rst`.
+
+
+
 ```javascript
 import { loadMixamoAnimation } from '/static/js/loadMixamoAnimation.js';
 import { mixamoVRMRigMap } from '/static/js/mixamoVRMRigMap.js';

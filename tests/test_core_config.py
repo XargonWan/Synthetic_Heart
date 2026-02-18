@@ -69,7 +69,9 @@ async def test_log_chat_persistence_uses_config_registry(monkeypatch):
     mock = AsyncMock()
     monkeypatch.setattr(cm.config_registry, "set_value", mock)
 
-    await conf.set_log_chat_id_and_thread(12345, thread_id=678, interface="telegram_bot")
+    await conf.set_log_chat_id_and_thread(
+        12345, thread_id=678, interface="telegram_bot"
+    )
 
     # Expect set_value called for each key
     assert mock.await_count >= 3
@@ -83,7 +85,17 @@ def test_get_log_chat_reads_from_config_registry(monkeypatch):
     from core import config as conf
     import core.config_manager as cm
 
-    monkeypatch.setattr(cm.config_registry, "get_value", lambda k, d=None: "telegram_bot" if k == "LOG_CHAT_INTERFACE" else ("12345" if k == "LOG_CHAT_ID" else ("678" if k == "LOG_CHAT_THREAD_ID" else d)))
+    monkeypatch.setattr(
+        cm.config_registry,
+        "get_value",
+        lambda k, d=None: "telegram_bot"
+        if k == "LOG_CHAT_INTERFACE"
+        else (
+            "12345"
+            if k == "LOG_CHAT_ID"
+            else ("678" if k == "LOG_CHAT_THREAD_ID" else d)
+        ),
+    )
 
     # Async getters
     val = asyncio.run(conf.get_log_chat_interface())
