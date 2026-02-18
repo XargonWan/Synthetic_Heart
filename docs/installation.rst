@@ -23,6 +23,39 @@ Build and start the services:
 A MariaDB instance is started automatically and a daily backup container
 writes dumps to ``./backups/``.
 
+System Dependencies (non-Docker)
+--------------------------------
+
+When running outside the Docker container the following system packages
+must be available:
+
+- **ffmpeg** — Required for multimodal video/audio processing
+  (frame extraction, audio track splitting, format conversion).
+  The multimodal pipeline degrades gracefully when ``ffmpeg`` is absent,
+  but video and voice-note features will be unavailable.
+
+  .. code-block:: bash
+
+     # Debian / Ubuntu
+     sudo apt-get install ffmpeg
+
+     # macOS (Homebrew)
+     brew install ffmpeg
+
+     # Windows – download from https://ffmpeg.org/download.html
+     # and ensure ffmpeg.exe is on PATH
+
+- **MariaDB client libraries** — Required by ``aiomysql`` /
+  ``PyMySQL`` for database connectivity.
+
+  .. code-block:: bash
+
+     # Debian / Ubuntu
+     sudo apt-get install libmariadb3 libmariadb-dev mariadb-client
+
+All Python dependencies (including ``discord-ext-voice-recv`` for Discord
+voice reception) are managed by **uv** and declared in ``pyproject.toml``:
+
 Modular Architecture
 --------------------
 
