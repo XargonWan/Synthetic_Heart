@@ -1573,6 +1573,13 @@ async def run_corrector_middleware(
                 if allowed_action_types:
                     correction_message_text += f"\nAllowed action types for this scope: {', '.join(sorted(allowed_action_types))}"
 
+            # Extract the originating interface so the LLM engine can route
+            # the corrected response back to the correct interface instead of
+            # falling back to synth_webui.
+            originating_interface: str | None = (
+                context.get("interface") if context else None
+            )
+
             correction_payload = {
                 "system_message": {
                     "type": "error",
@@ -1581,6 +1588,7 @@ async def run_corrector_middleware(
                     "original_user_message": original_user_message,
                     "chat_id": chat_id,
                     "thread_id": payload_thread_id,
+                    "target_interface": originating_interface,
                 }
             }
 
@@ -1596,14 +1604,15 @@ async def run_corrector_middleware(
                     f"[corrector_middleware] Added full action schema for {attempted_action_info['action_type']}"
                 )
 
-            # Add required format examples
+            # Add required format examples — use concrete interface name when known
+            iface_label = originating_interface or "<interface>"
             correction_payload["system_message"]["required_format"] = {
                 "actions": [
                     {
-                        "type": "message_<interface>_bot",
+                        "type": f"message_{iface_label}",
                         "payload": {
                             "text": "Your message content here (optional - only if you want to reply to user)",
-                            "interface_path": f"<interface_name>/{chat_id or '<chat_id>'}/{payload_thread_id if payload_thread_id is not None else ''}",
+                            "interface_path": f"{iface_label}/{chat_id or '<chat_id>'}/{payload_thread_id if payload_thread_id is not None else ''}",
                         },
                     }
                 ]
