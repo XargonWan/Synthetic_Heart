@@ -39,3 +39,17 @@ def test_profile_mentions_agency():
     pm = persona_manager.PersonaManager(config={})
     pj, profile = _assemble_for_skin(pm, "Rekku")
     assert ("agency" in profile.lower()) or ("autonom" in profile.lower())
+
+
+def test_profile_prohibits_canned_assistant_phrases():
+    """Ensure the base SyntH profile explicitly forbids canned 'assistant' wording.
+
+    This checks the canonical template so prompts will carry the prohibition into
+    LLM instructions (persona is prepended to prompt instructions).
+    """
+    # Template-level assertion
+    assert "Do NOT use canned" in persona_manager.SYNTH_BASE_PROFILE_TEMPLATE
+    # Assembled profile should therefore include the prohibition when using the base template
+    pm = persona_manager.PersonaManager(config={})
+    pj, profile = _assemble_for_skin(pm, "Rekku")
+    assert "canned" in profile.lower()

@@ -1,6 +1,10 @@
 # core/cortex_registry.py
 
-"""Registry to manage Cortex engines via base-module discovery."""
+"""Registry to manage Cortex engines via base-module discovery and dynamic loading.
+
+This module supports discovery of cortex base modules (e.g. `cortex/llm_provider/*_base.py`)
+and provides backward-compatible dynamic imports when needed.
+"""
 
 import importlib
 from typing import Dict, Any, Optional, List, TypedDict
@@ -13,6 +17,7 @@ class Capabilities(TypedDict, total=False):
     actions: bool
     bidi: bool
     low_latency: bool
+
 
 
 class CortexRegistry:
@@ -42,7 +47,6 @@ class CortexRegistry:
             "capabilities": capabilities or {},
         }
         log_debug(f"[cortex_registry] Registered cortex kind: {kind} ({label or kind})")
-
     def register_engine_module(
         self,
         name: str,
@@ -123,6 +127,24 @@ class CortexRegistry:
 
         module_path = self._engine_modules.get(name)
         if not module_path:
+            # dynamic fallback for backward compatibility and alternate layouts
+            candidates = [
+                f"cortex.llm_provider.{name}",
+                f"cortex.llm_engine.{name}",
+                f"cortex.selenium_engine.{name}",
+                f"cortex.live.{name}",
+            ]
+            log_debug(
+                f"[cortex_registry] Engine '{name}' not registered, attempting dynamic import from candidates: {candidates}"
+            )
+            for p in candidates:
+                try:
+                    importlib.import_module(p)
+                    module_path = p
+                    break
+                except ModuleNotFoundError:
+                    continue
+        if not module_path:
             raise ValueError(f"Unknown engine: {name}")
 
         try:
@@ -144,21 +166,29 @@ class CortexRegistry:
             log_error(f"[cortex_registry] ❌ {error_msg}")
             raise ValueError(error_msg)
 
-        # Verify display_name
+        # Verify display_name — prefer a graceful fallback with a warning
         if not hasattr(plugin_class, "display_name"):
-            error_msg = f"Plugin `{name}` (class `{plugin_class.__name__}`) does not define `display_name`."
-            log_error(f"[cortex_registry] ❌ {error_msg}")
-            raise ValueError(error_msg)
-
-        display_name = getattr(plugin_class, "display_name", "")
-        if (
-            not display_name
-            or not isinstance(display_name, str)
-            or not display_name.strip()
-        ):
-            error_msg = f"Plugin `{name}` (class `{plugin_class.__name__}`) has invalid `display_name`: '{display_name}'."
-            log_error(f"[cortex_registry] ❌ {error_msg}")
-            raise ValueError(error_msg)
+            fallback = name.replace("_", " ").title() or plugin_class.__name__
+            warning_msg = (
+                f"Plugin `{name}` (class `{plugin_class.__name__}`) does not define `display_name`. "
+                f"Using fallback display name: '{fallback}'."
+            )
+            log_warning(f"[cortex_registry] ⚠️ {warning_msg}")
+            display_name = fallback
+        else:
+            display_name = getattr(plugin_class, "display_name", "")
+            if (
+                not display_name
+                or not isinstance(display_name, str)
+                or not display_name.strip()
+            ):
+                fallback = name.replace("_", " ").title() or plugin_class.__name__
+                warning_msg = (
+                    f"Plugin `{name}` (class `{plugin_class.__name__}`) has invalid `display_name`: '{display_name}'. "
+                    f"Using fallback display name: '{fallback}'."
+                )
+                log_warning(f"[cortex_registry] ⚠️ {warning_msg}")
+                display_name = fallback
 
         try:
             plugin_args = plugin_class.__init__.__code__.co_varnames
@@ -272,3 +302,6 @@ def register_default_engines(*, dev_enabled: bool = False) -> None:
         )
     except Exception as e:
         log_warning(f"[cortex_registry] Engine auto-discovery failed: {e}")
+        log_info(
+            "[cortex_registry] Continuing without pre-registration - engines will load dynamically on demand"
+        )

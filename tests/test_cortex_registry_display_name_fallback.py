@@ -20,12 +20,16 @@ def test_load_engine_with_missing_display_name(monkeypatch):
     real_import = importlib.import_module
 
     def fake_import(name):
-        if name == "cortex.llm_provider.fake_missing_display":
+        # Accept both new and legacy import paths for compatibility
+        if name in (
+            "cortex.llm_provider.fake_missing_display",
+            "cortex.llm_engine.fake_missing_display",
+        ):
             return fake_mod
         return real_import(name)
 
     monkeypatch.setattr(importlib, "import_module", fake_import)
-    # Register and load
+    # Register and load (prefer new `llm_provider` layout)
     reg.register_engine_module(
         "fake_missing_display",
         "cortex.llm_provider.fake_missing_display",

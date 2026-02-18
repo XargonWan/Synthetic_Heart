@@ -10,6 +10,33 @@ from core.synth_core_memory import search_memories
 
 display_name = "Recon Memory Recollector"
 
+# UI-exposed switch to enable/disable this recon plugin
+try:
+    from core.variables_engine import register_exposed_var
+
+    register_exposed_var(
+        "RECON_MEMORY_RECOLLECTOR_RECON_ENABLED",
+        label="Enable Recon Memory Recollector",
+        default=True,
+        value_type=bool,
+        ui_type="bool",
+        description="Enable the Recon Memory Recollector plugin (search memories for Recon).",
+        scope="agent",
+        component="agent",
+    )
+except Exception:
+    from core.config_manager import config_registry
+
+    config_registry.get_var(
+        "RECON_MEMORY_RECOLLECTOR_RECON_ENABLED",
+        True,
+        value_type=bool,
+        label="Enable Recon Memory Recollector",
+        description="Enable the Recon Memory Recollector plugin (search memories for Recon).",
+        group="agent",
+        component="agent",
+    )
+
 
 class ReconMemoryRecollectorPlugin:
     display_name = display_name

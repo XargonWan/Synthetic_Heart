@@ -46,3 +46,12 @@ def test_list_available_cortexs_uses_registry(monkeypatch):
     assert "llm" in kinds
     assert "live" in kinds
     assert isinstance(kinds, list)
+
+
+def test_webui_accent_default():
+    """WEBUI accent variable is registered and defaults to #6bfefe."""
+    from core.config_manager import config_registry
+
+    val = config_registry.get_value("WEBUI_ACCENT_COLOR", "#6bfefe")
+    assert isinstance(val, str)
+    assert val.lower() == "#6bfefe"

@@ -150,8 +150,95 @@ try {
     if (window.__SYNTH_CONFIG.RESPONSE_TIMEOUT !== undefined) window.RESPONSE_TIMEOUT = window.__SYNTH_CONFIG.RESPONSE_TIMEOUT;
     if (window.__SYNTH_CONFIG.FAILED_MESSAGE_TEXT !== undefined) window.FAILED_MESSAGE_TEXT = window.__SYNTH_CONFIG.FAILED_MESSAGE_TEXT;
     if (window.__SYNTH_CONFIG.WEB_DEBUG !== undefined) window.__synth_web_debug_enabled = window.__SYNTH_CONFIG.WEB_DEBUG;
+
+    // Apply accent color from server-rendered runtime config (if provided)
+    try {
+      const accent = window.__SYNTH_CONFIG.WEBUI_ACCENT_COLOR;
+      if (accent) {
+        document.documentElement.style.setProperty('--accent', accent);
+        // set a soft variant at ~16% alpha and compute readable contrast color
+        const hexToRgb = (h) => { const c = h.replace('#',''); const bigint = parseInt(c.length===3?c.split('').map(x=>x+x).join(''):c,16); return [(bigint>>16)&255, (bigint>>8)&255, bigint&255]; };
+        const [r,g,b] = hexToRgb(accent);
+        document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b}, 0.16)`);
+        document.documentElement.style.setProperty('--accent-r', String(r));
+        document.documentElement.style.setProperty('--accent-g', String(g));
+        document.documentElement.style.setProperty('--accent-b', String(b));
+        try { document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(accent)); } catch(e) { document.documentElement.style.setProperty('--accent-contrast', '#07070c'); }
+        try { document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(accent)); } catch(e) { document.documentElement.style.setProperty('--accent-dark', '#5b5b6b'); }
+      }
+    } catch (e) { /* ignore */ }
   }
 } catch (e) { console.warn('[synth_webui] config init failed', e); }
+
+// Helper: choose readable contrast color (white or dark accent text) using WCAG luminance/contrast
+function _hexToRgb(h) { const c = String(h||'').replace('#',''); const hex = c.length===3 ? c.split('').map(x=>x+x).join('') : c; const bigint = parseInt(hex,16); return [(bigint>>16)&255, (bigint>>8)&255, bigint&255]; }
+function _relativeLuminance(r,g,b) { const srgb = [r,g,b].map(v => { v = v/255; return v <= 0.03928 ? v/12.92 : Math.pow((v+0.055)/1.055, 2.4); }); return 0.2126*srgb[0] + 0.7152*srgb[1] + 0.0722*srgb[2]; }
+function _contrastRatio(l1,l2) { const lighter = Math.max(l1,l2); const darker = Math.min(l1,l2); return (lighter + 0.05) / (darker + 0.05); }
+function pickAccentContrastFromHex(hex) {
+  try {
+    const [r,g,b] = _hexToRgb(hex);
+    const la = _relativeLuminance(r,g,b);
+    const lWhite = _relativeLuminance(255,255,255);
+    const lBlack = _relativeLuminance(7,7,12); // match --accent-contrast default
+    const crWhite = _contrastRatio(la, lWhite);
+    const crBlack = _contrastRatio(la, lBlack);
+    return (crWhite >= crBlack) ? '#ffffff' : '#07070c';
+  } catch(e) { return '#07070c'; }
+}
+
+// Darken a color (hex) using HSL lightness reduction to generate gradient end
+function _rgbToHsl(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  let h, s;
+  const l = (max + min) / 2;
+  if (max === min) {
+    h = s = 0; // achromatic
+  } else {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    switch (max) {
+      case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+      case g: h = (b - r) / d + 2; break;
+      case b: h = (r - g) / d + 4; break;
+    }
+    h /= 6;
+  }
+  return [h * 360, s, l];
+}
+function _hslToRgb(h, s, l) {
+  h /= 360;
+  let r, g, b;
+  if (s === 0) {
+    r = g = b = l; // achromatic
+  } else {
+    const hue2rgb = (p, q, t) => {
+      if (t < 0) t += 1;
+      if (t > 1) t -= 1;
+      if (t < 1/6) return p + (q - p) * 6 * t;
+      if (t < 1/2) return q;
+      if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+      return p;
+    };
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    r = hue2rgb(p, q, h + 1/3);
+    g = hue2rgb(p, q, h);
+    b = hue2rgb(p, q, h - 1/3);
+  }
+  return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
+}
+function _rgbToHex(r, g, b) { return '#' + [r, g, b].map(x => x.toString(16).padStart(2, '0')).join(''); }
+function darkenHex(hex, amount = 0.28) {
+  try {
+    const [r, g, b] = _hexToRgb(hex);
+    const [h, s, l] = _rgbToHsl(r, g, b);
+    const nl = Math.max(0, l - amount);
+    const [nr, ng, nb] = _hslToRgb(h, s, nl);
+    return _rgbToHex(nr, ng, nb);
+  } catch (e) { return '#4b4b4b'; }
+}
+function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
         // Configuration values from server
         window.__synthLipSyncAnalyser = null;
@@ -1090,12 +1177,278 @@ try {
                             fileWrap.appendChild(uploadBtn);
 
                             inputEl = fileWrap;
-                        } else if (item.ui_type === 'textarea' || item.value_type === 'json') {
+                        } else if (item.ui_type === 'textarea' || (item.value_type === 'json' && item.ui_type !== 'tags' && item.ui_type !== 'tag-combobox')) {
                             const textarea = document.createElement('textarea');
                             textarea.rows = 3;
                             textarea.value = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
                             textarea.disabled = !isEditable;
                             inputEl = textarea;
+
+                        // --- Color picker: presets + custom color input ---
+                        } else if (item.ui_type === 'color') {
+                            const swatchWrap = document.createElement('div');
+                            swatchWrap.style.display = 'flex';
+                            swatchWrap.style.alignItems = 'center';
+                            swatchWrap.style.gap = '0.5rem';
+
+                            // Presets: prefer server-provided runtime presets
+                            const presets = (window.__SYNTH_CONFIG && window.__SYNTH_CONFIG.WEBUI_ACCENT_PRESETS) || ['#6bfefe','#ff6bd6','#18c98c','#ffd166','#ff9ecb'];
+                            const presetsEl = document.createElement('div');
+                            presetsEl.style.display = 'flex';
+                            presetsEl.style.gap = '0.4rem';
+
+                            // --- Local preview/apply UX: don't persist on `input`.
+                            // Provide preview (Apply / Cancel) so user can freely adjust the picker.
+                            let previewValue = null;
+                            const applyPreview = async (val) => {
+                                previewValue = null;
+                                await persist(val);
+                            };
+
+                            // Local persist helper (color-picker scoped) so handlers don't rely on per-input saveValue
+                            const persist = async (val) => {
+                                try {
+                                    // disable controls while saving
+                                    colorInput.disabled = true;
+                                    Array.from(presetsEl.querySelectorAll('button')).forEach(b => b.disabled = true);
+                                    applyBtn.disabled = true;
+                                    cancelBtn.disabled = true;
+                                    reset.disabled = true;
+                                    const payload = { key: item.key, value: val };
+                                    const res = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                                    if (!res.ok) {
+                                        const txt = await res.text();
+                                        try { window.showToast('Save failed: ' + txt, true); } catch (e) {}
+                                    } else {
+                                        try {
+                                            const out = await res.json();
+                                            try { window.showToast('Saved', false); } catch (e) {}
+                                            if (out && out.requires_reload) {
+                                                window.showToast(out.message || 'Component reload recommended', false);
+                                            }
+                                            try { await refreshConfig(); } catch (e) { /* ignore */ }
+                                        } catch (e) {
+                                            try { window.showToast('Saved', false); } catch (e) {}
+                                        }
+                                    }
+                                } catch (e) {
+                                    try { window.showToast('Save failed', true); } catch (e) {}
+                                } finally {
+                                    try { colorInput.disabled = !isEditable; Array.from(presetsEl.querySelectorAll('button')).forEach(b => b.disabled = !isEditable); applyBtn.disabled = !isEditable; cancelBtn.disabled = !isEditable; reset.disabled = !isEditable; } catch (e) {}
+                                }
+                            };
+
+                            presets.forEach((c) => {
+                                const b = document.createElement('button');
+                                b.type = 'button';
+                                b.title = c;
+                                b.style.width = '34px';
+                                b.style.height = '34px';
+                                b.style.borderRadius = '50%';
+                                b.style.border = '1px solid rgba(255,255,255,0.06)';
+                                b.style.background = c;
+                                if (String(value).toLowerCase() === String(c).toLowerCase()) b.style.boxShadow = '0 0 0 4px rgba(0,0,0,0.14) inset';
+                                // clicking a preset previews the color (does not persist immediately)
+                                b.addEventListener('click', (ev) => {
+                                    ev.preventDefault();
+                                    previewValue = c;
+                                    try { document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch(e){}
+                                });
+                                presetsEl.appendChild(b);
+                            });
+
+                            const colorInput = document.createElement('input');
+                            colorInput.type = 'color';
+                            colorInput.value = typeof value === 'string' && value ? value : (item.default || '#6bfefe');
+                            colorInput.disabled = !isEditable;
+
+                            // Preview-only on input: apply to CSS variables but do not persist until Apply
+                            colorInput.addEventListener('input', (ev) => {
+                                const c = ev.target.value;
+                                previewValue = c;
+                                try {
+                                    document.documentElement.style.setProperty('--accent', c);
+                                    const [r,g,b2] = _hexToRgb(c);
+                                    document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`);
+                                    document.documentElement.style.setProperty('--accent-r', String(r));
+                                    document.documentElement.style.setProperty('--accent-g', String(g));
+                                    document.documentElement.style.setProperty('--accent-b', String(b2));
+                                    document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c));
+                                    document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c));
+                                } catch(e){}
+                            });
+
+                            // Apply / Cancel controls for preview UX
+                            const applyBtn = document.createElement('button');
+                            applyBtn.type = 'button';
+                            applyBtn.textContent = 'Apply';
+                            applyBtn.className = 'apply';
+                            applyBtn.disabled = !isEditable;
+                            applyBtn.addEventListener('click', async () => {
+                                const val = previewValue || colorInput.value;
+                                // persist and refresh
+                                await persist(val);
+                            });
+
+                            const cancelBtn = document.createElement('button');
+                            cancelBtn.type = 'button';
+                            cancelBtn.textContent = 'Cancel';
+                            cancelBtn.className = 'cancel';
+                            cancelBtn.disabled = !isEditable;
+                            cancelBtn.addEventListener('click', () => {
+                                // revert preview to authoritative value
+                                const current = typeof value === 'string' && value ? value : (item.default || '#6bfefe');
+                                previewValue = null;
+                                colorInput.value = current;
+                                try {
+                                    document.documentElement.style.setProperty('--accent', current);
+                                    const [r,g,b2] = _hexToRgb(current);
+                                    document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`);
+                                    document.documentElement.style.setProperty('--accent-r', String(r));
+                                    document.documentElement.style.setProperty('--accent-g', String(g));
+                                    document.documentElement.style.setProperty('--accent-b', String(b2));
+                                    document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(current));
+                                    document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(current));
+                                } catch(e){}
+                            });
+
+                            const reset = document.createElement('button');
+                            reset.type = 'button';
+                            reset.textContent = 'Reset';
+                            reset.disabled = !isEditable;
+                            reset.addEventListener('click', async () => {
+                                const def = item.default || '#6bfefe';
+                                await persist(def);
+                                colorInput.value = def;
+                                try {
+                                    document.documentElement.style.setProperty('--accent', def);
+                                    const [r,g,b2] = _hexToRgb(def);
+                                    document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`);
+                                    document.documentElement.style.setProperty('--accent-r', String(r));
+                                    document.documentElement.style.setProperty('--accent-g', String(g));
+                                    document.documentElement.style.setProperty('--accent-b', String(b2));
+                                    document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(def));
+                                    document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(def));
+                                } catch(e){}
+                            });
+
+                            swatchWrap.appendChild(presetsEl);
+                            swatchWrap.appendChild(colorInput);
+                            swatchWrap.appendChild(applyBtn);
+                            swatchWrap.appendChild(cancelBtn);
+                            swatchWrap.appendChild(reset);
+                            inputEl = swatchWrap;
+
+                        // --- Combobox: free-text input with datalist suggestions ---
+                        } else if (item.ui_type === 'combobox') {
+                            const input = document.createElement('input');
+                            input.type = 'text';
+                            input.value = typeof value === 'string' ? value : '';
+                            input.disabled = !isEditable;
+                            if (Array.isArray(item.options) && item.options.length) {
+                                const dlId = `datalist-${item.key}`;
+                                const dl = document.createElement('datalist');
+                                dl.id = dlId;
+                                item.options.forEach((opt) => {
+                                    const o = document.createElement('option');
+                                    o.value = opt;
+                                    dl.appendChild(o);
+                                });
+                                // Ensure unique id by attaching to document.body
+                                document.body.appendChild(dl);
+                                input.setAttribute('list', dlId);
+                            }
+                            inputEl = input;
+
+                        // --- Tags / tag-combobox: array editor with add/remove chips ---
+                        } else if (item.ui_type === 'tags' || item.ui_type === 'tag-combobox') {
+                            const wrap = document.createElement('div');
+                            wrap.className = 'tag-list-input';
+
+                            // Normalize incoming value to an array
+                            let tags = [];
+                            try {
+                                if (Array.isArray(value)) tags = value.slice();
+                                else if (typeof value === 'string' && value.trim() !== '') {
+                                    try { tags = JSON.parse(value); } catch (e) { tags = value.split(',').map(s => s.trim()).filter(Boolean); }
+                                }
+                            } catch (e) { tags = []; }
+
+                            const chips = document.createElement('div');
+                            chips.className = 'tag-chips';
+
+                            const input = document.createElement('input');
+                            input.type = 'text';
+                            input.className = 'tag-input-field';
+                            input.placeholder = 'Add tag and press Enter';
+                            input.disabled = !isEditable;
+
+                            // Optionally provide suggestions for tag-combobox
+                            if (item.ui_type === 'tag-combobox' && Array.isArray(item.options) && item.options.length) {
+                                const dlId = `tags-datalist-${item.key}`;
+                                const dl = document.createElement('datalist');
+                                dl.id = dlId;
+                                item.options.forEach((opt) => {
+                                    const o = document.createElement('option');
+                                    o.value = opt;
+                                    dl.appendChild(o);
+                                });
+                                document.body.appendChild(dl);
+                                input.setAttribute('list', dlId);
+                            }
+
+                            const renderChips = () => {
+                                chips.innerHTML = '';
+                                tags.forEach((t, idx) => {
+                                    const chip = document.createElement('span');
+                                    chip.className = 'tag-chip';
+                                    chip.textContent = String(t);
+                                    if (isEditable) {
+                                        const rem = document.createElement('button');
+                                        rem.type = 'button';
+                                        rem.className = 'tag-remove';
+                                        rem.textContent = '×';
+                                        rem.addEventListener('click', () => {
+                                            tags.splice(idx, 1);
+                                            renderChips();
+                                            // Persist tags array
+                                            saveValue(tags);
+                                        });
+                                        chip.appendChild(rem);
+                                    }
+                                    chips.appendChild(chip);
+                                });
+                            };
+
+                            input.addEventListener('keydown', (ev) => {
+                                if (ev.key === 'Enter') {
+                                    ev.preventDefault();
+                                    const v = input.value.trim();
+                                    if (v) {
+                                        if (!tags.includes(v)) tags.push(v);
+                                        input.value = '';
+                                        renderChips();
+                                        saveValue(tags);
+                                    }
+                                }
+                            });
+
+                            input.addEventListener('blur', () => {
+                                // Persist on blur in case user typed but didn't press Enter
+                                const v = input.value.trim();
+                                if (v) {
+                                    if (!tags.includes(v)) tags.push(v);
+                                    input.value = '';
+                                }
+                                renderChips();
+                                saveValue(tags);
+                            });
+
+                            renderChips();
+                            wrap.appendChild(chips);
+                            wrap.appendChild(input);
+                            inputEl = wrap;
+
                         } else {
                             const input = document.createElement('input');
                             input.type = item.ui_type === 'password' ? 'password' : (item.value_type === 'int' || item.value_type === 'float' || item.ui_type === 'number' ? 'number' : 'text');
@@ -1173,10 +1526,141 @@ try {
                     });
                 };
 
+                const groupByComponent = (list) => {
+                    return list.reduce((acc, it) => {
+                        const comp = it.component_label || it.component || 'Other';
+                        acc[comp] = acc[comp] || [];
+                        acc[comp].push(it);
+                        return acc;
+                    }, {});
+                };
+
+                const renderGrouped = (list, container) => {
+                    container.innerHTML = '';
+                    const groups = groupByComponent(list);
+                    const keys = Object.keys(groups).sort();
+                    if (!keys.length) {
+                        const empty = document.createElement('div');
+                        empty.className = 'meta';
+                        empty.textContent = 'No configuration entries found.';
+                        container.appendChild(empty);
+                        return;
+                    }
+                    keys.forEach((comp) => {
+                        const section = document.createElement('div');
+                        section.className = 'config-section';
+                        const h = document.createElement('h3');
+                        h.textContent = comp;
+                        section.appendChild(h);
+                        const listEl = document.createElement('div');
+                        listEl.className = 'config-list';
+                        section.appendChild(listEl);
+                        container.appendChild(section);
+                        renderList(groups[comp], listEl);
+                    });
+                };
+
                 const general = items.filter((item) => !item.advanced);
                 const advanced = items.filter((item) => item.advanced);
-                renderList(general, configGeneralListEl);
-                renderList(advanced, configAdvancedListEl);
+                renderGrouped(general, configGeneralListEl);
+                renderGrouped(advanced, configAdvancedListEl);
+
+                // --- Render a prominent Accent control at the top of Settings (Appearance card)
+                try {
+                    const themeCard = document.getElementById('config-theme-card');
+                    const themeContainer = document.getElementById('config-theme-input-container');
+                    if (themeCard && themeContainer) {
+                        // Find the accent config item from the authoritative items list
+                        const accentItem = items.find(it => (it.key && it.key === 'WEBUI_ACCENT_COLOR') || (it.label && /accent\s*color/i.test(it.label)));
+                        if (accentItem) {
+                            themeCard.style.display = 'block';
+                            themeContainer.innerHTML = '';
+                            const current = (typeof accentItem.value === 'string' && accentItem.value) ? accentItem.value : (accentItem.default || '#6bfefe');
+                            let previewVal = null;
+
+                            const presets = (window.__SYNTH_CONFIG && window.__SYNTH_CONFIG.WEBUI_ACCENT_PRESETS) || ['#6bfefe','#ff6bd6','#18c98c','#ffd166','#ff9ecb'];
+                            const presetsWrap = document.createElement('div');
+                            presetsWrap.className = 'accent-presets';
+                            presets.forEach((c) => {
+                                const b = document.createElement('button');
+                                b.type = 'button';
+                                b.style.background = c;
+                                b.title = c;
+                                b.addEventListener('click', () => {
+                                    previewVal = c;
+                                    try { document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch(e){}
+                                });
+                                presetsWrap.appendChild(b);
+                            });
+
+                            const colorInput = document.createElement('input');
+                            colorInput.type = 'color';
+                            colorInput.value = current;
+                            colorInput.addEventListener('input', (ev) => {
+                                previewVal = ev.target.value;
+                                try { const c = previewVal; document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch(e){}
+                            });
+
+                            const previewBox = document.createElement('div');
+                            previewBox.className = 'accent-preview';
+                            previewBox.title = 'Preview';
+
+                            const applyBtn = document.createElement('button');
+                            applyBtn.type = 'button';
+                            applyBtn.className = 'apply';
+                            applyBtn.textContent = 'Apply';
+                            applyBtn.addEventListener('click', async () => {
+                                const val = previewVal || colorInput.value;
+                                try {
+                                    const payload = { key: accentItem.key, value: val };
+                                    const res = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                                    if (res.ok) {
+                                        await refreshConfig();
+                                    } else {
+                                        const txt = await res.text();
+                                        window.showToast && window.showToast('Save failed: ' + txt, true);
+                                    }
+                                } catch (e) {
+                                    window.showToast && window.showToast('Save failed', true);
+                                }
+                            });
+
+                            const cancelBtn = document.createElement('button');
+                            cancelBtn.type = 'button';
+                            cancelBtn.className = 'cancel';
+                            cancelBtn.textContent = 'Cancel';
+                            cancelBtn.addEventListener('click', () => {
+                                previewVal = null;
+                                colorInput.value = current;
+                                try { const c = current; document.documentElement.style.setProperty('--accent', c); const [r,g,b2] = _hexToRgb(c); document.documentElement.style.setProperty('--accent-soft', `rgba(${r}, ${g}, ${b2}, 0.16)`); document.documentElement.style.setProperty('--accent-r', String(r)); document.documentElement.style.setProperty('--accent-g', String(g)); document.documentElement.style.setProperty('--accent-b', String(b2)); document.documentElement.style.setProperty('--accent-contrast', pickAccentContrastFromHex(c)); document.documentElement.style.setProperty('--accent-dark', pickAccentDarkFromHex(c)); } catch(e){}
+                            });
+
+                            const resetBtn = document.createElement('button');
+                            resetBtn.type = 'button';
+                            resetBtn.textContent = 'Reset';
+                            resetBtn.addEventListener('click', async () => {
+                                const def = accentItem.default || '#6bfefe';
+                                try { const payload = { key: accentItem.key, value: def }; const res = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); if (res.ok) await refreshConfig(); } catch (e) { window.showToast && window.showToast('Save failed', true); }
+                            });
+
+                            // assemble
+                            const actions = document.createElement('div');
+                            actions.className = 'accent-actions';
+                            actions.appendChild(applyBtn);
+                            actions.appendChild(cancelBtn);
+                            actions.appendChild(resetBtn);
+
+                            themeContainer.appendChild(presetsWrap);
+                            themeContainer.appendChild(colorInput);
+                            themeContainer.appendChild(actions);
+                            themeContainer.appendChild(previewBox);
+                        } else {
+                            themeCard.style.display = 'none';
+                        }
+                    }
+                } catch (e) {
+                    console.error('[synth_webui] Failed to render theme preview', e);
+                }
             } catch (e) {
                 console.error('[synth_webui] Failed to load configuration', e);
                 const configGeneralListEl = document.getElementById('config-general-list');
@@ -1186,6 +1670,30 @@ try {
             }
         }
         window.refreshConfig = window.refreshConfig || refreshConfig;
+
+        // If the settings page is opened very early during startup the server may
+        // still be populating configuration from the DB. Provide a short retry
+        // so the UI will pick up DB-backed values when they become available.
+        async function refreshConfigWithRetries(retries = 2, delayMs = 600) {
+            await refreshConfig();
+            for (let i = 0; i < retries; i++) {
+                // If any config row still equals its default, attempt a re-fetch
+                const anyDefault = Array.from(document.querySelectorAll('.config-row')).some((r) => {
+                    try {
+                        const inp = r.querySelector('.config-input input, .config-input textarea, .config-input select');
+                        if (!inp) return false;
+                        const defaultAttr = r.getAttribute('data-default');
+                        if (!defaultAttr) return false;
+                        // Compare rendered value to default string
+                        return String(inp.value || '').trim() === String(defaultAttr || '').trim();
+                    } catch (e) { return false; }
+                });
+                if (!anyDefault) break;
+                await new Promise((res) => setTimeout(res, delayMs));
+                await refreshConfig();
+            }
+        }
+        window.refreshConfigWithRetries = window.refreshConfigWithRetries || refreshConfigWithRetries;
 
         // -----------------------------------------------------------------------------
         // Core UI wiring (navigation + chat controls + WebSocket)
@@ -1322,6 +1830,15 @@ try {
                                 const selected = engineSelect.value;
                                 if (!selected) return;
                                 try {
+                                    const engine = getEngineByName(selected);
+                                    const loginUrl = engine ? (engine.login_url || engine.service_url || '') : '';
+                                    if (loginUrl) {
+                                        try {
+                                            window.open(loginUrl, '_blank', 'noopener');
+                                        } catch (e) {
+                                            console.debug('[synth_webui] Failed to open login URL', e);
+                                        }
+                                    }
                                     const res = await fetch('/api/components/cortex/login', {
                                         method: 'POST',
                                         headers: { 'Content-Type': 'application/json' },
@@ -1399,6 +1916,66 @@ try {
                             status.className = 'component-status component-status-' + statusClass;
                             status.textContent = statusValue;
                             summaryActions.appendChild(status);
+
+                            // Special: provide an "Open Selkies" button for the built-in Selkies desktop
+                            // and for any interface explicitly marked as external with Selkies data.
+                            try {
+                                const isSelk = (item && (item.name === 'selkies_desktop' || item.is_external && (item.selkies_protocol || item.selkies_port)));
+                                if (isSelk) {
+                                    const openBtn = document.createElement('button');
+                                    openBtn.className = 'pill';
+                                    openBtn.textContent = 'Login';
+                                    openBtn.title = 'Open Selkies login page in a new tab';
+                                    openBtn.style.marginLeft = '8px';
+                                    openBtn.addEventListener('click', async (ev) => {
+                                        ev.stopPropagation();
+                                        ev.preventDefault();
+                                        openBtn.disabled = true;
+                                        try {
+                                            // Try to get authoritative Selkies host/ports from the server
+                                            let cfg = null;
+                                            try {
+                                                const r = await fetch('/api/selkies');
+                                                if (r.ok) cfg = await r.json();
+                                            } catch (e) {
+                                                console.debug('[synth_webui] /api/selkies not available, falling back to component data');
+                                            }
+
+                                            // Determine host (substitute loopback with page host for external access)
+                                            const rawHost = (cfg && cfg.host) || window.location.hostname || '127.0.0.1';
+                                            const loopback = (rawHost === '127.0.0.1' || rawHost === 'localhost' || rawHost === '0.0.0.0');
+                                            const host = loopback ? window.location.hostname : rawHost;
+
+                                            // Determine protocol/port preference (prefer HTTPS)
+                                            const detected = (cfg && cfg.detected_protocol) || null;
+                                            const hasHttps = (cfg && cfg.https_port) || item.selkies_protocol === 'https' || item.selkies_port;
+                                            const hasHttp = (cfg && cfg.http_port) || item.selkies_protocol === 'http' || item.selkies_port;
+
+                                            let proto = 'https';
+                                            let port = (cfg && cfg.https_port) || item.selkies_port || 3000;
+                                            if (detected === 'http' && !hasHttps) {
+                                                proto = 'http';
+                                                port = (cfg && cfg.http_port) || item.selkies_port || 3000;
+                                            } else if (!hasHttps && hasHttp) {
+                                                proto = 'http';
+                                                port = (cfg && cfg.http_port) || item.selkies_port || 3000;
+                                            }
+
+                                            // Prefer a dedicated login path if Selkies exposes it; otherwise open root
+                                            const loginPath = (cfg && cfg.login_path) || '/';
+                                            const url = `${proto}://${host}:${port}${loginPath}`;
+                                            window.open(url, '_blank');
+                                        } catch (err) {
+                                            console.error('[synth_webui] Failed to open Selkies login', err);
+                                            alert('Failed to open Selkies Web Desktop login page.');
+                                        } finally {
+                                            openBtn.disabled = false;
+                                        }
+                                    });
+                                    summaryActions.appendChild(openBtn);
+                                }
+                            } catch (e) { /* ignore UI helper errors */ }
+
                             summary.appendChild(summaryActions);
                             details.appendChild(summary);
 
@@ -1501,6 +2078,16 @@ try {
                         panel.setAttribute('aria-hidden', 'true');
                     }
                 });
+
+                // Ensure About tab init is called when this tab becomes active
+                try {
+                    if (tab === 'about') {
+                        if (window.SynthWebUI && typeof window.SynthWebUI.initAboutTab === 'function') {
+                            window.SynthWebUI.initAboutTab();
+                        }
+                    }
+                } catch (e) { /* ignore */ }
+
                 if (tab === 'home' && typeof window.resizeVRMRenderer === 'function') {
                     setTimeout(() => {
                         try { window.resizeVRMRenderer(); } catch (e) { /* ignore */ }
@@ -1963,6 +2550,17 @@ try {
                 } catch (e) { /* ignore */ }
 
                 window.__synth_about_initialized = true;
+
+                // Show the inline Ko‑fi button inside About (no global overlay). The
+                // `.kofi-button` anchor is styled in the About template and remains
+                // visible only when the About tab is active.
+                try {
+                    const fallbackEl = document.querySelector('.kofi-button');
+                    if (fallbackEl) {
+                        fallbackEl.style.display = 'inline-flex';
+                        fallbackEl.setAttribute('aria-label', 'Support the project on Ko‑fi');
+                    }
+                } catch (e) { /* ignore */ }
             }
 
             function formatUptime(seconds) {

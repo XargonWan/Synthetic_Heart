@@ -978,6 +978,16 @@ class SynthWebUIInterface:
                 else "false",
             }
 
+            # Accent color config + presets (exposed to client as runtime config)
+            try:
+                accent = str(config_registry.get_value("WEBUI_ACCENT_COLOR", "#6bfefe"))
+            except Exception:
+                accent = "#6bfefe"
+            presets = ["#6bfefe", "#ff6bd6", "#18c98c", "#ffd166", "#ff9ecb"]
+            replacements["%%WEBUI_ACCENT_COLOR%%"] = accent
+            import json
+
+            replacements["%%WEBUI_ACCENT_PRESETS%%"] = json.dumps(presets)
             # Apply replacements
             for placeholder, value in replacements.items():
                 template = template.replace(placeholder, value)
@@ -2791,7 +2801,20 @@ class SynthWebUIInterface:
             self._set_active_vrm(synth_vrm.name)
             return synth_vrm.name
 
-        # Otherwise use first available from temp
+        # Prefer Rei model from skins/ only when there are NO user-uploaded VRMs
+        # This prevents overriding a user's uploaded model when no marker is present.
+        rei_vrm = Path(__file__).resolve().parent.parent / "skins" / "Rei" / "model.vrm"
+        if not available_vrms and rei_vrm.exists():
+            log_info(
+                f"{LOG_PREFIX} Using Rei model from skins as default (no user VRMs present)"
+            )
+            try:
+                web_path = rei_vrm.relative_to(Path(__file__).resolve().parent.parent)
+                return f"/{web_path.as_posix()}"
+            except ValueError:
+                return "/skins/Rei/model.vrm"
+
+        # Otherwise use first available from temp (user-uploaded VRMs take precedence)
         for candidate in available_vrms:
             log_info(
                 f"{LOG_PREFIX} Using first available VRM from temp: {candidate.name}"
@@ -2991,7 +3014,52 @@ class SynthWebUIInterface:
         return JSONResponse(payload)
 
     async def config_summary(self):
+        # Export current definitions. If some definitions were populated
+        # from hard-coded defaults during import-time (when the event loop
+        # was running) attempt a best-effort DB reload so the API returns the
+        # authoritative (database) values instead of defaults. This fixes the
+        # WebUI showing defaults after a restart when the DB actually has
+        # persisted values.
         definitions = config_registry.export_definitions()
+
+        # If any definition appears to be the hard-coded default (and is not
+        # env-overridden), trigger a background DB reload to pick up persisted
+        # values that were skipped during import-time. This mirrors the
+        # behavior in CoreInitializer but makes the `/api/config` endpoint
+        # resilient to timing/race conditions.
+        try:
+            needs_reload = False
+            for defn in config_registry._definitions.values():
+                try:
+                    # Consider it a candidate for reload when the current raw
+                    # value equals the serialized default and there's no
+                    # env_override (likely loaded at import-time)
+                    if (
+                        getattr(defn, "loaded", False)
+                        and not getattr(defn, "env_override", False)
+                        and defn.raw_value is not None
+                        and defn.raw_value
+                        == config_registry._serialize_value(defn, defn.default)
+                    ):
+                        needs_reload = True
+                        break
+                except Exception:
+                    continue
+            if needs_reload:
+                # Attempt to load DB-backed values for all definitions and
+                # regenerate the exported list.
+                try:
+                    await config_registry.load_all_from_db()
+                    definitions = config_registry.export_definitions()
+                except Exception:
+                    # Non-fatal: if DB is not available just continue with
+                    # the previously-exported definitions so the endpoint
+                    # remains responsive.
+                    pass
+        except Exception:
+            # Defensive: don't allow diagnostic checks to break the API
+            pass
+
         items = []
 
         # Precompute all actions flagged as unsafe by registered components so
@@ -5848,10 +5916,14 @@ class SynthWebUIInterface:
             # Attempt to include login info for Selenium-based engines without inducing side-effects
             login_state = "unknown"
             logged_in = False
+            login_url = ""
             try:
                 from cortex.selenium_engine.selenium_llm_base import SeleniumLLMBase
 
                 if instance is not None and isinstance(instance, SeleniumLLMBase):
+                    login_url = getattr(instance, "service_url", "") or getattr(
+                        instance, "config", {}
+                    ).get("service_url", "")
                     # If the driver isn't initialized, avoid creating it just to check login
                     if getattr(instance, "driver", None) is None:
                         login_state = "unknown"
@@ -5882,9 +5954,10 @@ class SynthWebUIInterface:
                     "error": meta["error"],
                     "login_state": login_state,
                     "logged_in": logged_in,
+                    "login_url": login_url,
                     "actions": actions,
                     "cortex": cortex_reg._engine_meta.get(engine_name, {}).get(
-                        "cortex", "unknown"
+                        "cortex", "llm_provider"
                     ),
                 }
             )
@@ -5958,7 +6031,14 @@ class SynthWebUIInterface:
                 "name": "selkies_desktop",
                 "display_name": "Selkies Web Desktop",
                 "description": "Web-based VNC desktop environment for visual interaction with the SyntH container. Provides full desktop access with Chrome browser.",
-                "actions": [],
+                "actions": [
+                    {
+                        "name": "login",
+                        "description": "Open Selkies login page in a new tab",
+                        "required_fields": [],
+                        "optional_fields": [],
+                    }
+                ],
                 "status": "success",
                 "details": f"Available at {selkies_protocol}://[host]:{selkies_port}",
                 "error": None,
@@ -6049,7 +6129,7 @@ class SynthWebUIInterface:
         by_cortex: dict[str, list[dict]] = {}
         try:
             for e in cortex_engines:
-                k = e.get("cortex", "unknown")
+                k = e.get("cortex", "llm_provider")
                 by_cortex.setdefault(k, []).append(e)
         except Exception:
             by_cortex = {}
@@ -6130,9 +6210,7 @@ class SynthWebUIInterface:
             ) from exc
 
         if not engine:
-            raise HTTPException(
-                status_code=404, detail=f"Cortex engine '{name}' not loaded"
-            )
+            raise HTTPException(status_code=404, detail=f"Cortex engine '{name}' not loaded")
 
         try:
             from cortex.selenium_engine.selenium_llm_base import SeleniumLLMBase

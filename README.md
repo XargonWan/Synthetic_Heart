@@ -8,6 +8,7 @@
 | `main`    | [![CI Status](https://img.shields.io/github/actions/workflow/status/XargonWan/Synthetic_Heart/build-release.yml)](https://github.com/XargonWan/Synthetic_Heart/actions)      | [![Docs Status](https://readthedocs.org/projects/synthetic-heart/badge/?version=latest)](https://synthetic-heart.readthedocs.io/en/latest/?badge=latest) |
 | `develop` | [![Develop CI Status](https://img.shields.io/github/actions/workflow/status/XargonWan/Synthetic_Heart/build-release.yml?branch=develop)](https://github.com/XargonWan/Synthetic_Heart/actions) | [![Docs Status](https://readthedocs.org/projects/synthetic-heart/badge/?version=latest)](https://synthetic-heart.readthedocs.io/en/latest/?badge=latest) |
 
+[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/xargon)  Buy me a coffee: https://ko-fi.com/xargon
 
 ## Meet SyntH — your digital friend
 
@@ -74,6 +75,8 @@ Beta, but stable enough for daily use. Development branch gives access to the la
 </div>
 
 For more information, see the [FAQ](https://synthetic-heart.readthedocs.io/en/latest/faq.html).
+
+Join the community on Matrix: [#synthetic-heart:matrix.org](https://matrix.to/#/#synthetic-heart:matrix.org)
 
 ### Ollama Compatibility
 

@@ -75,6 +75,16 @@
                         <div class="credits-content">
                             <p>SyntH is built with modern web technologies and AI frameworks.</p>
                             <p>Special thanks to the open-source community for the amazing tools and libraries that make this possible.</p>
+
+                            <div class="kofi-embed" id="kofi-about-embed">
+                                <p class="kofi-embed-text">If you'd like to support the project, you can buy me a coffee on
+                                    <a href="https://ko-fi.com/xargon" target="_blank" rel="noopener noreferrer">Ko‑fi</a>
+                                </p>
+                                <a class="kofi-button" href="https://ko-fi.com/xargon" target="_blank" rel="noopener noreferrer" aria-label="Support me on Ko‑fi">
+                                    <img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support me on Ko‑fi"/>
+                                </a>
+                            </div>
+
                             <div class="tech-stack">
                                 <span class="tech-badge">FastAPI</span>
                                 <span class="tech-badge">Three.js</span>
@@ -121,7 +131,7 @@
                 margin: 0;
                 font-size: 2.5rem;
                 letter-spacing: 0.08em;
-                background: linear-gradient(135deg, var(--accent), #7289da);
+                background: linear-gradient(135deg, var(--accent), var(--accent-dark, #7289da));
                 -webkit-background-clip: text;
                 -webkit-text-fill-color: transparent;
                 background-clip: text;
@@ -260,5 +270,22 @@
                 font-weight: 500;
                 color: var(--text);
             }
+
+            /* Ko‑fi inline widget in About (green theme) */
+            .kofi-embed { display:flex; gap:1rem; align-items:center; margin: 0.5rem 0 1rem 0; }
+            .kofi-embed-text { margin:0; color:var(--text-soft); }
+            /* Keep only the blue Ko‑fi image as the clickable element (no green pill) */
+            .kofi-button {
+                display: inline-block;
+                padding: 0;
+                background: transparent;
+                color: inherit;
+                border-radius: 0;
+                box-shadow: none;
+                text-decoration: none;
+                vertical-align: middle;
+            }
+            .kofi-button:hover { opacity: 0.95; }
+            .kofi-button img { height: 28px; width: auto; border-radius: 6px; display: inline-block; }
         </style>
         </section>

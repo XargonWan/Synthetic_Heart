@@ -88,6 +88,7 @@ class MatrixInterface:
         device_name: Optional[str] = None,
         store_path: Optional[str] = None,
         allowed_rooms: Optional[List[str]] = None,
+        auto_join: Optional[bool] = None,
         trainer_id: Optional[int] = None,
     ):
         self.homeserver = str(homeserver or "").rstrip("/")
@@ -98,6 +99,9 @@ class MatrixInterface:
         self.device_name = str(device_name or "SyntH Matrix Interface")
         self.store_path = store_path
         self.allowed_rooms = set(allowed_rooms or [])
+        self.auto_join = (
+            bool(auto_join) if auto_join is not None else bool(MATRIX_AUTO_JOIN)
+        )
         self.trainer_id = trainer_id
 
         self.is_enabled = True
@@ -110,13 +114,27 @@ class MatrixInterface:
         self._stop = asyncio.Event()
         self._logged_in = False
 
+        # Policies (read from module-level config defaults)
+        self.private_message_policy = str(MATRIX_PRIVATE_MESSAGES).lower()
+        self.invite_policy = str(MATRIX_INVITE_POLICY).lower()
+
         # Gatekeeping: determine whether the interface can be activated
         if AsyncClient is None:
             self._disable("matrix-nio is not installed")
         elif not self.homeserver or not self.user_id:
             self._disable("MATRIX_HOMESERVER or MATRIX_USER missing")
-        elif not self.password and not self.access_token:
-            self._disable("MATRIX_PASSWORD or MATRIX_ACCESS_TOKEN missing")
+        else:
+            # Allow the interface to be present in the UI even when credentials are
+            # not yet provided. Authentication (password or access token) is
+            # required to start the sync loop; we won't attempt to auto-start
+            # syncing until credentials are available.
+            if not self.password and not self.access_token:
+                log_warning(
+                    "[matrix_interface] No MATRIX_PASSWORD or MATRIX_ACCESS_TOKEN configured — interface will be available in UI but will not sync until credentials are provided"
+                )
+
+        # Track whether we have credentials available for login/sync
+        self._auth_configured = bool(self.password or self.access_token)
 
         if self.is_enabled:
             config = (
@@ -189,17 +207,22 @@ class MatrixInterface:
 
         if self.is_enabled:
             log_info("[matrix_interface] Matrix interface registered")
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(self.start())
-            except RuntimeError:
+            if self._auth_configured:
                 try:
-                    loop = asyncio.get_event_loop()
-                    loop.call_soon(lambda: asyncio.create_task(self.start()))
-                except Exception:
-                    log_debug(
-                        "[matrix_interface] No event loop available; Matrix interface will start during application initialization"
-                    )
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self.start())
+                except RuntimeError:
+                    try:
+                        loop = asyncio.get_event_loop()
+                        loop.call_soon(lambda: asyncio.create_task(self.start()))
+                    except Exception:
+                        log_debug(
+                            "[matrix_interface] No event loop available; Matrix interface will start during application initialization"
+                        )
+            else:
+                log_info(
+                    "[matrix_interface] Interface initialized but not authenticated — provide MATRIX_PASSWORD or MATRIX_ACCESS_TOKEN to enable syncing"
+                )
         else:
             reason = self.disabled_reason or "missing configuration"
             log_warning(
@@ -296,6 +319,11 @@ class MatrixInterface:
         if not self.client:
             log_debug("[matrix_interface] Start skipped - client not initialized")
             return
+        if not self._auth_configured and not self._logged_in:
+            log_debug(
+                "[matrix_interface] start() skipped - no credentials configured for login"
+            )
+            return
 
         await message_queue.run()
 
@@ -369,8 +397,40 @@ class MatrixInterface:
             return
         try:
             if getattr(event, "membership", "") == "invite":
-                await self.client.join(room.room_id)
-                log_info(f"[matrix_interface] Auto-joined room {room.room_id}")
+                inviter = getattr(event, "sender", None)
+                if not getattr(self, "auto_join", True):
+                    log_debug(
+                        f"[matrix_interface] Auto-join disabled; received invite for {room.room_id} from {inviter}"
+                    )
+                    return
+
+                # Invite policy: allow_all vs trainer_only
+                invite_policy = getattr(self, "invite_policy", "trainer_only")
+                allowed = False
+                if str(invite_policy).lower() == "allow_all":
+                    allowed = True
+                else:
+                    try:
+                        if inviter and _interface_registry.is_trainer(
+                            INTERFACE_NAME, inviter
+                        ):
+                            allowed = True
+                    except Exception:
+                        allowed = False
+                    if not allowed:
+                        try:
+                            if inviter in get_matrix_trusted_users():
+                                allowed = True
+                        except Exception:
+                            allowed = False
+
+                if allowed:
+                    await self.client.join(room.room_id)
+                    log_info(f"[matrix_interface] Auto-joined room {room.room_id}")
+                else:
+                    log_debug(
+                        f"[matrix_interface] Invite from {inviter} ignored by invite_policy={invite_policy}"
+                    )
         except Exception as exc:
             log_warning(
                 f"[matrix_interface] Failed to join room {getattr(room, 'room_id', '<unknown>')}: {exc}"
@@ -408,6 +468,35 @@ class MatrixInterface:
         member_count = getattr(room, "member_count", None)
         if member_count is not None and member_count <= 2:
             chat_type = "private"
+
+        # Enforce private-message policy if configured
+        if chat_type == "private":
+            pm_policy = str(
+                getattr(self, "private_message_policy", "trainer_only")
+            ).lower()
+            if pm_policy == "trainer_only":
+                sender = getattr(event, "sender", None)
+                allowed_pm = False
+                # 1) trainer configured for interface
+                try:
+                    if sender and _interface_registry.is_trainer(
+                        INTERFACE_NAME, sender
+                    ):
+                        allowed_pm = True
+                except Exception:
+                    allowed_pm = False
+                # 2) trusted users list
+                if not allowed_pm:
+                    try:
+                        if sender in get_matrix_trusted_users():
+                            allowed_pm = True
+                    except Exception:
+                        allowed_pm = False
+                if not allowed_pm:
+                    log_debug(
+                        f"[matrix_interface] Ignoring private message from {sender} due to MATRIX_PRIVATE_MESSAGES=trainer_only"
+                    )
+                    return
 
         timestamp_ms = getattr(event, "server_timestamp", None)
         if timestamp_ms is not None:
@@ -629,6 +718,99 @@ class MatrixInterface:
     async def get_me(self) -> SimpleNamespace:
         return SimpleNamespace(id=self.user_id, username=self.username)
 
+    async def reload_from_config(self) -> None:
+        """Reload runtime configuration from the registry and restart/refresh
+        the sync loop where appropriate.
+
+        Behaviour:
+        - Update in-memory policies and allowed-rooms immediately.
+        - If authentication was newly provided -> start the sync loop.
+        - If authentication was removed -> stop the sync loop.
+        - When running, perform a short `sync()` to re-check pending invites/messages.
+        """
+        try:
+            log_info("[matrix_interface] Applying configuration changes from registry")
+
+            # Read current values from ConfigVar wrappers
+            new_homeserver = str(MATRIX_HOMESERVER).rstrip("/")
+            new_user = str(MATRIX_USER)
+            new_password = (
+                MATRIX_PASSWORD.value
+                if hasattr(MATRIX_PASSWORD, "value")
+                else MATRIX_PASSWORD
+            )
+            new_token = (
+                MATRIX_ACCESS_TOKEN.value
+                if hasattr(MATRIX_ACCESS_TOKEN, "value")
+                else MATRIX_ACCESS_TOKEN
+            )
+            new_device_id = MATRIX_DEVICE_ID if MATRIX_DEVICE_ID else None
+            new_device_name = str(MATRIX_DEVICE_NAME)
+            new_store_path = MATRIX_STORE_PATH if MATRIX_STORE_PATH else None
+
+            new_allowed = get_matrix_allowed_rooms() or set()
+            new_auto_join = bool(MATRIX_AUTO_JOIN)
+            new_invite_policy = str(MATRIX_INVITE_POLICY).lower()
+            new_pm_policy = str(MATRIX_PRIVATE_MESSAGES).lower()
+
+            # Apply lightweight changes immediately
+            self.allowed_rooms = set(new_allowed)
+            self.auto_join = new_auto_join
+            self.invite_policy = new_invite_policy
+            self.private_message_policy = new_pm_policy
+
+            # Detect authentication changes
+            new_auth_configured = bool(new_password or new_token)
+            prev_auth = getattr(self, "_auth_configured", False)
+            self.password = new_password
+            self.access_token = new_token
+
+            # If auth state changed from unauthenticated -> authenticated, start
+            if not prev_auth and new_auth_configured:
+                log_info("[matrix_interface] Credentials supplied — starting sync loop")
+                self._auth_configured = True
+                try:
+                    await self.start()
+                except Exception as exc:
+                    log_warning(
+                        f"[matrix_interface] Failed to start after config change: {exc}"
+                    )
+
+                # Attempt a short sync to pick up pending invites/messages
+                try:
+                    if self.client and getattr(self, "_logged_in", False):
+                        await self.client.sync(timeout=1000, full_state=False)
+                except Exception as exc:
+                    log_debug(
+                        f"[matrix_interface] Short sync after reload failed: {exc}"
+                    )
+
+            # If auth removed, stop the interface
+            elif prev_auth and not new_auth_configured:
+                log_info("[matrix_interface] Credentials removed — stopping sync loop")
+                self._auth_configured = False
+                try:
+                    await self.stop()
+                except Exception as exc:
+                    log_warning(
+                        f"[matrix_interface] Failed to stop after config change: {exc}"
+                    )
+
+            # Auth unchanged: if we're logged in trigger a short sync so
+            # invite/message state is re-evaluated under the new policies.
+            else:
+                self._auth_configured = new_auth_configured
+                if self.client and getattr(self, "_logged_in", False):
+                    try:
+                        await self.client.sync(timeout=1000, full_state=False)
+                    except Exception as exc:
+                        log_debug(
+                            f"[matrix_interface] Short sync during config reload failed: {exc}"
+                        )
+
+        except Exception as exc:
+            log_error(f"[matrix_interface] reload_from_config failed: {exc}")
+
 
 # ----------------------------------------------------------------------
 # Configuration via registry
@@ -662,11 +844,11 @@ register_exposed_var(
     default=None,
     value_type=str,
     ui_type="password",
-    description="Password used when logging into the homeserver (ignored if access token is provided).",
+    description="Optional. Password used for password-based login. If you prefer, set `MATRIX_ACCESS_TOKEN` instead; the interface will remain visible in the WebUI even without credentials.",
     scope="interface",
     tags=["sensitive"],
     needs_component_reload=True,
-    component="matrix_bot",
+    component="matrix_chat",
 )
 
 register_exposed_var(
@@ -675,11 +857,11 @@ register_exposed_var(
     default=None,
     value_type=str,
     ui_type="password",
-    description="Optional long-lived access token used instead of password-based login.",
+    description="Optional long-lived access token used instead of password login. Interface will appear in the WebUI even if credentials are not yet configured.",
     scope="interface",
     tags=["sensitive"],
     needs_component_reload=True,
-    component="matrix_bot",
+    component="matrix_chat",
 )
 
 register_exposed_var(
@@ -724,6 +906,52 @@ register_exposed_var(
     value_type=str,
     ui_type="string",
     description="Comma separated list of room IDs the bot is allowed to respond in. Leave empty to allow all rooms.",
+    scope="interface",
+    component="matrix_chat",
+)
+
+register_exposed_var(
+    "MATRIX_AUTO_JOIN",
+    label="Matrix Auto-join Invites",
+    default=True,
+    value_type=bool,
+    ui_type="boolean",
+    description="Automatically join rooms when invited (recommended for easier setup).",
+    scope="interface",
+    component="matrix_chat",
+)
+
+register_exposed_var(
+    "MATRIX_INVITE_POLICY",
+    label="Matrix Invite Policy",
+    default="trainer_only",
+    value_type=str,
+    ui_type="select",
+    description="Controls which invites are auto-joined: 'allow_all' (auto-join invites from anyone) or 'trainer_only' (only auto-join invites from trainer/trusted users).",
+    scope="interface",
+    component="matrix_chat",
+    options=["allow_all", "trainer_only"],
+)
+
+register_exposed_var(
+    "MATRIX_PRIVATE_MESSAGES",
+    label="Matrix Private Messages",
+    default="trainer_only",
+    value_type=str,
+    ui_type="select",
+    description="Controls which private (1:1) messages the bot will accept: 'allow_all' or 'trainer_only'.",
+    scope="interface",
+    component="matrix_chat",
+    options=["allow_all", "trainer_only"],
+)
+
+register_exposed_var(
+    "MATRIX_TRUSTED_USERS",
+    label="Matrix Trusted Users",
+    default="",
+    value_type=str,
+    ui_type="string",
+    description="Comma-separated list of MXIDs (e.g. @alice:matrix.org) that are always allowed for private messages and invites when trainer-only policy is active.",
     scope="interface",
     component="matrix_chat",
 )
@@ -809,6 +1037,47 @@ def get_matrix_allowed_rooms() -> set[str]:
     return _parse_allowed_rooms(str(_MATRIX_ALLOWED_ROOMS_RAW))
 
 
+def get_matrix_trusted_users() -> set[str]:
+    """Parse and return MXIDs configured as trusted users."""
+    return _parse_allowed_rooms(str(_MATRIX_TRUSTED_USERS_RAW))
+
+
+MATRIX_AUTO_JOIN = config_registry.get_var(
+    "MATRIX_AUTO_JOIN",
+    True,
+    label="Matrix Auto-join Invites",
+    description="If enabled, auto-join rooms when invited.",
+    group="interface",
+    component="matrix_chat",
+)
+
+MATRIX_INVITE_POLICY = config_registry.get_var(
+    "MATRIX_INVITE_POLICY",
+    "trainer_only",
+    label="Matrix Invite Policy",
+    description="Auto-join only trainer/trusted invites (trainer_only) or allow all invites (allow_all).",
+    group="interface",
+    component="matrix_chat",
+)
+
+MATRIX_PRIVATE_MESSAGES = config_registry.get_var(
+    "MATRIX_PRIVATE_MESSAGES",
+    "trainer_only",
+    label="Matrix Private Messages",
+    description="Controls whether private (1:1) messages are accepted from everyone or only from the trainer/trusted users.",
+    group="interface",
+    component="matrix_chat",
+)
+
+_MATRIX_TRUSTED_USERS_RAW = config_registry.get_var(
+    "MATRIX_TRUSTED_USERS",
+    "",
+    label="Matrix Trusted Users",
+    description="Comma-separated list of MXIDs (e.g. @alice:matrix.org) that are always allowed for private messages and invites when trainer-only policy is active.",
+    group="interface",
+    component="matrix_chat",
+)
+
 MATRIX_TRAINER_ID: Optional[int] = core_get_trainer_id(INTERFACE_NAME)
 
 # Always instantiate so that the interface is present even when disabled
@@ -823,5 +1092,61 @@ MATRIX_INTERFACE_INSTANCE = MatrixInterface(
     allowed_rooms=list(get_matrix_allowed_rooms())
     if get_matrix_allowed_rooms()
     else None,
+    auto_join=bool(MATRIX_AUTO_JOIN),
     trainer_id=MATRIX_TRAINER_ID,
 )
+
+
+# ------------------------------------------------------------------
+# Runtime reload / config listeners
+async def reload_interface():
+    """Reload the Matrix interface when component-level config changes.
+
+    This is discovered by core_initializer and registered as the component
+    reload handler so `needs_component_reload` flips will automatically
+    trigger a runtime reload.
+    """
+    try:
+        log_info("[matrix_interface] Reload handler invoked - reloading from config")
+        await MATRIX_INTERFACE_INSTANCE.reload_from_config()
+    except Exception as exc:
+        log_error(f"[matrix_interface] Failed to reload interface: {exc}")
+
+
+def _schedule_instance_reload(_new_value=None) -> None:
+    """Synchronous callback for config_registry.add_listener that schedules
+    an asynchronous reload task for the active Matrix interface instance.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(MATRIX_INTERFACE_INSTANCE.reload_from_config())
+    except RuntimeError:
+        # No running loop available (e.g. during import); defer until app init
+        log_debug(
+            "[matrix_interface] Reload requested but no running loop; will apply on next start"
+        )
+
+
+# Register listeners for configuration keys that should hot-reload the
+# interface when changed via WebUI/API. We register both keys that set
+# needs_component_reload (handled by core_initializer) and other runtime
+# settings so changes take effect immediately.
+for _key in (
+    "MATRIX_PASSWORD",
+    "MATRIX_ACCESS_TOKEN",
+    "MATRIX_USER",
+    "MATRIX_HOMESERVER",
+    "MATRIX_ALLOWED_ROOMS",
+    "MATRIX_AUTO_JOIN",
+    "MATRIX_INVITE_POLICY",
+    "MATRIX_PRIVATE_MESSAGES",
+    "MATRIX_TRUSTED_USERS",
+    "MATRIX_DEVICE_ID",
+    "MATRIX_DEVICE_NAME",
+    "MATRIX_STORE_PATH",
+):
+    try:
+        config_registry.add_listener(_key, _schedule_instance_reload)
+    except Exception:
+        # If registration fails during import-time tests, ignore and continue
+        pass

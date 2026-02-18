@@ -31,3 +31,29 @@ def test_phase_priorities_terminated():
     assert "};" in snippet, (
         "PHASE_PRIORITIES declaration appears to be malformed (missing '};')"
     )
+
+
+def test_try_catch_balance_in_main_js():
+    """Basic sanity check: ensure every 'try {' has a corresponding 'catch' or 'finally' token.
+
+    This test ignores occurrences that appear inside strings or single-line comments
+    (e.g. template snippets) to avoid false positives from string literals.
+    """
+    import re
+
+    p = Path("res/synth_webui/js/main.js")
+    text = p.read_text(encoding="utf-8")
+
+    # Remove template literals and quoted strings to avoid counting 'try {' inside them
+    text_no_templates = re.sub(r'`(?:\\.|[^`])*`', '', text)
+    text_no_strings = re.sub(r'(["\'])(?:\\.|(?!\1).)*\1', '', text_no_templates)
+
+    # Strip single-line comments
+    clean_lines = [ln.split('//', 1)[0] for ln in text_no_strings.splitlines()]
+    clean_text = "\n".join(clean_lines)
+
+    tries = clean_text.count("try {")
+    catches = clean_text.count("catch (") + clean_text.count("finally {")
+    assert tries <= catches, (
+        f"Unbalanced try/catch/finally in main.js (try: {tries}, catch|finally: {catches})"
+    )

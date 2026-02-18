@@ -11,14 +11,17 @@ def test_plugin_with_none_plugin_class(monkeypatch):
     real_import = importlib.import_module
 
     def fake_import(name):
-        if name == "cortex.llm_provider.invalid_none":
+        # Accept both new and legacy import paths
+        if name in ("cortex.llm_provider.invalid_none", "cortex.llm_engine.invalid_none"):
             return fake_mod
         return real_import(name)
 
     monkeypatch.setattr(importlib, "import_module", fake_import)
 
     reg.register_engine_module(
-        "invalid_none", "cortex.llm_provider.invalid_none", cortex="llm_provider"
+        "invalid_none",
+        "cortex.llm_provider.invalid_none",
+        cortex="llm_provider",
     )
 
     try:

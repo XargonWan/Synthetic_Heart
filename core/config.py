@@ -457,6 +457,22 @@ def get_log_chat_thread_id_sync() -> int | None:
     return asyncio.run(get_log_chat_thread_id())
 
 
+def list_available_llms():
+    """Return available LLM engine names (delegates to CortexRegistry `llm_provider`)."""
+    try:
+        from core.cortex_registry import get_cortex_registry
+
+        reg = get_cortex_registry()
+        return sorted(reg.get_available_engines("llm_provider"))
+    except Exception:
+        return []
+
+
+# --- Compatibility helpers for Cortex (used by WebUI components tab)
+# These functions provide a backward-compatible shim for older WebUI code
+# that expects simple helpers in core.config. They delegate to the
+# CortexRegistry where possible to avoid duplicating discovery logic.
+
 def list_available_cortexs():
     """Return a sorted list of known cortex kinds."""
     try:

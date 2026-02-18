@@ -27,7 +27,7 @@ async def test_custom_sleep_trigger_puts_chat_to_sleep(monkeypatch):
 
     trainer_id = 555
     msg = SimpleNamespace(
-        from_user=SimpleNamespace(id=trainer_id, username="Xargon"),
+        from_user=SimpleNamespace(id=trainer_id, username="Xargon", full_name="Xargon Test"),
         chat=SimpleNamespace(id=chat_id, type="private"),
         text="bye 2b",
         message_id=1,
@@ -37,7 +37,10 @@ async def test_custom_sleep_trigger_puts_chat_to_sleep(monkeypatch):
         document=None,
         voice=None,
         video=None,
+        video_note=None,
     )
+    msg.chat_id = chat_id
+    msg.reply_to_message = None
     update = SimpleNamespace(message=msg)
 
     # stub ensure_plugin_loaded
@@ -75,14 +78,14 @@ async def test_empty_config_does_not_trigger_sleep(monkeypatch):
     # Ensure no configured triggers
     monkeypatch.setattr(
         "core.chat_attention.config_registry.get_value",
-        lambda k, d=None, **kwargs: (
-            "" if k in ("CHAT_SLEEP_COMMANDS", "CHAT_WAKE_COMMANDS") else ""
-        ),
+        lambda k, d=None, **kwargs: ""
+        if k in ("CHAT_SLEEP_COMMANDS", "CHAT_WAKE_COMMANDS")
+        else "",
     )
 
     trainer_id = 555
     msg = SimpleNamespace(
-        from_user=SimpleNamespace(id=trainer_id, username="Xargon"),
+        from_user=SimpleNamespace(id=trainer_id, username="Xargon", full_name="Xargon Test"),
         chat=SimpleNamespace(id=chat_id, type="private"),
         text="bye 2b",
         message_id=1,
@@ -92,7 +95,10 @@ async def test_empty_config_does_not_trigger_sleep(monkeypatch):
         document=None,
         voice=None,
         video=None,
+        video_note=None,
     )
+    msg.chat_id = chat_id
+    msg.reply_to_message = None
     update = SimpleNamespace(message=msg)
 
     async def ep(u):

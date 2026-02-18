@@ -278,7 +278,6 @@ register_command("wake", wake_command)
 register_command("awake", wake_command)
 register_command("sleep", sleep_command)
 register_command("status", status_command)
-register_command("cortex", cortex_command)
 
 
 async def cortex_command(*args) -> str:
@@ -308,6 +307,9 @@ async def cortex_command(*args) -> str:
     except Exception as e:
         return f"❌ Error loading plugin: {e}"
 
+
+# Register cortex command after function is defined
+register_command("cortex", cortex_command)
 
 async def model_command(*args) -> str:
     """Handle model switching command."""
@@ -374,7 +376,6 @@ async def context_command(*args) -> str:
         return f"🔄 Context mode {state}."
 
 
-register_command("llm", llm_command)
 register_command("model", model_command)
 register_command("last_chats", last_chats_command)
 register_command("context", context_command)
