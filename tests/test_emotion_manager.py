@@ -395,7 +395,6 @@ class TestEmotionIntegration:
         )
         assert set(VALID_EMOTIONS) == expected
 
-
     def test_emotion_tag_parsing_complex_message(self):
         """Test emotion extraction from realistic LLM-style message."""
         mgr = EmotionManager()
