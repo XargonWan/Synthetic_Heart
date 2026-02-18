@@ -579,7 +579,7 @@ class ConfigRegistry:
         # due to running event loop - the value might exist in DB but wasn't loaded yet.
         # Only persist if we're sure DB was checked (no running loop or bootstrap tag)
         try:
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
             # Event loop is running - DB load was skipped, so DON'T persist default yet
             # It will be loaded properly via load_all_from_db() later
             print(
@@ -592,7 +592,7 @@ class ConfigRegistry:
 
     def _load_from_db_sync(self, key: str) -> Optional[str]:
         try:
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
         except RuntimeError:
             # No event loop running - safe to create one
             return asyncio.run(self._load_from_db(key))
@@ -890,6 +890,8 @@ class ConfigRegistry:
         if definition.value_type is bool:
             return "true" if bool(value) else "false"
         if definition.value_type is int:
+            if value == "":
+                return ""
             return str(int(value))
         if definition.value_type is float:
             return str(float(value))

@@ -1695,40 +1695,6 @@ class CoreInitializer:
                 )
                 self.startup_errors.append(f"Core actions error: {e}")
 
-    def _initialize_persona_manager(self):
-        """Initialize the persona manager as a core component."""
-        try:
-            # Import the module (no longer triggers auto-initialization)
-
-            # Explicitly get or create the instance
-            from core.persona_manager import get_persona_manager
-
-            persona_manager = get_persona_manager()
-
-            if persona_manager:
-                log_info(
-                    "[core_initializer] ✅ Persona Manager initialized successfully"
-                )
-
-                # Initialize persona asynchronously (load default persona)
-                try:
-                    import asyncio
-
-                    asyncio.create_task(persona_manager.async_init())
-                    log_debug(
-                        "[core_initializer] Persona async initialization scheduled"
-                    )
-                except Exception as init_e:
-                    log_warning(
-                        f"[core_initializer] Persona async init failed: {init_e}"
-                    )
-            else:
-                log_warning("[core_initializer] ⚠️ Failed to initialize Persona Manager")
-                self.startup_errors.append("Persona Manager initialization failed")
-        except Exception as e:
-            log_error(f"[core_initializer] ❌ Error initializing Persona Manager: {e}")
-            self.startup_errors.append(f"Persona Manager error: {e}")
-
 
 # Global instance
 core_initializer = CoreInitializer()
