@@ -295,16 +295,22 @@ class EmotionManager(PluginBase):
         log_warning(f"[emotion_manager] Unknown action type: {action_type}")
         return None
 
-    def get_prompt_instructions(self, action_type: str) -> str:
+    def get_prompt_instructions(self, action_type: str) -> dict:
         """Return instructions for LLM on how to use emotion actions."""
-        # Generic instructions for emotion system (used by core_initializer to append to system prompt)
-        return """
-To express emotions, include tags in your response like {emotion intensity}.
-Supported emotions: happy, sad, angry, fear, disgust, surprised, neutral, relaxed, love, arousal, devotion.
-Intensity is 0.0 to 10.0.
-Example: "I am so happy to see you! {happy 8.5, love 5.0}"
-Your emotional state will decay over time, so reinforce it if the feeling persists.
-"""
+        if action_type == "static_inject":
+            return {
+                "description": "Automatically injects current emotional state into the prompt context.",
+                "when_to_use": "Runs automatically — you don't need to call it explicitly.",
+            }
+        return {
+            "description": (
+                "To express emotions, include tags in your response like {emotion intensity}. "
+                "Supported emotions: happy, sad, angry, fear, disgust, surprised, neutral, "
+                "relaxed, love, arousal, devotion. Intensity is 0.0 to 10.0."
+            ),
+            "example": "I am so happy to see you! {happy 8.5, love 5.0}",
+            "note": "Your emotional state will decay over time, so reinforce it if the feeling persists.",
+        }
 
     async def start(self):
         """Initialize emotion manager and create DB table if needed."""

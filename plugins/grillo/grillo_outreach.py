@@ -188,7 +188,7 @@ class GrilloOutreachPlugin:
                     # Get recent memories
                     await cur.execute(
                         """
-                        SELECT content FROM ai_memories 
+                        SELECT content FROM memories 
                         WHERE content IS NOT NULL 
                         ORDER BY timestamp DESC 
                         LIMIT %s

@@ -917,6 +917,8 @@ class ConfigRegistry:
             if definition.value_type is bool:
                 return str(raw_value).strip().lower() in {"1", "true", "yes", "on"}
             if definition.value_type is int:
+                if raw_value is None or str(raw_value).strip() == "":
+                    return definition.default
                 return int(raw_value)
             if definition.value_type is float:
                 return float(raw_value)
