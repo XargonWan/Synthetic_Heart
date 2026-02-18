@@ -1795,6 +1795,13 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             cortexKindSelect.addEventListener('change', () => {
                                 const kind = cortexKindSelect.value;
                                 renderForCortex(kind);
+                                // Also update the detailed cards shown under the selector
+                                try {
+                                    if (componentsCortexListEl) {
+                                        const byCortex = (data.cortex && data.cortex.by_cortex) || {};
+                                        renderDetailsList(byCortex[kind] || [], componentsCortexListEl);
+                                    }
+                                } catch (e) { console.debug('[synth_webui] renderForCortex: failed to re-render cards', e); }
                             });
                             cortexKindSelect.dataset.bound = '1';
                         }
@@ -1804,6 +1811,11 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     const initialKind = (data.cortex && data.cortex.active_kind) || (data.cortex && data.cortex.available_kinds && data.cortex.available_kinds[0]) || 'llm_provider';
                     renderForCortex(initialKind);
 
+                    // Also make sure the initial cards reflect the selected cortex kind
+                    try {
+                        const byCortex = (data.cortex && data.cortex.by_cortex) || {};
+                        if (componentsCortexListEl) renderDetailsList(byCortex[initialKind] || [], componentsCortexListEl);
+                    } catch (e) { console.debug('[synth_webui] init: failed to render initial cortex cards', e); }
                     // Bind engineSelect change to switch engine
                     if (!engineSelect.dataset.bound) {
                         engineSelect.addEventListener('change', async () => {
