@@ -638,6 +638,29 @@ class ConfigRegistry:
 
             return None
         except Exception as e:
+            # If the error looks like a missing-table/column schema error, try
+            # an idempotent ensure_core_tables() and retry the SELECT once.
+            msg = str(e) or ""
+            is_schema_error = (
+                "1146" in msg or "doesn't exist" in msg or "1054" in msg or "Unknown column" in msg
+            )
+            if is_schema_error:
+                try:
+                    from core.db import ensure_core_tables
+
+                    log_debug(f"[config] Schema error while loading '{key}': {msg}; running ensure_core_tables() and retrying")
+                    await ensure_core_tables()
+                    # retry once
+                    async with get_conn_ctx() as conn:
+                        async with conn.cursor() as cur:
+                            await cur.execute(
+                                "SELECT value FROM config WHERE config_key = %s", (key,)
+                            )
+                            row = await cur.fetchone()
+                            if row:
+                                return row[0]
+                except Exception as retry_exc:
+                    log_error(f"[config] Retry after ensure_core_tables() failed for key '{key}': {retry_exc}")
             log_error(f"[config] Error loading from DB for key '{key}': {e}")
             return None
 
@@ -726,7 +749,65 @@ class ConfigRegistry:
                             )
                         return True
                 except Exception as e:
-                    # Log full traceback to help diagnose failures (timeouts, connection reset, schema error)
+                    # If schema error (missing table/column), attempt an idempotent
+                    # ensure_core_tables() and retry the REPLACE/INSERT once.
+                    msg = str(e) or ""
+                    is_schema_error = (
+                        "1146" in msg or "doesn't exist" in msg or "1054" in msg or "Unknown column" in msg
+                    )
+                    if is_schema_error:
+                        try:
+                            from core.db import ensure_core_tables
+
+                            log_debug(f"[config] Schema error persisting '{key}': {msg}; running ensure_core_tables() and retrying persist")
+                            await ensure_core_tables()
+                            # retry the same persist steps once
+                            recreated = False
+                            async with conn.cursor() as cur:
+                                await cur.execute(
+                                    "SELECT 1 FROM config WHERE config_key = %s", (key,)
+                                )
+                                row = await cur.fetchone()
+                                if not row:
+                                    recreated = True
+
+                            try:
+                                async with conn.cursor() as cur:
+                                    await cur.execute(
+                                        "REPLACE INTO config (config_key, value) VALUES (%s, %s)",
+                                        (key, value),
+                                    )
+                                    await conn.commit()
+                                log_debug(f"[config] REPLACE (retry) succeeded for key='{key}'")
+                                if recreated:
+                                    log_warning(
+                                        f"[config] Config key '{key}' was missing and has been recreated on retry"
+                                    )
+                                return True
+                            except Exception:
+                                log_debug(f"[config] REPLACE (retry) failed for key='{key}', attempting INSERT fallback")
+                                async with conn.cursor() as cur:
+                                    await cur.execute(
+                                        "INSERT INTO config (config_key, value) VALUES (%s, %s) ON DUPLICATE KEY UPDATE value = VALUES(value)",
+                                        (key, value),
+                                    )
+                                    await conn.commit()
+                                log_debug(f"[config] Fallback INSERT (retry) succeeded for key='{key}'")
+                                if recreated:
+                                    log_warning(
+                                        f"[config] Config key '{key}' was missing and has been recreated on retry (fallback path)"
+                                    )
+                                return True
+                        except Exception as retry_exc:
+                            import traceback
+
+                            tb2 = traceback.format_exc()
+                            log_error(
+                                f"[config] Retry-after-ensure_core_tables() failed for '{key}': {retry_exc} -- traceback:\n{tb2}"
+                            )
+                            return False
+
+                    # Non-schema or unrecoverable error: log full traceback and fail gracefully
                     import traceback
 
                     tb = traceback.format_exc()
