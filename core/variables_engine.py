@@ -367,7 +367,9 @@ def register_all():
         default=["SyntH", "Synthetic Heart"],
         value_type="json",
         ui_type="tags",
-        description="Alternative names the synth responds to.",
+        description=(
+            "Add additional aliases for the synth. Default aliases are always kept."
+        ),
         scope="synth",
         component="persona",
         tags=["persona"],
@@ -404,13 +406,14 @@ def register_all():
         value_type="json",
         ui_type="tags",
         description=(
-            "Canonical alias list (base aliases + current name + additional aliases). "
+            "Canonical alias list. "
             "This list is computed automatically and cannot be edited directly."
         ),
         scope="synth",
         component="persona",
         tags=["persona"],
         readonly=True,
+        hidden=True,
     )
 
     register_exposed_var(

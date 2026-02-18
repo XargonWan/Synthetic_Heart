@@ -452,8 +452,15 @@ SYNTH_ALIASES = config_registry.get_var(
     value_type="json",
     getter=_get_persona_aliases,
     setter=_set_persona_aliases,
-    hidden=True,  # no longer exposed in the WebUI — shown via computed 'SYNTH_FULL_ALIASES' view
+    hidden=False,
 )
+
+# Ensure the alias definition remains hidden and uses the persona-backed getters/setters
+if "SYNTH_ALIASES" in config_registry._definitions:
+    defn = config_registry._definitions["SYNTH_ALIASES"]
+    defn.hidden = False
+    defn.getter = _get_persona_aliases
+    defn.setter = _set_persona_aliases
 
 # Expose the computed full aliases (canonical + persona name + user aliases)
 try:
@@ -482,7 +489,10 @@ except Exception:
 # Ensure SYNTH_FULL_ALIASES is read-only if definition exists
 if "SYNTH_FULL_ALIASES" in config_registry._definitions:
     try:
-        config_registry._definitions["SYNTH_FULL_ALIASES"].readonly = True
+        defn = config_registry._definitions["SYNTH_FULL_ALIASES"]
+        defn.readonly = True
+        defn.getter = _get_full_aliases
+        defn.hidden = True
     except Exception:
         pass
 

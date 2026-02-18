@@ -88,12 +88,14 @@ def test_get_log_chat_reads_from_config_registry(monkeypatch):
     monkeypatch.setattr(
         cm.config_registry,
         "get_value",
-        lambda k, d=None: "telegram_bot"
-        if k == "LOG_CHAT_INTERFACE"
-        else (
-            "12345"
-            if k == "LOG_CHAT_ID"
-            else ("678" if k == "LOG_CHAT_THREAD_ID" else d)
+        lambda k, d=None: (
+            "telegram_bot"
+            if k == "LOG_CHAT_INTERFACE"
+            else (
+                "12345"
+                if k == "LOG_CHAT_ID"
+                else ("678" if k == "LOG_CHAT_THREAD_ID" else d)
+            )
         ),
     )
 

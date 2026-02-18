@@ -80,9 +80,9 @@ async def test_empty_config_does_not_trigger_sleep(monkeypatch):
     # Ensure no configured triggers
     monkeypatch.setattr(
         "core.chat_attention.config_registry.get_value",
-        lambda k, d=None, **kwargs: ""
-        if k in ("CHAT_SLEEP_COMMANDS", "CHAT_WAKE_COMMANDS")
-        else "",
+        lambda k, d=None, **kwargs: (
+            "" if k in ("CHAT_SLEEP_COMMANDS", "CHAT_WAKE_COMMANDS") else ""
+        ),
     )
 
     trainer_id = 555
