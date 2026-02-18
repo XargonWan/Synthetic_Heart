@@ -452,6 +452,7 @@ SYNTH_ALIASES = config_registry.get_var(
     value_type="json",
     getter=_get_persona_aliases,
     setter=_set_persona_aliases,
+    hidden=True,  # no longer exposed in the WebUI — shown via computed 'SYNTH_FULL_ALIASES' view
 )
 
 # Expose the computed full aliases (canonical + persona name + user aliases)
@@ -459,7 +460,7 @@ try:
     SYNTH_FULL_ALIASES = config_registry.get_var(
         "SYNTH_FULL_ALIASES",
         ["SyntH", "Synthetic Heart"],
-        label="Synth Full Aliases",
+        label="Synth Aliases",
         description="Canonical alias list (base aliases + current name + additional aliases)",
         group="synth",
         component="persona",
@@ -471,7 +472,7 @@ except Exception:
     SYNTH_FULL_ALIASES = config_registry.get_var(
         "SYNTH_FULL_ALIASES",
         ["SyntH", "Synthetic Heart"],
-        label="Synth Full Aliases",
+        label="Synth Aliases",
         description="Canonical alias list (base aliases + current name + additional aliases)",
         group="synth",
         component="persona",

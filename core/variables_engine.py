@@ -399,7 +399,7 @@ def register_all():
 
     register_exposed_var(
         "SYNTH_FULL_ALIASES",
-        label="Synth Full Aliases",
+        label="Synth Aliases",
         default=["SyntH", "Synthetic Heart"],
         value_type="json",
         ui_type="tags",
