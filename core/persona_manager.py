@@ -521,7 +521,6 @@ class EmotiveState:
 
 
 @dataclass
-@dataclass
 class PersonaData:
     """Digital persona identity data structure.
 

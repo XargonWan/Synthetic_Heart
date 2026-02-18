@@ -1587,7 +1587,10 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 const fallback = interfaceOptions[0] || '';
                                 entries.push({ iface: fallback, id: '' });
                                 renderRows();
-                                persistValue(serializeEntries(), [addBtn]);
+                                // focus the new row's ID input so user can type immediately
+                                const lastInput = list.querySelector('.repeatable-row:last-child input[type="text"]');
+                                try { if (lastInput) { lastInput.focus(); lastInput.select(); } } catch (e) {}
+                                // Do NOT persist until the user enters an ID (persist happens on blur)
                             });
 
                             renderRows();
@@ -1755,10 +1758,22 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     }
                     keys.forEach((comp) => {
                         const section = document.createElement('div');
-                        section.className = 'config-section';
+                        section.className = 'config-section collapsible';
+
                         const h = document.createElement('h3');
+                        h.className = 'config-section-title';
                         h.textContent = comp;
+                        h.style.cursor = 'pointer';
+                        h.setAttribute('role', 'button');
+                        h.setAttribute('aria-expanded', 'true');
+                        // Toggle collapse when title clicked
+                        h.addEventListener('click', () => {
+                            const isCollapsed = section.classList.toggle('collapsed');
+                            h.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
+                        });
+
                         section.appendChild(h);
+
                         const sectionNote = (groups[comp] && groups[comp][0] && groups[comp][0].component_description) ? groups[comp][0].component_description : '';
                         if (sectionNote) {
                             const note = document.createElement('div');
@@ -1766,9 +1781,11 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             note.textContent = sectionNote;
                             section.appendChild(note);
                         }
+
                         const listEl = document.createElement('div');
                         listEl.className = 'config-list';
                         section.appendChild(listEl);
+
                         container.appendChild(section);
                         renderList(groups[comp], listEl);
                     });
@@ -2236,22 +2253,15 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             }
 
                             if (Array.isArray(item.actions) && item.actions.length) {
-                            const actions = document.createElement('div');
-                            actions.className = 'accent-actions';
-                            actions.appendChild(applyBtn);
-                            actions.appendChild(cancelBtn);
-                            actions.appendChild(resetBtn);
-
-                            container.appendChild(presetsWrap);
-                            container.appendChild(colorInput);
-                            container.appendChild(actions);
-                            container.appendChild(previewBox);
-                        };
-
-                        if (accentItem) {
-                            await renderAccentControl(accentCard, accentContainer);
-                            await renderAccentControl(themeCard, themeContainer);
-                        }
+                                const actionsWrap = document.createElement('div');
+                                actionsWrap.className = 'component-actions';
+                                const list = document.createElement('ul');
+                                list.className = 'component-actions-list';
+                                item.actions.forEach((action) => {
+                                    const li = document.createElement('li');
+                                    li.className = 'component-action';
+                                    const title = document.createElement('div');
+                                    title.className = 'component-action-title';
                                     title.textContent = action.type || action.name || 'Action';
                                     li.appendChild(title);
                                     if (action.description) {
