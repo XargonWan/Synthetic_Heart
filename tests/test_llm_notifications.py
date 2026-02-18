@@ -3,6 +3,26 @@ from unittest.mock import patch, AsyncMock, Mock
 import asyncio
 
 
+@pytest.fixture(autouse=True)
+def ensure_default_cortexs():
+    """Ensure CortexRegistry reports a minimal set of engines for tests that
+    rely on get_active_cortex_engine() without performing full discovery.
+    """
+    from core.cortex_registry import get_cortex_registry
+
+    reg = get_cortex_registry()
+    # Keep existing registrations but add minimal fallbacks if missing
+    reg._engine_meta.setdefault("manual", {"cortex": "llm_provider"})
+    reg._engine_modules.setdefault("manual", "cortex.llm_provider.manual")
+    reg._engine_meta.setdefault(
+        "selenium_chatgpt", {"cortex": "selenium_engine"}
+    )
+    reg._engine_modules.setdefault(
+        "selenium_chatgpt", "cortex.selenium_engine.selenium_chatgpt"
+    )
+    yield
+
+
 @pytest.mark.asyncio
 async def test_switch_active_cortex_notifies_on_success():
     from core.config import switch_active_cortex_engine
@@ -77,6 +97,87 @@ async def test_cortex_command_uses_switch_active_cortex():
 
 
 @pytest.mark.asyncio
+async def test_cortex_command_lists_engines():
+    """`/cortex` with no args should list kinds and engines and show active engine."""
+    from core import command_registry
+
+    with (
+        patch("core.config.get_active_cortex_engine", new=AsyncMock(return_value="manual")),
+        patch("core.config.list_available_cortexs", return_value=["llm_provider", "selenium_engine"]),
+        patch("core.config.list_available_cortex_engines") as mock_list_engines,
+    ):
+        def _list(kind=None):
+            if kind == "llm_provider":
+                return ["manual", "gpt"]
+            if kind == "selenium_engine":
+                return ["selenium_gemini"]
+            return ["manual", "gpt", "selenium_gemini"]
+
+        mock_list_engines.side_effect = _list
+        res = await command_registry.cortex_command()
+        assert "*Active Cortex:* `manual`" in res
+        assert "llm_provider:" in res
+        assert "selenium_engine:" in res
+        assert "`llm_provider/manual`" in res
+        assert "`selenium_engine/selenium_gemini`" in res
+
+
+@pytest.mark.asyncio
+async def test_cortex_command_fqdn_sets_engine():
+    """Fully-qualified `/cortex kind/engine` should set the engine by short name."""
+    from core import command_registry
+
+    mock_reg = Mock()
+    mock_reg._engine_meta = {}
+    mock_reg.get_available_engines = Mock(return_value=["manual"])
+
+    with (
+        patch("core.config.get_active_cortex_engine", new=AsyncMock(return_value="manual")),
+        patch("core.config.list_available_cortexs", return_value=["llm_provider"]),
+        patch("core.config.list_available_cortex_engines", return_value=["manual"]),
+        patch("core.cortex_registry.get_cortex_registry", return_value=mock_reg),
+        patch("core.config.switch_active_cortex_engine", new=AsyncMock()) as mock_switch,
+    ):
+        res = await command_registry.cortex_command("llm_provider/manual")
+        mock_switch.assert_awaited_with("manual", use_hot_swap=False)
+        assert "dynamically updated to `manual`" in res
+
+
+@pytest.mark.asyncio
+async def test_cortex_command_ambiguous_shortname():
+    """When a short-name matches multiple engines, /cortex should ask for disambiguation."""
+    from core import command_registry
+
+    mock_reg = Mock()
+    mock_reg._engine_meta = {
+        "gemini_live": {"cortex": "llm_provider"},
+        "selenium_gemini": {"cortex": "selenium_engine"},
+    }
+    mock_reg.get_available_engines = Mock(return_value=["gemini_live", "selenium_gemini"])
+
+    with (
+        patch("core.cortex_registry.get_cortex_registry", return_value=mock_reg),
+        patch("core.config.get_active_cortex_engine", new=AsyncMock(return_value="manual")),
+        patch("core.config.list_available_cortexs", return_value=["llm_provider", "selenium_engine"]),
+        patch("core.config.list_available_cortex_engines", return_value=["gemini_live", "selenium_gemini"]),
+    ):
+        res = await command_registry.cortex_command("gemini")
+        assert "Found multiple matching engines for 'gemini'" in res
+        assert "/cortex llm_provider/gemini_live" in res
+        assert "/cortex selenium_engine/selenium_gemini" in res
+
+
+@pytest.mark.asyncio
+async def test_llm_alias_deprecation_prefix():
+    from core import command_registry
+
+    with patch("core.config.switch_active_cortex_engine", new=AsyncMock()):
+        res = await command_registry.llm_alias("manual")
+        assert res.startswith("⚠️ `/llm` is deprecated")
+        assert "dynamically updated to `manual`" in res
+
+
+@pytest.mark.asyncio
 async def test_switch_active_cortex_notifies_on_start_failure(monkeypatch):
     """If plugin.start() raises during a hot-swap (ensure_started), the failure should be propagated and trainer notified."""
     from core.config import switch_active_cortex_engine
@@ -95,8 +196,12 @@ async def test_switch_active_cortex_notifies_on_start_failure(monkeypatch):
     mock_plugin.start = failing_start
     mock_registry.load_engine = Mock(return_value=mock_plugin)
 
+    # Patch registry in both the cortex_registry module and in core.plugin_instance
     monkeypatch.setattr(
         "core.cortex_registry.get_cortex_registry", Mock(return_value=mock_registry)
+    )
+    monkeypatch.setattr(
+        "core.plugin_instance.get_cortex_registry", Mock(return_value=mock_registry)
     )
 
     with patch("core.notifier.notify_trainer") as mock_notify:
@@ -148,7 +253,7 @@ async def test_switch_active_cortex_reloads_when_config_matches_but_plugin_diffe
             "Dummy", (), {"__module__": "cortex.llm_provider.manual"}
         )()
 
-    monkeypatch.setattr("core.config.set_base_cortex", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("core.config.set_base_cortex", AsyncMock())
     monkeypatch.setattr("core.plugin_instance.load_plugin", fake_load_plugin)
 
     try:
@@ -176,6 +281,9 @@ async def test_load_plugin_ensures_start_propagates(monkeypatch):
 
     monkeypatch.setattr(
         "core.cortex_registry.get_cortex_registry", Mock(return_value=mock_registry)
+    )
+    monkeypatch.setattr(
+        "core.plugin_instance.get_cortex_registry", Mock(return_value=mock_registry)
     )
 
     # Ensure global plugin is reset to avoid interference from other tests
