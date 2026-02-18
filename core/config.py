@@ -128,6 +128,37 @@ TRAINER_CORTEX = config_registry.get_var(
     component="core",
 )
 
+# --- LogChat configuration (use config_registry so exposed-variable APIs are consistent)
+LOG_CHAT_INTERFACE = config_registry.get_var(
+    "LOG_CHAT_INTERFACE",
+    "",
+    label="Log Chat Interface",
+    description="Interface used for system/trainer log messages.",
+    group="core",
+    component="core",
+    hidden=True,
+)
+LOG_CHAT_ID = config_registry.get_var(
+    "LOG_CHAT_ID",
+    "",
+    label="Log Chat ID",
+    description="Chat ID used for system/trainer notifications.",
+    group="core",
+    component="core",
+    value_type=int,
+    hidden=True,
+)
+LOG_CHAT_THREAD_ID = config_registry.get_var(
+    "LOG_CHAT_THREAD_ID",
+    "",
+    label="Log Chat Thread ID",
+    description="Thread ID for the log chat (if supported by interface).",
+    group="core",
+    component="core",
+    value_type=int,
+    hidden=True,
+)
+
 
 async def get_active_cortex_engine(scope: str | None = None) -> str:
     """Return the effective cortex engine for a given scope.
@@ -285,132 +316,87 @@ _log_chat_interface: str | None = None  # cached log chat interface
 
 
 async def get_log_chat_id() -> int | None:
-    """Return the configured log chat ID, if any (stored in `config` table as `LOG_CHAT_ID`)."""
+    """Return the configured log chat ID, if any (via config_registry `LOG_CHAT_ID`)."""
     global _log_chat_id
     if _log_chat_id is None:
-        async with get_conn_ctx() as conn:
-            try:
-                async with conn.cursor(aiomysql.DictCursor) as cur:
-                    await cur.execute(
-                        "SELECT value FROM config WHERE `config_key` = 'LOG_CHAT_ID'"
-                    )
-                    row = await cur.fetchone()
-                    if row:
-                        try:
-                            _log_chat_id = int(row["value"])
-                            log_debug(
-                                f"[config] 📥 Loaded LOG_CHAT_ID from DB: {_log_chat_id}"
-                            )
-                        except (ValueError, TypeError):
-                            _log_chat_id = None
-            except Exception as e:
-                log_error(f"[config] ❌ Error in get_log_chat_id(): {repr(e)}")
+        try:
+            raw = config_registry.get_value("LOG_CHAT_ID", "")
+            if raw is None or raw == "":
+                _log_chat_id = None
+            else:
+                try:
+                    _log_chat_id = int(raw)
+                except Exception:
+                    _log_chat_id = None
+            log_debug(f"[config] 📥 Loaded LOG_CHAT_ID via config_registry: {_log_chat_id}")
+        except Exception as e:
+            log_error(f"[config] ❌ Error in get_log_chat_id(): {repr(e)}")
     return _log_chat_id
 
 
 async def get_log_chat_interface() -> str | None:
-    """Return the configured log chat interface, if any (stored in `config` table as `LOG_CHAT_INTERFACE`)."""
+    """Return the configured log chat interface, if any (via config_registry `LOG_CHAT_INTERFACE`)."""
     global _log_chat_interface
     if _log_chat_interface is None:
-        async with get_conn_ctx() as conn:
-            try:
-                async with conn.cursor(aiomysql.DictCursor) as cur:
-                    await cur.execute(
-                        "SELECT value FROM config WHERE `config_key` = 'LOG_CHAT_INTERFACE'"
-                    )
-                    row = await cur.fetchone()
-                    if row:
-                        _log_chat_interface = row["value"]
-                        log_debug(
-                            f"[config] 📥 Loaded LOG_CHAT_INTERFACE from DB: {_log_chat_interface}"
-                        )
-            except Exception as e:
-                log_error(f"[config] ❌ Error in get_log_chat_interface(): {repr(e)}")
+        try:
+            raw = config_registry.get_value("LOG_CHAT_INTERFACE", "")
+            _log_chat_interface = raw if raw else None
+            log_debug(f"[config] 📥 Loaded LOG_CHAT_INTERFACE via config_registry: {_log_chat_interface}")
+        except Exception as e:
+            log_error(f"[config] ❌ Error in get_log_chat_interface(): {repr(e)}")
     return _log_chat_interface
 
 
 async def set_log_chat_id(chat_id: int) -> None:
-    """Persist and cache the log chat ID (stored in `config` table as `LOG_CHAT_ID`)."""
+    """Persist and cache the log chat ID via `config_registry`."""
     global _log_chat_id
     _log_chat_id = chat_id
-    from core.db import ensure_core_tables
-
-    await ensure_core_tables()
-    async with get_conn_ctx() as conn:
-        try:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "REPLACE INTO config (`config_key`, `value`) VALUES (%s, %s)",
-                    ("LOG_CHAT_ID", str(chat_id)),
-                )
-                await conn.commit()
-                log_debug(f"[config] 💾 Saved LOG_CHAT_ID in DB: {chat_id}")
-        except Exception as e:
-            log_error(f"[config] ❌ Error in set_log_chat_id(): {repr(e)}")
+    try:
+        await config_registry.set_value("LOG_CHAT_ID", str(chat_id))
+        log_debug(f"[config] 💾 Saved LOG_CHAT_ID via config_registry: {chat_id}")
+    except Exception as e:
+        log_error(f"[config] ❌ Error in set_log_chat_id(): {repr(e)}")
 
 
 async def get_log_chat_thread_id() -> int | None:
-    """Return the configured log chat thread ID, if any (stored in `config` table as `LOG_CHAT_THREAD_ID`)."""
+    """Return the configured log chat thread ID, if any (via config_registry `LOG_CHAT_THREAD_ID`)."""
     global _log_chat_thread_id
     if _log_chat_thread_id is None:
-        async with get_conn_ctx() as conn:
-            try:
-                async with conn.cursor(aiomysql.DictCursor) as cur:
-                    await cur.execute(
-                        "SELECT value FROM config WHERE `config_key` = 'LOG_CHAT_THREAD_ID'"
-                    )
-                    row = await cur.fetchone()
-                    if row:
-                        try:
-                            _log_chat_thread_id = int(row["value"])
-                            log_debug(
-                                f"[config] 📥 Loaded LOG_CHAT_THREAD_ID from DB: {_log_chat_thread_id}"
-                            )
-                        except (ValueError, TypeError):
-                            _log_chat_thread_id = None
-            except Exception as e:
-                log_error(f"[config] ❌ Error in get_log_chat_thread_id(): {repr(e)}")
+        try:
+            raw = config_registry.get_value("LOG_CHAT_THREAD_ID", "")
+            if raw is None or raw == "":
+                _log_chat_thread_id = None
+            else:
+                try:
+                    _log_chat_thread_id = int(raw)
+                except Exception:
+                    _log_chat_thread_id = None
+            log_debug(f"[config] 📥 Loaded LOG_CHAT_THREAD_ID via config_registry: {_log_chat_thread_id}")
+        except Exception as e:
+            log_error(f"[config] ❌ Error in get_log_chat_thread_id(): {repr(e)}")
     return _log_chat_thread_id
 
 
 async def set_log_chat_id_and_thread(
     chat_id: int, thread_id: int | None = None, interface: str = "webui"
 ) -> None:
-    """Persist and cache the log chat ID, thread ID, and interface."""
+    """Persist and cache the log chat ID, thread ID, and interface via config_registry."""
     global _log_chat_id, _log_chat_thread_id, _log_chat_interface
     _log_chat_id = chat_id
     _log_chat_thread_id = thread_id
     _log_chat_interface = interface
-    from core.db import ensure_core_tables
 
-    await ensure_core_tables()
-    async with get_conn_ctx() as conn:
-        try:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "REPLACE INTO config (`config_key`, `value`) VALUES (%s, %s)",
-                    ("LOG_CHAT_ID", str(chat_id)),
-                )
-                await cur.execute(
-                    "REPLACE INTO config (`config_key`, `value`) VALUES (%s, %s)",
-                    ("LOG_CHAT_INTERFACE", interface),
-                )
-                if thread_id is not None:
-                    await cur.execute(
-                        "REPLACE INTO config (`config_key`, `value`) VALUES (%s, %s)",
-                        ("LOG_CHAT_THREAD_ID", str(thread_id)),
-                    )
-                else:
-                    # Remove thread setting if None
-                    await cur.execute(
-                        "DELETE FROM config WHERE `config_key` = 'LOG_CHAT_THREAD_ID'"
-                    )
-                await conn.commit()
-                log_debug(
-                    f"[config] 💾 Saved log chat in DB: {chat_id}, thread: {thread_id}, interface: {interface}"
-                )
-        except Exception as e:
-            log_error(f"[config] ❌ Error in set_log_chat_id_and_thread(): {repr(e)}")
+    try:
+        await config_registry.set_value("LOG_CHAT_INTERFACE", interface)
+        await config_registry.set_value("LOG_CHAT_ID", str(chat_id))
+        await config_registry.set_value(
+            "LOG_CHAT_THREAD_ID", str(thread_id) if thread_id is not None else ""
+        )
+        log_debug(
+            f"[config] 💾 Saved LOG_CHAT (id/thread/interface) via config_registry: {chat_id}, {thread_id}, {interface}"
+        )
+    except Exception as e:
+        log_error(f"[config] ❌ Error in set_log_chat_id_and_thread(): {repr(e)}")
 
 
 def get_log_chat_id_sync() -> int | None:
