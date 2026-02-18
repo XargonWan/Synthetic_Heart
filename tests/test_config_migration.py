@@ -2,38 +2,8 @@ import asyncio
 
 import pytest
 
-from core.config_manager import config_registry
 from core.db import ensure_core_tables, get_conn_ctx
 from core.config import set_base_cortex
-
-
-@pytest.mark.asyncio
-async def test_legacy_base_cortex_migrates_to_config():
-    """If a legacy `settings.base_cortex` exists, _load_from_db should pick it up
-    and persist it into the modern `config` table (migration).
-    """
-    await ensure_core_tables()
-
-    # Ensure no existing config value for BASE_CORTEX
-    async with get_conn_ctx() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute("DELETE FROM config WHERE config_key = %s", ("BASE_CORTEX",))
-            await cur.execute(
-                "REPLACE INTO settings (`setting_key`, `value`) VALUES (%s, %s)",
-                ("base_cortex", "selenium_gemini"),
-            )
-            await conn.commit()
-
-    # _load_from_db should return the legacy value and persist it into `config`
-    raw = await config_registry._load_from_db("BASE_CORTEX")
-    assert raw == "selenium_gemini"
-
-    # Verify the migrated value is now present in `config`
-    async with get_conn_ctx() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute("SELECT value FROM config WHERE config_key = %s", ("BASE_CORTEX",))
-            row = await cur.fetchone()
-            assert row and row[0] == "selenium_gemini"
 
 
 @pytest.mark.asyncio
@@ -49,32 +19,3 @@ async def test_set_base_cortex_persists_to_config_table():
             await cur.execute("SELECT value FROM config WHERE config_key = %s", ("BASE_CORTEX",))
             row = await cur.fetchone()
             assert row and row[0] == "selenium_gemini"
-
-
-@pytest.mark.asyncio
-async def test_set_base_cortex_fallbacks_to_settings_on_persist_failure(monkeypatch):
-    """If persisting to `config` fails, `set_base_cortex` must write a legacy
-    copy into `settings.base_cortex` so the selection survives restart.
-    """
-    await ensure_core_tables()
-
-    # Simulate a persist failure inside ConfigRegistry by monkeypatching the
-    # internal _persist_to_db to always return False (best-effort persist failure)
-    async def _fake_persist(key, value):
-        return False
-
-    monkeypatch.setattr(config_registry, "_persist_to_db", _fake_persist)
-
-    # Call the public API - it should still create a legacy settings entry
-    await set_base_cortex("selenium_gemini")
-
-    async with get_conn_ctx() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "SELECT value FROM settings WHERE setting_key = %s",
-                ("base_cortex",),
-            )
-            row = await cur.fetchone()
-            assert row and row[0] == "selenium_gemini"
-
-    # Restore original persistence (monkeypatch fixture will undo automatically)

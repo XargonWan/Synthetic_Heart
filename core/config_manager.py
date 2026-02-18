@@ -636,44 +636,6 @@ class ConfigRegistry:
                     if row:
                         return row[0]
 
-                    # Legacy fallback: some older installs stored a few core values
-                    # in the `settings` table (lower-case keys). If we find a
-                    # legacy value, migrate it into the `config` table so the
-                    # modern ConfigRegistry can manage it going forward.
-                    legacy_mapping = {
-                        "BASE_CORTEX": "base_cortex",
-                        "GRILLO_CORTEX": "grillo_cortex",
-                        "TRAINER_CORTEX": "trainer_cortex",
-                    }
-                    legacy_key = legacy_mapping.get(key)
-                    if legacy_key:
-                        try:
-                            await cur.execute(
-                                "SELECT value FROM settings WHERE setting_key = %s",
-                                (legacy_key,),
-                            )
-                            legacy_row = await cur.fetchone()
-                            if legacy_row and legacy_row[0] is not None:
-                                legacy_value = legacy_row[0]
-                                log_info(
-                                    f"[config] Found legacy settings.{legacy_key}; migrating to config.{key}"
-                                )
-                                # Persist migrated value to `config` for future loads
-                                try:
-                                    await self._persist_to_db(key, legacy_value)
-                                    log_info(
-                                        f"[config] Migrated '{legacy_key}' -> '{key}' in DB"
-                                    )
-                                except Exception as _persist_exc:
-                                    log_warning(
-                                        f"[config] Migration persisted to 'config' failed for '{key}': {_persist_exc}"
-                                    )
-                                return legacy_value
-                        except Exception as _legacy_exc:
-                            # If the settings table/query is unavailable, treat as no legacy value
-                            log_debug(
-                                f"[config] Legacy settings lookup failed for '{legacy_key}': {_legacy_exc}"
-                            )
             return None
         except Exception as e:
             log_error(f"[config] Error loading from DB for key '{key}': {e}")

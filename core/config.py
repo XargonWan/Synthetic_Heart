@@ -162,12 +162,7 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
 
 
 async def set_base_cortex(name: str) -> None:
-    """Persist the base cortex engine selection.
-
-    Robustness: if persisting into the `config` table fails (DB race/schema
-    issue), persist a legacy copy into `settings.base_cortex` so the value
-    survives container restarts and will be migrated on next startup.
-    """
+    """Persist the base cortex engine selection."""
     try:
         await config_registry.set_value("BASE_CORTEX", name)
         log_info(f"[config] 💾 Saved base cortex to database: {name}")
@@ -175,42 +170,9 @@ async def set_base_cortex(name: str) -> None:
         log_error(f"[config] ❌ Error saving BASE_CORTEX to database: {repr(e)}")
         raise
 
-    # Verify the value actually landed in `config`; if not, write to legacy
-    # `settings.base_cortex` as a best-effort fallback so a restart won't lose it.
-    try:
-        from core.db import ensure_core_tables
-
-        await ensure_core_tables()
-        async with get_conn_ctx() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT value FROM config WHERE config_key = %s",
-                    ("BASE_CORTEX",),
-                )
-                row = await cur.fetchone()
-                if not row or (row and row[0] != name):
-                    # Persist fallback into legacy `settings` table
-                    await cur.execute(
-                        "REPLACE INTO settings (`setting_key`, `value`) VALUES (%s, %s)",
-                        ("base_cortex", name),
-                    )
-                    await conn.commit()
-                    from core.logging_utils import log_warning
-
-                    log_warning(
-                        f"[config] ⚠️ Fallback: persisted BASE_CORTEX='{name}' into settings.base_cortex because `config` write wasn't present"
-                    )
-    except Exception as _exc:  # pragma: no cover - best-effort fallback
-        log_warning(f"[config] Failed to apply legacy fallback for BASE_CORTEX: {_exc}")
-
 
 async def set_scope_cortex(scope: str, name: str) -> None:
-    """Persist a scope-specific cortex override.
-
-    If DB persist fails for the modern `config` table, also write a legacy
-    copy into `settings` (where applicable) so the selection survives restarts
-    and will be migrated on next boot.
-    """
+    """Persist a scope-specific cortex override."""
     key = "GRILLO_CORTEX" if scope == "grillo" else "TRAINER_CORTEX"
     try:
         await config_registry.set_value(key, name)
@@ -218,35 +180,6 @@ async def set_scope_cortex(scope: str, name: str) -> None:
     except Exception as e:
         log_error(f"[config] ❌ Error saving {key} to database: {repr(e)}")
         raise
-
-    # Fallback -> legacy settings (grillo_cortex / trainer_cortex)
-    legacy_map = {"GRILLO_CORTEX": "grillo_cortex", "TRAINER_CORTEX": "trainer_cortex"}
-    legacy_key = legacy_map.get(key)
-    if legacy_key:
-        try:
-            from core.db import ensure_core_tables
-
-            await ensure_core_tables()
-            async with get_conn_ctx() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        "SELECT value FROM config WHERE config_key = %s",
-                        (key,),
-                    )
-                    row = await cur.fetchone()
-                    if not row or (row and row[0] != name):
-                        await cur.execute(
-                            "REPLACE INTO settings (`setting_key`, `value`) VALUES (%s, %s)",
-                            (legacy_key, name),
-                        )
-                        await conn.commit()
-                        from core.logging_utils import log_warning
-
-                        log_warning(
-                            f"[config] ⚠️ Fallback: persisted {key}='{name}' into settings.{legacy_key}"
-                        )
-        except Exception as _exc:  # pragma: no cover - best-effort fallback
-            log_warning(f"[config] Failed to apply legacy fallback for {key}: {_exc}")
 
 
 async def switch_active_cortex_engine(name: str, use_hot_swap: bool = True):
