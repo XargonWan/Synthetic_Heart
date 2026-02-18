@@ -131,6 +131,12 @@ MODEL_CONFIGS = {
 
 DEFAULT_MODEL = "gemini-3-flash-preview"
 
+# Token budget for video multimodal content (frames + audio + markers).
+# The decomposition function dynamically adjusts extraction FPS so that the
+# total image-token cost stays just within this budget.
+# At ~1120 tokens/frame (Gemini 3 default), 32768 ≈ 28 frames.
+VIDEO_TOKEN_BUDGET: int = 32768
+
 
 def _get_gemini_model() -> str:
     from core.config import get_current_model
@@ -1370,13 +1376,42 @@ class GeminiAPIPlugin(AIPluginBase):
                 video_bytes = base64.b64decode(base64_data)
                 source_label = filename or "video"
                 decomposed = await decompose_video_to_frames_and_audio(
-                    video_bytes, source_label
+                    video_bytes,
+                    source_label,
+                    token_budget=VIDEO_TOKEN_BUDGET,
                 )
                 if decomposed:
                     any_video_decomposed = True
 
                     total_frames = sum(len(s["frames_b64"]) for s in decomposed)
-                    total_duration = float(len(decomposed))
+                    # Duration = last group's timestamp + 1 second
+                    total_duration = decomposed[-1]["ts"] + 1.0 if decomposed else 0.0
+                    has_any_audio = any(s["audio_b64"] is not None for s in decomposed)
+
+                    # --- Video context preamble ---
+                    # Give the model a holistic overview before the per-second
+                    # interleaved data, mirroring the structured metadata that
+                    # the image path provides.
+                    caption = attachment.get("caption", "")
+                    media_meta = attachment.get("media_metadata", {})
+                    preamble_parts = [
+                        f"[Video: {source_label}",
+                        f"{total_duration:.1f}s duration",
+                        f"{total_frames} frames",
+                    ]
+                    if has_any_audio:
+                        preamble_parts.append("with audio")
+                    else:
+                        preamble_parts.append("no audio")
+                    res_w = media_meta.get("width", 0)
+                    res_h = media_meta.get("height", 0)
+                    if res_w and res_h:
+                        preamble_parts.append(f"{res_w}x{res_h}")
+                    preamble = ", ".join(preamble_parts) + "]"
+                    if caption:
+                        preamble += f'\nUser caption: "{caption}"'
+                    parts.append({"text": preamble})
+
                     for sec in decomposed:
                         ts = sec["ts"]
                         end_ts = ts + 1.0

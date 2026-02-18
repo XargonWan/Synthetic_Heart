@@ -290,10 +290,139 @@ def _make_wav_header(
     )
 
 
+async def _probe_video_info(tmp_path: str) -> dict[str, float] | None:
+    """Use *ffprobe* to extract duration, resolution and native FPS.
+
+    Returns ``{"duration": float, "width": int, "height": int, "native_fps": float}``
+    or ``None`` on any failure.
+    """
+    import asyncio
+    import json as _json
+    import subprocess
+
+    try:
+        cmd = [
+            "ffprobe",
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+            "-select_streams",
+            "v:0",
+            tmp_path,
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        if proc.returncode != 0 or not stdout:
+            return None
+
+        info = _json.loads(stdout.decode(errors="replace"))
+
+        # Duration — prefer format-level, fall back to stream-level
+        duration = 0.0
+        fmt = info.get("format", {})
+        if fmt.get("duration"):
+            duration = float(fmt["duration"])
+
+        width = 0
+        height = 0
+        native_fps = 0.0
+        streams = info.get("streams", [])
+        for s in streams:
+            if s.get("codec_type") == "video":
+                width = int(s.get("width", 0))
+                height = int(s.get("height", 0))
+                # r_frame_rate is a fraction like "30/1"
+                rfr = s.get("r_frame_rate", "0/1")
+                parts = rfr.split("/")
+                if len(parts) == 2 and int(parts[1]) != 0:
+                    native_fps = float(int(parts[0]) / int(parts[1]))
+                if not duration and s.get("duration"):
+                    duration = float(s["duration"])
+                break
+
+        if duration <= 0:
+            return None
+
+        return {
+            "duration": duration,
+            "width": width,
+            "height": height,
+            "native_fps": native_fps,
+        }
+    except (FileNotFoundError, OSError):
+        log_debug("[multimodal] ffprobe not available — skipping video probe")
+        return None
+    except Exception as e:
+        log_debug(f"[multimodal] ffprobe failed: {e}")
+        return None
+
+
+# ── Token-budget constants for dynamic FPS ──────────────────────────────────
+_TOKENS_PER_FRAME: int = 1120  # Gemini 3 default media_resolution
+_TOKENS_PER_AUDIO_SEC: int = 25  # empirical from API logs
+_TOKENS_PER_MARKER: int = 20  # approximate per-section text marker
+_MIN_FPS: float = 0.5  # below this, temporal coherence breaks
+_MAX_FPS: float = 5.0  # diminishing returns above this
+_MAX_FRAME_WIDTH: int = 1024  # limits JPEG byte size; Gemini 3 tokens unaffected
+
+
+def compute_optimal_video_params(
+    duration_s: float,
+    token_budget: int,
+    tokens_per_frame: int = _TOKENS_PER_FRAME,
+    tokens_per_audio_sec: int = _TOKENS_PER_AUDIO_SEC,
+    tokens_per_marker: int = _TOKENS_PER_MARKER,
+) -> tuple[float, int]:
+    """Compute the best extraction FPS to fill *token_budget* for a video.
+
+    Returns ``(fps, max_frames)`` — both clamped to sane ranges.
+    """
+    import math
+
+    if duration_s <= 0:
+        return (2.0, 4)  # safe fallback
+
+    # Audio tokens scale linearly with duration
+    audio_tokens = math.ceil(duration_s) * tokens_per_audio_sec
+
+    # Estimate marker overhead: 1 marker per second of video + 1 preamble + 1 end marker
+    n_seconds = math.ceil(duration_s)
+    marker_tokens = (n_seconds + 2) * tokens_per_marker
+
+    available = token_budget - audio_tokens - marker_tokens
+    if available <= 0:
+        return (_MIN_FPS, max(int(duration_s * _MIN_FPS), 1))
+
+    max_frames = max(available // tokens_per_frame, 1)
+    raw_fps = max_frames / duration_s
+    clamped_fps = max(_MIN_FPS, min(raw_fps, _MAX_FPS))
+
+    # Re-derive frame count from clamped fps
+    final_frames = max(int(clamped_fps * duration_s), 1)
+
+    return (round(clamped_fps, 2), final_frames)
+
+
 async def decompose_video_to_frames_and_audio(
-    video_bytes: bytes, source_label: str, fps: int = 2
+    video_bytes: bytes,
+    source_label: str,
+    fps: float = 2,
+    *,
+    token_budget: int | None = None,
+    tokens_per_frame: int = _TOKENS_PER_FRAME,
 ) -> list[dict] | None:
     """Decompose a video into temporally-aligned frame + audio chunk pairs.
+
+    When *token_budget* is provided the function probes the video with
+    ``ffprobe`` and dynamically computes the best extraction FPS so that the
+    total multimodal token cost stays just within the budget.
 
     Extracts visual frames at *fps* frames-per-second and splits the audio
     track into 1-second WAV chunks so that downstream engines can interleave
@@ -329,6 +458,28 @@ async def decompose_video_to_frames_and_audio(
         os.write(fd, video_bytes)
         os.close(fd)
 
+        # --- Dynamic FPS: probe video and compute optimal params ----------------
+        scale_width = 640  # default fallback
+        if token_budget is not None:
+            vinfo = await _probe_video_info(tmp_path)
+            if vinfo and vinfo["duration"] > 0:
+                computed_fps, _ = compute_optimal_video_params(
+                    vinfo["duration"],
+                    token_budget,
+                    tokens_per_frame=tokens_per_frame,
+                )
+                fps = computed_fps
+                # Scale up to min(native, MAX_FRAME_WIDTH) — Gemini 3 token
+                # cost is fixed regardless of pixel size, so bigger = better.
+                if vinfo["width"] > 0:
+                    scale_width = min(vinfo["width"], _MAX_FRAME_WIDTH)
+                log_debug(
+                    f"[multimodal] Dynamic video params for {source_label}: "
+                    f"fps={fps}, scale_width={scale_width}, "
+                    f"duration={vinfo['duration']:.1f}s, "
+                    f"budget={token_budget} tokens"
+                )
+
         # --- Extract frames via image2pipe (all output to stdout) ---------------
         frame_cmd = [
             "ffmpeg",
@@ -336,7 +487,7 @@ async def decompose_video_to_frames_and_audio(
             "-i",
             tmp_path,
             "-vf",
-            f"fps={fps},scale=640:-1",
+            f"fps={fps},scale={scale_width}:-1",
             "-q:v",
             "5",
             "-f",
@@ -412,27 +563,44 @@ async def decompose_video_to_frames_and_audio(
                     f"{stderr_text[:300]}"
                 )
 
-        # --- Group frames by second and pair with audio chunks ------------------
+        # --- Group frames by actual timestamp and pair with audio chunks --------
+        # Each frame's real timestamp is frame_index / fps.  We bucket frames
+        # into 1-second windows so they align with the 1-second audio chunks.
+
         total_frames = len(frame_bytes_list)
-        total_seconds = (total_frames + fps - 1) // fps  # ceiling division
+
+        # Compute actual timestamp for every extracted frame
+        frame_ts = [i / fps for i in range(total_frames)]
+
+        # Total seconds = max of (last frame timestamp + 1, audio chunk count)
+        last_frame_sec = int(frame_ts[-1]) + 1 if frame_ts else 0
+        total_seconds = max(last_frame_sec, len(audio_chunks))
         result: list[dict] = []
 
         for sec_idx in range(total_seconds):
-            start_frame = sec_idx * fps
-            end_frame = min(start_frame + fps, total_frames)
-            sec_frames = frame_bytes_list[start_frame:end_frame]
+            sec_start = float(sec_idx)
+            sec_end = sec_start + 1.0
+
+            # Gather frames whose timestamp falls in [sec_start, sec_end)
+            sec_frames = [
+                frame_bytes_list[i]
+                for i, ts in enumerate(frame_ts)
+                if sec_start <= ts < sec_end
+            ]
 
             audio_chunk = audio_chunks[sec_idx] if sec_idx < len(audio_chunks) else None
 
-            result.append(
-                {
-                    "ts": float(sec_idx),
-                    "frames_b64": [encode_bytes_to_base64(fb) for fb in sec_frames],
-                    "audio_b64": (
-                        encode_bytes_to_base64(audio_chunk) if audio_chunk else None
-                    ),
-                }
-            )
+            # Only emit a group if there are frames or audio for this second
+            if sec_frames or audio_chunk:
+                result.append(
+                    {
+                        "ts": sec_start,
+                        "frames_b64": [encode_bytes_to_base64(fb) for fb in sec_frames],
+                        "audio_b64": (
+                            encode_bytes_to_base64(audio_chunk) if audio_chunk else None
+                        ),
+                    }
+                )
 
         log_debug(
             f"[multimodal] Decomposed {source_label}: {total_frames} frames, "
@@ -601,12 +769,25 @@ async def extract_multimodal_from_telegram(
                         file = await bot.get_file(video.file_id)
                         file_bytes = bytes(await file.download_as_bytearray())
 
+                        caption = getattr(message, "caption", None) or ""
+                        duration = getattr(video, "duration", 0) or 0
+                        width = getattr(video, "width", 0) or 0
+                        height = getattr(video, "height", 0) or 0
                         attachments.append(
                             {
                                 "mime_type": mime_type,
                                 "data": encode_bytes_to_base64(file_bytes),
                                 "filename": video.file_name
                                 or f"video_{video.file_unique_id}.mp4",
+                                "caption": caption,
+                                "media_metadata": {
+                                    "type": "video",
+                                    "duration": duration,
+                                    "width": width,
+                                    "height": height,
+                                    "file_size": file_size,
+                                    "has_audio": True,
+                                },
                             }
                         )
                         log_debug(
@@ -644,11 +825,22 @@ async def extract_multimodal_from_telegram(
                     file = await bot.get_file(video_note.file_id)
                     file_bytes = bytes(await file.download_as_bytearray())
 
+                    vn_duration = getattr(video_note, "duration", 0) or 0
+                    vn_length = getattr(video_note, "length", 0) or 0
                     attachments.append(
                         {
                             "mime_type": "video/mp4",
                             "data": encode_bytes_to_base64(file_bytes),
                             "filename": f"video_note_{video_note.file_unique_id}.mp4",
+                            "caption": "",
+                            "media_metadata": {
+                                "type": "video_note",
+                                "duration": vn_duration,
+                                "width": vn_length,
+                                "height": vn_length,
+                                "file_size": file_size,
+                                "has_audio": True,
+                            },
                         }
                     )
                     log_debug(
