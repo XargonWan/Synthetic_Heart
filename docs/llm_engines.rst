@@ -1,7 +1,7 @@
 LLM Engines
 ===========
 
-The Synthetic Heart supports multiple language model backends through a modular engine system. Engines are automatically discovered and can be switched at runtime using the ``/llm`` command. This design ensures that LLM implementations are completely decoupled from the core system.
+The Synthetic Heart supports multiple language model backends through a modular engine system. Engines are automatically discovered and can be switched at runtime using the ``/cortex`` command (``/llm`` remains as a deprecated alias). This design ensures that LLM implementations are completely decoupled from the core system.
 
 Engine Architecture
 -------------------
@@ -233,7 +233,7 @@ The ``selenium_gemini`` engine controls a Google Gemini browser session using th
 
 1. Access ``http://<host>:5006`` to sign in to your Google account
 2. Complete any authentication challenges
-3. Switch to this engine with ``/llm selenium_gemini``
+3. Switch to this engine with ``/cortex selenium_gemini`` (deprecated alias: ``/llm selenium_gemini``)
 
 Selenium Grok Engine
 --------------------
@@ -257,7 +257,7 @@ The ``selenium_grok`` engine controls an xAI Grok browser session using the stan
 
 1. Access ``http://<host>:5006`` to log in to X/Grok
 2. Complete login and any authentication challenges
-3. Switch to this engine with ``/llm selenium_grok``
+3. Switch to this engine with ``/cortex selenium_grok`` (deprecated alias: ``/llm selenium_grok``)
 
 Engine Registration and Discovery
 ---------------------------------

@@ -722,35 +722,33 @@ async def init_db() -> None:
         try:
             # Ensure we have a cursor to run schema creation for core tables
             async with conn.cursor() as cur:
-                pass
-
-            await cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS config (
-                    `config_key` VARCHAR(255) PRIMARY KEY,
-                    `value` TEXT NOT NULL,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                await cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS config (
+                        `config_key` VARCHAR(255) PRIMARY KEY,
+                        `value` TEXT NOT NULL,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                    )
+                    """
                 )
-                """
-            )
 
-            # Insert default config entries if they don't exist (use `config` table)
-            await cur.execute(
-                """
-                INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('BASE_CORTEX', 'selenium_chatgpt')
-                """
-            )
-            await cur.execute(
-                """
-                INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('GRILLO_CORTEX', 'Default')
-                """
-            )
-            await cur.execute(
-                """
-                INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('TRAINER_CORTEX', 'Default')
-                """
-            )
+                # Insert default config entries if they don't exist (use `config` table)
+                await cur.execute(
+                    """
+                    INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('BASE_CORTEX', 'selenium_chatgpt')
+                    """
+                )
+                await cur.execute(
+                    """
+                    INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('GRILLO_CORTEX', 'Default')
+                    """
+                )
+                await cur.execute(
+                    """
+                    INSERT IGNORE INTO config (`config_key`, `value`) VALUES ('TRAINER_CORTEX', 'Default')
+                    """
+                )
         except Exception as e:
             print(f"[init_db] Error: {e}")
 

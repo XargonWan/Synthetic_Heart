@@ -33,7 +33,7 @@ synth supports multiple language model backends with seamless switching. **Note:
 * ``manual`` – Human trainer input for debugging and development.
 
 **Runtime Engine Switching**
-    Use ``/llm <engine_name>`` to switch engines instantly during operation.
+    Use ``/cortex <engine_name>`` to switch engines instantly during operation (``/llm <engine_name>`` is a deprecated alias).
 
 Multi-Platform Integration
 ---------------------------

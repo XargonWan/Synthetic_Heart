@@ -281,35 +281,123 @@ register_command("status", status_command)
 
 
 async def cortex_command(*args) -> str:
-    """Handle Cortex switching command."""
-    from core.config import get_active_cortex_engine, list_available_cortex_engines
+    """Handle Cortex switching command.
+
+    Usage:
+      `/cortex` -> list registered cortex kinds and their engines (kind/engine)
+      `/cortex <kind>/<engine>` -> set by fully-qualified name
+      `/cortex <engine>` -> set by short name if unambiguous
+
+    If the short name is ambiguous across cortex kinds, the command will ask
+    the user to disambiguate using the fully-qualified form.
+    """
+    from core.config import (
+        get_active_cortex_engine,
+        list_available_cortex_engines,
+        list_available_cortexs,
+    )
+    from core.cortex_registry import get_cortex_registry
 
     current = await get_active_cortex_engine()
-    available = list_available_cortex_engines()
+    reg = get_cortex_registry()
 
-    if not args:
-        msg = f"*Active Cortex:* `{current}`\n\n*Available:*"
-        msg += "\n" + "\n".join(f"• `{name}`" for name in available)
-        msg += "\n\nTo change: `/cortex <name>`"
-        return msg
+    # Build kind -> engines map (stable ordering)
+    kinds = list_available_cortexs()
+    kind_map: dict[str, list[str]] = {}
+    for k in kinds:
+        try:
+            kind_map[k] = list(list_available_cortex_engines(k))
+        except Exception:
+            kind_map[k] = []
 
-    choice = args[0]
-    if choice not in available:
-        return f"❌ Cortex `{choice}` not found."
-
+    # Also build reverse map engine -> [kinds]
+    reverse_map: dict[str, list[str]] = {}
     try:
-        # Use centralized switching helper to ensure consistent behavior and notifications
+        all_engines = list_available_cortex_engines(None)
+    except Exception:
+        all_engines = []
+    for eng in all_engines:
+        meta = reg._engine_meta.get(eng, {}) if hasattr(reg, "_engine_meta") else {}
+        k = meta.get("cortex", None) or next(
+            (kk for kk, lst in kind_map.items() if eng in lst), None
+        )
+        reverse_map.setdefault(eng, []).append(k or "unknown")
+
+    # No-arg -> list by kind/engine
+    if not args:
+        lines = [f"*Active Cortex:* `{current}`\n", "*Available Cortex Engines:*"]
+        for k in sorted(kind_map.keys()):
+            engines = kind_map.get(k) or []
+            if not engines:
+                continue
+            lines.append(f"\n{k}:")
+            for e in sorted(engines):
+                lines.append(f"• `{k}/{e}`")
+        lines.append("\nTo change: `/cortex <kind>/<engine>` or `/cortex <engine>` (if unambiguous)")
+        return "\n".join(lines)
+
+    choice_raw = str(args[0]).strip()
+
+    # Fully-qualified form: kind/name
+    if "/" in choice_raw:
+        parts = choice_raw.split("/", 1)
+        if len(parts) != 2:
+            return "❌ Invalid format. Use `/cortex <kind>/<engine>` or `/cortex <engine>`"
+        kind, name = parts[0], parts[1]
+        if kind not in kind_map:
+            return f"❌ Cortex kind `{kind}` not recognised. Available kinds: {', '.join(sorted(kind_map.keys()))}"
+        if name not in kind_map.get(kind, []):
+            return f"❌ Engine `{name}` not found for cortex `{kind}`."
+        selected_engine = name
+    else:
+        # Short-name resolution: find exact or substring matches across all engines
+        candidates = [e for e in all_engines if e == choice_raw or choice_raw.lower() in e.lower()]
+        # Prefer exact match
+        exact = [e for e in candidates if e == choice_raw]
+        if len(exact) == 1:
+            selected_engine = exact[0]
+        elif len(candidates) == 1:
+            selected_engine = candidates[0]
+        elif len(candidates) > 1:
+            # Ambiguous — show full qualified options
+            opts = []
+            for e in sorted(set(candidates)):
+                ks = reverse_map.get(e, [])
+                for kk in sorted(ks):
+                    opts.append(f"{kk}/{e}")
+            hint = "\n".join(f"/cortex {o}" for o in opts)
+            return (
+                f"❌ Found multiple matching engines for '{choice_raw}'. Which one did you mean?\n{hint}"
+            )
+        else:
+            return f"❌ Cortex `{choice_raw}` not found."
+
+    # Final step: switch via central helper
+    try:
         from core.config import switch_active_cortex_engine
 
-        await switch_active_cortex_engine(choice, use_hot_swap=False)
-
-        return f"✅ Cortex engine dynamically updated to `{choice}`."
+        await switch_active_cortex_engine(selected_engine, use_hot_swap=False)
+        return f"✅ Cortex engine dynamically updated to `{selected_engine}`."
     except Exception as e:
         return f"❌ Error loading plugin: {e}"
 
 
 # Register cortex command after function is defined
 register_command("cortex", cortex_command)
+
+
+async def llm_alias(*args) -> str:
+    """Backward-compatible alias for `/llm` (deprecated).
+
+    This returns the same result as `/cortex` but prepends a deprecation hint.
+    """
+    res = await cortex_command(*args)
+    prefix = "⚠️ `/llm` is deprecated — use `/cortex` instead.\n\n"
+    return prefix + res
+
+
+# Deprecated alias (kept for backward compatibility)
+register_command("llm", llm_alias)
 
 async def model_command(*args) -> str:
     """Handle model switching command."""

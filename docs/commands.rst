@@ -26,10 +26,10 @@ User Management
 * ``/unblock <user_id>`` – Unblock a user.
 * ``/block_list`` – List blocked users.
 
-LLM Control
+Cortex Control
 -----------
 
-* ``/llm`` – Show and select the current LLM engine.
+* ``/cortex`` – Show and select the current Cortex engine (deprecated alias: ``/llm``).
 * ``/model`` – View or set the active model.
 
 Administration

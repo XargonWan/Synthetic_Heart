@@ -8,7 +8,7 @@ Usage Overview
 
 
 synth operates as a modular AI persona with multiple LLM backends. You can
-switch engines on the fly using the ``/llm`` command in your preferred chat
+switch engines on the fly using the ``/cortex`` command in your preferred chat
 platform. Supported modes include ``manual``, ``openai_chatgpt`` and
 ``selenium_chatgpt``.
 
@@ -38,7 +38,7 @@ synth automatically discovers and loads components at startup:
     - ``weather``: Weather information
     - ``message_plugin``: Cross-platform messaging
 
-**Available LLM Engines**
+**Available Cortex Engines**
     - ``openai_chatgpt``: OpenAI API integration
     - ``google_cli``: Google Gemini via CLI
     - ``selenium_chatgpt``: Browser-based ChatGPT
@@ -48,8 +48,8 @@ Runtime Commands
 ----------------
 
 **Engine Management**
-    - ``/llm``: List available LLM engines
-    - ``/llm <engine_name>``: Switch to a specific engine
+    - ``/cortex``: List available cortex engines (``/llm`` deprecated alias)
+    - ``/cortex <engine_name>``: Switch to a specific engine (``/llm <engine_name>`` deprecated)
     - ``/model``: List available models for the active engine
     - ``/model <model_name>``: Switch the active model (e.g. ``gemini_api``)
 
@@ -81,7 +81,7 @@ Components are configured through environment variables in the ``.env`` file:
 **File Storage**
     - ``SYNTH_EXPOSED_STORAGE_ROOT``: Files uploaded for `file`-type exposed variables are stored here. Defaults to ``/config/storage``.
 
-**LLM API Keys**
+**Cortex API Keys**
     - ``OPENAI_API_KEY``: OpenAI API access
     - ``GEMINI_API_KEY``: Google Gemini access
 
