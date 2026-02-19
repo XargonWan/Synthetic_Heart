@@ -57,10 +57,10 @@ Beta, but stable enough for daily use. Development branch gives access to the la
 - Mobile support
 
 <div align="center">
-   <img src="docs/res/screenshots/mobile_home.jpg" alt="SyntH Mobile Home Screenshot" style="max-width: 150px; border-radius: 8px; margin: 8px;" />
-   <img src="docs/res/screenshots/mobile_menu.jpg" alt="SyntH Mobile Menu Screenshot" style="max-width: 150px; border-radius: 8px; margin: 8px;" />
-   <img src="docs/res/screenshots/mobile_archive.jpg" alt="SyntH Mobile Chat Archive Screenshot" style="max-width: 150px; border-radius: 8px; margin: 8px;" />
-   <img src="docs/res/screenshots/mobile_config.jpg" alt="SyntH Mobile Config Screenshot" style="max-width: 150px; border-radius: 8px; margin: 8px;" />
+   <img src="docs/res/screenshots/mobile_home.jpg" alt="SyntH Mobile Home Screenshot" style="max-width: 120px; border-radius: 8px; margin: 4px; display: inline-block;" />
+   <img src="docs/res/screenshots/mobile_menu.jpg" alt="SyntH Mobile Menu Screenshot" style="max-width: 120px; border-radius: 8px; margin: 4px; display: inline-block;" />
+   <img src="docs/res/screenshots/mobile_archive.jpg" alt="SyntH Mobile Chat Archive Screenshot" style="max-width: 120px; border-radius: 8px; margin: 4px; display: inline-block;" />
+   <img src="docs/res/screenshots/mobile_config.jpg" alt="SyntH Mobile Config Screenshot" style="max-width: 120px; border-radius: 8px; margin: 4px; display: inline-block;" />
 </div>
 <p align="center" style="font-size: 0.9em; color: #888;">
    <em>* SyntH is fully usable on mobile devices via the WebUI.</em>
