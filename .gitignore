@@ -65,4 +65,4 @@ test_output*.txt
 db_check.txt
 git_*.txt
 .ruff_cache
-_build
+_[Bb]uild
