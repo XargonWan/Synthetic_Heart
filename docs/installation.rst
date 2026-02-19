@@ -1,7 +1,7 @@
 Installation
 ============
 
-.. image:: res/installation.png
+.. image:: res/Installation.png
    :alt: Installation steps
    :width: 600px
    :align: center

@@ -1,13 +1,16 @@
 Synthetic Heart Documentation
 ===================================
 
-.. raw:: html
+.. image:: res/synth_logo.png
+   :alt: Synthetic Heart Logo
+   :align: center
+   :width: 700px
 
-   <div align="center">
-      <div style="background: #222; border-radius: 12px; padding: 12px; width: 700px; height: 300px; display: flex; align-items: center; justify-content: center; margin: 0 auto;">
-         <img src="res/synth_logo.png" alt="Synthetic Heart Logo" style="max-width: 100%; max-height: 100%; object-fit: contain;" />
-      </div>
-   </div>
+
+.. container:: hero-box
+
+   The Documentation for **Synthetic Heart** is below; use the quickstart to get
+   running and the User / Developer sections to explore features and internals.
 
 
 Welcome to the **Synthetic Heart** documentation. These pages are built
@@ -36,7 +39,7 @@ getting started.
    :maxdepth: 2
    :caption: Developer guide:
 
-   component_development_guide
+   COMPONENT_DEVELOPMENT_GUIDE
    dev_components
    component_pattern
    two_phase_init_implementation

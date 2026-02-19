@@ -68,15 +68,13 @@ Key files
 Audio format details
 --------------------
 
-+---------------------------+-------------+----------+--------------------+-----------------------------+
-| Direction                 | Sample Rate | Channels | Bit Depth          | MIME                        |
-+===========================+=============+==========+====================+=============================+
-| Discord → Gemini (input)  | 16 kHz      | Mono     | 16-bit signed LE   | ``audio/pcm;rate=16000``     |
-+---------------------------+-------------+----------+--------------------+-----------------------------+
-| Gemini → Discord (output) | 24 kHz      | Mono     | 16-bit signed LE   | ``audio/pcm;rate=24000``     |
-+---------------------------+-------------+----------+--------------------+-----------------------------+
-| Discord voice (native)    | 48 kHz      | Stereo   | 16-bit signed LE   | —                           |
-+---------------------------+-------------+----------+--------------------+-----------------------------+
+- **Discord → Gemini (input)** — 16 kHz; Mono; 16-bit signed LE; MIME: ``audio/pcm;rate=16000``
+- **Gemini → Discord (output)** — 24 kHz; Mono; 16-bit signed LE; MIME: ``audio/pcm;rate=24000``
+- **Discord voice (native)** — 48 kHz; Stereo; 16-bit signed LE
+
+Resampling is performed with ``audioop.ratecv()``, ``audioop.tostereo()`` and
+``audioop.tomono()`` in the ``LiveVoiceAudioSink`` (input) and
+``LiveAudioBuffer`` (output) classes.
 
 Resampling is performed with ``audioop.ratecv()``, ``audioop.tostereo()`` and
 ``audioop.tomono()`` in the ``LiveVoiceAudioSink`` (input) and
@@ -191,30 +189,18 @@ Voice state cleanup
 The ``on_voice_state_update`` event handler in ``DiscordInterface`` monitors
 three scenarios:
 
-+------------------------------------------+---------------------------+
-| Scenario                                 | Action                    |
-+==========================================+===========================+
-| Bot disconnected/kicked from voice        | ``_stop_live_voice()``     |
-+------------------------------------------+---------------------------+
-| Bot moved to a different channel          | ``_stop_live_voice()``     |
-+------------------------------------------+---------------------------+
-| All human users leave the bot's channel   | ``_stop_live_voice()``     |
-+------------------------------------------+---------------------------+
+- Bot disconnected/kicked from voice — ``_stop_live_voice()``
+- Bot moved to a different channel — ``_stop_live_voice()``
+- All human users leave the bot's channel — ``_stop_live_voice()``
 
 This ensures Live API sessions are never left orphaned.
 
 Dependencies
 ------------
 
-+----------------------+---------------------------------------------+
-| Package              | Purpose                                     |
-+======================+=============================================+
-| ``google-genai``     | Google GenAI SDK (WebSocket client, types)  |
-+----------------------+---------------------------------------------+
-| ``discord.py``       | Discord bot framework                       |
-+----------------------+---------------------------------------------+
-| ``discord-ext-voice-recv`` | Audio reception from Discord voice channels |
-+----------------------+---------------------------------------------+
+- ``google-genai`` — Google GenAI SDK (WebSocket client, types)
+- ``discord.py`` — Discord bot framework
+- ``discord-ext-voice-recv`` — Audio reception from Discord voice channels
 
 Install with::
 
@@ -223,13 +209,8 @@ Install with::
 Configuration
 -------------
 
-+----------------------+--------------------------------------------------+
-| Variable             | Description                                      |
-+======================+==================================================+
-| ``GEMINI_API_KEY``   | Google AI API key (required)                     |
-+----------------------+--------------------------------------------------+
-| ``DISCORD_BOT_TOKEN``| Discord bot token (required)                     |
-+----------------------+--------------------------------------------------+
+- ``GEMINI_API_KEY`` — Google AI API key (required)
+- ``DISCORD_BOT_TOKEN`` — Discord bot token (required)
 
 The Live API model is hardcoded as ``gemini-2.5-flash-native-audio-preview-12-2025``
 in ``core/live_session_manager.py:LIVE_MODEL``.
@@ -237,21 +218,12 @@ in ``core/live_session_manager.py:LIVE_MODEL``.
 Troubleshooting
 ---------------
 
-+----------------------------------------------+--------------------------------------------------------------------+
-| Symptom                                      | Likely Cause                                                        |
-+==============================================+====================================================================+
-| ``_HAS_VOICE_RECV is False``                 | ``discord-ext-voice-recv`` not installed. Run ``uv add discord-ext-voice-recv`` |
-+----------------------------------------------+--------------------------------------------------------------------+
-| ``Live session manager unavailable``        | ``google-genai`` not installed or ``GEMINI_API_KEY`` not set        |
-+----------------------------------------------+--------------------------------------------------------------------+
-| No audio from model                          | Check ``LIVE_OUTPUT_SAMPLE_RATE`` matches actual model output; inspect ``on_audio_from_model`` logs |
-+----------------------------------------------+--------------------------------------------------------------------+
-| WebSocket disconnects                        | 15-minute session limit hit; reconnection should fire automatically |
-+----------------------------------------------+--------------------------------------------------------------------+
-| Tool calls not working                       | Check ``_build_gemini_tool_declarations()`` log output for declaration count |
-+----------------------------------------------+--------------------------------------------------------------------+
-| Bot stays in voice after session ends        | ``on_voice_state_update`` handler should clean up; check for exceptions in logs |
-+----------------------------------------------+--------------------------------------------------------------------+
+- ``_HAS_VOICE_RECV is False`` — ``discord-ext-voice-recv`` not installed. Run ``uv add discord-ext-voice-recv``
+- ``Live session manager unavailable`` — ``google-genai`` not installed or ``GEMINI_API_KEY`` not set
+- No audio from model — Check ``LIVE_OUTPUT_SAMPLE_RATE`` matches actual model output; inspect ``on_audio_from_model`` logs
+- WebSocket disconnects — 15-minute session limit hit; reconnection should fire automatically
+- Tool calls not working — Check ``_build_gemini_tool_declarations()`` log output for declaration count
+- Bot stays in voice after session ends — ``on_voice_state_update`` handler should clean up; check for exceptions in logs
 
 Remaining work
 --------------
