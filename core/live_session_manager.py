@@ -17,6 +17,7 @@ expected input format.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from typing import Any, Callable, Awaitable
 
@@ -36,6 +37,11 @@ RECONNECT_BUFFER_SECONDS = 30  # reconnect 30s before limit
 # Live API model
 LIVE_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
 
+# Default voice — configurable via LIVE_VOICE_NAME in persona.json or .env.
+# Available prebuilt voices: Puck, Charon, Kore, Fenrir, Aoede, Orbit,
+# Zephyr, Leda, Orus, Autonoe.  Check Google's docs for the full current list.
+_DEFAULT_VOICE = "Aoede"
+
 try:
     from google import genai
     from google.genai import types
@@ -45,6 +51,22 @@ except ImportError:
     genai = None  # type: ignore[assignment]
     types = None  # type: ignore[assignment]
     _HAS_GENAI_SDK = False
+
+
+def _clean_transcript(parts: list[str]) -> str:
+    """Join transcript fragments and normalise the result.
+
+    Fragments are concatenated without an extra separator because Gemini
+    streams them with their own surrounding whitespace.  We then strip
+    emotion-state tags injected by the persona engine and collapse any
+    runs of multiple spaces left behind.
+    """
+    text = "".join(parts).strip()
+    # Remove emotion/state tags: {emotion neutral  intensity  3.0}
+    text = re.sub(r"\{[^}]*\}", "", text)
+    # Collapse runs of whitespace to a single space
+    text = re.sub(r" {2,}", " ", text).strip()
+    return text
 
 
 class LiveSessionState:
@@ -58,6 +80,7 @@ class LiveSessionState:
         "is_active",
         "_session",
         "_receive_task",
+        "_ctx",
     )
 
     def __init__(
@@ -92,6 +115,9 @@ class LiveSessionManager:
     a Live API WebSocket session is opened. When it leaves, the session closes.
     """
 
+    # How often (seconds) the flush task drains accumulated audio to Gemini.
+    _FLUSH_INTERVAL_S = 0.2  # 200ms
+
     def __init__(self, api_key: str) -> None:
         if not _HAS_GENAI_SDK:
             raise RuntimeError(
@@ -107,7 +133,12 @@ class LiveSessionManager:
         self._on_audio: Callable[[int, bytes], Awaitable[None]] | None = None
         self._on_text: Callable[[int, str], Awaitable[None]] | None = None
         self._on_tool_call: Callable[[int, dict], Awaitable[dict]] | None = None
+        self._on_turn_complete: Callable[[int, str, str], Awaitable[None]] | None = None
         self._reconnect_locks: dict[int, asyncio.Lock] = {}
+        # Audio send buffers: guild_id -> bytearray
+        self._send_buffers: dict[int, bytearray] = {}
+        # Periodic flush tasks: guild_id -> Task
+        self._flush_tasks: dict[int, asyncio.Task[None]] = {}
 
     def set_audio_callback(
         self, callback: Callable[[int, bytes], Awaitable[None]]
@@ -126,6 +157,17 @@ class LiveSessionManager:
     ) -> None:
         """Set callback for tool/function calls. Args: (guild_id, call_dict) -> response_dict."""
         self._on_tool_call = callback
+
+    def set_turn_complete_callback(
+        self, callback: Callable[[int, str, str], Awaitable[None]]
+    ) -> None:
+        """Set callback fired after each model turn completes.
+
+        Args: (guild_id, user_transcript, model_transcript) — both sides of the turn.
+        user_transcript comes from input_audio_transcription; model_transcript from
+        output_audio_transcription. Either may be empty if transcription is unavailable.
+        """
+        self._on_turn_complete = callback
 
     async def start_session(
         self,
@@ -151,8 +193,28 @@ class LiveSessionManager:
             )
             await self.stop_session(guild_id)
 
+        # Resolve the voice name: persona config → .env → hardcoded default.
+        _voice_name = _DEFAULT_VOICE
+        try:
+            from core.config_manager import config_registry
+
+            _v = config_registry.get_value("LIVE_VOICE_NAME", None)
+            if _v and isinstance(_v, str) and _v.strip():
+                _voice_name = _v.strip()
+        except Exception:
+            pass
+
         live_config = types.LiveConnectConfig(
             response_modalities=["AUDIO"],  # type: ignore[arg-type]
+            input_audio_transcription=types.AudioTranscriptionConfig(),
+            output_audio_transcription=types.AudioTranscriptionConfig(),
+            speech_config=types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                        voice_name=_voice_name
+                    )
+                )
+            ),
             system_instruction=system_instruction,
         )
         if tools:
@@ -184,10 +246,33 @@ class LiveSessionManager:
                 name=f"live_receive_{guild_id}",
             )
 
+            # Start periodic audio flush task
+            self._flush_tasks[guild_id] = asyncio.create_task(
+                self._audio_flush_loop(guild_id),
+                name=f"live_flush_{guild_id}",
+            )
+
             log_info(
                 f"[live_session] Session started for guild {guild_id} "
                 f"channel {channel_id} (model={LIVE_MODEL})"
             )
+
+            # Kick off the model with an initial text turn so it sends a greeting
+            # without waiting for user audio. The system instruction handles the persona.
+            try:
+                await session.send_client_content(
+                    turns=types.Content(
+                        role="user",
+                        parts=[types.Part(text="[Session started. Greet naturally.]")],
+                    ),
+                    turn_complete=True,
+                )
+                log_info(
+                    f"[live_session] Sent initial kick to model for guild {guild_id}"
+                )
+            except Exception as e:
+                log_warning(f"[live_session] Initial kick failed (non-fatal): {e}")
+
             return True
 
         except Exception as e:
@@ -200,6 +285,17 @@ class LiveSessionManager:
     async def stop_session(self, guild_id: int) -> None:
         """Stop the Live API session for a guild."""
         state = self._sessions.pop(guild_id, None)
+        self._send_buffers.pop(guild_id, None)
+
+        # Cancel the flush task
+        flush_task = self._flush_tasks.pop(guild_id, None)
+        if flush_task and not flush_task.done():
+            flush_task.cancel()
+            try:
+                await flush_task
+            except asyncio.CancelledError:
+                pass
+
         if not state:
             return
 
@@ -227,28 +323,91 @@ class LiveSessionManager:
         log_info(f"[live_session] Session stopped for guild {guild_id}")
 
     async def send_audio(self, guild_id: int, pcm_data: bytes) -> None:
-        """Send PCM audio data to the Live API session.
+        """Buffer PCM audio data for the Live API session.
+
+        Audio is accumulated here and flushed by ``_audio_flush_loop``
+        every ~200ms.  This avoids flooding the WebSocket with many tiny
+        messages (which can cause keepalive ping timeouts) while still
+        ensuring speech tails are sent promptly.
 
         Args:
             guild_id: Target guild's session.
             pcm_data: Raw PCM 16-bit LE, 16kHz, mono audio bytes.
         """
         state = self._sessions.get(guild_id)
-        if not state or not state.is_active or not state._session:
+        if not state or not state.is_active:
             return
 
-        # Check if session needs reconnection
-        if state.should_reconnect:
-            asyncio.create_task(self._reconnect(guild_id))
-            return
-
-        try:
-            await state._session.send_realtime_input(
-                audio=types.Blob(data=pcm_data, mime_type=LIVE_AUDIO_MIME)
+        buf = self._send_buffers.get(guild_id)
+        if buf is None:
+            buf = bytearray()
+            self._send_buffers[guild_id] = buf
+            log_debug(
+                f"[live_session] First audio data buffered for guild {guild_id} "
+                f"({len(pcm_data)} bytes)"
             )
-        except Exception as e:
-            log_warning(
-                f"[live_session] Failed to send audio for guild {guild_id}: {e}"
+        buf.extend(pcm_data)
+
+    async def _audio_flush_loop(self, guild_id: int) -> None:
+        """Periodically flush accumulated audio to the Gemini Live API.
+
+        Runs every ``_FLUSH_INTERVAL_S`` seconds, draining whatever audio
+        has accumulated in the send buffer.  This guarantees that speech
+        tails (< one full buffer) are sent within 200ms.
+        """
+        send_count = 0
+        total_bytes = 0
+        try:
+            log_info(f"[live_session] Audio flush loop started for guild {guild_id}")
+            while True:
+                await asyncio.sleep(self._FLUSH_INTERVAL_S)
+
+                state = self._sessions.get(guild_id)
+                if not state or not state.is_active or not state._session:
+                    log_info(
+                        f"[live_session] Flush loop exiting: session inactive "
+                        f"(guild {guild_id}, sent {send_count} chunks, "
+                        f"{total_bytes} bytes total)"
+                    )
+                    break
+
+                # Check if session needs reconnection
+                if state.should_reconnect:
+                    asyncio.create_task(self._reconnect(guild_id))
+                    break
+
+                buf = self._send_buffers.get(guild_id)
+                if not buf:
+                    continue  # Nothing to send
+
+                chunk = bytes(buf)
+                buf.clear()
+                send_count += 1
+                total_bytes += len(chunk)
+
+                # Log first send and then every 25 sends (~5s)
+                if send_count == 1 or send_count % 25 == 0:
+                    log_info(
+                        f"[live_session] Flush #{send_count}: sending {len(chunk)} "
+                        f"bytes to Gemini (guild {guild_id}, "
+                        f"total {total_bytes} bytes)"
+                    )
+
+                try:
+                    await state._session.send_realtime_input(
+                        audio=types.Blob(data=chunk, mime_type=LIVE_AUDIO_MIME)
+                    )
+                except Exception as e:
+                    log_warning(
+                        f"[live_session] Failed to send audio for guild {guild_id}: {e}"
+                    )
+                    if "close" in str(e).lower() or "1011" in str(e):
+                        state.is_active = False
+                        break
+        except asyncio.CancelledError:
+            log_debug(
+                f"[live_session] Flush loop cancelled for guild {guild_id} "
+                f"(sent {send_count} chunks)"
             )
 
     async def send_text(self, guild_id: int, text: str) -> None:
@@ -282,70 +441,127 @@ class LiveSessionManager:
         """Background task: receive messages from the Live API and dispatch callbacks."""
         state = self._sessions.get(guild_id)
         if not state or not state._session:
+            log_warning(
+                f"[live_session] Receive loop aborted: no state/session for guild {guild_id}"
+            )
             return
 
+        log_info(f"[live_session] Receive loop started for guild {guild_id}")
+
+        msg_count = 0
+        turn_count = 0
         try:
-            async for message in state._session.receive():
+            # receive() covers ONE complete model turn then exits.
+            # Loop to keep receiving across all turns for the duration of the session.
+            while state.is_active and state._session:
+                turn_count += 1
+                # Per-turn transcript accumulators (filled from transcription fields).
+                user_parts: list[str] = []
+                model_parts: list[str] = []
+
+                async for message in state._session.receive():
+                    if not state.is_active:
+                        break
+
+                    msg_count += 1
+                    if msg_count <= 3 or msg_count % 50 == 0:
+                        log_info(
+                            f"[live_session] Received message #{msg_count} "
+                            f"(turn {turn_count}) from Gemini (guild {guild_id})"
+                        )
+
+                    # Audio — use SDK convenience property (handles inline_data decoding)
+                    audio_data = message.data
+                    if audio_data and self._on_audio:
+                        log_debug(
+                            f"[live_session] Received audio from model: "
+                            f"{len(audio_data)} bytes"
+                        )
+                        try:
+                            await self._on_audio(guild_id, audio_data)
+                        except Exception as e:
+                            log_warning(f"[live_session] Audio callback error: {e}")
+
+                    # Text — use SDK convenience property (skips thought parts)
+                    text = message.text
+                    if text and self._on_text:
+                        try:
+                            await self._on_text(guild_id, text)
+                        except Exception as e:
+                            log_warning(f"[live_session] Text callback error: {e}")
+
+                    # Collect audio transcription fragments for both sides of the turn.
+                    # input_transcription = what the user said (speech-to-text).
+                    # output_transcription = what the model said (transcription of audio output).
+                    sc = getattr(message, "server_content", None)
+                    if sc is not None:
+                        it = getattr(sc, "input_transcription", None)
+                        if it is not None:
+                            t = getattr(it, "text", None)
+                            if t:
+                                user_parts.append(t)
+                        ot = getattr(sc, "output_transcription", None)
+                        if ot is not None:
+                            t = getattr(ot, "text", None)
+                            if t:
+                                model_parts.append(t)
+
+                    # Tool/function calls
+                    tool_call = getattr(message, "tool_call", None)
+                    if tool_call and self._on_tool_call:
+                        function_calls = getattr(tool_call, "function_calls", []) or []
+                        for fc in function_calls:
+                            fc_name: str = str(getattr(fc, "name", ""))
+                            fc_id: str = str(getattr(fc, "id", ""))
+                            call_dict = {
+                                "name": fc_name,
+                                "id": fc_id,
+                                "args": getattr(fc, "args", {}),
+                            }
+                            try:
+                                result = await self._on_tool_call(guild_id, call_dict)
+                                await state._session.send_tool_response(
+                                    function_responses=types.FunctionResponse(
+                                        name=fc_name,
+                                        id=fc_id,
+                                        response=result or {"status": "ok"},
+                                    )
+                                )
+                            except Exception as e:
+                                log_warning(
+                                    f"[live_session] Tool call handling error: {e}"
+                                )
+
+                # Turn complete — fire callback with accumulated transcripts.
+                if self._on_turn_complete and (user_parts or model_parts):
+                    user_transcript = _clean_transcript(user_parts)
+                    model_transcript = _clean_transcript(model_parts)
+                    try:
+                        await self._on_turn_complete(
+                            guild_id, user_transcript, model_transcript
+                        )
+                    except Exception as e:
+                        log_warning(f"[live_session] Turn complete callback error: {e}")
+
                 if not state.is_active:
                     break
 
-                server_content = getattr(message, "server_content", None)
-                tool_call = getattr(message, "tool_call", None)
-
-                # Handle audio/text responses
-                if server_content:
-                    model_turn = getattr(server_content, "model_turn", None)
-                    if model_turn and model_turn.parts:
-                        for part in model_turn.parts:
-                            # Audio output
-                            inline_data = getattr(part, "inline_data", None)
-                            if inline_data and inline_data.data and self._on_audio:
-                                try:
-                                    await self._on_audio(guild_id, inline_data.data)
-                                except Exception as e:
-                                    log_warning(
-                                        f"[live_session] Audio callback error: {e}"
-                                    )
-
-                            # Text output
-                            text = getattr(part, "text", None)
-                            if text and self._on_text:
-                                try:
-                                    await self._on_text(guild_id, text)
-                                except Exception as e:
-                                    log_warning(
-                                        f"[live_session] Text callback error: {e}"
-                                    )
-
-                # Handle function/tool calls
-                if tool_call and self._on_tool_call:
-                    function_calls = getattr(tool_call, "function_calls", []) or []
-                    for fc in function_calls:
-                        fc_name: str = str(getattr(fc, "name", ""))
-                        fc_id: str = str(getattr(fc, "id", ""))
-                        call_dict = {
-                            "name": fc_name,
-                            "id": fc_id,
-                            "args": getattr(fc, "args", {}),
-                        }
-                        try:
-                            result = await self._on_tool_call(guild_id, call_dict)
-                            # Send tool response back
-                            await state._session.send_tool_response(
-                                function_responses=types.FunctionResponse(
-                                    name=fc_name,
-                                    id=fc_id,
-                                    response=result or {"status": "ok"},
-                                )
-                            )
-                        except Exception as e:
-                            log_warning(f"[live_session] Tool call handling error: {e}")
+                # After each turn, check if session is approaching time limit
+                if state.should_reconnect:
+                    log_info(
+                        f"[live_session] Session nearing time limit for guild "
+                        f"{guild_id}, reconnecting"
+                    )
+                    asyncio.create_task(self._reconnect(guild_id))
+                    break
 
         except asyncio.CancelledError:
             log_debug(f"[live_session] Receive loop cancelled for guild {guild_id}")
         except Exception as e:
             log_error(f"[live_session] Receive loop error for guild {guild_id}: {e}")
             state.is_active = False
+            log_info(f"[live_session] Attempting auto-reconnect for guild {guild_id}")
+            asyncio.create_task(self._reconnect(guild_id))
 
     async def _reconnect(self, guild_id: int) -> None:
         """Reconnect a session approaching the time limit.
@@ -362,12 +578,12 @@ class LiveSessionManager:
 
         async with lock:
             state = self._sessions.get(guild_id)
-            if not state or not state.is_active:
-                return
+            if not state:
+                return  # Session was fully removed — nothing to reconnect
 
             log_info(
                 f"[live_session] Reconnecting session for guild {guild_id} "
-                f"(elapsed {state.elapsed_seconds:.0f}s)"
+                f"(elapsed {state.elapsed_seconds:.0f}s, was_active={state.is_active})"
             )
 
             channel_id = state.channel_id

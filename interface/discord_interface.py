@@ -1,7 +1,7 @@
 import os
 import asyncio
 import audioop
-import io
+import threading
 from collections import deque
 from types import SimpleNamespace
 from typing import List, Any
@@ -36,6 +36,47 @@ from core.interfaces_registry import get_interface_registry
 
 context_memory: dict[int, deque] = {}
 chat_link_store = ChatLinkStore()
+
+# How often (turns) to flush a diary entry during a live voice session.
+# Set to 1 to capture every turn; increase to reduce write frequency.
+_LIVE_DIARY_EVERY_N_TURNS: int = 1
+
+
+async def _write_live_diary_entry(
+    guild_id: int, user_transcript: str, model_transcript: str
+) -> None:
+    """Write a diary entry for a completed Gemini Live voice turn.
+
+    Uses run_in_executor so the sync add_diary_entry call doesn't block
+    the event loop while aiomysql is scheduled back on it.
+    """
+    try:
+        import asyncio as _asyncio
+        from plugins.ai_diary import add_diary_entry
+
+        if user_transcript and len(user_transcript) > 80:
+            summary = f"Voice turn: user said '{user_transcript[:80]}…'"
+        elif user_transcript:
+            summary = f"Voice turn: user said '{user_transcript}'"
+        else:
+            summary = "Voice turn (no user transcript)"
+
+        loop = _asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: add_diary_entry(
+                content=model_transcript,
+                user_message=user_transcript,
+                interaction_summary=summary,
+                interface="discord",
+                chat_id=str(guild_id),
+            ),
+        )
+        log_debug(f"[live_voice] Diary entry written for guild {guild_id}")
+    except Exception as e:
+        log_warning(
+            f"[live_voice] Failed to write diary entry for guild {guild_id}: {e}"
+        )
 
 
 class DiscordInterface:
@@ -220,8 +261,8 @@ class DiscordInterface:
             },
             "join_voice_discord": {
                 "description": "Join a Discord voice channel.",
-                "required_fields": ["channel_id"],
-                "optional_fields": ["interface_path"],
+                "required_fields": [],
+                "optional_fields": ["channel_id", "interface_path"],
             },
             "leave_voice_discord": {
                 "description": "Leave the current Discord voice channel.",
@@ -235,8 +276,8 @@ class DiscordInterface:
             },
             "start_live_voice_discord": {
                 "description": "Start a Gemini Live API voice session in the current voice channel. Enables real-time bidirectional voice conversation.",
-                "required_fields": ["channel_id"],
-                "optional_fields": ["interface_path"],
+                "required_fields": [],
+                "optional_fields": ["channel_id", "interface_path"],
             },
             "stop_live_voice_discord": {
                 "description": "Stop the active Gemini Live API voice session.",
@@ -280,7 +321,8 @@ class DiscordInterface:
                     "channel_id": {
                         "type": "string",
                         "example": "123456789",
-                        "description": "The ID of the voice channel to join.",
+                        "description": "The ID of the voice channel to join. If the sender is in a voice channel, use input.payload.source.voice_channel_id. Otherwise derive from interface_path or omit to auto-resolve.",
+                        "optional": True,
                     },
                     "interface_path": {
                         "type": "string",
@@ -289,6 +331,10 @@ class DiscordInterface:
                         "optional": True,
                     },
                 },
+                "important_notes": [
+                    "If the sender is currently in a voice channel, their voice_channel_id is available in input.payload.source.voice_channel_id — use it as channel_id.",
+                    "If voice_channel_id is not available and no channel_id is known, omit channel_id and the system will attempt auto-resolve.",
+                ],
             }
         if action_name == "leave_voice_discord":
             return {
@@ -336,9 +382,13 @@ class DiscordInterface:
                     "channel_id": {
                         "type": "string",
                         "example": "123456789",
-                        "description": "The ID of the voice channel to start the live session in.",
+                        "description": "The ID of the voice channel to start the live session in. If the sender is in a voice channel, use input.payload.source.voice_channel_id.",
+                        "optional": True,
                     },
                 },
+                "important_notes": [
+                    "If the sender is currently in a voice channel, their voice_channel_id is available in input.payload.source.voice_channel_id — use it as channel_id.",
+                ],
             }
         if action_name == "stop_live_voice_discord":
             return {
@@ -359,12 +409,7 @@ class DiscordInterface:
         errors: list[str] = []
 
         if action_type == "join_voice_discord":
-            channel_id = payload.get("channel_id")
-            interface_path = payload.get("interface_path")
-            if not channel_id and not interface_path:
-                errors.append(
-                    "payload.channel_id or payload.interface_path is required"
-                )
+            # channel_id, interface_path, or author voice state auto-resolve at execute time
             return errors
 
         if action_type == "leave_voice_discord":
@@ -511,139 +556,6 @@ class DiscordInterface:
                 f"[discord_interface] Failed to send message to {channel_id}: {repr(e)}"
             )
 
-    async def execute_action(self, action: dict, context: dict, bot, original_message):
-        """Execute non-message actions."""
-        action_type = action.get("type")
-        payload = action.get("payload", {})
-
-        if action_type == "join_voice_discord":
-            channel_id = payload.get("channel_id")
-            interface_path = payload.get("interface_path")
-
-            if not channel_id and interface_path:
-                # Try to extract channel ID from interface path if not explicitly provided
-                try:
-                    from core.interface_path_utils import parse_interface_path
-
-                    _, levels = parse_interface_path(interface_path)
-                    # discord_bot/guild_id/channel_id
-                    if len(levels) >= 2:
-                        channel_id = levels[1]
-                except Exception:
-                    pass
-
-            if not channel_id:
-                return {"status": "failed", "message": "Missing channel_id"}
-
-            return await self._join_voice(channel_id)
-
-        elif action_type == "leave_voice_discord":
-            guild_id = payload.get("guild_id")
-            interface_path = payload.get("interface_path")
-
-            if not guild_id and interface_path:
-                try:
-                    from core.interface_path_utils import parse_interface_path
-
-                    _, levels = parse_interface_path(interface_path)
-                    if len(levels) >= 1:
-                        guild_id = levels[0]
-                except Exception:
-                    pass
-
-            if not guild_id:
-                return {"status": "failed", "message": "Missing guild_id"}
-
-            return await self._leave_voice(guild_id)
-
-        elif action_type == "audio_discord_bot":
-            audio_path = payload.get("audio")
-            channel_id = payload.get("channel_id")
-            interface_path = payload.get("interface_path")
-            caption = payload.get("caption")
-
-            if not channel_id and interface_path:
-                try:
-                    from core.interface_path_utils import parse_interface_path
-
-                    _, levels = parse_interface_path(interface_path)
-                    # discord_bot/guild_id/channel_id
-                    if len(levels) >= 2:
-                        channel_id = levels[1]
-                except Exception:
-                    pass
-
-            # Check if we are in a voice channel in this guild
-            streaming = False
-            if channel_id and self.client:
-                try:
-                    channel = self.client.get_channel(int(channel_id))
-                    if not channel:
-                        channel = await self.client.fetch_channel(int(channel_id))
-
-                    if channel and channel.guild and channel.guild.voice_client:
-                        # We are connected to voice in this guild
-                        # Verify if we are in the requested channel OR if the request was just for the guild context
-                        # Actually, if we are in ANY voice channel in this guild, we can stream.
-                        # But typically we want to stream to the channel we are in.
-                        vc = channel.guild.voice_client
-                        if vc.is_connected():
-                            return await self._stream_audio(vc, audio_path)
-                except Exception as e:
-                    log_debug(f"[discord_interface] Voice check failed: {e}")
-
-            # Fallback to sending as file
-            log_debug(
-                "[discord_interface] Not in voice or lookup failed, sending as file attachment"
-            )
-            await self.send_message(
-                channel_id=channel_id,
-                text=caption,
-                audio=audio_path,
-                interface_path=interface_path,
-            )
-            return {"status": "success", "message": "Sent as file"}
-
-        elif action_type == "start_live_voice_discord":
-            channel_id = payload.get("channel_id")
-            interface_path = payload.get("interface_path")
-
-            if not channel_id and interface_path:
-                try:
-                    from core.interface_path_utils import parse_interface_path
-
-                    _, levels = parse_interface_path(interface_path)
-                    if len(levels) >= 2:
-                        channel_id = levels[1]
-                except Exception:
-                    pass
-
-            if not channel_id:
-                return {"status": "failed", "message": "Missing channel_id"}
-
-            return await self._start_live_voice(channel_id)
-
-        elif action_type == "stop_live_voice_discord":
-            guild_id = payload.get("guild_id")
-            interface_path = payload.get("interface_path")
-
-            if not guild_id and interface_path:
-                try:
-                    from core.interface_path_utils import parse_interface_path
-
-                    _, levels = parse_interface_path(interface_path)
-                    if len(levels) >= 1:
-                        guild_id = levels[0]
-                except Exception:
-                    pass
-
-            if not guild_id:
-                return {"status": "failed", "message": "Missing guild_id"}
-
-            return await self._stop_live_voice(int(guild_id))
-
-        return {"status": "failed", "message": f"Unknown action {action_type}"}
-
     async def _stream_audio(self, voice_client, audio_path):
         """Stream audio to voice client."""
         if not os.path.exists(audio_path):
@@ -663,7 +575,11 @@ class DiscordInterface:
             return {"status": "failed", "message": str(e)}
 
     async def _join_voice(self, channel_id):
-        """Join a voice channel."""
+        """Join a voice channel.
+
+        Uses VoiceRecvClient when available so that ``_start_live_voice``
+        does not need to disconnect and reconnect.
+        """
         if not self.client:
             return {"status": "failed", "message": "Discord client not initialized"}
 
@@ -678,13 +594,19 @@ class DiscordInterface:
             guild = channel.guild
             voice_client = guild.voice_client
 
+            # Pick the right client class so live voice doesn't need to reconnect
+            cls = voice_recv.VoiceRecvClient if _HAS_VOICE_RECV and voice_recv else None
+
             if voice_client:
                 if voice_client.channel.id == channel.id:
                     return {"status": "success", "message": "Already in channel"}
                 await voice_client.move_to(channel)
                 return {"status": "success", "message": f"Moved to {channel.name}"}
             else:
-                await channel.connect()
+                if cls:
+                    await channel.connect(cls=cls)
+                else:
+                    await channel.connect()
                 return {"status": "success", "message": f"Connected to {channel.name}"}
 
         except Exception as e:
@@ -797,9 +719,79 @@ class DiscordInterface:
                 """Route Gemini function calls to the SyntH action pipeline."""
                 return await _handle_live_tool_call(gid, call_dict, self.client)
 
+            # Stable interface_path for this guild's live voice conversation.
+            live_interface_path = f"discord_live_{guild_id}"
+
+            async def on_turn_complete(
+                gid: int, user_transcript: str, model_transcript: str
+            ) -> None:
+                """Store both sides of a live turn to history and trigger diary."""
+                from core.chat_history_cache import save_chat_message
+
+                # Resolve the real Discord user from the sink's last-speaker info.
+                _sink = (
+                    self._live_voice_state.get(gid, {}).get("sink")
+                    if hasattr(self, "_live_voice_state")
+                    else None
+                )
+                _speaker_name: str | None = getattr(_sink, "_last_speaker_name", None)
+                _speaker_id: str | None = getattr(_sink, "_last_speaker_id", None)
+
+                if user_transcript:
+                    await save_chat_message(
+                        interface_path=live_interface_path,
+                        message_text=user_transcript,
+                        sender_name=_speaker_name or "[voice_user]",
+                        sender_id=_speaker_id or None,
+                    )
+                if model_transcript:
+                    await save_chat_message(
+                        interface_path=live_interface_path,
+                        message_text=model_transcript,
+                        sender_name="Synth",
+                    )
+
+                # Track turn count for diary cadence.
+                live_state = (
+                    self._live_voice_state.get(gid, {})
+                    if hasattr(self, "_live_voice_state")
+                    else {}
+                )
+                turn_n: int = live_state.get("turn_count", 0) + 1
+                if hasattr(self, "_live_voice_state") and gid in self._live_voice_state:
+                    self._live_voice_state[gid]["turn_count"] = turn_n
+
+                # Write a diary entry on the configured cadence.
+                if model_transcript and turn_n % _LIVE_DIARY_EVERY_N_TURNS == 0:
+                    asyncio.create_task(
+                        _write_live_diary_entry(gid, user_transcript, model_transcript)
+                    )
+
+                # Persist to the memories table so semantic memory search can
+                # surface voice conversations in future context injections.
+                if user_transcript and model_transcript:
+                    from core.synth_core_memory import silently_record_memory
+
+                    asyncio.create_task(
+                        silently_record_memory(
+                            user_text=user_transcript,
+                            response_text=model_transcript,
+                            tags='["voice", "auto"]',
+                            scope="general",
+                            source="voice",
+                        )
+                    )
+
+                log_debug(
+                    f"[live_voice] Turn {turn_n} stored for guild {gid}: "
+                    f"user={len(user_transcript)} chars, "
+                    f"model={len(model_transcript)} chars"
+                )
+
             manager.set_audio_callback(on_audio_from_model)
             manager.set_text_callback(on_text_from_model)
             manager.set_tool_call_callback(on_tool_call)
+            manager.set_turn_complete_callback(on_turn_complete)
 
             # Start the Live API session
             started = await manager.start_session(
@@ -832,6 +824,7 @@ class DiscordInterface:
                 "audio_buffer": audio_buffer,
                 "sink": sink,
                 "source": source,
+                "turn_count": 0,
             }
 
             log_info(
@@ -1119,6 +1112,28 @@ class DiscordInterface:
                 if not parts:
                     return
                 command, *args = parts
+
+                # Discord-specific: /leave requires guild context not available to registry handlers
+                if command == "leave":
+                    guild = getattr(message, "guild", None)
+                    if not guild:
+                        await self._discord_send(
+                            message.channel.id, "❌ Not in a server."
+                        )
+                        return
+                    await self._stop_live_voice(guild.id)
+                    leave_result = await self._leave_voice(guild.id)
+                    if leave_result.get("status") == "success":
+                        await self._discord_send(
+                            message.channel.id, "👋 Left voice channel."
+                        )
+                    else:
+                        await self._discord_send(
+                            message.channel.id,
+                            f"❌ {leave_result.get('message', 'Failed to leave.')}",
+                        )
+                    return
+
                 try:
                     response = await execute_command(command, *args)
                     if response:
@@ -1159,6 +1174,18 @@ class DiscordInterface:
                             ),
                         ),
                     )
+
+            # Check if author is currently in a voice channel (used for join_voice_discord auto-resolve)
+            voice_channel_id: str | None = None
+            try:
+                author_voice = getattr(message.author, "voice", None)
+                if author_voice and getattr(author_voice, "channel", None):
+                    voice_channel_id = str(author_voice.channel.id)
+                    log_debug(
+                        f"[discord_interface] Author is in voice channel: {voice_channel_id}"
+                    )
+            except Exception:
+                pass
 
             # Discord thread detection and handling
             thread_id = None
@@ -1223,6 +1250,7 @@ class DiscordInterface:
                 message_id=getattr(message, "id", None),
                 chat_id=channel_id,  # In Discord, this is thread ID if in thread, channel ID otherwise
                 interface_path=interface_path,  # Add interface_path to message
+                voice_channel_id=voice_channel_id,  # Author's current voice channel, if any
                 text=content,
                 caption=None,
                 date=getattr(message, "created_at", None),
@@ -1388,6 +1416,247 @@ class DiscordInterface:
                 log_warning(
                     f"[discord_interface] message_discord_bot called but no valid routing info (interface_path/target) found in payload: {payload}"
                 )
+
+        elif action_type == "join_voice_discord":
+            payload = action.get("payload", {})
+            channel_id = payload.get("channel_id")
+
+            # Fallback: use the sender's current voice channel from the wrapped message
+            # (original_message is the SimpleNamespace built in _process_message)
+            if not channel_id and original_message is not None:
+                vc_id = getattr(original_message, "voice_channel_id", None)
+                if vc_id:
+                    channel_id = str(vc_id)
+                    log_info(
+                        f"[discord_interface] join_voice_discord: auto-resolved "
+                        f"channel_id={channel_id} from sender's voice state"
+                    )
+
+            # Last resort: look up the sender's voice state live via the guild
+            if not channel_id and original_message is not None and self.client:
+                try:
+                    interface_path = payload.get("interface_path") or getattr(
+                        original_message, "interface_path", None
+                    )
+                    if interface_path:
+                        from core.interface_path_utils import parse_interface_path
+
+                        _, levels = parse_interface_path(interface_path)
+                        if levels:
+                            guild = self.client.get_guild(int(levels[0]))
+                            if guild:
+                                sender_id = getattr(
+                                    getattr(original_message, "from_user", None),
+                                    "id",
+                                    None,
+                                )
+                                if sender_id:
+                                    member = guild.get_member(int(sender_id))
+                                    if member and member.voice and member.voice.channel:
+                                        channel_id = str(member.voice.channel.id)
+                                        log_info(
+                                            f"[discord_interface] join_voice_discord: resolved "
+                                            f"channel_id={channel_id} from guild member voice state"
+                                        )
+                except Exception as e:
+                    log_debug(
+                        f"[discord_interface] join_voice_discord: guild voice lookup failed: {e}"
+                    )
+
+            if not channel_id:
+                log_warning(
+                    "[discord_interface] join_voice_discord: Missing channel_id and "
+                    "sender is not in a voice channel"
+                )
+                return
+            result = await self._join_voice(channel_id)
+
+            # Auto-start live voice session after joining
+            if result and result.get("status") == "success":
+                log_info(
+                    f"[discord_interface] join_voice_discord: auto-starting live voice "
+                    f"session in channel {channel_id}"
+                )
+                live_result = await self._start_live_voice(channel_id)
+                if live_result.get("status") != "success":
+                    log_warning(
+                        f"[discord_interface] join_voice_discord: live voice auto-start "
+                        f"failed: {live_result.get('message')}"
+                    )
+
+        elif action_type == "leave_voice_discord":
+            payload = action.get("payload", {})
+            guild_id = payload.get("guild_id")
+            interface_path = payload.get("interface_path")
+
+            if not guild_id and interface_path:
+                try:
+                    from core.interface_path_utils import parse_interface_path
+
+                    _, levels = parse_interface_path(interface_path)
+                    if len(levels) >= 1:
+                        guild_id = levels[0]
+                except Exception:
+                    pass
+
+            if not guild_id:
+                log_warning("[discord_interface] leave_voice_discord: Missing guild_id")
+                return
+            await self._leave_voice(guild_id)
+
+        elif action_type == "audio_discord_bot":
+            payload = action.get("payload", {})
+            audio_path = payload.get("audio")
+            channel_id = payload.get("channel_id")
+            interface_path = payload.get("interface_path")
+            caption = payload.get("caption")
+
+            if not channel_id and interface_path:
+                try:
+                    from core.interface_path_utils import parse_interface_path
+
+                    _, levels = parse_interface_path(interface_path)
+                    if len(levels) >= 2:
+                        channel_id = levels[1]
+                except Exception:
+                    pass
+
+            if channel_id and self.client:
+                try:
+                    channel = self.client.get_channel(int(channel_id))
+                    if not channel:
+                        channel = await self.client.fetch_channel(int(channel_id))
+                    if channel and channel.guild and channel.guild.voice_client:
+                        vc = channel.guild.voice_client
+                        if vc.is_connected():
+                            await self._stream_audio(vc, audio_path)
+                            return
+                except Exception as e:
+                    log_debug(f"[discord_interface] Voice check failed: {e}")
+
+            log_debug(
+                "[discord_interface] Not in voice or lookup failed, sending as file attachment"
+            )
+            await self.send_message(
+                channel_id=channel_id,
+                text=caption,
+                audio=audio_path,
+                interface_path=interface_path,
+            )
+
+        elif action_type == "start_live_voice_discord":
+            payload = action.get("payload", {})
+            channel_id = payload.get("channel_id")
+
+            # Skip if a live session is already running (e.g. auto-started by join_voice_discord)
+            if hasattr(self, "_live_voice_state"):
+                # Resolve guild_id to check active sessions
+                _check_guild_id: int | None = None
+                if channel_id and self.client:
+                    try:
+                        _ch = self.client.get_channel(int(channel_id))
+                        if _ch:
+                            _check_guild_id = _ch.guild.id
+                    except Exception:
+                        pass
+                if not _check_guild_id:
+                    # Try to get guild from interface_path
+                    _ip = payload.get("interface_path") or (
+                        getattr(original_message, "interface_path", None)
+                        if original_message
+                        else None
+                    )
+                    if _ip:
+                        try:
+                            from core.interface_path_utils import parse_interface_path
+
+                            _, _lvls = parse_interface_path(_ip)
+                            if _lvls:
+                                _check_guild_id = int(_lvls[0])
+                        except Exception:
+                            pass
+                if _check_guild_id and _check_guild_id in self._live_voice_state:
+                    log_info(
+                        f"[discord_interface] start_live_voice_discord: session already "
+                        f"active for guild {_check_guild_id}, skipping duplicate start"
+                    )
+                    return
+
+            # Fallback: use the sender's current voice channel from the wrapped message
+            if not channel_id and original_message is not None:
+                vc_id = getattr(original_message, "voice_channel_id", None)
+                if vc_id:
+                    channel_id = str(vc_id)
+                    log_info(
+                        f"[discord_interface] start_live_voice_discord: auto-resolved "
+                        f"channel_id={channel_id} from sender's voice state"
+                    )
+
+            # Last resort: look up the sender's voice state live via the guild
+            if not channel_id and original_message is not None and self.client:
+                try:
+                    interface_path = payload.get("interface_path") or getattr(
+                        original_message, "interface_path", None
+                    )
+                    if interface_path:
+                        from core.interface_path_utils import parse_interface_path
+
+                        _, levels = parse_interface_path(interface_path)
+                        if levels:
+                            guild = self.client.get_guild(int(levels[0]))
+                            if guild:
+                                sender_id = getattr(
+                                    getattr(original_message, "from_user", None),
+                                    "id",
+                                    None,
+                                )
+                                if sender_id:
+                                    member = guild.get_member(int(sender_id))
+                                    if member and member.voice and member.voice.channel:
+                                        channel_id = str(member.voice.channel.id)
+                                        log_info(
+                                            f"[discord_interface] start_live_voice_discord: resolved "
+                                            f"channel_id={channel_id} from guild member voice state"
+                                        )
+                except Exception as e:
+                    log_debug(
+                        f"[discord_interface] start_live_voice_discord: guild voice lookup failed: {e}"
+                    )
+
+            if not channel_id:
+                log_warning(
+                    "[discord_interface] start_live_voice_discord: Missing channel_id and "
+                    "sender is not in a voice channel"
+                )
+                return
+            await self._start_live_voice(channel_id)
+
+        elif action_type == "stop_live_voice_discord":
+            payload = action.get("payload", {})
+            guild_id = payload.get("guild_id")
+            interface_path = payload.get("interface_path")
+
+            if not guild_id and interface_path:
+                try:
+                    from core.interface_path_utils import parse_interface_path
+
+                    _, levels = parse_interface_path(interface_path)
+                    if len(levels) >= 1:
+                        guild_id = levels[0]
+                except Exception:
+                    pass
+
+            if not guild_id:
+                log_warning(
+                    "[discord_interface] stop_live_voice_discord: Missing guild_id"
+                )
+                return
+            await self._stop_live_voice(int(guild_id))
+
+        else:
+            log_warning(
+                f"[discord_interface] execute_action: unknown action_type={action_type}"
+            )
 
     async def add_reaction(self, message, emoji: str) -> bool:
         """Add a reaction to a message.
@@ -1634,16 +1903,20 @@ _DISCORD_FRAME_SIZE = 3840  # 20ms at 48kHz stereo 16-bit = 960*2*2
 
 
 class LiveAudioBuffer:
-    """Thread-safe circular buffer for PCM audio from Gemini → Discord.
+    """Thread-safe buffer for PCM audio from Gemini → Discord.
 
     Receives 24kHz mono PCM from the Live API, resamples to 48kHz stereo
     for Discord voice playback.
+
+    Both ``write`` (called from asyncio) and ``read`` (called from Discord's
+    voice send thread) must be safe across threads — uses a threading lock.
     """
 
     def __init__(self) -> None:
-        self._buffer = io.BytesIO()
-        self._lock = asyncio.Lock()
+        self._chunks: list[bytes] = []
+        self._lock = threading.Lock()
         self._closed = False
+        self._ratecv_state: Any = None  # audioop ratecv state for continuity
 
     def write(self, pcm_24k_mono: bytes) -> None:
         """Write 24kHz mono PCM data, converting to 48kHz stereo."""
@@ -1651,30 +1924,36 @@ class LiveAudioBuffer:
             return
         try:
             # 24kHz → 48kHz (ratio 2:1)
-            upsampled = audioop.ratecv(
+            upsampled, self._ratecv_state = audioop.ratecv(
                 pcm_24k_mono,
                 _DISCORD_SAMPLE_WIDTH,
                 1,
                 _GEMINI_OUTPUT_RATE,
                 _DISCORD_RATE,
-                None,
-            )[0]
+                self._ratecv_state,
+            )
             # Mono → Stereo (duplicate channel)
             stereo = audioop.tostereo(upsampled, _DISCORD_SAMPLE_WIDTH, 1, 1)
-            self._buffer.write(stereo)
-        except Exception:
-            pass
+            with self._lock:
+                self._chunks.append(stereo)
+        except Exception as e:
+            log_warning(f"[live_audio_buffer] Resample/write failed: {e}")
 
     def read(self, nbytes: int) -> bytes:
         """Read up to nbytes of 48kHz stereo PCM for Discord playback."""
-        data = self._buffer.getvalue()
-        if len(data) < nbytes:
-            # Not enough data yet — return silence
-            return b"\x00" * nbytes
-        # Consume the requested amount
+        with self._lock:
+            if not self._chunks:
+                return b""  # No data — signal silence to AudioSource
+            # Join all chunks and split at the requested boundary
+            data = b"".join(self._chunks)
+            self._chunks.clear()
+
+        if len(data) <= nbytes:
+            return data
+        # Return requested amount, put remainder back
         result = data[:nbytes]
-        remaining = data[nbytes:]
-        self._buffer = io.BytesIO(remaining)
+        with self._lock:
+            self._chunks.insert(0, data[nbytes:])
         return result
 
     def close(self) -> None:
@@ -1692,8 +1971,20 @@ class LivePCMAudioSource(discord.AudioSource if discord else object):  # type: i
         self._buffer = buffer
 
     def read(self) -> bytes:
-        """Return 20ms of audio (3840 bytes at 48kHz stereo 16-bit)."""
-        return self._buffer.read(_DISCORD_FRAME_SIZE)
+        """Return 20ms of audio (3840 bytes at 48kHz stereo 16-bit).
+
+        Returns a full silence frame when the buffer is empty so Discord
+        keeps the audio source alive (returning b'' would stop playback).
+        """
+        data = self._buffer.read(_DISCORD_FRAME_SIZE)
+        if not data:
+            # Return silence frame to keep the source alive without
+            # showing the bot as "speaking"
+            return b"\x00" * _DISCORD_FRAME_SIZE
+        if len(data) < _DISCORD_FRAME_SIZE:
+            # Pad partial frame with silence
+            data += b"\x00" * (_DISCORD_FRAME_SIZE - len(data))
+        return data
 
     def is_opus(self) -> bool:
         return False
@@ -1709,12 +2000,24 @@ if _HAS_VOICE_RECV and voice_recv is not None:
 
         Receives 48kHz stereo 16-bit PCM from Discord, converts to 16kHz mono,
         and sends to the Live API session.
+
+        NOTE: The ``write`` callback runs on the voice_recv packet-router thread,
+        **not** the asyncio event loop thread.  We capture the running loop at
+        init time and use ``call_soon_threadsafe`` to schedule coroutines.
         """
 
         def __init__(self, manager: Any, guild_id: int) -> None:
             super().__init__()
             self._manager = manager
             self._guild_id = guild_id
+            # Capture the running event loop from the main thread at construction time
+            self._loop: asyncio.AbstractEventLoop = asyncio.get_running_loop()
+            self._packet_count: int = 0
+            self._ratecv_state: Any = None  # preserve resampler state across packets
+            # Track the last real user who sent audio so on_turn_complete can
+            # attribute the user-side transcript to the correct Discord account.
+            self._last_speaker_name: str | None = None
+            self._last_speaker_id: str | None = None
 
         def wants_opus(self) -> bool:
             return False  # We want decoded PCM
@@ -1722,34 +2025,60 @@ if _HAS_VOICE_RECV and voice_recv is not None:
         def write(self, user: Any, data: voice_recv.VoiceData) -> None:  # type: ignore[name-defined]
             """Process incoming audio from a Discord user.
 
+            Called from the packet-router thread — must not call asyncio
+            directly; instead schedules the coroutine on the captured loop.
+
             Args:
-                user: The Discord user who spoke.
+                user: The Discord user who spoke. May be None for unmapped SSRCs.
                 data: VoiceData containing PCM audio bytes.
             """
+            # Skip packets with an unmapped SSRC (user is None) — these are
+            # typically the bot's own audio stream reflected by Discord's voice
+            # server, or early packets before the SSRC→user mapping is ready.
+            # Also skip any bot user (including ourselves) to prevent audio
+            # feedback where Gemini hears its own output and loops on it.
+            if user is None or getattr(user, "bot", False):
+                return
+
             pcm_48k_stereo = data.pcm
             if not pcm_48k_stereo:
                 return
+
+            # Update last-speaker info for transcript attribution.
+            self._last_speaker_name = str(
+                getattr(user, "display_name", None)
+                or getattr(user, "name", None)
+                or "[voice_user]"
+            )
+            self._last_speaker_id = str(getattr(user, "id", ""))
+
+            self._packet_count += 1
+            # Log first packet and then every 500 packets (~10s at 50pps)
+            if self._packet_count == 1 or self._packet_count % 500 == 0:
+                log_info(
+                    f"[live_voice_sink] Received packet #{self._packet_count} "
+                    f"from user {user}, {len(pcm_48k_stereo)} bytes"
+                )
 
             try:
                 # Stereo → Mono (mix down)
                 mono = audioop.tomono(pcm_48k_stereo, _DISCORD_SAMPLE_WIDTH, 0.5, 0.5)
                 # 48kHz → 16kHz (ratio 3:1)
-                downsampled = audioop.ratecv(
+                downsampled, self._ratecv_state = audioop.ratecv(
                     mono,
                     _DISCORD_SAMPLE_WIDTH,
                     1,
                     _DISCORD_RATE,
                     _GEMINI_INPUT_RATE,
-                    None,
-                )[0]
-                # Send to Live API (fire-and-forget via the event loop)
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    asyncio.ensure_future(
-                        self._manager.send_audio(self._guild_id, downsampled)
-                    )
-            except Exception:
-                pass
+                    self._ratecv_state,
+                )
+                # Schedule on the main event loop (thread-safe)
+                asyncio.run_coroutine_threadsafe(
+                    self._manager.send_audio(self._guild_id, downsampled),
+                    self._loop,
+                )
+            except Exception as e:
+                log_warning(f"[live_voice_sink] Audio processing failed: {e}")
 
         def cleanup(self) -> None:
             pass

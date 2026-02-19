@@ -194,7 +194,7 @@ async def load_chat_history(interface_path: str) -> deque:
                     SELECT sender_name, sender_id, message_text, timestamp, interface_path
                     FROM chat_history_cache
                     WHERE interface_path = %s
-                    ORDER BY timestamp ASC
+                    ORDER BY timestamp ASC, id ASC
                     LIMIT %s
                 """,
                     (interface_path, history_limit),
