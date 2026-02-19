@@ -260,14 +260,17 @@ class MemorySearchPlugin:
             }
         }
 
-    def get_prompt_instructions(self, action_type: str) -> Optional[str]:
+    def get_prompt_instructions(self, action_type: str) -> dict:
         if action_type != "memory_search":
-            return None
-        return (
-            "Use `memory_search` when you lack information to answer. "
-            "Call it with mode='tags' and a list of tags, or mode='free' and a list of keywords (preferred) or a free-text query. "
-            "The plugin will return a list of matching memory snippets."
-        )
+            return {}
+        return {
+            "description": (
+                "Use `memory_search` when you lack information to answer. "
+                "Call it with mode='tags' and a list of tags, or mode='free' and "
+                "a list of keywords (preferred) or a free-text query. "
+                "The plugin will return a list of matching memory snippets."
+            ),
+        }
 
     def validate_payload(self, action: Dict[str, Any]) -> List[str]:
         errors: List[str] = []

@@ -194,8 +194,6 @@ class ManualAIPlugin(AIPluginBase):
 
         # /say support removed — no interactive trainer forwarding (previously forwarded trainer text to target chat)
 
-        # === Invia prompt JSON al trainer ===
-
         # Resolve trainer id from core.config at runtime to respect test monkeypatches
         try:
             from core import config as _config

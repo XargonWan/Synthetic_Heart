@@ -126,25 +126,28 @@ class TestEmotionState:
         assert abs(decayed - 10.0) < 0.001
 
     def test_exponential_decay_one_tau(self):
-        """Test decay after one tau returns ~37% of original (e^-1)."""
+        """Test decay after one tau returns ~37% of original (e^-1) above baseline."""
         now = datetime.now()
         emotion = EmotionState("angry", 10.0, now - timedelta(seconds=3600))
 
-        # With default tau=3600, after 3600 seconds: 10 * e^-1 ≈ 3.678
-        decayed = emotion.get_decayed_intensity(now)
-        expected = 10.0 * math.exp(-1)
+        # Baseline for angry is 0.1
+        baseline = 0.1
+        # Formula: B + (I - B) * e^(-1)
+        expected = baseline + (10.0 - baseline) * math.exp(-1)
 
+        decayed = emotion.get_decayed_intensity(now)
         assert abs(decayed - expected) < 0.01
 
     def test_exponential_decay_two_tau(self):
-        """Test decay after two tau returns ~13.5% of original (e^-2)."""
+        """Test decay after two tau returns ~13.5% of original (e^-2) above baseline."""
         now = datetime.now()
         emotion = EmotionState("fear", 10.0, now - timedelta(seconds=7200))
 
-        # After 2*tau: 10 * e^-2 ≈ 1.353
-        decayed = emotion.get_decayed_intensity(now)
-        expected = 10.0 * math.exp(-2)
+        # Baseline for fear is 0.1
+        baseline = 0.1
+        expected = baseline + (10.0 - baseline) * math.exp(-2)
 
+        decayed = emotion.get_decayed_intensity(now)
         assert abs(decayed - expected) < 0.01
 
     def test_decay_clamped_to_range(self):
@@ -287,9 +290,16 @@ class TestEmotionManager:
         assert inv is not None and "nonsense" in inv and inv["nonsense"] == 5
 
     def test_plutchik_opposites_bidirectional(self):
-        """Test that Plutchik opposites are defined bidirectionally."""
+        """Test that Plutchik opposites are defined bidirectionally where expected."""
         # If A is opposite of B, then B should be opposite of A
+        # Exceptions: arousal -> disgust -> love (triangular/hierarchical)
+        #             neutral -> disgust -> love (triangular/hierarchical)
+        exceptions = {"arousal", "neutral"}
+
         for emotion, opposite in PLUTCHIK_OPPOSITES.items():
+            if emotion in exceptions:
+                continue
+
             # Most opposites should be bidirectional
             if opposite in PLUTCHIK_OPPOSITES:
                 assert PLUTCHIK_OPPOSITES[opposite] == emotion, (
@@ -367,7 +377,7 @@ class TestEmotionIntegration:
 
     def test_whitelist_completeness(self):
         """Test that VALID_EMOTIONS has reasonable size and variety."""
-        # Now we expect only the canonical set (Ekman6 + neutral + relaxed)
+        # Now we expect only the canonical set (Ekman6 + neutral + relaxed + love + arousal + devotion)
         expected = set(
             [
                 "happy",
@@ -378,6 +388,9 @@ class TestEmotionIntegration:
                 "surprised",
                 "neutral",
                 "relaxed",
+                "love",
+                "arousal",
+                "devotion",
             ]
         )
         assert set(VALID_EMOTIONS) == expected

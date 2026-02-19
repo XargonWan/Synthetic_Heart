@@ -14,7 +14,7 @@ import json
 import math
 import asyncio
 from datetime import datetime
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 from dataclasses import dataclass
 import inspect
 
@@ -242,16 +242,75 @@ class EmotionManager(PluginBase):
             },
         }
 
-    def get_prompt_instructions(self, action_type: str) -> str:
+    async def execute_action(
+        self,
+        action: Dict[str, Any],
+        context: Dict[str, Any],
+        bot: Any,
+        original_message: Any,
+    ) -> Any:
+        """Execute an action."""
+        action_type = action.get("type")
+        payload = action.get("payload", {})
+
+        # Normalize payload if it's an object/namespace
+        if not isinstance(payload, dict):
+            try:
+                payload = vars(payload)
+            except Exception:
+                payload = {}
+
+        if action_type == "update_emotion_from_tags":
+            text = payload.get("text", "")
+            apply_balancing = payload.get("apply_balancing", True)
+            return await self.update_emotion_from_tags(text, apply_balancing)
+
+        elif action_type == "set_emotion":
+            emotion = payload.get("emotion")
+            intensity = payload.get("intensity")
+            if emotion is not None and intensity is not None:
+                return await self.set_emotion(emotion, float(intensity))
+            return False
+
+        elif action_type == "decay_emotions":
+            threshold = payload.get("threshold")
+            if threshold:
+                try:
+                    threshold = float(threshold)
+                except (ValueError, TypeError):
+                    threshold = None
+            return await self.decay_emotions(threshold)
+
+        elif action_type == "sync_emotions_from_all_sources":
+            return await self.sync_emotions_from_all_sources()
+
+        elif action_type == "get_emotion_state":
+            include_raw = payload.get("include_raw", False)
+            return await self.get_emotion_state(include_raw)
+
+        elif action_type == "static_inject":
+            # Typically handled by gather_static_injections, but if called explicitly:
+            return await self.get_static_injection(original_message, context)
+
+        log_warning(f"[emotion_manager] Unknown action type: {action_type}")
+        return None
+
+    def get_prompt_instructions(self, action_type: str) -> dict:
         """Return instructions for LLM on how to use emotion actions."""
-        # Generic instructions for emotion system (used by core_initializer to append to system prompt)
-        return """
-To express emotions, include tags in your response like {emotion intensity}.
-Supported emotions: happy, sad, angry, fear, disgust, surprised, neutral, relaxed, love, arousal, devotion.
-Intensity is 0.0 to 10.0.
-Example: "I am so happy to see you! {happy 8.5, love 5.0}"
-Your emotional state will decay over time, so reinforce it if the feeling persists.
-"""
+        if action_type == "static_inject":
+            return {
+                "description": "Automatically injects current emotional state into the prompt context.",
+                "when_to_use": "Runs automatically — you don't need to call it explicitly.",
+            }
+        return {
+            "description": (
+                "To express emotions, include tags in your response like {emotion intensity}. "
+                "Supported emotions: happy, sad, angry, fear, disgust, surprised, neutral, "
+                "relaxed, love, arousal, devotion. Intensity is 0.0 to 10.0."
+            ),
+            "example": "I am so happy to see you! {happy 8.5, love 5.0}",
+            "note": "Your emotional state will decay over time, so reinforce it if the feeling persists.",
+        }
 
     async def start(self):
         """Initialize emotion manager and create DB table if needed."""

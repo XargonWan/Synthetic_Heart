@@ -10,9 +10,11 @@ Overview
 
 Prerequisites
 -------------
-- Python 3.11+ installed and on PATH
-- A running MySQL/MariaDB instance reachable from this machine (or set `DB_HOST` to a host that provides one)
-- Optional: Chrome and `undetected-chromedriver` if you plan to use Selenium-based LLM engines
+- Python 3.10+ installed and on PATH
+- `uv <https://docs.astral.sh/uv/>`_ installed (``pip install uv`` or see Astral docs)
+- A running MySQL/MariaDB instance reachable from this machine (or set ``DB_HOST`` to a host that provides one)
+- **ffmpeg** on PATH — required for multimodal video/audio processing and Discord voice features. Download from https://ffmpeg.org/download.html and add to PATH.
+- Optional: Chrome and ``undetected-chromedriver`` if you plan to use Selenium-based LLM engines
 
 Quick start
 -----------
@@ -34,13 +36,11 @@ Quick start
    WEBVIEW_HOST=localhost
    WEBVIEW_PORT=3000
 
-3. Create and activate a Python virtual environment and install dependencies:
+3. Install dependencies using **uv**:
 
 .. code-block:: powershell
 
-   python -m venv .venv
-   .\.venv\Scripts\Activate.ps1
-   pip install -r requirements.txt
+   uv sync
 
 4. (Optional) Initialize the DB schema if you prefer (otherwise the app will attempt to initialize on startup):
 

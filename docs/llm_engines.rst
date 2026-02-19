@@ -132,6 +132,10 @@ Selenium-based LLM plugins can function in guest mode (without user authenticati
 Available Engines
 -----------------
 
+**API Engines:**
+
+* ``gemini_api`` – Direct REST API integration with Google Gemini. Supports multimodal input (images, audio, video, documents), correction/retry loops, and agentic hooks. See :doc:`gemini_api_engine` for full documentation.
+
 **Stable Engines:**
 
 * ``selenium_chatgpt_legacy`` – Legacy version of the ChatGPT Selenium engine. For backward compatibility only; consider migrating to the standardized ``selenium_chatgpt`` engine.

@@ -150,6 +150,479 @@ def encode_bytes_to_base64(data: bytes) -> str:
     return base64.b64encode(data).decode("utf-8")
 
 
+async def _extract_audio_from_video(
+    video_bytes: bytes, source_label: str
+) -> bytes | None:
+    """Extract the audio track from a video file using ffmpeg.
+
+    Gemini tends to focus on the visual track when a video is sent as a single
+    inline_data blob, so we extract the audio separately and send it alongside
+    the video to ensure the model attends to both modalities.
+
+    Returns raw OGG Opus bytes, or None if extraction fails or there is no
+    audio track.
+    """
+    import asyncio
+    import subprocess
+    import tempfile
+    import os
+
+    tmp_in = None
+    tmp_out = None
+    try:
+        # Write video bytes to a temp file (ffmpeg needs seekable input)
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+            f.write(video_bytes)
+            tmp_in = f.name
+
+        tmp_out = tmp_in + ".audio.ogg"
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            tmp_in,
+            "-vn",  # discard video
+            "-c:a",
+            "libopus",  # encode to Opus
+            "-b:a",
+            "64k",  # moderate bitrate — keeps size small
+            "-ac",
+            "1",  # mono
+            "-ar",
+            "16000",  # 16 kHz
+            tmp_out,
+        ]
+
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+
+        if process.returncode != 0:
+            stderr_text = stderr.decode(errors="replace") if stderr else ""
+            # "does not contain any stream" means no audio track — not an error
+            if "does not contain any stream" in stderr_text:
+                log_debug(f"[multimodal] No audio track in video ({source_label})")
+            else:
+                log_debug(
+                    f"[multimodal] ffmpeg audio extraction failed for {source_label}: {stderr_text[:300]}"
+                )
+            return None
+
+        if not os.path.exists(tmp_out) or os.path.getsize(tmp_out) == 0:
+            log_debug(
+                f"[multimodal] Audio extraction produced empty output for {source_label}"
+            )
+            return None
+
+        with open(tmp_out, "rb") as f:
+            audio_bytes = f.read()
+
+        log_debug(
+            f"[multimodal] Extracted audio track from {source_label}: {len(audio_bytes)} bytes"
+        )
+        return audio_bytes
+
+    except FileNotFoundError:
+        log_debug("[multimodal] ffmpeg not available — skipping video audio extraction")
+        return None
+    except Exception as e:
+        log_warning(f"[multimodal] Audio extraction error for {source_label}: {e}")
+        return None
+    finally:
+        # Clean up temp files
+        for p in (tmp_in, tmp_out):
+            if p:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+
+def _split_mjpeg_stream(data: bytes) -> list[bytes]:
+    """Split a concatenated MJPEG stream into individual JPEG frames.
+
+    ffmpeg ``image2pipe`` outputs each frame as a complete JPEG back-to-back.
+    We split on the SOI marker (``FF D8``) that begins each frame.
+    """
+    SOI = b"\xff\xd8"
+    frames: list[bytes] = []
+    start = data.find(SOI)
+    while start != -1:
+        next_start = data.find(SOI, start + 2)
+        if next_start == -1:
+            frames.append(data[start:])
+        else:
+            frames.append(data[start:next_start])
+        start = next_start
+    return frames
+
+
+def _make_wav_header(
+    data_size: int,
+    sample_rate: int = 16000,
+    channels: int = 1,
+    bits_per_sample: int = 16,
+) -> bytes:
+    """Build a 44-byte RIFF/WAV header for raw PCM data."""
+    import struct
+
+    byte_rate = sample_rate * channels * bits_per_sample // 8
+    block_align = channels * bits_per_sample // 8
+    return struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF",
+        36 + data_size,
+        b"WAVE",
+        b"fmt ",
+        16,  # sub-chunk size
+        1,  # PCM format
+        channels,
+        sample_rate,
+        byte_rate,
+        block_align,
+        bits_per_sample,
+        b"data",
+        data_size,
+    )
+
+
+async def _probe_video_info(tmp_path: str) -> dict[str, float] | None:
+    """Use *ffprobe* to extract duration, resolution and native FPS.
+
+    Returns ``{"duration": float, "width": int, "height": int, "native_fps": float}``
+    or ``None`` on any failure.
+    """
+    import asyncio
+    import json as _json
+    import subprocess
+
+    try:
+        cmd = [
+            "ffprobe",
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+            "-select_streams",
+            "v:0",
+            tmp_path,
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        if proc.returncode != 0 or not stdout:
+            return None
+
+        info = _json.loads(stdout.decode(errors="replace"))
+
+        # Duration — prefer format-level, fall back to stream-level
+        duration = 0.0
+        fmt = info.get("format", {})
+        if fmt.get("duration"):
+            duration = float(fmt["duration"])
+
+        width = 0
+        height = 0
+        native_fps = 0.0
+        streams = info.get("streams", [])
+        for s in streams:
+            if s.get("codec_type") == "video":
+                width = int(s.get("width", 0))
+                height = int(s.get("height", 0))
+                # r_frame_rate is a fraction like "30/1"
+                rfr = s.get("r_frame_rate", "0/1")
+                parts = rfr.split("/")
+                if len(parts) == 2 and int(parts[1]) != 0:
+                    native_fps = float(int(parts[0]) / int(parts[1]))
+                if not duration and s.get("duration"):
+                    duration = float(s["duration"])
+                break
+
+        if duration <= 0:
+            return None
+
+        return {
+            "duration": duration,
+            "width": width,
+            "height": height,
+            "native_fps": native_fps,
+        }
+    except (FileNotFoundError, OSError):
+        log_debug("[multimodal] ffprobe not available — skipping video probe")
+        return None
+    except Exception as e:
+        log_debug(f"[multimodal] ffprobe failed: {e}")
+        return None
+
+
+# ── Token-budget constants for dynamic FPS ──────────────────────────────────
+_TOKENS_PER_FRAME: int = 1120  # Gemini 3 default media_resolution
+_TOKENS_PER_AUDIO_SEC: int = 25  # empirical from API logs
+_TOKENS_PER_MARKER: int = 20  # approximate per-section text marker
+_MIN_FPS: float = 0.5  # below this, temporal coherence breaks
+_MAX_FPS: float = 5.0  # diminishing returns above this
+_MAX_FRAME_WIDTH: int = 1024  # limits JPEG byte size; Gemini 3 tokens unaffected
+
+
+def compute_optimal_video_params(
+    duration_s: float,
+    token_budget: int,
+    tokens_per_frame: int = _TOKENS_PER_FRAME,
+    tokens_per_audio_sec: int = _TOKENS_PER_AUDIO_SEC,
+    tokens_per_marker: int = _TOKENS_PER_MARKER,
+) -> tuple[float, int]:
+    """Compute the best extraction FPS to fill *token_budget* for a video.
+
+    Returns ``(fps, max_frames)`` — both clamped to sane ranges.
+    """
+    import math
+
+    if duration_s <= 0:
+        return (2.0, 4)  # safe fallback
+
+    # Audio tokens scale linearly with duration
+    audio_tokens = math.ceil(duration_s) * tokens_per_audio_sec
+
+    # Estimate marker overhead: 1 marker per second of video + 1 preamble + 1 end marker
+    n_seconds = math.ceil(duration_s)
+    marker_tokens = (n_seconds + 2) * tokens_per_marker
+
+    available = token_budget - audio_tokens - marker_tokens
+    if available <= 0:
+        return (_MIN_FPS, max(int(duration_s * _MIN_FPS), 1))
+
+    max_frames = max(available // tokens_per_frame, 1)
+    raw_fps = max_frames / duration_s
+    clamped_fps = max(_MIN_FPS, min(raw_fps, _MAX_FPS))
+
+    # Re-derive frame count from clamped fps
+    final_frames = max(int(clamped_fps * duration_s), 1)
+
+    return (round(clamped_fps, 2), final_frames)
+
+
+async def decompose_video_to_frames_and_audio(
+    video_bytes: bytes,
+    source_label: str,
+    fps: float = 2,
+    *,
+    token_budget: int | None = None,
+    tokens_per_frame: int = _TOKENS_PER_FRAME,
+) -> list[dict] | None:
+    """Decompose a video into temporally-aligned frame + audio chunk pairs.
+
+    When *token_budget* is provided the function probes the video with
+    ``ffprobe`` and dynamically computes the best extraction FPS so that the
+    total multimodal token cost stays just within the budget.
+
+    Extracts visual frames at *fps* frames-per-second and splits the audio
+    track into 1-second WAV chunks so that downstream engines can interleave
+    them.  This lets the model "see and hear" each second of the video in
+    parallel with explicit temporal grounding.
+
+    All heavy output is piped through memory — only a single temporary file
+    is written for the input video (MP4 demuxing requires seeking).
+
+    Returns a list of per-second dicts::
+
+        [
+            {
+                "ts": 0.0,
+                "frames_b64": ["<b64>", "<b64>"],   # *fps* frames
+                "audio_b64": "<b64>" | None,         # 1-second WAV chunk
+            },
+            ...
+        ]
+
+    Returns ``None`` on any failure (caller should fall back to blob
+    behaviour).
+    """
+    import asyncio
+    import subprocess
+    import tempfile
+    import os
+
+    # MP4 demuxing requires a seekable input — one temp file is unavoidable.
+    tmp_path: str | None = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(suffix=".mp4", prefix="synth_vdec_")
+        os.write(fd, video_bytes)
+        os.close(fd)
+
+        # --- Dynamic FPS: probe video and compute optimal params ----------------
+        scale_width = 640  # default fallback
+        if token_budget is not None:
+            vinfo = await _probe_video_info(tmp_path)
+            if vinfo and vinfo["duration"] > 0:
+                computed_fps, _ = compute_optimal_video_params(
+                    vinfo["duration"],
+                    token_budget,
+                    tokens_per_frame=tokens_per_frame,
+                )
+                fps = computed_fps
+                # Scale up to min(native, MAX_FRAME_WIDTH) — Gemini 3 token
+                # cost is fixed regardless of pixel size, so bigger = better.
+                if vinfo["width"] > 0:
+                    scale_width = min(vinfo["width"], _MAX_FRAME_WIDTH)
+                log_debug(
+                    f"[multimodal] Dynamic video params for {source_label}: "
+                    f"fps={fps}, scale_width={scale_width}, "
+                    f"duration={vinfo['duration']:.1f}s, "
+                    f"budget={token_budget} tokens"
+                )
+
+        # --- Extract frames via image2pipe (all output to stdout) ---------------
+        frame_cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            tmp_path,
+            "-vf",
+            f"fps={fps},scale={scale_width}:-1",
+            "-q:v",
+            "5",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "mjpeg",
+            "pipe:1",
+        ]
+        fproc = await asyncio.create_subprocess_exec(
+            *frame_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        frame_stdout, frame_stderr = await fproc.communicate()
+
+        if fproc.returncode != 0:
+            log_debug(
+                f"[multimodal] Frame extraction failed for {source_label}: "
+                f"{(frame_stderr.decode(errors='replace'))[:300]}"
+            )
+            return None
+
+        frame_bytes_list = _split_mjpeg_stream(frame_stdout)
+        if not frame_bytes_list:
+            log_debug(f"[multimodal] No frames extracted for {source_label}")
+            return None
+
+        # --- Extract audio as raw PCM to stdout ---------------------------------
+        # 16 kHz, mono, s16le → 32 000 bytes per second
+        SAMPLE_RATE = 16000
+        BYTES_PER_SECOND = SAMPLE_RATE * 1 * 2  # mono, 16-bit
+
+        audio_cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            tmp_path,
+            "-vn",
+            "-f",
+            "s16le",
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            str(SAMPLE_RATE),
+            "-ac",
+            "1",
+            "pipe:1",
+        ]
+        aproc = await asyncio.create_subprocess_exec(
+            *audio_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        audio_stdout, audio_stderr = await aproc.communicate()
+
+        # Split raw PCM into 1-second chunks and wrap in WAV headers
+        audio_chunks: list[bytes] = []
+        has_audio = aproc.returncode == 0 and len(audio_stdout) > 0
+        if has_audio:
+            offset = 0
+            while offset < len(audio_stdout):
+                chunk_pcm = audio_stdout[offset : offset + BYTES_PER_SECOND]
+                wav_header = _make_wav_header(len(chunk_pcm), sample_rate=SAMPLE_RATE)
+                audio_chunks.append(wav_header + chunk_pcm)
+                offset += BYTES_PER_SECOND
+        else:
+            stderr_text = audio_stderr.decode(errors="replace") if audio_stderr else ""
+            if "does not contain any stream" in stderr_text:
+                log_debug(f"[multimodal] No audio track in {source_label}, frames-only")
+            else:
+                log_debug(
+                    f"[multimodal] Audio extraction failed for {source_label}: "
+                    f"{stderr_text[:300]}"
+                )
+
+        # --- Group frames by actual timestamp and pair with audio chunks --------
+        # Each frame's real timestamp is frame_index / fps.  We bucket frames
+        # into 1-second windows so they align with the 1-second audio chunks.
+
+        total_frames = len(frame_bytes_list)
+
+        # Compute actual timestamp for every extracted frame
+        frame_ts = [i / fps for i in range(total_frames)]
+
+        # Total seconds = max of (last frame timestamp + 1, audio chunk count)
+        last_frame_sec = int(frame_ts[-1]) + 1 if frame_ts else 0
+        total_seconds = max(last_frame_sec, len(audio_chunks))
+        result: list[dict] = []
+
+        for sec_idx in range(total_seconds):
+            sec_start = float(sec_idx)
+            sec_end = sec_start + 1.0
+
+            # Gather frames whose timestamp falls in [sec_start, sec_end)
+            sec_frames = [
+                frame_bytes_list[i]
+                for i, ts in enumerate(frame_ts)
+                if sec_start <= ts < sec_end
+            ]
+
+            audio_chunk = audio_chunks[sec_idx] if sec_idx < len(audio_chunks) else None
+
+            # Only emit a group if there are frames or audio for this second
+            if sec_frames or audio_chunk:
+                result.append(
+                    {
+                        "ts": sec_start,
+                        "frames_b64": [encode_bytes_to_base64(fb) for fb in sec_frames],
+                        "audio_b64": (
+                            encode_bytes_to_base64(audio_chunk) if audio_chunk else None
+                        ),
+                    }
+                )
+
+        log_debug(
+            f"[multimodal] Decomposed {source_label}: {total_frames} frames, "
+            f"{len(audio_chunks)} audio chunks, {total_seconds} seconds "
+            f"(in-memory, single temp input)"
+        )
+        return result
+
+    except FileNotFoundError:
+        log_debug("[multimodal] ffmpeg not available — skipping video decomposition")
+        return None
+    except Exception as e:
+        log_warning(f"[multimodal] Video decomposition error for {source_label}: {e}")
+        return None
+    finally:
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
 async def extract_multimodal_from_telegram(
     bot: Any,
     message: Any,
@@ -294,19 +767,47 @@ async def extract_multimodal_from_telegram(
                 else:
                     try:
                         file = await bot.get_file(video.file_id)
-                        file_bytes = await file.download_as_bytearray()
+                        file_bytes = bytes(await file.download_as_bytearray())
 
+                        caption = getattr(message, "caption", None) or ""
+                        duration = getattr(video, "duration", 0) or 0
+                        width = getattr(video, "width", 0) or 0
+                        height = getattr(video, "height", 0) or 0
                         attachments.append(
                             {
                                 "mime_type": mime_type,
-                                "data": encode_bytes_to_base64(bytes(file_bytes)),
+                                "data": encode_bytes_to_base64(file_bytes),
                                 "filename": video.file_name
                                 or f"video_{video.file_unique_id}.mp4",
+                                "caption": caption,
+                                "media_metadata": {
+                                    "type": "video",
+                                    "duration": duration,
+                                    "width": width,
+                                    "height": height,
+                                    "file_size": file_size,
+                                    "has_audio": True,
+                                },
                             }
                         )
                         log_debug(
                             f"[multimodal] Extracted Telegram video: {video.file_unique_id} ({mime_type})"
                         )
+
+                        # Extract audio track separately so the model attends to
+                        # both visual and audio content (Gemini under-weights audio
+                        # when it is embedded inside a video container).
+                        audio_bytes = await _extract_audio_from_video(
+                            file_bytes, f"video_{video.file_unique_id}"
+                        )
+                        if audio_bytes:
+                            attachments.append(
+                                {
+                                    "mime_type": "audio/ogg",
+                                    "data": encode_bytes_to_base64(audio_bytes),
+                                    "filename": f"video_{video.file_unique_id}_audio.ogg",
+                                }
+                            )
                     except Exception as e:
                         log_warning(
                             f"[multimodal] Failed to download Telegram video: {e}"
@@ -322,18 +823,42 @@ async def extract_multimodal_from_telegram(
             if file_size <= 20 * 1024 * 1024:  # 20MB limit
                 try:
                     file = await bot.get_file(video_note.file_id)
-                    file_bytes = await file.download_as_bytearray()
+                    file_bytes = bytes(await file.download_as_bytearray())
 
+                    vn_duration = getattr(video_note, "duration", 0) or 0
+                    vn_length = getattr(video_note, "length", 0) or 0
                     attachments.append(
                         {
                             "mime_type": "video/mp4",
-                            "data": encode_bytes_to_base64(bytes(file_bytes)),
+                            "data": encode_bytes_to_base64(file_bytes),
                             "filename": f"video_note_{video_note.file_unique_id}.mp4",
+                            "caption": "",
+                            "media_metadata": {
+                                "type": "video_note",
+                                "duration": vn_duration,
+                                "width": vn_length,
+                                "height": vn_length,
+                                "file_size": file_size,
+                                "has_audio": True,
+                            },
                         }
                     )
                     log_debug(
                         f"[multimodal] Extracted Telegram video note: {video_note.file_unique_id}"
                     )
+
+                    # Extract audio track separately (same reasoning as video above)
+                    audio_bytes = await _extract_audio_from_video(
+                        file_bytes, f"video_note_{video_note.file_unique_id}"
+                    )
+                    if audio_bytes:
+                        attachments.append(
+                            {
+                                "mime_type": "audio/ogg",
+                                "data": encode_bytes_to_base64(audio_bytes),
+                                "filename": f"video_note_{video_note.file_unique_id}_audio.ogg",
+                            }
+                        )
                 except Exception as e:
                     log_warning(
                         f"[multimodal] Failed to download Telegram video note: {e}"

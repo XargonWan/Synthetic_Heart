@@ -744,23 +744,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # LIVE MEDIA HANDLING (Voice, Video, Video Note)
-    # Check if we should treat this as a "Live" stream event
-    if message.voice or message.video_note or message.video:
-        supports_live = False
-        if plugin_instance.plugin:
-            # Check explicit support flag or method existence
-            # We check handle_live_processing (new) or fallback to voice interaction check
-            supports_live = getattr(
-                plugin_instance.plugin, "supports_voice_interaction", False
-            ) or hasattr(plugin_instance.plugin, "handle_live_processing")
-
-        # Only intercept regular videos if they don't have a caption (which might imply they are just attachments)
-        # But user wants "live stream audio and video". Standard telegram video messages are often "live" moments.
-        # Let's intercept if we simply support it.
-        if supports_live:
-            log_debug("[telegram_bot] Routing to Live Media Handler")
-            await handle_media_live(update, context)
-            return
+    # Disabled: voice/video now flows through the normal message pipeline as
+    # multimodal attachments (static multimodal), preserving full context
+    # instead of being processed in isolation with a generic system prompt.
+    # if message.voice or message.video_note or message.video:
+    #     supports_live = False
+    #     if plugin_instance.plugin:
+    #         supports_live = getattr(
+    #             plugin_instance.plugin, "supports_voice_interaction", False
+    #         ) or hasattr(plugin_instance.plugin, "handle_live_processing")
+    #     if supports_live:
+    #         log_debug("[telegram_bot] Routing to Live Media Handler")
+    #         await handle_media_live(update, context)
+    #         return
 
     user = message.from_user
     user_id = user.id
