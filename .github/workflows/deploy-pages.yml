@@ -5,7 +5,7 @@ on:
     branches: [ develop ]
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -21,5 +21,7 @@ jobs:
       - name: Deploy `website/` to GitHub Pages (gh-pages)
         uses: peaceiris/actions-gh-pages@v3
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          # Use a repo-scoped Personal Access Token if your repository disallows GITHUB_TOKEN pushes.
+          # Create a secret named `GH_PAGES_DEPLOY_TOKEN` with `repo` scope and it will be used automatically.
+          github_token: ${{ secrets.GH_PAGES_DEPLOY_TOKEN || secrets.GITHUB_TOKEN }}
           publish_dir: ./website
