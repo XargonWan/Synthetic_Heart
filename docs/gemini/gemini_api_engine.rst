@@ -1,7 +1,7 @@
 Gemini API Engine
 =================
 
-The ``gemini_api`` engine is the primary API-based LLM engine for Synthetic Heart. Unlike the Selenium-based engines that drive a browser session, this engine communicates directly with the `Google Gemini REST API <https://ai.google.dev/>`_ using HTTP requests and, optionally, the ``google-genai`` SDK for live media processing.
+The ``gemini_api`` module is the primary API-based Cortex engine for Synthetic Heart. Unlike the Selenium-based adapters that drive a browser session, this engine communicates directly with the `Google Gemini REST API <https://ai.google.dev/>`_ using HTTP requests and, optionally, the ``google-genai`` SDK for live media processing.
 
 .. contents:: Table of Contents
    :depth: 3
@@ -11,7 +11,7 @@ The ``gemini_api`` engine is the primary API-based LLM engine for Synthetic Hear
 Overview
 --------
 
-**File:** ``llm_engines/gemini_api.py``
+**File:** ``cortex/llm_provider/gemini_api.py``
 
 **Base class:** ``AIPluginBase`` (from ``core/ai_plugin_base.py``)
 
@@ -43,7 +43,7 @@ Architecture Diagram
    │    attachments (audio, images)    │
    │  - Calls build_json_prompt()      │
    │    with attachments inline        │
-   │  - Passes prompt to LLM engine    │
+   │  - Passes prompt to Cortex engine  │
    └───────────────┬───────────────────┘
                    │
                    ▼
@@ -699,7 +699,7 @@ File Structure Summary
 
 ::
 
-   llm_engines/gemini_api.py (≈1500 lines)
+   cortex/llm_provider/gemini_api.py (≈1500 lines)
    │
    ├── Imports & SDK availability check          (1-38)
    ├── Variable registration                     (41-94)

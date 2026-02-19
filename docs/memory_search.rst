@@ -42,4 +42,4 @@ Docs: Where to update
 ---------------------
 
 - This file: `docs/memory_search.rst`
-- Consider adding examples to `AGENTS.md` and the prompt guidance docs if you want more detailed usage examples for specific LLM engines.
+- Consider adding examples to `AGENTS.md` and the prompt guidance docs if you want more detailed usage examples for specific Cortex engines.

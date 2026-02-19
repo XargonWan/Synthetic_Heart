@@ -4,7 +4,7 @@ Component Development Guide - Configuration Management
 Overview
 --------
 
-This guide explains how to properly use the configuration system when developing new components (interfaces, plugins, LLM engines) for Synthetic Heart.
+This guide explains how to properly use the configuration system when developing new components (interfaces, plugins, Cortex engines) for Synthetic Heart.
 
 .. warning::
    **IMPORTANT: Use ConfigVar for Global Variables**

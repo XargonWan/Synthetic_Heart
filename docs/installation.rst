@@ -70,7 +70,7 @@ Synthetic Heart follows a modular architecture where components are automaticall
 **Plugins** (``plugins/``)
     Action providers that extend functionality (terminal, weather, AI diary, etc.).
 
-**LLM Engines** (``llm_engines/``)
-    AI backend implementations (OpenAI, Google Gemini, manual input, etc.).
+**Cortex engines**
+    Runtime engine implementations (OpenAI, Google Gemini, manual input, etc.).
 
 This design ensures that new features can be added by simply placing compatible modules in the appropriate directories without modifying the core codebase.

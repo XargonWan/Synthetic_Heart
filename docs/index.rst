@@ -5,7 +5,7 @@ Synthetic Heart Documentation
 
    <div align="center">
       <div style="background: #222; border-radius: 12px; padding: 12px; width: 700px; height: 300px; display: flex; align-items: center; justify-content: center; margin: 0 auto;">
-         <img src="res/SyntH_logo.png" alt="Synthetic Heart Logo" style="max-width: 100%; max-height: 100%; object-fit: contain;" />
+         <img src="res/synth_logo.png" alt="Synthetic Heart Logo" style="max-width: 100%; max-height: 100%; object-fit: contain;" />
       </div>
    </div>
 
@@ -19,45 +19,28 @@ getting started.
 
 .. toctree::
    :maxdepth: 2
-   :caption: Contents:
+   :caption: User guide:
 
-   installation
-   usage
    quickstart
-   commands
+   usage
    features
-   recon_debrief_hooks
-   architecture
-   event_id_flow
-   auto_response
-   chat_links
-   chat_context
-   chat_history
-   emotion_engine
-   persona_manager
-   persona_configuration
-   llm_engines
-   plugins
-   action_schema_format
-   validation_system
-   message_handling
-   monitoring_and_scheduling
-   ai_diary_personal_memory
-   vrm_animations
-   animation_system
-   webui_debug
-   webui_controls
-   webui_desktop_iframe
-   window_manager
+   cortex
    interfaces
-   compose_env_vars
-   interface_path
-   matrix_interface
-   config_management
-   dev_components
+   plugins
+   vrm_animations
+   webui_controls
+   gemini/synth-live-voice-integration
+   faq
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Developer guide:
+
    component_development_guide
+   dev_components
    component_pattern
    two_phase_init_implementation
+   config_management
    contributing
    faq
 

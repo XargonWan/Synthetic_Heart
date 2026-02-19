@@ -1,7 +1,7 @@
 Interfaces
 ==========
 
-Interfaces provide the communication layer between synth and external platforms. Like plugins and LLM engines, interfaces are completely modular and automatically discovered at runtime. This ensures that platform integrations are decoupled from the core system and can be developed independently.
+Interfaces provide the communication layer between synth and external platforms. Like plugins and Cortex engines, interfaces are completely modular and automatically discovered at runtime. This ensures that platform integrations are decoupled from the core system and can be developed independently.
 
 Interface Architecture
 ----------------------
@@ -164,7 +164,7 @@ The **Ollama compatibility server** exposes Synthetic Heart through the same HTT
 
 - Implements ``/api/generate`` and ``/api/chat`` with streaming NDJSON output.
 - Mirrors the Ollama ``/api/tags`` endpoint so discovery requests return a synthetic model catalogue.
-- Translates incoming prompts into the synth message chain, letting the currently loaded LLM engine drive the reply.
+- Translates incoming prompts into the synth message chain, letting the currently loaded Cortex engine drive the reply.
 
 **Configuration**
 

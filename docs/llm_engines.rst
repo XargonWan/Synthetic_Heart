@@ -1,7 +1,9 @@
-LLM Engines
-===========
+This page has been removed.
 
-The Synthetic Heart supports multiple language model backends through a modular engine system. Engines are automatically discovered and can be switched at runtime using the ``/cortex`` command (``/llm`` remains as a deprecated alias). This design ensures that LLM implementations are completely decoupled from the core system.
+.. note::
+
+   The `llm_engines` documentation was removed from the public wiki. See :doc:`cortex` for the current runtime-engine abstraction and developer guidance.
+
 
 Engine Architecture
 -------------------
