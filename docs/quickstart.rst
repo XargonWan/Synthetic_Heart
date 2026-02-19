@@ -30,6 +30,12 @@ This guide outlines the typical steps to run **Synthetic Heart** using Docker. s
 
       docker compose up -d
 
+   **NOTE:** if you wish to make sure you're running the latest version, or you wish to update, you can use:
+
+   .. code-block:: bash
+
+      docker compose up -d --pull always
+
 4. **Open the WebUI**
    Open your browser and navigate to ``https://localhost:8000``.
    This is the default address; if you set it up on a remote host or changed the port mapping in ``docker-compose.yml``, adjust accordingly.
