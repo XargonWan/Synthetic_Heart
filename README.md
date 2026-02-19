@@ -160,14 +160,10 @@ Here are the main improvements and integrations we plan to work on — contribut
 
 - [ ] Event system fixes
 - [ ] Global animation engine fixes — make animations always reflect the actual state of the SyntH and their current actions
-- [ ] Helper Cortex engine — offload some background/service actions to a dedicated helper model running alongside the user-facing LLM
-- [ ] Memory retagging engine — improve tagging and indexing of memory entries for better recall and context
-- [ ] Memory compressor engine — compact/condense long-term memory while retaining critical information
-- [ ] Grok web Cortex engine support
 - [ ] Deepseek web Cortex engine support
-- [ ] Voice message plugin — enable synth to record and send voice messages
+- [ ] SetpFun web Cortex engine support
 - [ ] Desktop presence — allow SyntH to show up on a desktop environment (outside web interfaces)
 - [ ] First gaming plugin: Minecraft integration
 - [ ] Matrix interface
 
-If you're interested in helping implement these features or testing them, open an issue or a PR and tag it with the relevant area (e.g. `interface`, `llm`, `plugin`, etc.).
+If you're interested in helping implement these features or testing them, open an issue or a PR and tag it with the relevant area (e.g. `interface`, `cortex`, `plugin`, etc.).
