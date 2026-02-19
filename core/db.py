@@ -785,8 +785,47 @@ async def ensure_plugin_tables() -> None:
 
             await init_diary_table()
         except Exception:
-            # No-op if plugin not present or init failed; we'll still attempt CREATE TABLE IF NOT EXISTS below
+            # No-op if plugin not present or init failed; create a safe fallback so
+            # other plugin tables (e.g. grillo) that JOIN `ai_diary` won't keep
+            # failing with 1146. This mirrors the schema declared in
+            # `plugins/ai_diary.init_diary_table()` and is intentionally
+            # idempotent (`IF NOT EXISTS`). Any real migration should be
+            # performed by the plugin, but the fallback avoids a hard failure
+            # during auto-heal.
             log_debug("[db] init_diary_table not available or failed (continuing)")
+            try:
+                # Create a *minimal placeholder* so other plugin table creation and
+                # JOINs do not fail with 1146. This intentionally avoids duplicating
+                # the plugin-managed schema (columns, JSON types, migrations).
+                # The `plugins.ai_diary` implementation is still authoritative and
+                # must perform any schema migrations (adding columns / changing
+                # types) — the placeholder prevents hard failures only.
+                async with get_conn_ctx() as _conn:
+                    async with _conn.cursor() as _cur:
+                        await _cur.execute("""
+                            CREATE TABLE IF NOT EXISTS ai_diary (
+                                id INT AUTO_INCREMENT PRIMARY KEY,
+                                content LONGTEXT,
+                                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                INDEX idx_timestamp (timestamp)
+                            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+                        """)
+
+                        await _cur.execute("""
+                            CREATE TABLE IF NOT EXISTS ai_diary_archive (
+                                id INT AUTO_INCREMENT PRIMARY KEY,
+                                content LONGTEXT,
+                                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                INDEX idx_timestamp (timestamp)
+                            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+                        """)
+                    try:
+                        await _conn.commit()
+                    except Exception:
+                        pass
+                log_info("[db] Minimal placeholder `ai_diary` / `ai_diary_archive` created (plugin must migrate full schema)")
+            except Exception as _fallback_err:
+                log_warning(f"[db] Failed to create minimal placeholder ai_diary tables: {_fallback_err}")
 
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:
