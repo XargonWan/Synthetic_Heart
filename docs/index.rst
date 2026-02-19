@@ -1,10 +1,10 @@
 Synthetic Heart Documentation
 ===================================
 
-.. image:: res/synth_logo.png
-   :alt: Synthetic Heart Logo
+.. image:: res/synth_banner.png
+   :alt: Synthetic Heart banner
    :align: center
-   :width: 700px
+   :width: 100%
 
 
 .. container:: hero-box
@@ -45,7 +45,6 @@ getting started.
    two_phase_init_implementation
    config_management
    contributing
-   faq
 
 Building the Documentation
 --------------------------
