@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Synthetic Heart — Presentazione</title>
+    <meta name="description" content="Synthetic Heart (SyntH) — modular AI persona system. Documentazione, quickstart e risorse." />
+    <link rel="stylesheet" href="styles.css">
+    <link rel="icon" href="assets/synth_logo_bg.png" type="image/png">
+  </head>
+  <body>
+    <header class="nav">
+      <div class="container nav-inner">
+        <a class="brand" href="#">
+          <img src="assets/synth_logo_bg.png" alt="Synthetic Heart logo" class="logo">
+          <div class="brand-text">
+            <strong>Synthetic Heart</strong>
+            <small>Synth — modular AI persona system</small>
+          </div>
+        </a>
+        <nav class="links">
+          <a href="https://github.com/XargonWan/Synthetic_Heart/blob/develop/docs/quickstart.rst" target="_blank">Docs</a>
+          <a href="https://github.com/XargonWan/Synthetic_Heart" target="_blank">GitHub</a>
+          <a class="cta" href="https://github.com/XargonWan/Synthetic_Heart#readme" target="_blank">Inizia</a>
+        </nav>
+      </div>
+    </header>
+
+    <main class="hero">
+      <div class="container hero-grid">
+        <section class="hero-card">
+          <h1>Synthetic Heart</h1>
+          <p class="lead">Un sistema modulare di persona AI — plugin estensibili, motori LLM intercambiabili, animazioni VRM e interfacce multiple.</p>
+          <div class="actions">
+            <a class="btn btn-primary" href="https://github.com/XargonWan/Synthetic_Heart#readme" target="_blank">Get started</a>
+            <a class="btn btn-ghost" href="https://github.com/XargonWan/Synthetic_Heart/tree/develop/docs" target="_blank">Documentazione</a>
+          </div>
+
+          <div class="quickstart">
+            <h3>Quick start</h3>
+            <ol>
+              <li>Clona il repo: <code>git clone https://github.com/XargonWan/Synthetic_Heart.git</code></li>
+              <li>Sincronizza dipendenze: <code>uv sync</code></li>
+              <li>Avvia dev (locale): <code>./synth.sh</code> o <code>docker compose -f docker-compose-dev.yml --env-file .env-dev up -d --build</code></li>
+            </ol>
+          </div>
+        </section>
+
+        <aside class="features">
+          <div class="feature">
+            <h4>Modulare</h4>
+            <p>Plugin e interfacce scambiabili: aggiungi nuove azioni senza toccare il core.</p>
+          </div>
+          <div class="feature">
+            <h4>LLM-friendly</h4>
+            <p>Supporto per motori multipli — hot-swappable e testabili.</p>
+          </div>
+          <div class="feature">
+            <h4>Animazioni</h4>
+            <p>Gestione avanzata di animazioni VRM per avatar reattivi.</p>
+          </div>
+          <div class="feature">
+            <h4>Estendibile</h4>
+            <p>Architettura progettata per integrazioni e agenti background.</p>
+          </div>
+
+          <div class="card-stats">
+            <div>
+              <strong>Docs</strong>
+              <small>Completa</small>
+            </div>
+            <div>
+              <strong>Tests</strong>
+              <small>pytest</small>
+            </div>
+            <div>
+              <strong>License</strong>
+              <small>MIT</small>
+            </div>
+          </div>
+        </aside>
+      </div>
+
+      <section class="showcase container">
+        <h3>Design ispirato alla WebUI</h3>
+        <p>Interfaccia scura, accenti neon e layout semplice per presentare il progetto in modo pulito e moderno.</p>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="container footer-inner">
+        <div>© <strong>Synthetic Heart</strong> — <a href="https://github.com/XargonWan/Synthetic_Heart" target="_blank">Repository</a></div>
+        <div class="small-links">
+          <a href="https://github.com/XargonWan/Synthetic_Heart/blob/develop/LICENSE" target="_blank">License</a>
+          <a href="https://github.com/XargonWan/Synthetic_Heart/issues" target="_blank">Issues</a>
+        </div>
+      </div>
+    </footer>
+
+  </body>
+</html>
