@@ -12,7 +12,6 @@ except Exception:  # pragma: no cover - fallback when dotenv not installed
         return False
 
 
-
 # aiomysql is optional at import time — make the import lazy/fail-safe so
 # importing core.config doesn't raise in environments where aiomysql isn't
 # installed (e.g., lightweight tests or build-time checks). Modules that need
