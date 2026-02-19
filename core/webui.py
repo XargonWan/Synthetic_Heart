@@ -180,9 +180,11 @@ class SynthWebUIInterface:
         # Selkies: prefer HTTPS; HTTP port is optional and will only be set
         # if the environment explicitly defines SELKIES_HTTP_PORT.
         try:
-            self.selkies_https_port = int(os.getenv("SELKIES_HTTPS_PORT", "3000"))
+            # Default host-exposed Selkies HTTPS port is 3006 (docker-compose mapping).
+            # Respect SELKIES_HTTPS_PORT if explicitly provided in the environment.
+            self.selkies_https_port = int(os.getenv("SELKIES_HTTPS_PORT", "3006"))
         except Exception:
-            self.selkies_https_port = 3000
+            self.selkies_https_port = 3006
 
         if "SELKIES_HTTP_PORT" in os.environ:
             try:
@@ -1035,33 +1037,40 @@ class SynthWebUIInterface:
         import socket
 
         host = getattr(self, "selkies_host", "127.0.0.1") or "127.0.0.1"
-        # The container exposes Selkies on container port 3000; prefer that.
-        container_port = 3000
 
-        # Try HTTPS first (TLS handshake)
-        try:
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-            with socket.create_connection((host, container_port), timeout=1) as sock:
-                with ctx.wrap_socket(sock, server_hostname=host) as ssock:
-                    # If handshake succeeds, we assume HTTPS
-                    return {"protocol": "https", "details": "TLS handshake succeeded"}
-        except Exception as e:
-            https_err = str(e)
+        # Build a prioritized list of ports to probe:
+        # 1) configured host-exposed ports (selkies_https_port / selkies_http_port)
+        # 2) container defaults (3001 = HTTPS, 3000 = HTTP) as a last resort
+        candidate_ports = []
+        if getattr(self, "selkies_https_port", None):
+            candidate_ports.append((int(self.selkies_https_port), "https"))
+        if getattr(self, "selkies_http_port", None):
+            candidate_ports.append((int(self.selkies_http_port), "http"))
 
-        # Fallback: try plain HTTP
-        try:
-            with socket.create_connection((host, container_port), timeout=1) as sock:
-                # If we connect and receive no TLS error, assume HTTP
-                return {"protocol": "http", "details": "Plain TCP connect succeeded"}
-        except Exception as e:
-            http_err = str(e)
+        # Container defaults (try HTTPS container port first)
+        candidate_ports.extend([(3001, "https"), (3000, "http")])
 
-        return {
-            "protocol": "none",
-            "details": f"https_err={https_err}; http_err={http_err}",
-        }
+        https_err = ""
+        http_err = ""
+        for port, proto in candidate_ports:
+            try:
+                if proto == "https":
+                    ctx = ssl.create_default_context()
+                    ctx.check_hostname = False
+                    ctx.verify_mode = ssl.CERT_NONE
+                    with socket.create_connection((host, port), timeout=1) as sock:
+                        with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+                            return {"protocol": "https", "details": f"TLS handshake succeeded on port {port}", "port": port}
+                else:
+                    with socket.create_connection((host, port), timeout=1) as sock:
+                        return {"protocol": "http", "details": f"Plain TCP connect succeeded on port {port}", "port": port}
+            except Exception as e:
+                if proto == "https":
+                    https_err = str(e)
+                else:
+                    http_err = str(e)
+
+        return {"protocol": "none", "details": f"https_err={https_err}; http_err={http_err}", "port": None}
 
     def _get_chat_resizable(self) -> bool:
         """Return whether chat should be resizable (from config/DB)."""
@@ -3277,8 +3286,10 @@ class SynthWebUIInterface:
             )
             payload["detected_protocol"] = probe.get("protocol")
             payload["detected_details"] = probe.get("details")
+            payload["detected_port"] = probe.get("port")
         except Exception:
             payload["detected_protocol"] = "unknown"
+            payload["detected_port"] = None
 
         return JSONResponse(payload)
 

@@ -19,6 +19,15 @@
                         <div style="margin-top:6px;" id="cortex-engine-login-state">state: –</div>
                     </div>
                     <button id="cortex-login-btn" class="pill">Login</button>
+                    <div id="cortex-login-warning" class="meta" style="display:none; margin-top:8px; max-width:560px;">
+                        <div style="font-weight:600;">If the login button is not working please:</div>
+                        <ul style="margin:6px 0 0 18px;">
+                            <li>browse <span id="cortex-login-warning-selkies">https://{host}:{port}</span></li>
+                            <li>open the "Synth Browser" from the application menu</li>
+                            <li>browse to: <span id="cortex-login-warning-url">{login_url}</span></li>
+                            <li>login to the selected service</li>
+                        </ul>
+                    </div>
                 </div>
 
                 <div class="components-list" id="components-cortex-list"></div>

@@ -3405,14 +3405,6 @@ class SeleniumLLMBase(AIPluginBase):
             )
             return False
 
-    def _on_selector_success(self, kind: str, selector: str) -> None:
-        """Hook called when a selector of `kind` successfully matched an element.
-
-        Plugins may override to record/promote selectors that worked in the wild.
-        Default implementation is a no-op.
-        """
-        return None
-
         try:
             # Combine specific selectors with common fallbacks
             all_selectors = self.login_detection_selectors + self.common_login_selectors
@@ -3422,6 +3414,7 @@ class SeleniumLLMBase(AIPluginBase):
                 try:
                     elements = self.driver.find_elements(by, selector)
                     if elements:
+                        self._on_selector_success("login_button", selector)
                         log_debug(
                             f"[{self.component_name}] Found login button with selector {selector}, user NOT logged in"
                         )
@@ -3441,6 +3434,14 @@ class SeleniumLLMBase(AIPluginBase):
                 f"[{self.component_name}] Error checking login status: {e}, assuming not logged in"
             )
             return False
+
+    def _on_selector_success(self, kind: str, selector: str) -> None:
+        """Hook called when a selector of `kind` successfully matched an element.
+
+        Plugins may override to record/promote selectors that worked in the wild.
+        Default implementation is a no-op.
+        """
+        return None
 
     # === NEW: LOGIN FLOW HELPERS ===
 

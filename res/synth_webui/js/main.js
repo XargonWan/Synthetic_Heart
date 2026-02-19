@@ -2081,7 +2081,49 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     const engineLabel = document.getElementById('cortex-engine-label');
                     const engineLoginStateLabel = document.getElementById('cortex-engine-login-state');
                     const engineLoginBtn = document.getElementById('cortex-login-btn');
+                    const engineLoginWarning = document.getElementById('cortex-login-warning');
+                    const engineLoginWarningSelkies = document.getElementById('cortex-login-warning-selkies');
+                    const engineLoginWarningUrl = document.getElementById('cortex-login-warning-url');
                     const devToggle = document.getElementById('dev-components-toggle');
+
+                    const getEngineByName = (name) => {
+                        const engines = (data.cortex && Array.isArray(data.cortex.engines)) ? data.cortex.engines : [];
+                        return engines.find((engine) => engine && engine.name === name) || null;
+                    };
+
+                    const resolveSelkiesLoginUrl = async () => {
+                        if (resolveSelkiesLoginUrl.cache) return resolveSelkiesLoginUrl.cache;
+                        let cfg = null;
+                        try {
+                            const r = await fetch('/api/selkies');
+                            if (r.ok) cfg = await r.json();
+                        } catch (e) {
+                            cfg = null;
+                        }
+
+                        const rawHost = (cfg && cfg.host) || window.location.hostname || '127.0.0.1';
+                        const loopback = (rawHost === '127.0.0.1' || rawHost === 'localhost' || rawHost === '0.0.0.0');
+                        const host = loopback ? window.location.hostname : rawHost;
+
+                        const detected = (cfg && cfg.detected_protocol) || null;
+                        const detectedPort = (cfg && cfg.detected_port) || null;
+                        const hasHttps = !!(cfg && cfg.https_port);
+                        const hasHttp = !!(cfg && cfg.http_port);
+
+                        let proto = 'https';
+                        let port = (cfg && cfg.https_port) || (detected === 'https' ? detectedPort : null) || (cfg && cfg.http_port) || detectedPort || 3000;
+                        if (detected === 'http' && !hasHttps) {
+                            proto = 'http';
+                            port = (cfg && cfg.http_port) || detectedPort || 3000;
+                        } else if (!hasHttps && hasHttp) {
+                            proto = 'http';
+                            port = (cfg && cfg.http_port) || detectedPort || 3000;
+                        }
+
+                        const url = `${proto}://${host}:${port}`;
+                        resolveSelkiesLoginUrl.cache = url;
+                        return url;
+                    };
 
                     // Helper to render engines list and select for a particular cortex kind
                     const renderForCortex = (kind) => {
@@ -2110,9 +2152,26 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         if (engineLabel) engineLabel.textContent = active ? (active.label || active.description || '') : '';
                         const loginState = active ? (active.login_state || (active.logged_in ? 'logged' : 'unlogged')) : '—';
                         if (engineLoginStateLabel) engineLoginStateLabel.textContent = `state: ${loginState}`;
+                        const isSeleniumKind = String(kind || '').toLowerCase().includes('selenium');
                         if (engineLoginBtn) {
+                            engineLoginBtn.style.display = isSeleniumKind ? '' : 'none';
                             engineLoginBtn.disabled = !active || !active.loaded;
                             engineLoginBtn.textContent = active && active.logged_in ? 'Logged' : 'Login';
+                        }
+                        if (engineLoginWarning) {
+                            engineLoginWarning.style.display = isSeleniumKind ? 'block' : 'none';
+                        }
+                        if (engineLoginWarningUrl) {
+                            const loginUrl = active ? (active.login_url || active.service_url || '') : '';
+                            engineLoginWarningUrl.textContent = loginUrl || '—';
+                        }
+                        if (engineLoginWarningSelkies) {
+                            engineLoginWarningSelkies.textContent = 'https://{host}:{port}';
+                            if (isSeleniumKind) {
+                                resolveSelkiesLoginUrl().then((url) => {
+                                    engineLoginWarningSelkies.textContent = url;
+                                }).catch(() => {});
+                            }
                         }
                     };
 
@@ -2180,12 +2239,14 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 if (!selected) return;
                                 try {
                                     const engine = getEngineByName(selected);
-                                    const loginUrl = engine ? (engine.login_url || engine.service_url || '') : '';
-                                    if (loginUrl) {
+                                    if (engine) {
                                         try {
-                                            window.open(loginUrl, '_blank', 'noopener');
+                                            const selkiesUrl = await resolveSelkiesLoginUrl();
+                                            if (selkiesUrl) {
+                                                window.open(selkiesUrl, '_blank', 'noopener');
+                                            }
                                         } catch (e) {
-                                            console.debug('[synth_webui] Failed to open login URL', e);
+                                            console.debug('[synth_webui] Failed to open Selkies URL', e);
                                         }
                                     }
                                     const res = await fetch('/api/components/cortex/login', {
@@ -2297,17 +2358,18 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
                                             // Determine protocol/port preference (prefer HTTPS)
                                             const detected = (cfg && cfg.detected_protocol) || null;
+                                            const detectedPort = (cfg && cfg.detected_port) || null;
                                             const hasHttps = (cfg && cfg.https_port) || item.selkies_protocol === 'https' || item.selkies_port;
                                             const hasHttp = (cfg && cfg.http_port) || item.selkies_protocol === 'http' || item.selkies_port;
 
                                             let proto = 'https';
-                                            let port = (cfg && cfg.https_port) || item.selkies_port || 3000;
+                                            let port = (cfg && cfg.https_port) || (detected === 'https' ? detectedPort : null) || item.selkies_port || detectedPort || 3000;
                                             if (detected === 'http' && !hasHttps) {
                                                 proto = 'http';
-                                                port = (cfg && cfg.http_port) || item.selkies_port || 3000;
+                                                port = (cfg && cfg.http_port) || (detected === 'http' ? detectedPort : null) || item.selkies_port || detectedPort || 3000;
                                             } else if (!hasHttps && hasHttp) {
                                                 proto = 'http';
-                                                port = (cfg && cfg.http_port) || item.selkies_port || 3000;
+                                                port = (cfg && cfg.http_port) || detectedPort || item.selkies_port || 3000;
                                             }
 
                                             // Prefer a dedicated login path if Selkies exposes it; otherwise open root
