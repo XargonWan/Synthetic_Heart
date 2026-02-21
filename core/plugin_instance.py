@@ -805,39 +805,6 @@ async def handle_incoming_message(
             if chain_result == "ACTIONS_EXECUTED":
                 return None
 
-            # === FALLBACK: If the LLM DID NOT produce interface actions, send a short ACK
-            # This avoids leaving users with only a reaction and no reply when the LLM's
-            # output didn't contain a `message_*` action (e.g. only memory writes or diary entries).
-            try:
-                # Heuristic: if chain_result is truthy and not ACTIONS_EXECUTED, assume
-                # no message actions were executed. Send a brief acknowledgement so the
-                # user knows their message was processed and a fuller reply may follow.
-                # Avoid duplicating when the LLM explicitly returned a user-facing message
-                # as an action (handled above with ACTIONS_EXECUTED).
-                ack_text = (
-                    "Ricevuto! Sto elaborando la tua richiesta e ti rispondo a breve."
-                )
-                # Use bot.send_message if available (Telegram/Discord wrappers support similar call signatures)
-                if bot and hasattr(bot, "send_message"):
-                    try:
-                        # Prefer to reply in-thread when possible
-                        kwargs = {"chat_id": getattr(message, "chat_id", None)}
-                        reply_id = getattr(message, "message_id", None)
-                        if reply_id:
-                            kwargs["reply_to_message_id"] = reply_id
-                        await bot.send_message(**kwargs, text=ack_text)
-                        log_debug(
-                            "[plugin_instance] Sent fallback ACK to user after LLM produced no message actions"
-                        )
-                    except Exception as e:
-                        log_debug(f"[plugin_instance] Failed to send fallback ACK: {e}")
-                else:
-                    log_debug(
-                        "[plugin_instance] No bot.send_message available for fallback ACK"
-                    )
-            except Exception as e:
-                log_debug(f"[plugin_instance] Fallback ACK logic failed: {e}")
-
             return chain_result
 
         return result

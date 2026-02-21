@@ -2111,7 +2111,6 @@ class SynthWebUIInterface:
                         "type": "message_ack",
                         "message_id": message.message_id,
                         "status": "received",
-                        "text": "📝 Ricevuto il tuo messaggio, sto elaborando...",
                     }
                     await websocket.send_json(ack_message)
                     log_info(f"{LOG_PREFIX} Sent immediate ACK to session {session_id}")
