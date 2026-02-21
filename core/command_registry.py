@@ -280,6 +280,77 @@ register_command("sleep", sleep_command)
 register_command("status", status_command)
 
 
+async def _resolve_cortex_choice(choice_raw: str) -> str:
+    """Turn a user-provided string into a canonical engine name.
+
+    The logic mirrors the parsing code used by :func:`cortex_command` so that
+    the two helpers stay in sync.  Returns the engine name on success or
+    raises ``ValueError`` with a user-friendly error message.
+    """
+    from core.config import list_available_cortexs, list_available_cortex_engines
+    from core.cortex_registry import get_cortex_registry
+
+    # build maps so we can validate kinds and disambiguate short names
+    kinds = list_available_cortexs()
+    kind_map: dict[str, list[str]] = {}
+    for k in kinds:
+        try:
+            kind_map[k] = list(list_available_cortex_engines(k))
+        except Exception:
+            kind_map[k] = []
+
+    reg = get_cortex_registry()
+
+    try:
+        all_engines = list_available_cortex_engines(None)
+    except Exception:
+        all_engines = []
+
+    reverse_map: dict[str, list[str]] = {}
+    for eng in all_engines:
+        meta = reg._engine_meta.get(eng, {}) if hasattr(reg, "_engine_meta") else {}
+        k = meta.get("cortex", None) or next(
+            (kk for kk, lst in kind_map.items() if eng in lst), None
+        )
+        reverse_map.setdefault(eng, []).append(k or "unknown")
+
+    choice = choice_raw.strip()
+    if "/" in choice:
+        parts = choice.split("/", 1)
+        if len(parts) != 2:
+            raise ValueError(
+                "❌ Invalid format. Use `/cortex <kind>/<engine>` or `/cortex <engine>`"
+            )
+        kind, name = parts[0], parts[1]
+        if kind not in kind_map:
+            raise ValueError(
+                f"❌ Cortex kind `{kind}` not recognised. Available kinds: {', '.join(sorted(kind_map.keys()))}"
+            )
+        if name not in kind_map.get(kind, []):
+            raise ValueError(f"❌ Engine `{name}` not found for cortex `{kind}`.")
+        return name
+
+    # short-name resolution across all kinds
+    candidates = [e for e in all_engines if e == choice or choice.lower() in e.lower()]
+    exact = [e for e in candidates if e == choice]
+    if len(exact) == 1:
+        return exact[0]
+    elif len(candidates) == 1:
+        return candidates[0]
+    elif len(candidates) > 1:
+        opts: list[str] = []
+        for e in sorted(set(candidates)):
+            ks = reverse_map.get(e, [])
+            for kk in sorted(ks):
+                opts.append(f"{kk}/{e}")
+        hint = "\n".join(f"/cortex {o}" for o in opts)
+        raise ValueError(
+            f"❌ Found multiple matching engines for '{choice}'. Which one did you mean?\n{hint}"
+        )
+    else:
+        raise ValueError(f"❌ Cortex `{choice}` not found.")
+
+
 async def cortex_command(*args) -> str:
     """Handle Cortex switching command.
 
@@ -289,7 +360,10 @@ async def cortex_command(*args) -> str:
       `/cortex <engine>` -> set by short name if unambiguous
 
     If the short name is ambiguous across cortex kinds, the command will ask
-    the user to disambiguate using the fully-qualified form.
+    the user to disambiguate using the fully-qualified form.  When invoked
+    without arguments the reply now includes *all* scope overrides (base/live,
+    grillo, trainer) to make it easy to see what engines are active in which
+    contexts.
     """
     from core.config import (
         get_active_cortex_engine,
@@ -298,7 +372,11 @@ async def cortex_command(*args) -> str:
     )
     from core.cortex_registry import get_cortex_registry
 
-    current = await get_active_cortex_engine()
+    # resolve active engines across scopes
+    base = await get_active_cortex_engine(None)
+    grillo = await get_active_cortex_engine("grillo")
+    trainer = await get_active_cortex_engine("trainer")
+
     reg = get_cortex_registry()
 
     # Build kind -> engines map (stable ordering)
@@ -310,7 +388,7 @@ async def cortex_command(*args) -> str:
         except Exception:
             kind_map[k] = []
 
-    # Also build reverse map engine -> [kinds]
+    # Also build reverse map engine -> [kinds] (used for disambiguation below)
     reverse_map: dict[str, list[str]] = {}
     try:
         all_engines = list_available_cortex_engines(None)
@@ -323,9 +401,29 @@ async def cortex_command(*args) -> str:
         )
         reverse_map.setdefault(eng, []).append(k or "unknown")
 
-    # No-arg -> list by kind/engine
+    # No-arg -> list by kind/engine with scope info.  We display the
+    # *raw* override value for grillo/trainer so that when the setting is
+    # "Default" (i.e. no override) the output reads "Default" instead of
+    # repeating the base engine; this matches the Web UI behaviour.
     if not args:
-        lines = [f"*Active Cortex:* `{current}`\n", "*Available Cortex Engines:*"]
+        # helper for deciding what to show
+        from core.config import config_registry
+
+        def _fmt_override(scope: str, effective: str) -> str:
+            key = "GRILLO_CORTEX" if scope == "grillo" else "TRAINER_CORTEX"
+            raw = config_registry.get_value(key, "Default")
+            if raw in (None, "", "Default", "None"):
+                return "Default"
+            return raw
+
+        grillo_display = _fmt_override("grillo", grillo)
+        trainer_display = _fmt_override("trainer", trainer)
+
+        lines: list[str] = ["*Active Cortex engines:*"]
+        lines.append(f"• live (base): `{base}`")
+        lines.append(f"• grillo override: `{grillo_display}`")
+        lines.append(f"• trainer override: `{trainer_display}`")
+        lines.append("\n*Available Cortex Engines:*")
         for k in sorted(kind_map.keys()):
             engines = kind_map.get(k) or []
             if not engines:
@@ -334,9 +432,27 @@ async def cortex_command(*args) -> str:
             for e in sorted(engines):
                 lines.append(f"• `{k}/{e}`")
         lines.append(
-            "\nTo change: `/cortex <kind>/<engine>` or `/cortex <engine>` (if unambiguous)"
+            "\nTo change base: `/cortex <kind>/<engine>` or `/cortex <engine>` (if unambiguous)"
         )
+        lines.append("To override grillo: `/cortex_grillo <engine>`")
+        lines.append("To override trainer: `/cortex_trainer <engine>`")
         return "\n".join(lines)
+
+    choice_raw = str(args[0]).strip()
+
+    try:
+        selected_engine = await _resolve_cortex_choice(choice_raw)
+    except ValueError as ve:
+        return str(ve)
+
+    # Final step: switch via central helper
+    try:
+        from core.config import switch_active_cortex_engine
+
+        await switch_active_cortex_engine(selected_engine, use_hot_swap=False)
+        return f"✅ Cortex engine dynamically updated to `{selected_engine}`."
+    except Exception as e:
+        return f"❌ Error loading plugin: {e}"
 
     choice_raw = str(args[0]).strip()
 
@@ -402,6 +518,79 @@ async def llm_alias(*args) -> str:
 
 # Deprecated alias (kept for backward compatibility)
 register_command("llm", llm_alias)
+
+
+# convenience aliases for setting particular cortex scopes
+async def cortex_live_alias(*args) -> str:
+    """Alias for `/cortex` that makes it clear we're changing the live/base engine."""
+    return await cortex_command(*args)
+
+
+async def cortex_grillo_command(*args) -> str:
+    """Show or update the Cortex engine used for grillo beats.
+
+    Usage:
+      `/cortex_grillo` -> display the current override and available engines
+      `/cortex_grillo <engine>` -> set a new engine (short names allowed)
+    """
+    from core.config import (
+        set_scope_cortex,
+        get_active_cortex_engine,
+        list_available_cortex_engines,
+    )
+
+    if not args:
+        current = await get_active_cortex_engine("grillo")
+        engines = list_available_cortex_engines(None)
+        msg = f"*Active Cortex (grillo override):* `{current}`\n\n*Available:*"
+        msg += "\n" + "\n".join(f"• `{name}`" for name in engines)
+        msg += "\n\nTo change: `/cortex_grillo <engine>`"
+        return msg
+
+    choice_raw = str(args[0]).strip()
+    try:
+        engine = await _resolve_cortex_choice(choice_raw)
+    except ValueError as ve:
+        return str(ve)
+
+    await set_scope_cortex("grillo", engine)
+    return f"✅ Cortex engine override for grillo updated to `{engine}`."
+
+
+async def cortex_trainer_command(*args) -> str:
+    """Show or update the Cortex engine used for the trainer interface.
+
+    Works exactly like :func:`cortex_grillo_command` but targets the
+    ``trainer`` scope instead of ``grillo``.
+    """
+    from core.config import (
+        set_scope_cortex,
+        get_active_cortex_engine,
+        list_available_cortex_engines,
+    )
+
+    if not args:
+        current = await get_active_cortex_engine("trainer")
+        engines = list_available_cortex_engines(None)
+        msg = f"*Active Cortex (trainer override):* `{current}`\n\n*Available:*"
+        msg += "\n" + "\n".join(f"• `{name}`" for name in engines)
+        msg += "\n\nTo change: `/cortex_trainer <engine>`"
+        return msg
+
+    choice_raw = str(args[0]).strip()
+    try:
+        engine = await _resolve_cortex_choice(choice_raw)
+    except ValueError as ve:
+        return str(ve)
+
+    await set_scope_cortex("trainer", engine)
+    return f"✅ Cortex engine override for trainer updated to `{engine}`."
+
+
+# register the new helper commands
+register_command("cortex_live", cortex_live_alias)
+register_command("cortex_grillo", cortex_grillo_command)
+register_command("cortex_trainer", cortex_trainer_command)
 
 
 async def model_command(*args) -> str:
@@ -693,7 +882,7 @@ async def cancel_command(*args, interface_context=None) -> str:
         interface_registry = get_interface_registry()
         # Get current interface dynamically
         interface_name = getattr(
-            context.get("bot"), "get_interface_id", lambda: "unknown"
+            interface_context.get("bot"), "get_interface_id", lambda: "unknown"
         )()
         trainer_id = interface_registry.get_trainer_id(interface_name)
 

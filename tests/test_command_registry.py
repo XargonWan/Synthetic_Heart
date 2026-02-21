@@ -27,6 +27,20 @@ class TestCommandRegistry(unittest.TestCase):
         with self.assertRaises(ValueError):
             await execute_command("unknown_command_that_does_not_exist")
 
+    async def test_scope_commands_registered(self):
+        """New cortex scope helpers should appear in the command list."""
+        cmds = list_commands()
+        self.assertIn("cortex_live", cmds)
+        self.assertIn("cortex_grillo", cmds)
+        self.assertIn("cortex_trainer", cmds)
+
+    async def test_handle_scope_command_message(self):
+        """Generic handler should recognise the new commands (returning a string)."""
+        # patch underlying handler to avoid side effects
+        with patch("core.command_registry.cortex_live_alias", new=AsyncMock(return_value="ok")):
+            res = await handle_command_message("/cortex_live manual")
+            self.assertEqual(res, "ok")
+
 
 if __name__ == "__main__":
     unittest.main()
