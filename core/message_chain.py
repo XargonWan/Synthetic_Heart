@@ -448,11 +448,9 @@ async def handle_incoming_message(
 
     # Check for action result delivery context - these responses should have minimal retries
     # to prevent cascading loops when processing action outputs (e.g., memory_search results)
-    is_action_result = False
     try:
         system_message = ctx.get("system_message", {})
         if isinstance(system_message, dict):
-            is_action_result = system_message.get("is_action_result_delivery", False)
             custom_max = system_message.get("max_correction_attempts")
             if custom_max is not None and isinstance(custom_max, int):
                 max_retries = min(max_retries, custom_max)
@@ -518,6 +516,43 @@ async def handle_incoming_message(
                 actions = parsed
             elif isinstance(parsed, dict) and "type" in parsed:
                 actions = [parsed]
+            elif isinstance(parsed, dict) and "recovery_actions" in parsed:
+                # Debrief plugins sometimes return {"recovery_actions": [{"action_type": ..., "payload": ...}]}
+                # Normalize this to the standard {"actions": [{"type": ..., "payload": ...}]} format.
+                raw_recovery = parsed.get("recovery_actions")
+                if isinstance(raw_recovery, list):
+                    normalized_recovery = []
+                    for item in raw_recovery:
+                        if not isinstance(item, dict):
+                            continue
+                        # action_type → type (debrief uses action_type, core uses type)
+                        atype = (
+                            item.get("action_type")
+                            or item.get("type")
+                            or item.get("action")
+                        )
+                        if not atype:
+                            continue
+                        normalized_recovery.append(
+                            {"type": atype, "payload": item.get("payload", {})}
+                        )
+                    if normalized_recovery:
+                        log_info(
+                            f"[message_chain] 🔄 Normalizing recovery_actions → actions "
+                            f"({len(normalized_recovery)} item(s)): "
+                            f"{[a['type'] for a in normalized_recovery]}"
+                        )
+                        actions = normalized_recovery
+                    else:
+                        log_warning(
+                            "[message_chain] recovery_actions list was empty or malformed - triggering corrector"
+                        )
+                        parsed = None
+                else:
+                    log_warning(
+                        "[message_chain] recovery_actions field is not a list - triggering corrector"
+                    )
+                    parsed = None
             elif isinstance(parsed, dict) and "action" in parsed:
                 # Normalize Gemini-style {"action": "...", "action_input"|"content": "..."} to standard format
                 # This handles LLMs that output the older single-action format

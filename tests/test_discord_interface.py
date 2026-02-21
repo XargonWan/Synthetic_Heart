@@ -1,5 +1,7 @@
 import asyncio
 from types import SimpleNamespace
+
+import pytest
 from interface.discord_interface import DiscordInterface
 
 

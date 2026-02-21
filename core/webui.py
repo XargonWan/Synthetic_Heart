@@ -1060,17 +1060,29 @@ class SynthWebUIInterface:
                     ctx.verify_mode = ssl.CERT_NONE
                     with socket.create_connection((host, port), timeout=1) as sock:
                         with ctx.wrap_socket(sock, server_hostname=host) as ssock:
-                            return {"protocol": "https", "details": f"TLS handshake succeeded on port {port}", "port": port}
+                            return {
+                                "protocol": "https",
+                                "details": f"TLS handshake succeeded on port {port}",
+                                "port": port,
+                            }
                 else:
                     with socket.create_connection((host, port), timeout=1) as sock:
-                        return {"protocol": "http", "details": f"Plain TCP connect succeeded on port {port}", "port": port}
+                        return {
+                            "protocol": "http",
+                            "details": f"Plain TCP connect succeeded on port {port}",
+                            "port": port,
+                        }
             except Exception as e:
                 if proto == "https":
                     https_err = str(e)
                 else:
                     http_err = str(e)
 
-        return {"protocol": "none", "details": f"https_err={https_err}; http_err={http_err}", "port": None}
+        return {
+            "protocol": "none",
+            "details": f"https_err={https_err}; http_err={http_err}",
+            "port": None,
+        }
 
     def _get_chat_resizable(self) -> bool:
         """Return whether chat should be resizable (from config/DB)."""
@@ -3206,9 +3218,19 @@ class SynthWebUIInterface:
                 )
 
             # Cortex selection dropdowns (registered cortex engines)
-            if entry.get("key") in ("BASE_CORTEX", "GRILLO_CORTEX", "TRAINER_CORTEX"):
+            if entry.get("key") in (
+                "BASE_CORTEX",
+                "GRILLO_CORTEX",
+                "TRAINER_CORTEX",
+                "LIVE_CORTEX",
+            ):
                 ui_type = "select"
-                if entry.get("key") in ("GRILLO_CORTEX", "TRAINER_CORTEX"):
+                if entry.get("key") == "LIVE_CORTEX":
+                    from core.cortex_registry import get_cortex_registry as _get_cr
+
+                    live_engines = _get_cr().get_engines_by_cortex("live")
+                    options = ["Default"] + live_engines
+                elif entry.get("key") in ("GRILLO_CORTEX", "TRAINER_CORTEX"):
                     options = ["Default"] + available_cortex_engines
                 else:
                     options = available_cortex_engines
@@ -3229,6 +3251,7 @@ class SynthWebUIInterface:
                 "GRILLO_OBSERVER_": "Grillo Observer",
                 "HISTORY_EVALUATOR_": "History Evaluator",
                 "GRILLO_": "Grillo",
+                "LIVE_": "Live",
                 "SYNTH_": "Persona",
             }
             for prefix, label in subgroup_map.items():
@@ -6201,6 +6224,38 @@ class SynthWebUIInterface:
         except Exception:
             by_cortex = {}
 
+        # Build scope overrides for the UI (Grillo, Trainer, Live cortex selectors)
+        cortex_scopes: list[dict] = []
+        try:
+            all_engines_sorted = sorted(engine_names)
+            live_engines: list[str] = []
+            try:
+                live_engines = cortex_reg.get_engines_by_cortex("live")
+            except Exception:
+                pass
+            cortex_scopes = [
+                {
+                    "key": "GRILLO_CORTEX",
+                    "label": "Grillo",
+                    "value": config_registry.get_value("GRILLO_CORTEX", "Default"),
+                    "options": ["Default"] + all_engines_sorted,
+                },
+                {
+                    "key": "TRAINER_CORTEX",
+                    "label": "Trainer",
+                    "value": config_registry.get_value("TRAINER_CORTEX", "Default"),
+                    "options": ["Default"] + all_engines_sorted,
+                },
+                {
+                    "key": "LIVE_CORTEX",
+                    "label": "Live",
+                    "value": config_registry.get_value("LIVE_CORTEX", "Default"),
+                    "options": ["Default"] + live_engines,
+                },
+            ]
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} unable to build cortex scopes: {exc}")
+
         payload = {
             "cortex": {
                 "available_kinds": available_cortexs,
@@ -6208,6 +6263,7 @@ class SynthWebUIInterface:
                 "active_engine": active_engine,
                 "engines": cortex_engines,
                 "by_cortex": by_cortex,
+                "scopes": cortex_scopes,
             },
             "interfaces": interfaces_data,
             "plugins": plugins_data,

@@ -823,9 +823,13 @@ async def ensure_plugin_tables() -> None:
                         await _conn.commit()
                     except Exception:
                         pass
-                log_info("[db] Minimal placeholder `ai_diary` / `ai_diary_archive` created (plugin must migrate full schema)")
+                log_info(
+                    "[db] Minimal placeholder `ai_diary` / `ai_diary_archive` created (plugin must migrate full schema)"
+                )
             except Exception as _fallback_err:
-                log_warning(f"[db] Failed to create minimal placeholder ai_diary tables: {_fallback_err}")
+                log_warning(
+                    f"[db] Failed to create minimal placeholder ai_diary tables: {_fallback_err}"
+                )
 
         async with get_conn_ctx() as conn:
             async with conn.cursor() as cur:

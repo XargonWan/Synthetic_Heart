@@ -106,6 +106,7 @@ BASE_CORTEX = config_registry.get_var(
     description="Default cortex engine used system-wide unless overridden by scope.",
     group="core",
     component="cortex",
+    hidden=True,  # Managed via the Cortex Engines component selector
 )
 
 GRILLO_CORTEX = config_registry.get_var(
@@ -115,6 +116,7 @@ GRILLO_CORTEX = config_registry.get_var(
     description="Cortex engine used for Grillo (Default means Base Cortex).",
     group="core",
     component="cortex",
+    hidden=True,  # Managed via the Cortex Engines scope selectors
 )
 
 TRAINER_CORTEX = config_registry.get_var(
@@ -126,6 +128,17 @@ TRAINER_CORTEX = config_registry.get_var(
     " means Base Cortex).",
     group="core",
     component="cortex",
+    hidden=True,  # Managed via the Cortex Engines scope selectors
+)
+
+LIVE_CORTEX = config_registry.get_var(
+    "LIVE_CORTEX",
+    "Default",
+    label="Live Cortex",
+    description="Cortex engine used for live voice sessions (Default means Base Cortex). Only 'live' kind engines are selectable.",
+    group="core",
+    component="cortex",
+    hidden=True,  # Managed via the Cortex Engines scope selectors
 )
 
 # --- LogChat configuration (use config_registry so exposed-variable APIs are consistent)
@@ -172,6 +185,8 @@ async def get_active_cortex_engine(scope: str | None = None) -> str:
             override = config_registry.get_value("GRILLO_CORTEX", "Default")
         elif scope == "trainer":
             override = config_registry.get_value("TRAINER_CORTEX", "Default")
+        elif scope == "live":
+            override = config_registry.get_value("LIVE_CORTEX", "Default")
         else:
             override = "Default"
 
@@ -204,13 +219,58 @@ async def set_base_cortex(name: str) -> None:
 
 async def set_scope_cortex(scope: str, name: str) -> None:
     """Persist a scope-specific cortex override."""
-    key = "GRILLO_CORTEX" if scope == "grillo" else "TRAINER_CORTEX"
+    if scope == "grillo":
+        key = "GRILLO_CORTEX"
+    elif scope == "live":
+        key = "LIVE_CORTEX"
+    else:
+        key = "TRAINER_CORTEX"
     try:
         await config_registry.set_value(key, name)
         log_info(f"[config] 💾 Saved {key} to database: {name}")
     except Exception as e:
         log_error(f"[config] ❌ Error saving {key} to database: {repr(e)}")
         raise
+
+
+# ---------------------------------------------------------------------------
+# Per-path cortex overrides (in-memory, volatile — reset on restart)
+# Used by LiveSessionManager to route a specific interface_path to a live engine
+# without affecting the global BASE_CORTEX or scope overrides.
+# ---------------------------------------------------------------------------
+_path_cortex_overrides: dict[str, str] = {}
+
+
+def set_path_cortex_override(interface_path: str, engine_name: str) -> None:
+    """Override the cortex engine for a specific interface_path (in-memory, volatile)."""
+    _path_cortex_overrides[interface_path] = engine_name
+    log_info(
+        f"[config] 🔀 Per-path cortex override set: {interface_path} → {engine_name}"
+    )
+
+
+def clear_path_cortex_override(interface_path: str) -> None:
+    """Remove the per-path cortex override, restoring normal routing."""
+    removed = _path_cortex_overrides.pop(interface_path, None)
+    if removed is not None:
+        log_info(f"[config] 🔀 Per-path cortex override cleared for: {interface_path}")
+
+
+async def get_active_cortex_for_path(
+    interface_path: str | None,
+    scope: str | None = None,
+) -> str:
+    """Resolve the cortex engine for an interface_path.
+
+    Priority:
+    1. Per-path in-memory override (set e.g. during a live voice session).
+    2. get_active_cortex_engine(scope) — normal scope-based routing.
+    """
+    if interface_path and interface_path in _path_cortex_overrides:
+        engine = _path_cortex_overrides[interface_path]
+        log_debug(f"[config] 🧠 Per-path cortex ({interface_path}): {engine}")
+        return engine
+    return await get_active_cortex_engine(scope=scope)
 
 
 async def switch_active_cortex_engine(name: str, use_hot_swap: bool = True):

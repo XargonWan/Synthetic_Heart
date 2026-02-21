@@ -357,7 +357,9 @@ async def build_json_prompt(
     # debug: log full prompt payload for reconstruction
     try:
         full_text = json_dumps(input_payload)
-        log_debug(f"[json_prompt] ⏹️ Final prompt built ({len(full_text)} chars): {full_text}")
+        log_debug(
+            f"[json_prompt] ⏹️ Final prompt built ({len(full_text)} chars): {full_text}"
+        )
     except Exception as e:
         log_debug(f"[json_prompt] Failed to dump final prompt for logging: {e}")
 

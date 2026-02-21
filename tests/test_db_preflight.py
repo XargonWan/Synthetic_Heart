@@ -140,7 +140,11 @@ async def test_ensure_plugin_tables_creates_minimal_ai_diary_placeholder(monkeyp
     await db.ensure_plugin_tables()
 
     # Find the ai_diary CREATE statement
-    ai_creates = [s for s in executed_sql if s and "create table" in s.lower() and "ai_diary" in s.lower()]
+    ai_creates = [
+        s
+        for s in executed_sql
+        if s and "create table" in s.lower() and "ai_diary" in s.lower()
+    ]
     assert ai_creates, f"No ai_diary CREATE found in executed SQL: {executed_sql}"
 
     ai_sql = "\n".join(ai_creates).lower()
@@ -149,5 +153,13 @@ async def test_ensure_plugin_tables_creates_minimal_ai_diary_placeholder(monkeyp
     assert "content" in ai_sql and "timestamp" in ai_sql and "id" in ai_sql
 
     # Must NOT contain plugin-managed columns (guard against schema duplication)
-    for forbidden in ("context_tags", "involved_users", "personal_thought", "interface", "chat_id"):
-        assert forbidden not in ai_sql, f"Fallback created plugin-only column: {forbidden}"
+    for forbidden in (
+        "context_tags",
+        "involved_users",
+        "personal_thought",
+        "interface",
+        "chat_id",
+    ):
+        assert forbidden not in ai_sql, (
+            f"Fallback created plugin-only column: {forbidden}"
+        )

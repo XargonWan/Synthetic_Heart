@@ -22,6 +22,9 @@ CAPABILITIES = {
 
 class GeminiLivePlugin:
     display_name = "Gemini Live (Prototype)"
+    # Maximum live session duration in seconds (declared, not exposed).
+    # LiveSessionManager reads this via reflection to schedule auto-rejoin.
+    MAX_SESSION_SECONDS: int = 900  # 15 minutes
 
     def __init__(self, notify_fn=None):
         # Queues for outgoing sensory data
