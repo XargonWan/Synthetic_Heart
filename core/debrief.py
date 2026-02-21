@@ -57,6 +57,10 @@ async def run_debrief(
     original_message: Any = None,
 ) -> None:
     enabled = bool(config_registry.get_var("ENABLE_DEBRIEF", True))
+    # log entry and received data
+    log_debug(
+        f"[debrief] run_debrief start: enabled={enabled} processed={processed_actions!r} failed={failed_actions!r} results={results!r} context={context!r} original_message={original_message!r}"
+    )
     if not enabled:
         log_debug("[debrief] ENABLE_DEBRIEF disabled, skipping debrief hooks")
         return
@@ -70,10 +74,14 @@ async def run_debrief(
         plugins = []
 
     recovery_actions: List[Dict[str, Any]] = []
+    log_debug("[debrief] beginning plugin on_debrief loop")
 
     for plugin in plugins:
         try:
             if hasattr(plugin, "on_debrief"):
+                log_debug(
+                    f"[debrief] calling plugin {plugin.__class__.__name__}.on_debrief"
+                )
                 try:
                     rval = plugin.on_debrief(
                         processed_actions=processed_actions,
@@ -92,6 +100,9 @@ async def run_debrief(
                     )
                 if asyncio.iscoroutine(rval):
                     await rval
+                log_debug(
+                    f"[debrief] plugin {plugin.__class__.__name__} returned {rval!r}"
+                )
                 if isinstance(rval, dict) and rval.get("recovery_actions"):
                     actions = rval.get("recovery_actions")
                     if isinstance(actions, list):
@@ -102,6 +113,7 @@ async def run_debrief(
             )
 
     if recovery_actions:
+        log_debug(f"[debrief] collected recovery_actions: {recovery_actions!r}")
         policy = str(
             config_registry.get_value(
                 "AUTO_RECOVERY_POLICY", "require_review", value_type=str
@@ -161,4 +173,5 @@ async def run_debrief(
             except Exception:
                 pass
 
+    log_debug(f"[debrief] final context after debrief: {context!r}")
     log_info("[debrief] Debrief hooks completed")

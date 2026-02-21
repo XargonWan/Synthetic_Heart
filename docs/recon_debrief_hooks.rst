@@ -94,3 +94,11 @@ Changelog
 ---------
 - Recon replaces the legacy preflight system and consolidates language,
   tone and memory-detection into plugin-driven preflight contributions.
+- Added comprehensive debug logging for both Recon and Debrief; logs now
+  include input parameters, generated system/user prompts, LLM responses,
+  parsed data, plugin dispatch details and recovery-action decisions.
+- Prompt builder and plugin-instance components now emit full JSON prompt
+  dumps at DEBUG level (`[json_prompt]` and plugin-instance `🌐 JSON PROMPT`),
+  along with raw LLM responses. When `LOG_LLM_TRAFFIC_ENABLED` is enabled a
+  separate JSONL file is produced. Together these allow the entire sequence of
+  prompts/responses to be replayed from the logs.

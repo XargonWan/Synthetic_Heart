@@ -623,6 +623,11 @@ async def handle_incoming_message(
         log_info(
             f"[flow] -> LLM plugin: handing off chat_id={getattr(message, 'chat_id', None)} interface={interface} prompt_len={len(json_dumps(prompt)) if isinstance(prompt, (dict, list)) else len(str(prompt))} pre_reduction_size={pre_size}"
         )
+        # debug log of the full prompt content for reconstruction
+        try:
+            log_debug(f"[flow] prompt content: {json_dumps(prompt)}")
+        except Exception:
+            pass
     except Exception:
         log_info(
             f"[flow] -> LLM plugin: handing off chat_id={getattr(message, 'chat_id', None)} interface={interface}"
@@ -638,6 +643,11 @@ async def handle_incoming_message(
             _log_llm_traffic(prompt, result, interface)
         except Exception as e:
             log_error(f"[plugin_instance] Failed to log LLM traffic: {e}")
+        # debug log response for full transaction replay
+        try:
+            log_debug(f"[flow] LLM raw response: {result}")
+        except Exception:
+            pass
 
         # Update Grillo activity log if this was a Grillo beat
         # This ensures the raw LLM response is persisted even if actions fail or don't write back
