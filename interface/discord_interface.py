@@ -26,7 +26,7 @@ from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.chat_attention import set_attention, evaluate_triggers
 from core.transport_layer import universal_send
 from core.core_initializer import register_interface
-from core.command_registry import execute_command
+from core.command_registry import execute_command, handle_command_message, list_commands
 from core import message_queue
 from plugins.chat_link import ChatLinkStore
 from core.config_manager import config_registry
@@ -105,16 +105,237 @@ class DiscordInterface:
             log_warning(f"[discord_interface] Failed to register trainer ID: {e}")
 
         self.client = None
+        self._command_tree = None
         if discord is not None:  # pragma: no branch
             intents = discord.Intents.default()
             intents.message_content = True
             self.client = discord.Client(intents=intents)
+
+            # Native Discord application command tree (registered slash commands)
+            from discord import app_commands as _app_commands
+
+            self._command_tree = _app_commands.CommandTree(self.client)
+
+            # /leave [target] — registered as a real Discord application command so
+            # Discord's slash-command picker recognises it and the interaction is
+            # delivered even when the user picks it from the autocomplete UI.
+            @self._command_tree.command(
+                name="leave",
+                description="Leave the current Discord voice channel",
+            )
+            @_app_commands.describe(
+                target="Guild ID or channel name (omit when only in one channel)"
+            )
+            async def _app_leave(
+                interaction: discord.Interaction, target: str = ""
+            ) -> None:
+                await interaction.response.defer(ephemeral=False)
+                connections: list[tuple[Any, Any, str | None]] = [
+                    (
+                        g,
+                        vc,
+                        getattr(getattr(vc, "channel", None), "name", None),
+                    )
+                    for vc in getattr(self.client, "voice_clients", [])
+                    if (g := getattr(vc, "guild", None)) is not None
+                ]
+
+                async def _do(g_obj: Any) -> dict:
+                    await self._stop_live_voice(g_obj.id)
+                    return await self._leave_voice(g_obj.id)
+
+                async def _reply(text: str) -> None:
+                    await interaction.followup.send(text)
+
+                target = target.strip()
+                if target:
+                    matched = next(
+                        (
+                            g
+                            for g, _vc, chan in connections
+                            if str(g.id) == target
+                            or (chan and chan.lower() == target.lower())
+                        ),
+                        None,
+                    )
+                    if not matched:
+                        await _reply(f"❌ Not in a voice channel matching '{target}'.")
+                        return
+                    res = await _do(matched)
+                    await _reply(
+                        f"👋 Left voice channel in guild **{matched.name}**."
+                        if res.get("status") == "success"
+                        else f"❌ {res.get('message', 'Failed to leave.')}"
+                    )
+                    return
+
+                if not connections:
+                    await _reply("❌ I'm not in any voice channels.")
+                    return
+                if len(connections) == 1:
+                    g_obj, _, _ = connections[0]
+                    res = await _do(g_obj)
+                    await _reply(
+                        "👋 Left voice channel."
+                        if res.get("status") == "success"
+                        else f"❌ {res.get('message', 'Failed to leave.')}"
+                    )
+                    return
+
+                lines = [
+                    f"• **{g.name}** — #{chan or '?'} (ID: `{g.id}`)"
+                    for g, _, chan in connections
+                ]
+                await _reply(
+                    "I'm in multiple voice channels:\n"
+                    + "\n".join(lines)
+                    + "\n\nUse `/leave <guild_id>` to specify one."
+                )
+
+            # ------------------------------------------------------------------
+            # Dynamic registration: all core registry commands → Discord app cmds
+            # ------------------------------------------------------------------
+            def _make_core_cmd_handler(
+                _name: str,
+            ):
+                """Factory: returns a Discord interaction handler for a core command.
+
+                Uses ``handle_command_message`` (same path as Telegram) so that
+                permission checks, routing and interface_context are applied
+                consistently across interfaces.
+                """
+
+                async def _handler(
+                    interaction: discord.Interaction, args: str = ""
+                ) -> None:
+                    await interaction.response.defer(ephemeral=False)
+                    user_id = str(interaction.user.id)
+                    # Build a Discord-compatible interface_context.
+                    # Telegram-specific keys (update/context/bot) are absent;
+                    # commands that only require interface_id / discord_interaction
+                    # will work; Telegram-only commands will gracefully return an
+                    # error rather than crash.
+                    interface_ctx = {
+                        "discord_interaction": interaction,
+                        "discord_interface": self,
+                        "interface_id": "discord_bot",
+                        # Compat stubs so commands that probe for Telegram keys
+                        # don't raise AttributeError
+                        "update": None,
+                        "context": None,
+                        "bot": None,
+                    }
+                    cmd_text = f"/{_name} {args}".strip()
+                    try:
+                        response = await handle_command_message(
+                            cmd_text, user_id, "discord_bot", interface_ctx
+                        )
+                        if response:
+                            # Discord messages are capped at 2000 chars
+                            await interaction.followup.send(response[:2000])
+                    except Exception as _ce:
+                        log_error(
+                            f"[discord_interface] app_command /{_name} error: {_ce}"
+                        )
+                        await interaction.followup.send(
+                            f"❌ Error executing `/{_name}`: {_ce}"
+                        )
+
+                # discord.py reads the callback name to derive the command name,
+                # so we rename the inner function to match the command.
+                _handler.__name__ = _name
+                return _handler
+
+            # Register every command from the core registry as a Discord app command.
+            # /leave is already registered above as a custom command; skip it here.
+            _SKIP_CMDS: set[str] = {"leave", "help"}  # help has its own below
+
+            for _cmd_name in list_commands():
+                if _cmd_name in _SKIP_CMDS:
+                    continue
+                if len(_cmd_name) > 32:  # Discord app command name limit
+                    continue
+                try:
+                    _core_handler = _make_core_cmd_handler(_cmd_name)
+                    _app_cmd = _app_commands.Command(
+                        name=_cmd_name,
+                        description=f"SyntH: /{_cmd_name}",
+                        callback=_core_handler,
+                    )
+                    self._command_tree.add_command(_app_cmd)
+                except Exception as _reg_err:
+                    log_warning(
+                        f"[discord_interface] Failed to register app command '{_cmd_name}': {_reg_err}"
+                    )
+
+            # /help — explicitly registered so it shows a proper description
+            @self._command_tree.command(
+                name="help", description="Show available SyntH commands"
+            )
+            async def _app_help(interaction: discord.Interaction) -> None:
+                await interaction.response.defer(ephemeral=False)
+                try:
+                    from core.command_registry import execute_command as _exec
+
+                    response = await _exec("help")
+                    if response:
+                        await interaction.followup.send(response[:2000])
+                except Exception as _he:
+                    await interaction.followup.send(f"❌ {_he}")
 
             @self.client.event
             async def on_ready():
                 log_info(
                     f"[discord_interface] Discord client ready as {self.client.user}"
                 )
+                # Step 1: copy global commands into each guild and sync per-guild.
+                # Guild commands appear in the picker within seconds (no propagation delay).
+                total_synced = 0
+                for _guild in self.client.guilds:
+                    try:
+                        self._command_tree.copy_global_to(guild=_guild)
+                        guild_synced = await self._command_tree.sync(guild=_guild)
+                        total_synced += len(guild_synced)
+                        log_info(
+                            f"[discord_interface] Synced {len(guild_synced)} command(s) "
+                            f"to guild '{_guild.name}' ({_guild.id})"
+                        )
+                    except Exception as _gs_err:
+                        log_warning(
+                            f"[discord_interface] Guild sync failed for {_guild.id}: {_gs_err}"
+                        )
+                log_info(
+                    f"[discord_interface] Total: {total_synced} command slot(s) synced "
+                    f"across {len(self.client.guilds)} guild(s)"
+                )
+
+                # Step 2: clear global commands from Discord's API so they don't
+                # show alongside the guild-specific ones (which would cause duplicates).
+                try:
+                    self._command_tree.clear_commands(guild=None)
+                    await self._command_tree.sync()
+                    log_info(
+                        "[discord_interface] Cleared global application commands (dedup)"
+                    )
+                except Exception as _clr_err:
+                    log_warning(
+                        f"[discord_interface] Failed to clear global commands: {_clr_err}"
+                    )
+
+            @self.client.event
+            async def on_guild_join(guild: discord.Guild) -> None:
+                """Sync commands immediately when invited to a new guild."""
+                try:
+                    self._command_tree.copy_global_to(guild=guild)
+                    guild_synced = await self._command_tree.sync(guild=guild)
+                    log_info(
+                        f"[discord_interface] Joined guild '{guild.name}' ({guild.id}), "
+                        f"synced {len(guild_synced)} command(s)"
+                    )
+                except Exception as _gj_err:
+                    log_warning(
+                        f"[discord_interface] Guild join sync failed for {guild.id}: {_gj_err}"
+                    )
 
             @self.client.event
             async def on_message(message):
@@ -122,6 +343,10 @@ class DiscordInterface:
                     f"[discord_interface] Raw message received: {message.content} from {message.author}"
                 )
                 await self._process_message(message)
+
+            @self.client.event
+            async def on_interaction(interaction: discord.Interaction) -> None:
+                await self._command_tree.on_interaction(interaction)
 
             @self.client.event
             async def on_voice_state_update(member, before, after):
@@ -258,9 +483,9 @@ class DiscordInterface:
                 "optional_fields": ["interface_path", "target", "reply_to_message_id"],
             },
             "join_voice_discord": {
-                "description": "Join a Discord voice channel, optionally starting a live voice session.",
+                "description": "Join a Discord voice channel.",
                 "required_fields": [],
-                "optional_fields": ["channel_id", "interface_path", "start_live_voice"],
+                "optional_fields": ["channel_id", "interface_path"],
             },
             "leave_voice_discord": {
                 "description": "Leave the current Discord voice channel.",
@@ -318,17 +543,10 @@ class DiscordInterface:
                         "description": "Optional interface path to derive guild/channel.",
                         "optional": True,
                     },
-                    "start_live_voice": {
-                        "type": "boolean",
-                        "example": True,
-                        "description": "When true, starts a live bidirectional voice session (Gemini Live) immediately after joining.",
-                        "optional": True,
-                    },
                 },
                 "important_notes": [
                     "If the sender is currently in a voice channel, their voice_channel_id is available in input.payload.source.voice_channel_id — use it as channel_id.",
                     "If voice_channel_id is not available and no channel_id is known, omit channel_id and the system will attempt auto-resolve.",
-                    "Set start_live_voice=true to enable real-time bidirectional voice conversation via the configured live engine.",
                 ],
             }
         if action_name == "leave_voice_discord":
@@ -650,18 +868,32 @@ class DiscordInterface:
             guild = channel.guild
             guild_id = guild.id
 
-            # Get or create the Live session manager from the Gemini engine
-            from core.plugin_instance import plugin as active_engine
+            # Resolve a live-capable engine from the cortex registry WITHOUT
+            # touching the globally active cortex (which may be any engine that
+            # does not support the Live API).  We look for the first registered
+            # engine that exposes get_live_session_manager().
+            from core.cortex_registry import get_cortex_registry as _get_creg
 
-            if not active_engine or not hasattr(
-                active_engine, "get_live_session_manager"
-            ):
+            _creg = _get_creg()
+            _live_capable_engine = None
+            for _en in _creg.get_available_engines():
+                _e = _creg.get_engine(_en)
+                if _e and hasattr(_e, "get_live_session_manager"):
+                    _live_capable_engine = _e
+                    log_info(f"[live_voice] Using engine '{_en}' for Live API")
+                    break
+
+            if not _live_capable_engine:
                 return {
                     "status": "failed",
-                    "message": "Active LLM engine does not support Live API",
+                    "message": (
+                        "No registered engine supports the Live API "
+                        "(get_live_session_manager not found). "
+                        "Enable a live-capable engine in the cortex settings."
+                    ),
                 }
 
-            manager = active_engine.get_live_session_manager()
+            manager = _live_capable_engine.get_live_session_manager()
             if not manager:
                 return {
                     "status": "failed",
@@ -800,6 +1032,18 @@ class DiscordInterface:
             sink = LiveVoiceAudioSink(manager, guild_id)
             vc.listen(sink)
 
+            # Activate per-path cortex routing for the live voice interface
+            # path so that any message-chain activity on this path uses the
+            # live engine rather than the global cortex.
+            try:
+                from cortex.live.live_base import LiveSessionManager as _LSM
+
+                await _LSM.get_instance().activate_live_for_path(
+                    live_interface_path, guild_id
+                )
+            except Exception as _ae:
+                log_warning(f"[live_voice] activate_live_for_path failed: {_ae}")
+
             # Store state for cleanup
             if not hasattr(self, "_live_voice_state"):
                 self._live_voice_state: dict[int, dict] = {}
@@ -809,6 +1053,8 @@ class DiscordInterface:
                 "sink": sink,
                 "source": source,
                 "turn_count": 0,
+                "live_engine": _live_capable_engine,
+                "interface_path": live_interface_path,
             }
 
             log_info(
@@ -827,11 +1073,12 @@ class DiscordInterface:
     async def _stop_live_voice(self, guild_id: int) -> dict[str, str]:
         """Stop the Gemini Live API voice session for a guild."""
         try:
-            # Stop the Live API session
-            from core.plugin_instance import plugin as active_engine
-
-            if active_engine and hasattr(active_engine, "stop_live_voice_session"):
-                await active_engine.stop_live_voice_session(guild_id)
+            # Use the live engine stored at session start — NOT the global cortex,
+            # which may be a different engine (e.g. selenium_gemini).
+            _state_now = getattr(self, "_live_voice_state", {}).get(guild_id, {})
+            _live_eng = _state_now.get("live_engine")
+            if _live_eng and hasattr(_live_eng, "stop_live_voice_session"):
+                await _live_eng.stop_live_voice_session(guild_id)
 
             # Stop listening and playing
             if self.client:
@@ -932,12 +1179,27 @@ class DiscordInterface:
             await self._stop_live_voice(guild_id)
             return
 
-        # Case 3: A user left, check if the bot is alone in the channel
+        # Case 3: A user changed voice state (left/moved). Determine whether
+        # the channel the bot was in is now empty of humans after the change.
         if before.channel is not None:
             state = self._live_voice_state.get(guild_id)
             if state and state.get("channel_id") == before.channel.id:
-                # Count non-bot members remaining in the channel
-                human_members = [m for m in before.channel.members if not m.bot]
+                # the event gives us the member who triggered the update; compute
+                # the remaining human members by removing that user from the
+                # ``before.channel.members`` list.  This avoids relying on the
+                # client's cache being updated before the event handler runs.
+                leaving_id = getattr(member, "id", None)
+                human_members = [
+                    m
+                    for m in getattr(before.channel, "members", [])
+                    if not getattr(m, "bot", False) and m.id != leaving_id
+                ]
+
+                log_debug(
+                    f"[discord_interface] remaining human_members after {leaving_id} left guild {guild_id}: "
+                    f"{[m.id for m in human_members]}"
+                )
+
                 if not human_members:
                     log_info(
                         f"[discord_interface] All users left voice in guild {guild_id}, "
@@ -1120,21 +1382,102 @@ class DiscordInterface:
                             message.channel.id, "❌ Not in a server."
                         )
                         return
-                    await self._stop_live_voice(guild.id)
-                    leave_result = await self._leave_voice(guild.id)
-                    if leave_result.get("status") == "success":
-                        await self._discord_send(
-                            message.channel.id, "👋 Left voice channel."
-                        )
-                    else:
+
+                    # gather all active voice clients; this is more reliable than
+                    # iterating guilds because ``guild.voice_client`` can be None
+                    # while ``client.voice_clients`` still contains a connection.
+                    connections: list[tuple[Any, Any, str | None]] = []
+                    if self.client:
+                        for vc in getattr(self.client, "voice_clients", []):
+                            g = getattr(vc, "guild", None)
+                            chan_name = None
+                            if hasattr(vc, "channel"):
+                                chan_name = getattr(vc.channel, "name", None)
+                            if g is not None:
+                                connections.append((g, vc, chan_name))
+
+                    # helper to perform leave on a specific guild object
+                    async def _do_leave(g_obj):
+                        await self._stop_live_voice(g_obj.id)
+                        res = await self._leave_voice(g_obj.id)
+                        return res
+
+                    # if a specific target was provided, try to match it
+                    if args:
+                        target = args[0]
+                        matched = None
+                        for g_obj, vc, chan in connections:
+                            if str(g_obj.id) == target or (
+                                chan and chan.lower() == target.lower()
+                            ):
+                                matched = g_obj
+                                break
+                        if not matched:
+                            await self._discord_send(
+                                message.channel.id,
+                                f"❌ I'm not in a voice channel matching '{target}'.",
+                            )
+                            return
+                        leave_res = await _do_leave(matched)
+                        if leave_res.get("status") == "success":
+                            await self._discord_send(
+                                message.channel.id,
+                                f"👋 Left voice channel in guild {matched.name}.",
+                            )
+                        else:
+                            await self._discord_send(
+                                message.channel.id,
+                                f"❌ {leave_res.get('message', 'Failed to leave.')}",
+                            )
+                        return
+
+                    # no argument: act based on how many connections exist
+                    if not connections:
                         await self._discord_send(
                             message.channel.id,
-                            f"❌ {leave_result.get('message', 'Failed to leave.')}",
+                            "❌ I'm not in any voice channels.",
                         )
+                        return
+                    if len(connections) == 1:
+                        g_obj, _, _ = connections[0]
+                        leave_res = await _do_leave(g_obj)
+                        if leave_res.get("status") == "success":
+                            await self._discord_send(
+                                message.channel.id, "👋 Left voice channel."
+                            )
+                        else:
+                            await self._discord_send(
+                                message.channel.id,
+                                f"❌ {leave_res.get('message', 'Failed to leave.')}",
+                            )
+                        return
+
+                    # multiple connections: list them and instruct how to pick one
+                    msg_list = "I'm currently connected to multiple voice channels:\n"
+                    for g_obj, vc, chan in connections:
+                        msg_list += f"• {g_obj.name} (id {g_obj.id}) in channel '{chan or 'unknown'}'\n"
+                    msg_list += "Use `/leave <guild id or channel name>` to disconnect from one of them."
+                    await self._discord_send(message.channel.id, msg_list)
                     return
 
+                # Route through the centralized handler (same as Telegram).
+                # This applies permission checks and passes interface_context.
                 try:
-                    response = await execute_command(command, *args)
+                    interface_ctx = {
+                        "discord_message": message,
+                        "discord_interface": self,
+                        "interface_id": "discord_bot",
+                        # Compat stubs
+                        "update": None,
+                        "context": None,
+                        "bot": None,
+                    }
+                    user_id = str(
+                        getattr(getattr(message, "author", None), "id", "") or ""
+                    )
+                    response = await handle_command_message(
+                        content, user_id, "discord_bot", interface_ctx
+                    )
                     if response:
                         await self._discord_send(message.channel.id, response)
                 except Exception as e:  # pragma: no cover - command errors
@@ -1419,7 +1762,8 @@ class DiscordInterface:
         elif action_type == "join_voice_discord":
             payload = action.get("payload", {})
             channel_id = payload.get("channel_id")
-            start_live = bool(payload.get("start_live_voice", False))
+            # note: start_live_voice flag removed – live sessions must be started
+            # explicitly via a dedicated action (`start_live_voice_discord`).
 
             # Gate: LIVE_TRAINER_ONLY_VOICE — only the trainer may request a voice join
             try:
@@ -1433,12 +1777,43 @@ class DiscordInterface:
                         _sender_id = str(getattr(_fu, "id", "") or "")
                     if not _sender_id:
                         _sender_id = str(context.get("sender_id", "") or "")
-                    _trainer_id = get_interface_registry().get_trainer_id("discord_bot")
-                    if not _sender_id or str(_trainer_id) != _sender_id:
+
+                    # determine whether the sender qualifies as trainer by
+                    # numeric id or username(s) via the registry helper
+                    registry = get_interface_registry()
+
+                    def sender_is_trainer() -> bool:
+                        if not _sender_id:
+                            return False
+                        if registry.is_trainer("discord_bot", _sender_id):
+                            return True
+                        # also try known name fields if a discord user object is
+                        # available (original_message may carry it)
+                        if original_message is not None:
+                            user_obj = getattr(original_message, "from_user", None)
+                            if user_obj:
+                                names: list[str] = []
+                                if getattr(user_obj, "name", None):
+                                    names.append(str(user_obj.name))
+                                if getattr(user_obj, "display_name", None):
+                                    names.append(str(user_obj.display_name))
+                                disc = getattr(user_obj, "discriminator", None)
+                                if disc and names:
+                                    names.append(f"{names[0]}#{disc}")
+                                for n in names:
+                                    if registry.is_trainer("discord_bot", n):
+                                        return True
+                        # context sender_name may also be useful
+                        name_ctx = context.get("sender_name")
+                        if name_ctx and registry.is_trainer("discord_bot", name_ctx):
+                            return True
+                        return False
+
+                    if not sender_is_trainer():
                         log_warning(
                             "[discord_interface] join_voice_discord: denied — "
                             f"LIVE_TRAINER_ONLY_VOICE active and sender {_sender_id!r} "
-                            f"is not the trainer {_trainer_id!r}"
+                            f"is not recognised as a trainer"
                         )
                         return
             except Exception as _ge:
@@ -1520,76 +1895,78 @@ class DiscordInterface:
             if result and result.get("status") == "failed":
                 return {"error": result.get("message", "Voice join failed")}
 
-            # Conditionally start live voice session
-            if result and result.get("status") == "success" and start_live:
-                log_info(
-                    f"[discord_interface] join_voice_discord: starting live voice "
-                    f"session in channel {channel_id}"
-                )
-                live_result = await self._start_live_voice(channel_id)
-                if live_result.get("status") == "success":
-                    # Resolve guild_id and interface_path for LiveSessionManager
-                    _live_guild_id: int | None = None
-                    _live_ipath: str | None = payload.get("interface_path") or getattr(
-                        original_message, "interface_path", None
-                    )
-                    if self.client:
-                        try:
-                            _ch = self.client.get_channel(int(channel_id))
-                            if _ch and hasattr(_ch, "guild"):
-                                _live_guild_id = _ch.guild.id
-                        except Exception:
-                            pass
-                    if _live_guild_id:
-                        if not _live_ipath:
-                            _live_ipath = f"discord_bot/{_live_guild_id}/{channel_id}"
-                        # Store interface_path in live state so _stop_live_voice can deactivate routing
-                        if (
-                            hasattr(self, "_live_voice_state")
-                            and _live_guild_id in self._live_voice_state
+            # Auto-start live session if the trainer is present in the channel.
+            # Use voice_clients (always current) instead of get_channel() (cache-only).
+            if self.client:
+                try:
+                    # Find the voice channel the bot just joined via voice_clients.
+                    vc_channel = None
+                    for _vc in getattr(self.client, "voice_clients", []):
+                        _vc_ch = getattr(_vc, "channel", None)
+                        if _vc_ch is None:
+                            continue
+                        # Match by channel_id if we resolved one, otherwise take first.
+                        if channel_id and str(getattr(_vc_ch, "id", "")) != str(
+                            channel_id
                         ):
-                            self._live_voice_state[_live_guild_id]["interface_path"] = (
-                                _live_ipath
-                            )
-                        # Build rejoin callback (exit + re-enter + restart live)
-                        _rjoin_channel_id = channel_id
-                        _rjoin_guild_id = _live_guild_id
-                        _rjoin_ipath = _live_ipath
+                            continue
+                        vc_channel = _vc_ch
+                        break
 
-                        async def _rejoin_cb(
-                            _gid: int = _rjoin_guild_id,
-                            _cid: str = _rjoin_channel_id,
-                            _ip: str = _rjoin_ipath,
-                        ) -> None:
-                            await self._stop_live_voice(_gid)
-                            await asyncio.sleep(2)
-                            await self._join_voice(_cid)
-                            _r = await self._start_live_voice(_cid)
-                            if _r.get("status") == "success":
-                                if (
-                                    hasattr(self, "_live_voice_state")
-                                    and _gid in self._live_voice_state
-                                ):
-                                    self._live_voice_state[_gid]["interface_path"] = _ip
-
+                    if vc_channel is None and channel_id:
+                        # Fallback: fetch from Discord API (bypasses cache)
                         try:
-                            from cortex.live.live_base import LiveSessionManager
-
-                            await LiveSessionManager.get_instance().activate_live_for_path(
-                                _live_ipath, _live_guild_id, _rejoin_cb
+                            vc_channel = await self.client.fetch_channel(
+                                int(channel_id)
                             )
-                            log_info(
-                                f"[discord_interface] Live routing activated for {_live_ipath}"
-                            )
-                        except Exception as _lse:
+                        except Exception as _fc_err:
                             log_warning(
-                                f"[discord_interface] LiveSessionManager.activate_live_for_path failed: {_lse}"
+                                f"[discord_interface] join_voice_discord: fetch_channel failed: {_fc_err}"
                             )
-                else:
-                    log_warning(
-                        f"[discord_interface] join_voice_discord: live voice start "
-                        f"failed: {live_result.get('message')}"
+
+                    log_info(
+                        f"[discord_interface] join_voice_discord: live auto-start check — "
+                        f"vc_channel={getattr(vc_channel, 'id', None)}, "
+                        f"members={[getattr(m, 'id', None) for m in getattr(vc_channel, 'members', [])]}"
                     )
+
+                    if vc_channel is not None:
+                        registry = get_interface_registry()
+                        trainer_present = any(
+                            not getattr(m, "bot", False)
+                            and registry.is_trainer("discord_bot", str(m.id))
+                            for m in getattr(vc_channel, "members", [])
+                        )
+                        if trainer_present:
+                            log_info(
+                                "[discord_interface] join_voice_discord: trainer detected "
+                                f"in channel {getattr(vc_channel, 'id', channel_id)} — auto-starting live session"
+                            )
+                            live_result = await self._start_live_voice(
+                                getattr(vc_channel, "id", channel_id)
+                            )
+                            if live_result and live_result.get("status") == "failed":
+                                log_warning(
+                                    "[discord_interface] join_voice_discord: live session "
+                                    f"auto-start failed: {live_result.get('message')}"
+                                )
+                        else:
+                            log_info(
+                                "[discord_interface] join_voice_discord: no trainer in "
+                                f"channel — skipping live session auto-start "
+                                f"(members: {[getattr(m, 'id', None) for m in getattr(vc_channel, 'members', [])]}, "
+                                f"trainer check uses 'discord_bot' interface)"
+                            )
+                    else:
+                        log_warning(
+                            "[discord_interface] join_voice_discord: could not resolve voice "
+                            f"channel for live auto-start (channel_id={channel_id})"
+                        )
+                except Exception as _lve:
+                    log_warning(
+                        f"[discord_interface] join_voice_discord: live auto-start check failed: {_lve}"
+                    )
+
             return result
 
         elif action_type == "leave_voice_discord":
@@ -2120,13 +2497,22 @@ DISCORD_BOT_TOKEN = config_registry.get_var(
 discord_interface = None
 
 
-def _parse_trainer_id_from_config() -> int | None:
-    """Extract trainer ID for discord_bot from TRAINER_IDS configuration."""
+def _parse_trainer_id_from_config() -> int | str | list[int | str] | None:
+    """Extract trainer identifier(s) for ``discord_bot`` from the
+    TRAINER_IDS configuration.
+
+    The configuration value is a comma-separated list of ``interface:value``
+    pairs.  For Discord we recognise either ``discord_bot`` or the short
+    alias ``discord``.  The value component may be a numeric user ID (legacy)
+    or a username (with optional ``#discriminator``).  Multiple entries are
+    allowed; the function returns a list when more than one identifier is
+    found, a scalar otherwise.
+    """
     trainer_ids = config_registry.get_var(
         "TRAINER_IDS",
         "",
         label="Trainer IDs",
-        description="Comma-separated list of trainer IDs for each interface (format: interface_name:user_id)",
+        description="Comma-separated list of trainer IDs for each interface (format: interface_name:user_id or interface_name:username)",
         group="core",
         component="discord_interface",
     )
@@ -2135,27 +2521,30 @@ def _parse_trainer_id_from_config() -> int | None:
     if not trainer_ids_str:
         return None
 
+    results: list[int | str] = []
     for trainer_config in trainer_ids_str.split(","):
         trainer_config = trainer_config.strip()
+        if not trainer_config:
+            continue
         # Accept both 'discord_bot:' (primary) and 'discord:' (short alias)
-        if trainer_config.startswith("discord_bot:"):
-            try:
-                return int(trainer_config.split(":")[1])
-            except (ValueError, IndexError):
-                log_warning(
-                    f"[discord_interface] Invalid trainer ID format in TRAINER_IDS: {trainer_config}"
-                )
-                return None
-        elif trainer_config.startswith("discord:"):
-            try:
-                return int(trainer_config.split(":")[1])
-            except (ValueError, IndexError):
-                log_warning(
-                    f"[discord_interface] Invalid trainer ID format in TRAINER_IDS: {trainer_config}"
-                )
-                return None
-
-    return None
+        for prefix in ("discord_bot:", "discord:"):
+            if trainer_config.startswith(prefix):
+                value = trainer_config[len(prefix) :].strip()
+                if not value:
+                    continue
+                # try to parse number but fall back to string
+                try:
+                    num = int(value)
+                    results.append(num)
+                except ValueError:
+                    # leave username as-is
+                    results.append(value)
+                break
+    if not results:
+        return None
+    if len(results) == 1:
+        return results[0]
+    return results
 
 
 def get_discord_token() -> str:

@@ -1562,7 +1562,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
                                     const idInput = document.createElement('input');
                                     idInput.type = 'text';
-                                    idInput.placeholder = 'Trainer ID';
+                                    idInput.placeholder = 'Trainer ID or username';
                                     idInput.value = entry && entry.id ? entry.id : '';
                                     idInput.disabled = !isEditable;
 

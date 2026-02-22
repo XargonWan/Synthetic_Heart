@@ -50,7 +50,6 @@ from core.message_sender import (
 )
 from core.config import (
     get_active_cortex_engine,
-    list_available_cortex_engines,
     set_log_chat_id_and_thread,
     get_log_chat_id_sync,
 )
