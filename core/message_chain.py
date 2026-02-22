@@ -448,9 +448,13 @@ async def handle_incoming_message(
 
     # Check for action result delivery context - these responses should have minimal retries
     # to prevent cascading loops when processing action outputs (e.g., memory_search results)
+    # (value read later if needed)
     try:
         system_message = ctx.get("system_message", {})
         if isinstance(system_message, dict):
+            # note: we only read is_action_result when necessary later, ignore
+            # for now to keep lint happy
+            _ = system_message.get("is_action_result_delivery", False)
             custom_max = system_message.get("max_correction_attempts")
             if custom_max is not None and isinstance(custom_max, int):
                 max_retries = min(max_retries, custom_max)
@@ -659,6 +663,20 @@ async def handle_incoming_message(
 
                 # Only enforce this for LLM-originated responses
                 if is_from_llm and isinstance(actions, list):
+                    # quick mapping: some models may output a generic "message"
+                    # action when they really intend to send text to the current
+                    # interface.  Convert it to a concrete type based on the
+                    # context path to avoid unnecessary corrector loops.
+                    if ctx_interface_path:
+                        for act in actions:
+                            if isinstance(act, dict) and act.get("type") == "message":
+                                if ctx_interface_path.startswith("telegram_bot"):
+                                    act["type"] = "message_telegram_bot"
+                                elif ctx_interface_path.startswith("discord_bot"):
+                                    act["type"] = "message_discord_bot"
+                                else:
+                                    act["type"] = "message_synth_webui"
+
                     unsupported = []
                     for idx, act in enumerate(actions):
                         if not isinstance(act, dict):

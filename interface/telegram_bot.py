@@ -1267,46 +1267,31 @@ async def manage_chat_id_command(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def cortex_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    log_info(
-        f"[telegram_bot] Cortex command received from user {update.effective_user.id}"
-    )
+    """Legacy handler kept for backwards compatibility.
 
-    if not is_trainer(update.effective_user.id):
-        log_warning(
-            f"[telegram_bot] Cortex command rejected: user {update.effective_user.id} != get_trainer_id() {get_trainer_id()}"
-        )
-        return
-
-    args = context.args
-    log_info(f"[telegram_bot] Cortex command args: {args}")
-
-    current = await get_active_cortex_engine()
-    available = list_available_cortex_engines()
-
-    if not args:
-        msg = f"*Active Cortex:* `{current}`\n\n*Available:*"
-        msg += "\n" + "\n".join(f"• `{name}`" for name in available)
-        msg += "\n\nTo change: `/cortex <name>`"
-        await update.message.reply_text(msg, parse_mode="Markdown")
-        return
-
-    choice = args[0]
-    if choice not in available:
-        await update.message.reply_text(f"❌ Cortex `{choice}` not found.")
-        return
+    The real work is performed by :func:`core.command_registry.handle_command_message`.
+    This function simply delegates so that any future changes to `/cortex` output
+    (including scope overrides) are automatically honoured.
+    """
+    # the generic handler will take care of permission checks
+    command_text = update.message.text
+    user_id = update.effective_user.id if update.effective_user else None
+    interface_context = {
+        "update": update,
+        "context": context,
+        "bot": context.bot,
+        "interface_id": "telegram_bot",
+    }
 
     try:
-        from core.config import switch_active_cortex_engine
-
-        # Use the centralized switch function with full reinitialization for Telegram
-        await switch_active_cortex_engine(choice, use_hot_swap=False)
-        await update.message.reply_text(
-            f"✅ Cortex engine dynamically updated to `{choice}`."
+        response = await handle_command_message(
+            command_text, user_id, "telegram_bot", interface_context
         )
-    except ValueError as e:
-        await update.message.reply_text(f"❌ Cortex not available: {e}")
+        if response is not None:
+            await update.message.reply_text(response, parse_mode="Markdown")
     except Exception as e:
-        await update.message.reply_text(f"❌ Error loading plugin: {e}")
+        log_error(f"[telegram_bot] Error handling cortex command: {e}")
+        await update.message.reply_text("❌ Error processing command.")
 
 
 async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

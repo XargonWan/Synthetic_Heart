@@ -48,8 +48,13 @@ Runtime Commands
 ----------------
 
 **Engine Management**
-    - ``/cortex``: List available cortex engines (``/llm`` deprecated alias)
+    - ``/cortex``: List available cortex engines (``/llm`` deprecated alias); output now includes per-scope overrides (live, grillo, trainer)
     - ``/cortex <engine_name>``: Switch to a specific engine (``/llm <engine_name>`` deprecated)
+    - ``/cortex_live <engine_name>``: Set the live/base cortex engine (alias of ``/cortex``)
+    - ``/cortex_grillo <engine_name>``: Override the engine used by grillo beats
+      (use without arguments to see current override)
+    - ``/cortex_trainer <engine_name>``: Override the engine used for trainer
+      messages
     - ``/model``: List available models for the active engine
     - ``/model <model_name>``: Switch the active model (e.g. ``gemini_api``)
 
