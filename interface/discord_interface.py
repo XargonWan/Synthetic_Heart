@@ -192,6 +192,64 @@ class DiscordInterface:
                     + "\n\nUse `/leave <guild_id>` to specify one."
                 )
 
+            # /join — join the voice channel of the user who issued the command.
+            @self._command_tree.command(
+                name="join",
+                description="Move Synth to your current voice channel",
+            )
+            async def _app_join(interaction: discord.Interaction) -> None:
+                await interaction.response.defer(ephemeral=False)
+
+                # Resolve the voice channel the invoking user is in.
+                voice_state = getattr(interaction.user, "voice", None)
+                vc_channel = (
+                    getattr(voice_state, "channel", None) if voice_state else None
+                )
+                if vc_channel is None:
+                    await interaction.followup.send(
+                        "❌ You're not in a voice channel. Join one first!"
+                    )
+                    return
+
+                # If there is already a live session in a *different* channel,
+                # stop it gracefully before moving.
+                guild_id = interaction.guild_id
+                existing_state = getattr(self, "_live_voice_state", {}).get(guild_id)
+                if existing_state and existing_state.get("channel_id") != vc_channel.id:
+                    await self._stop_live_voice(guild_id)
+
+                # Delegate to the existing _start_live_voice path which handles
+                # trainer detection, LiveSessionManager creation, audio sink, etc.
+                result = await self._start_live_voice(vc_channel.id)
+                if result.get("status") == "success":
+                    await interaction.followup.send(
+                        f"🎙️ Joined **{vc_channel.name}** and started live session."
+                    )
+                else:
+                    # Live start failed — fall back to a plain voice join so the
+                    # bot at least enters the channel for non-live usage.
+                    err_msg = result.get("message", "")
+                    try:
+                        guild = interaction.guild
+                        vc = guild.voice_client if guild else None
+                        if vc:
+                            await vc.move_to(vc_channel)
+                        else:
+                            await vc_channel.connect()
+                        if err_msg:
+                            await interaction.followup.send(
+                                f"✅ Joined **{vc_channel.name}** "
+                                f"(live session unavailable: {err_msg})"
+                            )
+                        else:
+                            await interaction.followup.send(
+                                f"✅ Joined **{vc_channel.name}**."
+                            )
+                    except Exception as _je:
+                        await interaction.followup.send(
+                            f"❌ Could not join **{vc_channel.name}**: {_je}"
+                        )
+
             # ------------------------------------------------------------------
             # Dynamic registration: all core registry commands → Discord app cmds
             # ------------------------------------------------------------------
@@ -248,7 +306,7 @@ class DiscordInterface:
 
             # Register every command from the core registry as a Discord app command.
             # /leave is already registered above as a custom command; skip it here.
-            _SKIP_CMDS: set[str] = {"leave", "help"}  # help has its own below
+            _SKIP_CMDS: set[str] = {"leave", "join", "help"}  # help has its own below
 
             for _cmd_name in list_commands():
                 if _cmd_name in _SKIP_CMDS:
@@ -1207,16 +1265,29 @@ class DiscordInterface:
             await self._stop_live_voice(guild_id)
             return
 
-        # Case 3: A user changed voice state (left/moved). Determine whether
-        # the channel the bot was in is now empty of humans after the change.
+        # Case 3: A user changed voice state (left/moved/muted/deafened). Check
+        # whether the channel the bot was in is now empty of humans after the
+        # change — but only count the member as "leaving" if they actually left
+        # the channel (not just muted/deafened while staying in the same channel).
         if before.channel is not None:
             state = self._live_voice_state.get(guild_id)
             if state and state.get("channel_id") == before.channel.id:
-                # the event gives us the member who triggered the update; compute
-                # the remaining human members by removing that user from the
-                # ``before.channel.members`` list.  This avoids relying on the
-                # client's cache being updated before the event handler runs.
-                leaving_id = getattr(member, "id", None)
+                # Determine if the member actually left (or moved to a different
+                # channel) versus only changing voice properties (mute/deafen).
+                # ``after.channel`` of None means they disconnected entirely;
+                # a different channel id means they moved.  Same or non-existent
+                # after.channel with an equal id means a property-only change.
+                _after_ch_id = getattr(after.channel, "id", None)
+                actually_left = (
+                    after.channel is None or _after_ch_id != before.channel.id
+                )
+
+                # Only subtract the member from the presence count when they
+                # genuinely vacated the channel; property-only changes (mute,
+                # deafen, stream start/stop) must not shrink the count.
+                leaving_id: int | None = (
+                    getattr(member, "id", None) if actually_left else None
+                )
                 human_members = [
                     m
                     for m in getattr(before.channel, "members", [])
@@ -1224,8 +1295,10 @@ class DiscordInterface:
                 ]
 
                 log_debug(
-                    f"[discord_interface] remaining human_members after {leaving_id} left guild {guild_id}: "
-                    f"{[m.id for m in human_members]}"
+                    f"[discord_interface] voice_state update in guild {guild_id}: "
+                    f"member={getattr(member, 'id', None)}, "
+                    f"actually_left={actually_left}, "
+                    f"remaining humans={[m.id for m in human_members]}"
                 )
 
                 if not human_members:
