@@ -315,6 +315,7 @@ async def _resolve_cortex_choice(choice_raw: str) -> str:
         reverse_map.setdefault(eng, []).append(k or "unknown")
 
     choice = choice_raw.strip()
+
     if "/" in choice:
         parts = choice.split("/", 1)
         if len(parts) != 2:
@@ -420,9 +421,24 @@ async def cortex_command(*args) -> str:
         trainer_display = _fmt_override("trainer", trainer)
 
         lines: list[str] = ["*Active Cortex engines:*"]
-        lines.append(f"• live (base): `{base}`")
-        lines.append(f"• grillo override: `{grillo_display}`")
+        # show base engine separately from any live override
+        lines.append(f"• base: `{base}`")
+        # trainer and grillo overrides always shown (even if Default)
         lines.append(f"• trainer override: `{trainer_display}`")
+        lines.append(f"• grillo override: `{grillo_display}`")
+        # optionally show live override when configured and different from base
+        try:
+            from core.config import config_registry
+
+            live_override = config_registry.get_value("LIVE_CORTEX", "Default")
+        except Exception:
+            live_override = "Default"
+        if (
+            live_override
+            and live_override not in ("Default", "", None)
+            and live_override != base
+        ):
+            lines.append(f"• live override: `{live_override}`")
         lines.append("\n*Available Cortex Engines:*")
         for k in sorted(kind_map.keys()):
             engines = kind_map.get(k) or []
@@ -544,7 +560,7 @@ async def cortex_grillo_command(*args) -> str:
         engines = list_available_cortex_engines(None)
         msg = f"*Active Cortex (grillo override):* `{current}`\n\n*Available:*"
         msg += "\n" + "\n".join(f"• `{name}`" for name in engines)
-        msg += "\n\nTo change: `/cortex_grillo <engine>`"
+        msg += "\n\nTo change: `/cortex_grillo <kind>/<engine>` or `/cortex_grillo <engine>`"
         return msg
 
     choice_raw = str(args[0]).strip()
@@ -574,7 +590,7 @@ async def cortex_trainer_command(*args) -> str:
         engines = list_available_cortex_engines(None)
         msg = f"*Active Cortex (trainer override):* `{current}`\n\n*Available:*"
         msg += "\n" + "\n".join(f"• `{name}`" for name in engines)
-        msg += "\n\nTo change: `/cortex_trainer <engine>`"
+        msg += "\n\nTo change: `/cortex_trainer <kind>/<engine>` or `/cortex_trainer <engine>`"
         return msg
 
     choice_raw = str(args[0]).strip()

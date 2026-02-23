@@ -871,13 +871,41 @@ class DiscordInterface:
             # Resolve a live-capable engine from the cortex registry WITHOUT
             # touching the globally active cortex (which may be any engine that
             # does not support the Live API).  We look for the first registered
-            # engine that exposes get_live_session_manager().
+            # engine that exposes get_live_session_manager(), preferring the
+            # configured LIVE_CORTEX engine and loading it on demand if needed.
             from core.cortex_registry import get_cortex_registry as _get_creg
+            from core.config_manager import config_registry as _cfg_r
 
             _creg = _get_creg()
+            _configured_live_engine: str = str(
+                _cfg_r.get_value("LIVE_CORTEX", "") or ""
+            ).strip()
+            _all_engine_names = _creg.get_available_engines()
+            # Prefer the configured LIVE_CORTEX; fall back to any already-loaded engine.
+            _candidates = (
+                [_configured_live_engine]
+                if _configured_live_engine
+                and _configured_live_engine in _all_engine_names
+                else []
+            ) + [e for e in _all_engine_names if e != _configured_live_engine]
+
             _live_capable_engine = None
-            for _en in _creg.get_available_engines():
+            for _en in _candidates:
                 _e = _creg.get_engine(_en)
+                if _e is None and _en == _configured_live_engine:
+                    # Load the configured LIVE_CORTEX engine on demand so we
+                    # don't have to instantiate all registered engines just to
+                    # find one with get_live_session_manager.
+                    try:
+                        _e = _creg.load_engine(_en)
+                        log_info(
+                            f"[live_voice] Loaded LIVE_CORTEX engine '{_en}' on demand"
+                        )
+                    except Exception as _le:
+                        log_warning(
+                            f"[live_voice] Could not load LIVE_CORTEX engine '{_en}': {_le}"
+                        )
+                        continue
                 if _e and hasattr(_e, "get_live_session_manager"):
                     _live_capable_engine = _e
                     log_info(f"[live_voice] Using engine '{_en}' for Live API")

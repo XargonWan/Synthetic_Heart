@@ -1,4 +1,3 @@
-
 from core.interfaces_registry import InterfaceRegistry
 
 

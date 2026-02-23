@@ -464,6 +464,13 @@ async def handle_incoming_message(
     except Exception:
         pass
 
+    # Track whether any actions have successfully executed during the loop.
+    # If at least one action ran, we consider the iteration partially successful and
+    # avoid sending a generic fallback message later on. This matches the
+    # requirement that "LLM failure" should only be emitted when the entire
+    # iteration failed (or there was a technical error with no reply at all).
+    actions_executed_during_loop = False
+
     while True:
         log_info(
             f"[message_chain] 🔄 LOOP: attempt={attempt} source={source} chat={getattr(message, 'chat_id', None)} text_len={len(text) if text else 0}"
@@ -1037,6 +1044,18 @@ async def handle_incoming_message(
                                 f"[message_chain] Skipping TTS auto-inject for non-user-facing interface: {interface_path}"
                             )
 
+                    # at this point we may not have computed the
+                    # various interface flags (they're defined only in
+                    # the branch above). ensure they exist so the
+                    # warning logic doesn't crash when has_user_response
+                    # is False.
+                    if "is_user_facing" not in locals():
+                        is_user_facing = False
+                    if "is_grillo_internal" not in locals():
+                        is_grillo_internal = False
+                    if "is_internal_chat" not in locals():
+                        is_internal_chat = False
+
                     if not has_user_response:
                         if (
                             is_user_facing
@@ -1175,6 +1194,10 @@ async def handle_incoming_message(
                         failed = result.get("failed_actions", [])
                         errors = result.get("errors", [])
 
+                        # remember if we actually ran anything
+                        if processed:
+                            actions_executed_during_loop = True
+
                         log_info(
                             f"[message_chain] Actions result: {len(processed)} successful, {len(failed)} failed"
                         )
@@ -1258,9 +1281,22 @@ async def handle_incoming_message(
 
                     except Exception as e:
                         log_warning(f"[message_chain] Failed to run actions: {e}")
-                        # If action execution fails, don't continue with correction loop
-                        # This prevents cascading failures and loops
-                        return BLOCKED
+                        # On a hard exception during action execution we treat it as a
+                        # technical failure. If nothing has run yet, propagate an LLM
+                        # failure so the interface can show a fallback message. If some
+                        # actions already succeeded we simply report ACTIONS_EXECUTED so
+                        # the user isn't spammed with unrelated error texts.
+                        if not actions_executed_during_loop:
+                            failure_reason = f"Action execution exception: {e}"
+                            try:
+                                await send_llm_fallback_message(
+                                    bot, message, failure_reason, context=ctx
+                                )
+                            except Exception:
+                                pass
+                            return LLM_FAILED
+                        else:
+                            return ACTIONS_EXECUTED
 
         # Not parsed. If it's from LLM, always attempt correction regardless of braces
         # If it's non-LLM source, don't attempt correction
@@ -1282,15 +1318,35 @@ async def handle_incoming_message(
             failure_reason = (
                 f"Exhausted {max_retries} correction attempts for invalid JSON"
             )
-            log_warning(f"[message_chain] {failure_reason}; sending fallback message")
-            await send_llm_fallback_message(bot, message, failure_reason, context=ctx)
-            return LLM_FAILED
+            if not actions_executed_during_loop:
+                log_warning(
+                    f"[message_chain] {failure_reason}; sending fallback message"
+                )
+                await send_llm_fallback_message(
+                    bot, message, failure_reason, context=ctx
+                )
+                return LLM_FAILED
+            else:
+                log_warning(
+                    f"[message_chain] {failure_reason} but {len(actions or [])} action(s) already executed; skipping fallback"
+                )
+                return ACTIONS_EXECUTED
 
         if text in tried_texts:
             failure_reason = "Correction loop detected - same text repeated"
-            log_warning(f"[message_chain] {failure_reason}; sending fallback message")
-            await send_llm_fallback_message(bot, message, failure_reason, context=ctx)
-            return LLM_FAILED
+            if not actions_executed_during_loop:
+                log_warning(
+                    f"[message_chain] {failure_reason}; sending fallback message"
+                )
+                await send_llm_fallback_message(
+                    bot, message, failure_reason, context=ctx
+                )
+                return LLM_FAILED
+            else:
+                log_warning(
+                    f"[message_chain] {failure_reason} but some actions already executed; skipping fallback"
+                )
+                return ACTIONS_EXECUTED
 
         tried_texts.add(text)
 
@@ -1328,13 +1384,19 @@ async def handle_incoming_message(
                 failure_reason = (
                     f"Corrector returned no correction after {attempt} attempts"
                 )
-                log_warning(
-                    f"[message_chain] {failure_reason}; sending fallback message"
-                )
-                await send_llm_fallback_message(
-                    bot, message, failure_reason, context=ctx
-                )
-                return LLM_FAILED
+                if not actions_executed_during_loop:
+                    log_warning(
+                        f"[message_chain] {failure_reason}; sending fallback message"
+                    )
+                    await send_llm_fallback_message(
+                        bot, message, failure_reason, context=ctx
+                    )
+                    return LLM_FAILED
+                else:
+                    log_warning(
+                        f"[message_chain] {failure_reason} but some actions already executed; skipping fallback"
+                    )
+                    return ACTIONS_EXECUTED
             # On no-correction, loop and let retry counter enforce blocking
             await asyncio.sleep(0.5)
             continue

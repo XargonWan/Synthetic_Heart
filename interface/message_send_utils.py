@@ -864,9 +864,21 @@ async def llm_response_send(
         dedupe_window = _DEFAULT_DEDUPE_WINDOW
 
     try:
-        import time
+        import time, re, unicodedata
 
-        norm_text = " ".join(str(text).split())[:500]
+        # perform a more aggressive normalization so we catch invisible
+        # characters, zero‑width spaces, extra linebreaks, etc.  The previous
+        # logic simply collapsed whitespace which could still leave a stray
+        # ``\u200B`` or similar in the string and defeat the cache.
+        norm_text = str(text)
+        # strip out common zero‑width / control characters
+        norm_text = re.sub(r"[\u200B-\u200F\uFEFF]", "", norm_text)
+        # collapse all whitespace to single spaces, then trim
+        norm_text = " ".join(norm_text.split()).strip()
+        # limit key length so the cache doesn't grow unbounded
+        norm_text = norm_text[:500]
+
+        # always stringify chat_id to avoid int/str mismatches
         dedupe_key = f"{chat_id}:{norm_text}"
         last = _OUTGOING_DEDUPE.get(dedupe_key)
         now = time.time()
