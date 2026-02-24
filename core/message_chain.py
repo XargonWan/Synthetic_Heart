@@ -620,7 +620,9 @@ async def handle_incoming_message(
                 # We already allow certain metadata keys (e.g. "feelings") via the validation registry.
                 # Any other top-level key is treated as an invalid action type so the corrector
                 # can regenerate the response using only registered actions.
-                is_from_cortex = source == "llm" or getattr(message, "from_cortex", False)
+                is_from_cortex = source == "llm" or getattr(
+                    message, "from_cortex", False
+                )
                 if is_from_cortex and isinstance(parsed, dict):
                     try:
                         from core.validation_registry import get_validation_registry

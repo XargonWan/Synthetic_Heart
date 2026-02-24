@@ -113,7 +113,35 @@ class LiveSessionManager:
 
     One session per guild — when the bot joins a voice channel in a guild,
     a Live API WebSocket session is opened. When it leaves, the session closes.
+
+    This class is instantiated by the Cortex live engines but is also used
+    directly by tests and by memory_search/discord_interface.  For convenience
+    we provide a simple singleton accessor that lazily creates the manager.
     """
+
+    # singleton instance used by helpers and tests
+    _instance: ClassVar["LiveSessionManager | None"] = None
+
+    @classmethod
+    def get_instance(cls, api_key: str | None = None) -> "LiveSessionManager":
+        """Return (and lazily create) a global LiveSessionManager.
+
+        The manager requires an ``api_key`` argument for its constructor.  When
+        invoked without one we attempt to read ``LIVE_API_KEY`` from the
+        configuration registry.  This mirrors the behaviour in
+        ``cortex.live.live_base.LiveSessionManager`` and keeps tests simple
+        (they can monkeypatch this method directly).
+        """
+        if cls._instance is None:
+            if api_key is None:
+                try:
+                    from core.config_manager import config_registry
+
+                    api_key = str(config_registry.get_value("LIVE_API_KEY", "") or "")
+                except Exception:
+                    api_key = ""
+            cls._instance = cls(api_key=api_key or "")
+        return cls._instance
 
     # How often (seconds) the flush task drains accumulated audio to Gemini.
     _FLUSH_INTERVAL_S = 0.2  # 200ms
@@ -139,6 +167,44 @@ class LiveSessionManager:
         self._send_buffers: dict[int, bytearray] = {}
         # Periodic flush tasks: guild_id -> Task
         self._flush_tasks: dict[int, asyncio.Task[None]] = {}
+        # Periodic history sync tasks: guild_id -> Task
+        self._sync_tasks: dict[int, asyncio.Task[None]] = {}
+
+        # Live chat history sync configuration (updated by config listeners)
+        from core.config_manager import config_registry
+
+        # initial values
+        self.sync_history: bool = bool(
+            config_registry.get_value("LIVE_SYNC_CHAT_HISTORY", True, value_type=bool)
+        )
+        self.history_sync_interval: int = int(
+            config_registry.get_value("LIVE_HISTORY_SYNC_INTERVAL", 30, value_type=int)
+        )
+
+        # keep attributes up-to-date if config changes
+        def _on_sync_enabled(v: Any) -> None:
+            self.sync_history = bool(v)
+            if self.sync_history:
+                # start loops for any active sessions that lack one
+                for gid, state in list(self._sessions.items()):
+                    if gid not in self._sync_tasks and getattr(
+                        state, "is_active", False
+                    ):
+                        self._sync_tasks[gid] = asyncio.create_task(
+                            self._history_sync_loop(gid),
+                            name=f"live_history_sync_{gid}",
+                        )
+            else:
+                # cancel all existing sync tasks
+                for t in list(self._sync_tasks.values()):
+                    t.cancel()
+                self._sync_tasks.clear()
+
+        config_registry.add_listener("LIVE_SYNC_CHAT_HISTORY", _on_sync_enabled)
+        config_registry.add_listener(
+            "LIVE_HISTORY_SYNC_INTERVAL",
+            lambda v: setattr(self, "history_sync_interval", int(v)),
+        )
 
     def set_audio_callback(
         self, callback: Callable[[int, bytes], Awaitable[None]]
@@ -251,6 +317,12 @@ class LiveSessionManager:
                 self._audio_flush_loop(guild_id),
                 name=f"live_flush_{guild_id}",
             )
+            # Optionally start history sync loop
+            if self.sync_history:
+                self._sync_tasks[guild_id] = asyncio.create_task(
+                    self._history_sync_loop(guild_id),
+                    name=f"live_history_sync_{guild_id}",
+                )
 
             log_info(
                 f"[live_session] Session started for guild {guild_id} "
@@ -293,6 +365,14 @@ class LiveSessionManager:
             flush_task.cancel()
             try:
                 await flush_task
+            except asyncio.CancelledError:
+                pass
+        # Cancel the history sync task if present
+        sync_task = self._sync_tasks.pop(guild_id, None)
+        if sync_task and not sync_task.done():
+            sync_task.cancel()
+            try:
+                await sync_task
             except asyncio.CancelledError:
                 pass
 
@@ -408,6 +488,63 @@ class LiveSessionManager:
             log_debug(
                 f"[live_session] Flush loop cancelled for guild {guild_id} "
                 f"(sent {send_count} chunks)"
+            )
+
+    async def _history_sync_loop(self, guild_id: int) -> None:
+        """Background task: periodically import text messages into live session.
+
+        This is the "fallback" polling mechanism described in the design plan.
+        It runs at ``self.history_sync_interval`` seconds, queries
+        ``chat_history_cache.load_chat_history_for_guild`` for any messages newer
+        than the last-seen timestamp, sends each one into Gemini via
+        ``send_text`` and replicates it onto the ``discord_live_<guild>`` path
+        so that the live prompt will see the text history as if it had been
+        uttered in voice.
+        """
+        last_ts = None
+        try:
+            while True:
+                await asyncio.sleep(self.history_sync_interval)
+
+                state = self._sessions.get(guild_id)
+                if not state or not state.is_active:
+                    log_info(
+                        f"[live_session] History sync loop exiting: session inactive (guild {guild_id})"
+                    )
+                    break
+
+                try:
+                    from core.chat_history_cache import (
+                        load_chat_history_for_guild,
+                        save_chat_message,
+                    )
+
+                    new_msgs = await load_chat_history_for_guild(
+                        guild_id, since=last_ts
+                    )
+                    for msg in new_msgs:
+                        text = msg.get("text") or ""
+                        if text:
+                            # forward into live model
+                            await self.send_text(guild_id, text)
+                            # replicate to live history path
+                            await save_chat_message(
+                                interface_path=f"discord_live_{guild_id}",
+                                message_text=text,
+                                sender_name=msg.get("sender_name"),
+                                sender_id=msg.get("sender_id"),
+                                timestamp=msg.get("timestamp"),
+                            )
+                        # update last_ts regardless so we don't re-fetch the same
+                        if msg.get("timestamp"):
+                            last_ts = msg.get("timestamp")
+                except Exception as e:
+                    log_warning(
+                        f"[live_session] History sync error for guild {guild_id}: {e}"
+                    )
+        except asyncio.CancelledError:
+            log_debug(
+                f"[live_session] History sync loop cancelled for guild {guild_id}"
             )
 
     async def send_text(self, guild_id: int, text: str) -> None:

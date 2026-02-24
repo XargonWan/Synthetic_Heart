@@ -11,6 +11,7 @@ can see the found memories and continue its response.
 from __future__ import annotations
 
 import json
+import asyncio
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timedelta, timezone
 import re
@@ -510,6 +511,72 @@ class MemorySearchPlugin:
 
         return union_q, final_params
 
+    async def _live_search(
+        self, payload: Dict[str, Any], guild_id: int, original_message
+    ) -> None:
+        """Perform a memory search and send formatted results to a live session.
+
+        This helper mirrors much of :meth:`execute_action` but instead of
+        issuing an LLM delivery it sends a plain text summary back into the
+        live voice session via ``LiveSessionManager.send_text``.  It is
+        intentionally fire-and-forget (used via ``asyncio.create_task``).
+        """
+        # mimic execute_action's result-building part but no LLM delivery
+        try:
+            default_max = int(
+                config_registry.get_value(
+                    "MEMORY_SEARCH_MAX_RESULTS", 10, value_type=int
+                )
+                or 10
+            )
+            max_results = int(payload.get("max_results") or default_max)
+
+            union_q, params = self._build_query_and_params(payload, max_results)
+            if not union_q:
+                return
+
+            rows = []
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(union_q, params)
+                    rows = await cur.fetchall()
+
+            results: List[Dict[str, Any]] = []
+            for r in rows:
+                src, _id, ts, content = r
+                try:
+                    ts_iso = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+                except Exception:
+                    ts_iso = str(ts)
+                snippet = content if isinstance(content, str) else str(content)
+                if len(snippet) > 400:
+                    snippet = snippet[:400] + "..."
+                results.append(
+                    {
+                        "source": src,
+                        "id": _id,
+                        "timestamp": ts_iso,
+                        "snippet": snippet,
+                    }
+                )
+
+            # format results into a simple text blob
+            if results:
+                text_lines = [f"[{r['timestamp']}] {r['snippet']}" for r in results]
+            else:
+                text_lines = ["No matching memories found for this search query."]
+            final_text = "\n".join(text_lines)
+
+            try:
+                from core.live_session_manager import LiveSessionManager
+
+                mgr = LiveSessionManager.get_instance()
+                await mgr.send_text(guild_id, final_text)
+            except Exception as e:
+                log_warning(f"[memory_search] live send_text failed: {e}")
+        except Exception as e:
+            log_error(f"[memory_search] live_search failed: {e}")
+
     async def execute_action(
         self, action: Dict[str, Any], context: Dict[str, Any], bot, original_message
     ) -> Dict[str, Any]:
@@ -518,6 +585,22 @@ class MemorySearchPlugin:
         # When running as a prompt preflight, do NOT request an extra LLM delivery.
         # The caller will inject the results into the main prompt context.
         is_preflight = bool((context or {}).get("preflight"))
+
+        # the new async live search path
+        interface_path = getattr(original_message, "interface_path", "")
+        if isinstance(interface_path, str) and interface_path.startswith(
+            "discord_live_"
+        ):
+            # extract guild id from path
+            try:
+                guild_id = int(interface_path.split("_")[2])
+            except Exception:
+                guild_id = None
+            if guild_id is not None:
+                asyncio.create_task(
+                    self._live_search(payload, guild_id, original_message)
+                )
+                return {"processed": True, "results": [], "async": True}
 
         # Check toggle
         enabled = bool(

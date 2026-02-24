@@ -291,6 +291,76 @@ async def load_global_chat_history(limit: int = 10) -> deque:
         return deque()
 
 
+async def load_chat_history_for_guild(
+    guild_id: int,
+    since: str | None = None,
+    limit: int = 100,
+) -> deque:
+    """Load chat history for all interface paths belonging to a Discord guild.
+
+    This is used by the live sync feature to fetch *text* messages posted in
+    the guild, regardless of channel. The returned messages are ordered
+    chronologically (oldest first) and share the same format as
+    :func:`load_chat_history`.
+
+    Args:
+        guild_id: Discord guild ID
+        since: Optional ISO timestamp string. When provided, only messages
+            newer than ``since`` are returned.
+        limit: Maximum number of messages to retrieve.
+    """
+    if guild_id is None:
+        return deque()
+
+    try:
+        async with get_conn_ctx() as conn:
+            async with conn.cursor() as cur:
+                # Build the base query
+                query = """
+                    SELECT sender_name, sender_id, message_text, timestamp, interface_path
+                    FROM chat_history_cache
+                    WHERE interface_path LIKE %s
+                """
+                params: list[Any] = [f"discord_{guild_id}_%"]
+                if since:
+                    query += "\n AND timestamp > %s"
+                    params.append(since)
+                query += "\n ORDER BY timestamp ASC, id ASC\n LIMIT %s"
+                params.append(limit)
+
+                await cur.execute(query, tuple(params))
+                rows = await cur.fetchall()
+
+                messages = deque()
+                for row in rows:
+                    try:
+                        sender_name, sender_id, message_text, timestamp, ipath = row
+                        msg = {
+                            "sender_name": sender_name,
+                            "sender_id": sender_id,
+                            "text": message_text,
+                            "timestamp": timestamp.isoformat()
+                            if hasattr(timestamp, "isoformat")
+                            else str(timestamp),
+                            "interface_path": ipath,
+                        }
+                        messages.append(msg)
+                    except Exception as e:
+                        log_debug(
+                            f"[chat_history_cache] Error parsing guild message row: {e}"
+                        )
+
+                log_debug(
+                    f"[chat_history_cache] Loaded {len(messages)} messages for guild {guild_id} since={since} limit={limit}"
+                )
+                return messages
+    except Exception as e:
+        log_error(
+            f"[chat_history_cache] Failed to load history for guild {guild_id}: {e}"
+        )
+        return deque()
+
+
 async def clear_chat_history(interface_path: str) -> None:
     """Clear all messages for a specific interface path.
 

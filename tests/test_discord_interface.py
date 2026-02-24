@@ -270,6 +270,115 @@ async def test_voice_cleanup_not_triggered_if_other_human_remains(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# live sync & diary behaviour tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_live_sync_forwarding(monkeypatch):
+    """Messages should be forwarded to live session and replicated in history."""
+    di = DiscordInterface(bot_token="")
+    di.client = SimpleNamespace(user=SimpleNamespace(id=1))
+
+    class FakeMgr:
+        def __init__(self):
+            self.sent = []
+
+        def is_session_active(self, gid):
+            return True
+
+        async def send_text(self, gid, text):
+            self.sent.append((gid, text))
+
+    fake_mgr = FakeMgr()
+    monkeypatch.setattr(
+        "core.live_session_manager.LiveSessionManager.get_instance",
+        lambda: fake_mgr,
+    )
+
+    # force sync enabled
+    monkeypatch.setattr(
+        "core.config_manager.config_registry.get_value",
+        lambda key, default, value_type=None, **kw: True
+        if key == "LIVE_SYNC_CHAT_HISTORY"
+        else default,
+    )
+
+    repl = []
+
+    async def fake_save(
+        interface_path, message_text, sender_name=None, sender_id=None, timestamp=None
+    ):
+        repl.append((interface_path, message_text))
+        return True
+
+    monkeypatch.setattr("core.chat_history_cache.save_chat_message", fake_save)
+    monkeypatch.setattr("core.message_queue.enqueue", lambda *a, **k: asyncio.sleep(0))
+
+    fake_message = SimpleNamespace(
+        content="hello",
+        author=SimpleNamespace(id=2, name="bob"),
+        guild=SimpleNamespace(id=42),
+        channel=SimpleNamespace(id=123),
+        mentions=[],
+        role_mentions=[],
+        reference=None,
+        created_at=SimpleNamespace(isoformat=lambda: ""),
+    )
+
+    await di._process_message(fake_message)
+    await asyncio.sleep(0)
+    assert fake_mgr.sent == [(42, "hello")]
+    assert repl == [("discord_live_42", "hello")]
+
+
+@pytest.mark.asyncio
+async def test_flush_live_diary_at_stop(monkeypatch):
+    """Stopping a live session should flush a single diary entry."""
+    di = DiscordInterface(bot_token="")
+    monkeypatch.setattr(
+        "cortex.live.live_base.LiveSessionManager.get_instance",
+        lambda: SimpleNamespace(deactivate_live_for_path=lambda ip, gid: None),
+    )
+    di.client = None
+
+    calls = []
+
+    def fake_add_diary(**kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr("plugins.ai_diary.add_diary_entry", fake_add_diary)
+
+    di._live_voice_state = {
+        7: {
+            "interface_path": "discord_live_7",
+            "diary_buffer": [("u1", "m1"), ("u2", "m2")],
+        }
+    }
+
+    res = await di._stop_live_voice(7)
+    assert res.get("status") == "success"
+    assert len(calls) == 1
+    assert "Sessione vocale terminata" in calls[0].get("interaction_summary", "")
+
+
+@pytest.mark.asyncio
+async def test_old_write_live_diary_entry(monkeypatch):
+    """Deprecated helper still writes a diary entry in executor."""
+    calls = []
+
+    def fake_add(**kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr("plugins.ai_diary.add_diary_entry", fake_add)
+    from interface.discord_interface import _write_live_diary_entry
+
+    await _write_live_diary_entry(99, "hello user", "reply model")
+    assert len(calls) == 1
+    assert "Voice turn" in calls[0].get("interaction_summary", "")
+
+
+# ---------------------------------------------------------------------------
 # /leave slash command tests
 # ---------------------------------------------------------------------------
 

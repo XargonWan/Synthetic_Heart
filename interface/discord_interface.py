@@ -38,8 +38,10 @@ context_memory: dict[int, deque] = {}
 chat_link_store = ChatLinkStore()
 
 # How often (turns) to flush a diary entry during a live voice session.
-# Set to 1 to capture every turn; increase to reduce write frequency.
-_LIVE_DIARY_EVERY_N_TURNS: int = 1
+# Historically used by `_write_live_diary_entry`, now deprecated in favor of a
+# single cumulative entry at session end.  The constant is left in place for
+# backwards compatibility and may be removed in a future release.
+_LIVE_DIARY_EVERY_N_TURNS: int = 1  # ignored
 
 
 async def _write_live_diary_entry(
@@ -49,6 +51,10 @@ async def _write_live_diary_entry(
 
     Uses run_in_executor so the sync add_diary_entry call doesn't block
     the event loop while aiomysql is scheduled back on it.
+
+    **Deprecated.**  New code buffers turns and flushes a single entry at
+    session end; this helper is preserved only for backwards compatibility
+    tests.
     """
     try:
         import asyncio as _asyncio
@@ -76,6 +82,43 @@ async def _write_live_diary_entry(
     except Exception as e:
         log_warning(
             f"[live_voice] Failed to write diary entry for guild {guild_id}: {e}"
+        )
+
+
+async def _flush_live_diary(guild_id: int, buffer: list[tuple[str, str]]) -> None:
+    """Flush buffered voice turns into a single diary entry.
+
+    Runs in the event loop by default but dispatches the synchronous
+    ``add_diary_entry`` call to an executor as before.
+
+    ``buffer`` is a list of (user_transcript, model_transcript) tuples.
+    """
+    if not buffer:
+        return
+    try:
+        import asyncio as _asyncio
+        from plugins.ai_diary import add_diary_entry
+
+        content = "\n\n".join(m for (_u, m) in buffer if m)
+        user_msgs = "\n\n".join(u for (u, _m) in buffer if u)
+        summary = f"Sessione vocale terminata – {len(buffer)} turni"
+        loop = _asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: add_diary_entry(
+                content=content,
+                user_message=user_msgs,
+                interaction_summary=summary,
+                interface="discord",
+                chat_id=str(guild_id),
+            ),
+        )
+        log_debug(
+            f"[live_voice] Flushed diary for guild {guild_id} ({len(buffer)} turns)"
+        )
+    except Exception as e:
+        log_warning(
+            f"[live_voice] Failed to flush live diary for guild {guild_id}: {e}"
         )
 
 
@@ -1027,7 +1070,14 @@ class DiscordInterface:
             async def on_turn_complete(
                 gid: int, user_transcript: str, model_transcript: str
             ) -> None:
-                """Store both sides of a live turn to history and trigger diary."""
+                """Store both sides of a live turn to history and buffer diary entries.
+
+                This callback is invoked after every model turn.  We still persist the
+                transcription to the chat history and semantic memories right away,
+                but instead of writing a diary entry each turn we accumulate the
+                transcripts in ``self._live_voice_state[gid]["diary_buffer"]`` and
+                flush them when the session stops.
+                """
                 from core.chat_history_cache import save_chat_message
 
                 # Resolve the real Discord user from the sink's last-speaker info.
@@ -1053,7 +1103,7 @@ class DiscordInterface:
                         sender_name="Synth",
                     )
 
-                # Track turn count for diary cadence.
+                # Track turn count for diagnostics.
                 live_state = (
                     self._live_voice_state.get(gid, {})
                     if hasattr(self, "_live_voice_state")
@@ -1062,12 +1112,9 @@ class DiscordInterface:
                 turn_n: int = live_state.get("turn_count", 0) + 1
                 if hasattr(self, "_live_voice_state") and gid in self._live_voice_state:
                     self._live_voice_state[gid]["turn_count"] = turn_n
-
-                # Write a diary entry on the configured cadence.
-                if model_transcript and turn_n % _LIVE_DIARY_EVERY_N_TURNS == 0:
-                    asyncio.create_task(
-                        _write_live_diary_entry(gid, user_transcript, model_transcript)
-                    )
+                    # append transcripts to buffer
+                    buf = self._live_voice_state[gid].setdefault("diary_buffer", [])
+                    buf.append((user_transcript, model_transcript))
 
                 # Persist to the memories table so semantic memory search can
                 # surface voice conversations in future context injections.
@@ -1139,6 +1186,7 @@ class DiscordInterface:
                 "sink": sink,
                 "source": source,
                 "turn_count": 0,
+                "diary_buffer": [],
                 "live_engine": _live_capable_engine,
                 "interface_path": live_interface_path,
             }
@@ -1179,6 +1227,13 @@ class DiscordInterface:
             # Clean up state and deactivate live cortex routing
             if hasattr(self, "_live_voice_state"):
                 state_backup = self._live_voice_state.pop(guild_id, None)
+
+                # Flush any buffered diary turns before we drop the state
+                if state_backup:
+                    buf = state_backup.get("diary_buffer", [])
+                    if buf:
+                        await _flush_live_diary(guild_id, buf)
+
                 if state_backup and state_backup.get("audio_buffer"):
                     state_backup["audio_buffer"].close()
                 # Deactivate per-path cortex override via LiveSessionManager
@@ -1775,6 +1830,43 @@ class DiscordInterface:
                 )
             except Exception as e:  # pragma: no cover - queue errors
                 log_error(f"[discord_interface] message_queue enqueue failed: {e}")
+
+            # --- live chat sync support ------------------------------------------------
+            # When enabled and a live voice session is active for the guild, mirror
+            # the textual message into the live context and replicate it on the
+            # ``discord_live_<guild>`` history path.  This keeps the text and voice
+            # stories aligned in real time.
+            try:
+                from core.config_manager import config_registry as _cfg
+                from core.chat_history_cache import save_chat_message
+
+                if (
+                    _cfg.get_value("LIVE_SYNC_CHAT_HISTORY", True, value_type=bool)
+                    and getattr(message, "guild", None)
+                    and hasattr(self, "client")
+                ):
+                    guild_id = message.guild.id
+                    # check whether a session is running
+                    live_mgr = None
+                    try:
+                        from core.live_session_manager import LiveSessionManager
+
+                        live_mgr = LiveSessionManager.get_instance()
+                    except Exception:
+                        live_mgr = None
+                    if live_mgr and live_mgr.is_session_active(guild_id):
+                        text = content
+                        # forward into live model
+                        await live_mgr.send_text(guild_id, text)
+                        # replicate in history cache
+                        await save_chat_message(
+                            interface_path=f"discord_live_{guild_id}",
+                            message_text=text,
+                            sender_name=getattr(message.author, "name", None),
+                            sender_id=str(getattr(message.author, "id", "")),
+                        )
+            except Exception as _sync_err:  # pragma: no cover - best effort
+                log_debug(f"[discord_interface] live sync failed: {_sync_err}")
 
         except Exception as e:  # pragma: no cover - unexpected errors
             log_error(f"[discord_interface] Error processing message: {e}")

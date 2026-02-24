@@ -116,10 +116,14 @@ async def test_grillo_response_extraction() -> None:
     result = await extract_response_text_from_cortex_response("Simple string response")
     assert result == "Simple string response"
 
-    result = await extract_response_text_from_cortex_response({"message": "Dict message"})
+    result = await extract_response_text_from_cortex_response(
+        {"message": "Dict message"}
+    )
     assert result == "Dict message"
 
-    result = await extract_response_text_from_cortex_response({"content": "Dict content"})
+    result = await extract_response_text_from_cortex_response(
+        {"content": "Dict content"}
+    )
     assert result == "Dict content"
 
     result = await extract_response_text_from_cortex_response(

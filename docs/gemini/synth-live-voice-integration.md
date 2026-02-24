@@ -203,10 +203,23 @@ After each model turn completes, `on_turn_complete` in
 subsystems.  The `interface_path` key used for voice conversations is
 `discord_live_{guild_id}`.
 
+### History Synchronization
+
+To keep the live voice context aligned with text-channel activity, the system
+forwards every incoming Discord message directly into the Live API if a
+session is active and also mirrors it on the `discord_live_{guild}` history
+path.  A background poll loop running at `LIVE_HISTORY_SYNC_INTERVAL` seconds
+serves as a fallback catch‑up mechanism; it queries
+`chat_history_cache.load_chat_history_for_guild()` for any new text messages
+and injects them similarly.  This hybrid approach (real-time + periodic
+sync) guarantees that both text and voice narratives remain coherent within
+prompts and prevents gaps if the immediate path experiences transient
+failures.
+
 | Subsystem | Table | How |
 |-----------|-------|-----|
 | `chat_history_cache` | `chat_history_cache` | `save_chat_message()` called for both sides; user entry uses real Discord name/ID from speaker attribution |
-| `ai_diary` | `ai_diary` | `add_diary_entry()` called via `run_in_executor` on the configured cadence (`_LIVE_DIARY_EVERY_N_TURNS`, default 1) |
+| `ai_diary` | `ai_diary` | `add_diary_entry()` called via `run_in_executor` once when the session stops; earlier per-turn cadence (_LIVE_DIARY_EVERY_N_TURNS) is deprecated and ignored. |
 | `synth_core_memory` | `memories` | `silently_record_memory()` called as `asyncio.create_task` when both sides have content; tagged `["voice", "auto"]`, `source="voice"` |
 | Grillo introspection | — | Passive — Grillo's beat-based introspection reads `load_global_chat_history()` which queries all `interface_path` values including `discord_live_*` |
 

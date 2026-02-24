@@ -110,6 +110,12 @@ API Reference
 ``load_chat_history(interface_path)``
    Load recent messages for a conversation
 
+``load_chat_history_for_guild(guild_id, since=None, limit=100)``
+   Load recent text messages across all interface paths belonging to a Discord
+   guild (paths matching ``discord_<guild>_%``).  This is used by the live voice
+   synchronization subsystem to mirror text channel activity into ongoing
+   voice sessions.
+
 **Usage Examples:**
 
 .. code-block:: python

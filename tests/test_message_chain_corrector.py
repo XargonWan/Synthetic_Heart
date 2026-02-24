@@ -127,7 +127,9 @@ async def test_message_chain_triggers_corrector_for_unregistered_top_level_key(
         fake_extract_json,
     )
 
-    msg = SimpleNamespace(chat_id=123, interface_path="telegram_bot/123", from_cortex=True)
+    msg = SimpleNamespace(
+        chat_id=123, interface_path="telegram_bot/123", from_cortex=True
+    )
 
     result = await message_chain.handle_incoming_message(
         bot=None,

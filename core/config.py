@@ -141,6 +141,36 @@ LIVE_CORTEX = config_registry.get_var(
     hidden=True,  # Managed via the Cortex Engines scope selectors
 )
 
+# ----------------------------------------------------------------------
+# Live session synchronization settings
+# ----------------------------------------------------------------------
+LIVE_SYNC_CHAT_HISTORY = config_registry.get_var(
+    "LIVE_SYNC_CHAT_HISTORY",
+    True,
+    label="Live Sync Chat History",
+    description=(
+        "When enabled, text messages sent in Discord are forwarded into an "
+        "active live voice session and the live prompt includes both the "
+        "local live history and the global chat history across interfaces."
+    ),
+    group="core",
+    component="live",
+    value_type=bool,
+)
+
+LIVE_HISTORY_SYNC_INTERVAL = config_registry.get_var(
+    "LIVE_HISTORY_SYNC_INTERVAL",
+    30,
+    label="Live History Sync Interval",
+    description=(
+        "Interval (seconds) between periodic polls that import recent text "
+        "messages into any running live voice session."
+    ),
+    group="core",
+    component="live",
+    value_type=int,
+)
+
 # --- LogChat configuration (use config_registry so exposed-variable APIs are consistent)
 LOG_CHAT_INTERFACE = config_registry.get_var(
     "LOG_CHAT_INTERFACE",
