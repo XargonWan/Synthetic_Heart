@@ -714,6 +714,7 @@ async def handle_incoming_message(
                         # Attach correction context and force correction path
                         correction_context = {
                             "successful_actions": [],
+                            "successful_types": [],
                             "failed_actions": unsupported,
                             "had_json_errors": False,
                             "original_text": text,
@@ -1196,6 +1197,23 @@ async def handle_incoming_message(
                         log_debug(
                             f"[message_chain] EXECUTING ACTIONS: count={len(actions) if actions else 0}, interface_path={ctx.get('interface_path')}, chat_id={ctx.get('chat_id')}, action_types={[a.get('type') or a.get('action') for a in (actions or []) if isinstance(a, dict)]}"
                         )
+                        # filter out previously-successful types when retrying
+                        if attempt > 0:
+                            cc = getattr(message, "correction_context", None) or {}
+                            successful_types = cc.get("successful_types", [])
+                            if successful_types and isinstance(actions, list):
+                                filtered = []
+                                for act in actions:
+                                    atype = None
+                                    if isinstance(act, dict):
+                                        atype = act.get("type") or act.get("action")
+                                    if atype in successful_types:
+                                        log_debug(
+                                            f"[message_chain] Removing previously successful action type '{atype}' from retry payload"
+                                        )
+                                    else:
+                                        filtered.append(act)
+                                actions = filtered
                         result = await run_actions(actions, ctx, bot, message)
                         processed = result.get("processed", [])
                         failed = result.get("failed_actions", [])
@@ -1257,6 +1275,11 @@ async def handle_incoming_message(
                             # Build correction context with info about what succeeded and what failed
                             correction_context = {
                                 "successful_actions": processed,
+                                "successful_types": [
+                                    (a.get("type") or a.get("action"))
+                                    for a in processed
+                                    if isinstance(a, dict)
+                                ],
                                 "failed_actions": failed,
                                 "errors": errors,
                                 "had_json_errors": metadata.get("recovered", False),

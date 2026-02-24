@@ -2187,14 +2187,13 @@ async def corrector_orchestrator(
             # Add message to context for error handling
             context = dict(context) if context else {}
             context["message"] = message
-            # Pass interface_path from original message to maintain conversation continuity
-            interface_path = getattr(message, "interface_path", None)
+            # Pass thread_id from original message to maintain conversation continuity
             corrected = await transport.run_corrector_middleware(
                 text,
                 bot=bot,
                 context=context,
                 chat_id=getattr(message, "chat_id", None),
-                interface_path=interface_path,
+                thread_id=getattr(message, "thread_id", None),
             )
         except Exception as e:
             log_warning(f"[corrector_orchestrator] Corrector invocation failed: {e}")
