@@ -11,7 +11,7 @@ async def test_corrector_invoked_when_top_level_message_without_message_action(
     called = {}
 
     async def fake_run_corrector_middleware(
-        text, bot=None, context=None, chat_id=None, interface_path=None
+        text, bot=None, context=None, chat_id=None, interface_path=None, **kwargs
     ):
         called["text"] = text
         called["bot"] = bot
@@ -34,13 +34,14 @@ async def test_corrector_invoked_when_top_level_message_without_message_action(
     }"""
 
     message = SimpleNamespace()
-    message.from_llm = True
+    message.from_cortex = True
     message.chat_id = 12345
     message.interface_path = "telegram_bot/12345"
 
+    # include a cortex-origin flag in context to mirror real transport use
     result = await corrector_orchestrator(
         llm_text,
-        context={"interface": "telegram"},
+        context={"interface": "telegram", "from_cortex": True},
         bot=None,
         message=message,
         max_retries=1,
@@ -59,3 +60,18 @@ async def test_corrector_invoked_when_top_level_message_without_message_action(
         ctx.get("correction_context")
         and "message" in ctx["correction_context"].get("instruction", "")
     )
+    # Make sure our origin flag is passed via context when message isn't useful
+    assert ctx.get("from_cortex")
+
+    # If we drop all actions (simulate only invalid ones), the orchestrator
+    # should return False (blocking) even without middleware involvement.
+    called.clear()
+    bad = '{"type":"message_unknown","payload":{}}'
+    result2 = await corrector_orchestrator(
+        bad,
+        context={"interface": "telegram", "from_cortex": True},
+        bot=None,
+        message=message,
+        max_retries=1,
+    )
+    assert result2 is False

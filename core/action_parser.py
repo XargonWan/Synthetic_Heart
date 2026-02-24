@@ -1194,7 +1194,7 @@ IMPORTANT: Do not include the {successful_count} actions that were already execu
 
         correction_message = types.SimpleNamespace()
         correction_message.chat_id = getattr(original_message, "chat_id", None)
-        correction_message.from_llm = True
+        correction_message.from_cortex = True
         correction_message.original_text = correction_context["instruction"]
         correction_message.text = correction_context["instruction"]
 
@@ -1275,12 +1275,12 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
                 )
                 continue
 
-            # --- Safety & autonomy checks for LLM-originated actions ---
-            is_from_llm = (
-                hasattr(original_message, "from_llm")
-                and getattr(original_message, "from_llm")
-            ) or context.get("from_llm", False)
-            if is_from_llm:
+            # --- Safety & autonomy checks for AI/cortex-originated actions ---
+            is_from_cortex = (
+                hasattr(original_message, "from_cortex")
+                and getattr(original_message, "from_cortex")
+            ) or context.get("from_cortex", False)
+            if is_from_cortex:
                 try:
                     # Centralized safety decision
                     from core.action_safety import is_action_allowed_for_execution
@@ -1407,12 +1407,12 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
 
     if collected_errors and failed_actions:
         # New selective corrector: only ask LLM to fix failed actions, not successful ones
-        # Check both message object AND context for from_llm flag
-        is_from_llm = (
-            hasattr(original_message, "from_llm") and original_message.from_llm
-        ) or context.get("from_llm", False)
+        # Check both message object AND context for from_cortex flag
+        is_from_cortex = (
+            hasattr(original_message, "from_cortex") and original_message.from_cortex
+        ) or context.get("from_cortex", False)
 
-        if is_from_llm:
+        if is_from_cortex:
             try:
                 await _request_selective_correction(
                     failed_actions=failed_actions,
@@ -2018,13 +2018,21 @@ async def corrector_orchestrator(
         False -> blocked (corrector exhausted or not allowed)
         None  -> not JSON-like; caller may forward as plain text
     """
-    # Only handle messages that explicitly originate from the LLM.
-    # Transport layer / llm engines must set `message.from_llm = True` when passing
-    # LLM outputs into this orchestrator. Any message without this flag is ignored
-    # here so system- or interface-originated payloads are not processed.
-    if message is not None and not getattr(message, "from_llm", False):
+    # Only handle messages that explicitly originate from the AI/cortex layer.
+    # We signal this with a single flag `from_cortex` on the message or in the
+    # context; legacy `from_cortex`/`from_ai` names are no longer used.
+    origin_flag = False
+    try:
+        origin_flag = bool(
+            getattr(message, "from_cortex", False)
+            or (context or {}).get("from_cortex", False)
+        )
+    except Exception:
+        origin_flag = False
+
+    if message is not None and not origin_flag:
         log_debug(
-            "[corrector_orchestrator] Ignoring message: not marked as LLM-origin (message.from_llm is False or missing)"
+            "[corrector_orchestrator] Ignoring message: not marked as cortex-origin"
         )
         return None
 

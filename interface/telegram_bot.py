@@ -2170,7 +2170,7 @@ class TelegramInterface:
                 msg.original_text = json.dumps(correction_payload, ensure_ascii=False)
                 msg.thread_id = None
                 msg.date = datetime.utcnow()
-                msg.from_llm = False
+                msg.from_cortex = False
                 if action_parser is not None:
                     try:
                         await action_parser.corrector_orchestrator(
@@ -2184,37 +2184,15 @@ class TelegramInterface:
                 return
             if not row:
                 # Use orchestrator instead of legacy corrector for not-found
-                try:
-                    from core import action_parser
-                    import json
-                    from types import SimpleNamespace
-                    from datetime import datetime
-                except Exception:
-                    action_parser = None
-                correction_payload = {
-                    "system_message": {
-                        "type": "error",
-                        "message": f"Channel or thread not found for name {chat_name or thread_name}",
-                        "your_reply": payload,
-                    }
-                }
-                msg = SimpleNamespace()
-                msg.chat_id = None
-                msg.text = ""
-                msg.original_text = json.dumps(correction_payload, ensure_ascii=False)
-                msg.thread_id = None
-                msg.date = datetime.utcnow()
-                msg.from_llm = False
-                if action_parser is not None:
-                    try:
-                        await action_parser.corrector_orchestrator(
-                            text=msg.original_text,
-                            context={"interface": "telegram"},
-                            bot=self.bot,
-                            message=msg,
-                        )
-                    except Exception:
-                        pass
+                from core.transport_layer import notify_corrector_of_system_message
+
+                await notify_corrector_of_system_message(
+                    json.dumps(correction_payload, ensure_ascii=False),
+                    self.bot,
+                    chat_id=None,
+                    thread_id=None,
+                    interface="telegram",
+                )
                 return
             chat_id = row.get("chat_id", chat_id)
             thread_id = row.get("thread_id", thread_id)
@@ -2311,71 +2289,27 @@ class TelegramInterface:
         except BadRequest as e:
             if "chat not found" in str(e).lower():
                 # Use orchestrator instead of legacy corrector
-                try:
-                    from core import action_parser
-                    import json
-                    from types import SimpleNamespace
-                    from datetime import datetime
-                except Exception:
-                    action_parser = None
-                correction_payload = {
-                    "system_message": {
-                        "type": "error",
-                        "message": f"Chat {chat_id} not found",
-                        "your_reply": payload,
-                    }
-                }
-                msg = SimpleNamespace()
-                msg.chat_id = chat_id
-                msg.text = ""
-                msg.original_text = json.dumps(correction_payload, ensure_ascii=False)
-                msg.thread_id = thread_id
-                msg.date = datetime.utcnow()
-                msg.from_llm = False
-                if action_parser is not None:
-                    try:
-                        await action_parser.corrector_orchestrator(
-                            text=msg.original_text,
-                            context={"interface": "telegram"},
-                            bot=self.bot,
-                            message=msg,
-                        )
-                    except Exception:
-                        pass
+                from core.transport_layer import notify_corrector_of_system_message
+
+                await notify_corrector_of_system_message(
+                    json.dumps(correction_payload, ensure_ascii=False),
+                    self.bot,
+                    chat_id=chat_id,
+                    thread_id=thread_id,
+                    interface="telegram",
+                )
                 return
             else:
                 # Generic error -> request correction via orchestrator
-                try:
-                    from core import action_parser
-                    import json
-                    from types import SimpleNamespace
-                    from datetime import datetime
-                except Exception:
-                    action_parser = None
-                correction_payload = {
-                    "system_message": {
-                        "type": "error",
-                        "message": str(e),
-                        "your_reply": payload,
-                    }
-                }
-                msg = SimpleNamespace()
-                msg.chat_id = chat_id
-                msg.text = ""
-                msg.original_text = json.dumps(correction_payload, ensure_ascii=False)
-                msg.thread_id = thread_id
-                msg.date = datetime.utcnow()
-                msg.from_llm = False
-                if action_parser is not None:
-                    try:
-                        await action_parser.corrector_orchestrator(
-                            text=msg.original_text,
-                            context={"interface": "telegram"},
-                            bot=self.bot,
-                            message=msg,
-                        )
-                    except Exception:
-                        pass
+                from core.transport_layer import notify_corrector_of_system_message
+
+                await notify_corrector_of_system_message(
+                    json.dumps(correction_payload, ensure_ascii=False),
+                    self.bot,
+                    chat_id=chat_id,
+                    thread_id=thread_id,
+                    interface="telegram",
+                )
                 return
         await self._verify_delivery(sent_message, payload, original_message)
 

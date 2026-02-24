@@ -371,7 +371,7 @@ async def safe_send(
         f"[telegram_utils] safe_send called: chat_id={chat_id} type={type(chat_id)} kwargs_keys={list(kwargs.keys())} chunk_size={chunk_size} retries={retries} delay={delay}"
     )
 
-    result = await llm_response_send(
+    result = await cortex_response_send(
         bot, chat_id, text, chunk_size, retries, delay, **kwargs
     )
 
@@ -517,9 +517,9 @@ async def send_with_thread_fallback(
 
     try:
         log_debug(
-            f"[telegram_utils] send_with_thread_fallback calling llm_response_send chat_id={chat_id} send_kwargs={send_kwargs}"
+            f"[telegram_utils] send_with_thread_fallback calling cortex_response_send chat_id={chat_id} send_kwargs={send_kwargs}"
         )
-        message = await llm_response_send(
+        message = await cortex_response_send(
             bot,
             chat_id,
             text,
@@ -535,7 +535,7 @@ async def send_with_thread_fallback(
                 f"[telegram_utils] Message to {chat_id} queued/skipped due to cooldown or error"
                 f" (thread: {thread_id}, reply_message_id: {reply_to_message_id})"
             )
-        log_debug(f"[telegram_utils] llm_response_send returned: {repr(message)}")
+        log_debug(f"[telegram_utils] cortex_response_send returned: {repr(message)}")
         return message
     except Exception as e:
         # On network/flood errors, set a cooldown for this chat
@@ -571,7 +571,7 @@ async def send_with_thread_fallback(
                 f"[telegram_utils] Thread {thread_id} not found; retrying without thread"
             )
             send_kwargs.pop("message_thread_id", None)
-            message = await llm_response_send(bot, chat_id, text, **send_kwargs)
+            message = await cortex_response_send(bot, chat_id, text, **send_kwargs)
             if message is not None:
                 log_info(f"[telegram_utils] Message sent to {chat_id} without thread")
             else:
@@ -598,7 +598,7 @@ async def send_with_thread_fallback(
             fallback_kwargs["reply_to_message_id"] = fallback_reply_to_message_id
         log_debug(f"[telegram_utils] Retrying in fallback chat {fallback_chat_id}")
         try:
-            message = await llm_response_send(
+            message = await cortex_response_send(
                 bot, fallback_chat_id, text, **fallback_kwargs
             )
             if message is not None:
@@ -615,7 +615,7 @@ async def send_with_thread_fallback(
     return None
 
 
-async def llm_response_send(
+async def cortex_response_send(
     bot,
     chat_id: int,
     text: str,
@@ -659,11 +659,11 @@ async def llm_response_send(
                     masked_token = "*" * (len(token) - 4) + token[-4:]
                     bot_repr = bot_repr.replace(token, masked_token)
         log_debug(
-            f"[llm_response_send] Called with bot={bot_repr}, chat_id={chat_id}, kwargs={kwargs}"
+            f"[cortex_response_send] Called with bot={bot_repr}, chat_id={chat_id}, kwargs={kwargs}"
         )
     except Exception:
         log_debug(
-            f"[llm_response_send] Called with chat_id={chat_id}, kwargs_keys={list(kwargs.keys())}"
+            f"[cortex_response_send] Called with chat_id={chat_id}, kwargs_keys={list(kwargs.keys())}"
         )
 
     # Log text content for debugging, and detect potential encoding issues (mojibake)
@@ -671,35 +671,35 @@ async def llm_response_send(
         try:
             from core.text_utils import looks_like_mojibake, try_recover_mojibake
 
-            log_debug(f"[llm_response_send] Text repr: {text!r}")
+            log_debug(f"[cortex_response_send] Text repr: {text!r}")
             if looks_like_mojibake(text):
                 log_warning(
-                    "[llm_response_send] Potential mojibake detected in LLM output (will forward as-is)."
+                    "[cortex_response_send] Potential mojibake detected in LLM output (will forward as-is)."
                 )
                 recovered = try_recover_mojibake(text)
                 log_debug(
-                    f"[llm_response_send] Mojibake recovery attempt: recovered={recovered!r}"
+                    f"[cortex_response_send] Mojibake recovery attempt: recovered={recovered!r}"
                 )
         except Exception:
-            log_debug("[llm_response_send] mojibake detection unavailable")
+            log_debug("[cortex_response_send] mojibake detection unavailable")
 
         # For JSON content, always log fully without truncation for debugging
         if text.strip().startswith(("{", "[")):
             log_debug(
-                f"[llm_response_send] JSON content ({len(text)} chars, full dump below):\n{text}"
+                f"[cortex_response_send] JSON content ({len(text)} chars, full dump below):\n{text}"
             )
         else:
-            log_debug(f"[llm_response_send] Text ({len(text)} chars): {text}")
+            log_debug(f"[cortex_response_send] Text ({len(text)} chars): {text}")
 
     if "reply_to_message_id" in kwargs and not kwargs["reply_to_message_id"]:
         log_warning(
-            "[llm_response_send] reply_to_message_id not found. Sending without replying."
+            "[cortex_response_send] reply_to_message_id not found. Sending without replying."
         )
         kwargs.pop("reply_to_message_id")
 
     # Validate chat_id
     if chat_id is None or not isinstance(chat_id, (int, str)):
-        log_error(f"[llm_response_send] Invalid chat_id provided: {chat_id}")
+        log_error(f"[cortex_response_send] Invalid chat_id provided: {chat_id}")
         return None
 
     # Convert string chat_id to int if possible
@@ -719,10 +719,10 @@ async def llm_response_send(
     if not is_system_message:
         json_data = extract_json_from_text(text)
         if json_data:
-            log_debug(f"[llm_response_send] JSON parsed successfully: {json_data}")
+            log_debug(f"[cortex_response_send] JSON parsed successfully: {json_data}")
         elif ("{" in text and "}" in text) or ("[" in text and "]" in text):
             log_debug(
-                f"[llm_response_send] Text contains JSON-like content but failed to parse: {text[:200]}..."
+                f"[cortex_response_send] Text contains JSON-like content but failed to parse: {text[:200]}..."
             )
             # Try to process with action parser if available
             try:
@@ -735,6 +735,10 @@ async def llm_response_send(
                 message.original_text = text
                 message.thread_id = kwargs.get("thread_id")
                 message.date = datetime.utcnow()
+                # mark origin so corrector will operate on this artificial message
+                # mark origin to indicate AI/cortex output; no need for multiple
+                # legacy flags since we now normalise on "from_cortex" throughout.
+                message.from_cortex = True
 
                 current_interface = "telegram"
                 corrector_context = {
@@ -742,6 +746,7 @@ async def llm_response_send(
                     "original_chat_id": chat_id,
                     "original_thread_id": kwargs.get("thread_id"),
                     "original_text": text[:500] if text else "",
+                    "from_cortex": True,
                 }
 
                 from core import action_parser
@@ -752,25 +757,33 @@ async def llm_response_send(
 
                 if orchestrator_result is True:
                     log_debug(
-                        "[llm_response_send] corrector_orchestrator executed actions; not forwarding text"
+                        "[cortex_response_send] corrector_orchestrator executed actions; not forwarding text"
                     )
                     return
                 elif orchestrator_result is False:
                     log_warning(
-                        "[llm_response_send] corrector_orchestrator blocked message"
+                        "[cortex_response_send] corrector_orchestrator blocked message"
                     )
                     return None
                 else:
+                    # If the text looked JSON-like but orchestrator declined to
+                    # handle it (returned None), we should block rather than
+                    # echo the potentially-invalid payload back to the user.
+                    if "{" in (text or "") or "[" in (text or ""):
+                        log_warning(
+                            "[cortex_response_send] corrector_orchestrator returned None on JSON-like text; blocking to prevent invalid send"
+                        )
+                        return None
                     log_debug(
-                        "[llm_response_send] corrector_orchestrator returned None -> forwarding as normal text"
+                        "[cortex_response_send] corrector_orchestrator returned None -> forwarding as normal text"
                     )
 
             except Exception as e:
-                log_debug(f"[llm_response_send] corrector_orchestrator failed: {e}")
+                log_debug(f"[cortex_response_send] corrector_orchestrator failed: {e}")
                 return None
         else:
             log_debug(
-                "[llm_response_send] No JSON-like content detected, sending as normal text"
+                "[cortex_response_send] No JSON-like content detected, sending as normal text"
             )
 
     if json_data:
@@ -781,7 +794,7 @@ async def llm_response_send(
             if isinstance(json_data, dict) and "actions" in json_data:
                 actions = json_data["actions"]
                 if not isinstance(actions, list):
-                    log_warning("[llm_response_send] actions field must be a list")
+                    log_warning("[cortex_response_send] actions field must be a list")
                     actions = []
             elif isinstance(json_data, list):
                 actions = json_data
@@ -789,7 +802,7 @@ async def llm_response_send(
                 actions = [json_data]
             else:
                 log_warning(
-                    f"[llm_response_send] Unrecognized JSON structure: {json_data}"
+                    f"[cortex_response_send] Unrecognized JSON structure: {json_data}"
                 )
                 actions = []
 
@@ -864,7 +877,8 @@ async def llm_response_send(
         dedupe_window = _DEFAULT_DEDUPE_WINDOW
 
     try:
-        import time, re, unicodedata
+        import time
+        import re
 
         # perform a more aggressive normalization so we catch invisible
         # characters, zero‑width spaces, extra linebreaks, etc.  The previous
@@ -884,7 +898,7 @@ async def llm_response_send(
         now = time.time()
         if last and (now - last) < dedupe_window:
             log_info(
-                f"[llm_response_send] Suppressing duplicate send to {chat_id} (within {dedupe_window}s)"
+                f"[cortex_response_send] Suppressing duplicate send to {chat_id} (within {dedupe_window}s)"
             )
             return None
         # Record this send
@@ -900,7 +914,7 @@ async def llm_response_send(
         for i in range(0, len(text), chunk_size):
             chunk = text[i : i + chunk_size]
             log_debug(
-                f"[llm_response_send] Sending chunk {i // chunk_size + 1} (len={len(chunk)}) to chat_id={chat_id}"
+                f"[cortex_response_send] Sending chunk {i // chunk_size + 1} (len={len(chunk)}) to chat_id={chat_id}"
             )
             sent = await _send_with_retry(bot, chat_id, chunk, retries, delay, **kwargs)
             # _send_with_retry may return a telegram Message object or None; keep last non-None
@@ -913,12 +927,12 @@ async def llm_response_send(
         error_msg = str(e).lower()
         if "thread not found" in error_msg or "message thread not found" in error_msg:
             log_warning(
-                f"[llm_response_send] Thread error (will retry without thread): {repr(e)}"
+                f"[cortex_response_send] Thread error (will retry without thread): {repr(e)}"
             )
         else:
-            log_error(f"[llm_response_send] Failed to send text chunks: {repr(e)}")
+            log_error(f"[cortex_response_send] Failed to send text chunks: {repr(e)}")
         raise
 
 
-# Backward compatibility alias (deprecated, use llm_response_send instead)
-telegram_safe_send = llm_response_send
+# Backward compatibility alias (deprecated, use cortex_response_send instead)
+telegram_safe_send = cortex_response_send

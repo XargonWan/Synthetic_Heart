@@ -10,7 +10,7 @@ async def test_declared_high_security_blocked_in_suggest_mode(monkeypatch):
     # Setup env
     await config_registry.set_value("SYNTH_AUTONOMY_MODE", "suggest")
     original_message = SimpleNamespace()
-    original_message.from_llm = True
+    original_message.from_cortex = True
 
     # Monkeypatch actions_block to declare action as high security
     core_initializer.actions_block = {
@@ -35,7 +35,7 @@ async def test_declared_high_security_blocked_in_suggest_mode(monkeypatch):
 async def test_external_effects_increase_to_medium_and_block_in_suggest(monkeypatch):
     await config_registry.set_value("SYNTH_AUTONOMY_MODE", "suggest")
     original_message = SimpleNamespace()
-    original_message.from_llm = True
+    original_message.from_cortex = True
 
     core_initializer.actions_block = {
         "available_actions": {
@@ -59,7 +59,7 @@ async def test_grillo_allows_medium_if_configured(monkeypatch):
     # Grillo configured to allow medium
     await config_registry.set_value("GRILLO_ALLOWED_SECURITY_LEVEL", "medium")
     original_message = SimpleNamespace()
-    original_message.from_llm = True
+    original_message.from_cortex = True
 
     core_initializer.actions_block = {
         "available_actions": {

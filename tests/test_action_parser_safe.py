@@ -13,7 +13,7 @@ async def test_llm_action_safe_false_blocked_by_default(monkeypatch):
 
     # Action from LLM
     original_message = SimpleNamespace()
-    original_message.from_llm = True
+    original_message.from_cortex = True
     original_message.chat_id = -1
 
     action = {
@@ -45,7 +45,7 @@ async def test_llm_action_safe_true_allowed_in_suggest_mode_if_low(monkeypatch):
     # With new security-level default=low, LLM-originated low-security actions should be allowed
     await config_registry.set_value("SYNTH_AUTONOMY_MODE", "suggest")
     original_message = SimpleNamespace()
-    original_message.from_llm = True
+    original_message.from_cortex = True
 
     executed = {}
 
@@ -85,7 +85,7 @@ async def test_autonomous_mode_executes_safe(monkeypatch):
     await config_registry.set_value("AUTONOMY_ALLOWED_ACTIONS", [])  # empty = allow all
 
     original_message = SimpleNamespace()
-    original_message.from_llm = True
+    original_message.from_cortex = True
 
     # Patch DiaryPlugin.execute_action to be a no-op that records execution
     executed = {}

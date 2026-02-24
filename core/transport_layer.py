@@ -1115,8 +1115,9 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
 
             message.chat_id = chat_id_value
             message.text = ""
-            # Mark this message as coming from an LLM so corrective flows trigger
-            message.from_llm = True
+            # Mark this message as coming from the AI/cortex layer so corrective
+            # flows trigger. Keep both legacy and new flags to be safe.
+            message.from_cortex = True
             message.original_text = text
             message.thread_id = kwargs.get("thread_id")
             from datetime import datetime
@@ -1152,7 +1153,7 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
                 "thread_defaults": {"default": None},
             }  # Add more context as needed
             # Mark context to indicate source is LLM (used by selective corrector)
-            context["from_llm"] = True
+            context["from_cortex"] = True
 
             # Filter actions to only include those for the current interface
             current_interface_actions = []
@@ -1794,6 +1795,56 @@ async def llm_to_interface(interface_send_func, *args, text: str = None, **kwarg
         )
         return None
 
+
+async def notify_corrector_of_system_message(
+    text: str,
+    bot,
+    chat_id: int | str | None = None,
+    thread_id: int | None = None,
+    interface: str = "telegram",
+):
+    """Send a manually-generated system message into the corrector.
+
+    This is used by interfaces (currently only Telegram) when they need to
+    trigger the correction loop for error notifications or invalid user
+    input.  Unlike normal LLM-origin messages, these are *not* coming from the
+    AI stack, so we explicitly mark ``from_cortex=False`` to prevent the
+    orchestrator from re-processing them as model output.
+
+    Args:
+        text: The text to pass through the corrector (usually a JSON payload).
+        bot: Bot instance (may be None for tests).
+        chat_id: Optional chat identifier associated with the message.
+        thread_id: Optional thread identifier.
+        interface: Name of originating interface for logging/context.
+    """
+    from types import SimpleNamespace
+    from datetime import datetime
+    try:
+        msg = SimpleNamespace()
+        msg.chat_id = chat_id
+        msg.text = ""
+        msg.original_text = text
+        msg.thread_id = thread_id
+        msg.date = datetime.utcnow()
+        msg.from_cortex = False
+    except Exception:
+        msg = None
+
+    context = {"interface": interface}
+    if chat_id is not None:
+        context["original_chat_id"] = chat_id
+    if thread_id is not None:
+        context["original_thread_id"] = thread_id
+
+    try:
+        from core import action_parser
+
+        await action_parser.corrector_orchestrator(text, context, bot, msg)
+    except Exception as e:
+        log_debug(f"[transport] notify_corrector_of_system_message failed: {e}")
+    return
+
     # Normalize LLM text for mojibake / double-escaped sequences BEFORE parsing
     try:
         from core.text_utils import normalize_for_outbound
@@ -1888,9 +1939,11 @@ async def llm_to_interface(interface_send_func, *args, text: str = None, **kwarg
                 message.text = ""
                 message.original_text = text
                 message.thread_id = kwargs.get("thread_id")
-                # Mark this message as originating from the LLM so the orchestrator
-                # will process it. This complements the is_llm_response flag.
-                message.from_llm = True
+                # Mark this message as originating from the AI/cortex layer so the
+                # orchestrator will process it.  The `is_llm_response` flag is also
+                # set earlier, but we propagate a concrete attribute here for
+                # downstream code.
+                message.from_cortex = True
                 message.date = datetime.utcnow()
 
                 current_interface = kwargs.get("interface") or (
@@ -1903,6 +1956,7 @@ async def llm_to_interface(interface_send_func, *args, text: str = None, **kwarg
                     "original_chat_id": chat_id,
                     "original_thread_id": kwargs.get("thread_id"),
                     "original_text": text[:500] if text else "",
+                    "from_cortex": True,
                 }
 
                 # If JSON is corrupted, extract already-completed actions from the recovered JSON

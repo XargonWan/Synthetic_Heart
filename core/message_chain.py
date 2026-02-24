@@ -349,12 +349,16 @@ async def handle_incoming_message(
         except Exception:
             ctx["original_user_message"] = ""
 
-    # Mark LLM-origin in context (not on message object, as Telegram Message objects are immutable)
-    is_from_llm = True if source == "llm" else ctx.get("from_llm", False)
-    ctx["from_llm"] = is_from_llm
+    # Mark cortex-origin in context (not on message object, as Telegram
+    # Message objects are immutable). We normalise on "from_cortex" internally.
+    is_cortex_origin = True if source == "llm" else ctx.get("from_cortex", False)
+    # also honor explicit cortex/ai flags in context (legacy support)
+    if not is_cortex_origin:
+        is_cortex_origin = bool(ctx.get("from_cortex") or ctx.get("from_ai"))
+    ctx["from_cortex"] = is_cortex_origin
 
     # Preserve raw LLM response text for Debrief/intent-recovery plugins
-    if is_from_llm:
+    if is_cortex_origin:
         try:
             ctx["llm_response_text"] = text or ""
         except Exception:
@@ -363,7 +367,8 @@ async def handle_incoming_message(
     # Also set on message object if possible (for corrector_orchestrator and action_parser detection)
     try:
         if hasattr(message, "__dict__") or isinstance(message, type({})):
-            message.from_llm = is_from_llm
+            # keep legacy attr for compatibility but core uses from_cortex
+            message.from_cortex = is_cortex_origin
     except (AttributeError, TypeError):
         pass  # Message object is immutable (Telegram Message); use ctx instead
 
@@ -394,7 +399,7 @@ async def handle_incoming_message(
     )
 
     # Process LLM messages for emotional state updates
-    if ctx.get("from_llm", False) or source == "llm":
+    if ctx.get("from_cortex", False) or source == "llm":
         log_info("[message_chain] 🎭 Starting emotion processing for LLM message...")
         try:
             from core.persona_manager import get_persona_manager
@@ -615,8 +620,8 @@ async def handle_incoming_message(
                 # We already allow certain metadata keys (e.g. "feelings") via the validation registry.
                 # Any other top-level key is treated as an invalid action type so the corrector
                 # can regenerate the response using only registered actions.
-                is_from_llm = source == "llm" or getattr(message, "from_llm", False)
-                if is_from_llm and isinstance(parsed, dict):
+                is_from_cortex = source == "llm" or getattr(message, "from_cortex", False)
+                if is_from_cortex and isinstance(parsed, dict):
                     try:
                         from core.validation_registry import get_validation_registry
 
@@ -669,7 +674,7 @@ async def handle_incoming_message(
                     supported_action_types = set()
 
                 # Only enforce this for LLM-originated responses
-                if is_from_llm and isinstance(actions, list):
+                if is_from_cortex and isinstance(actions, list):
                     # quick mapping: some models may output a generic "message"
                     # action when they really intend to send text to the current
                     # interface.  Convert it to a concrete type based on the
@@ -761,7 +766,7 @@ async def handle_incoming_message(
                 # Note: LLM decides freely whether to respond to user or not
                 # If no message_telegram_bot action is included, user simply receives nothing
                 # Log for debugging purposes
-                if source == "llm" or getattr(message, "from_llm", False):
+                if source == "llm" or getattr(message, "from_cortex", False):
                     has_user_response = False
                     has_tts = False
                     user_message_action = None
@@ -1240,7 +1245,7 @@ async def handle_incoming_message(
                             pass
 
                         if needs_correction and (
-                            source == "llm" or getattr(message, "from_llm", False)
+                            source == "llm" or getattr(message, "from_cortex", False)
                         ):
                             # Some actions failed or JSON was corrupted - request selective correction
                             log_warning(
@@ -1302,7 +1307,7 @@ async def handle_incoming_message(
         # If it's non-LLM source, don't attempt correction
         # IMPORTANT: Only attempt correction for LLM messages that failed JSON parsing
         # Non-LLM messages and messages that don't require correction should be blocked
-        if source != "llm" and not getattr(message, "from_llm", False):
+        if source != "llm" and not getattr(message, "from_cortex", False):
             log_debug("[message_chain] Non-LLM source; no correction needed")
             return BLOCKED
 
@@ -1406,7 +1411,7 @@ async def handle_incoming_message(
         text = corrected
         source = "llm"
         ctx["original_text"] = text  # Track in context instead of on message object
-        ctx["from_llm"] = True  # Track in context instead of on message object
+        ctx["from_cortex"] = True  # Track in context instead of on message object
         # loop continues
 
 

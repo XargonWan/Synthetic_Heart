@@ -109,10 +109,10 @@ def is_action_allowed_for_execution(
         )
 
         # 5) Origin and mode
-        is_from_llm = (
-            hasattr(original_message, "from_llm")
-            and getattr(original_message, "from_llm")
-        ) or (isinstance(context, dict) and context.get("from_llm", False))
+        is_from_cortex = (
+            hasattr(original_message, "from_cortex")
+            and getattr(original_message, "from_cortex")
+        ) or (isinstance(context, dict) and context.get("from_cortex", False))
         synth_mode = str(
             config_registry.get_value("SYNTH_AUTONOMY_MODE", "suggest") or "suggest"
         ).lower()
@@ -155,7 +155,7 @@ def is_action_allowed_for_execution(
             )
 
         # If not from LLM (human-triggered), allow (unless payload safe flag blocks and override not set)
-        if not is_from_llm:
+        if not is_from_cortex:
             return True, "allowed: human-triggered", {"security_level": declared_level}
 
         # From LLM -> apply synth_mode policies

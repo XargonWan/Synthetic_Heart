@@ -69,7 +69,7 @@ async def update_grillo_activity_response(
         return False
 
 
-async def extract_response_text_from_llm_response(response: Any) -> str:
+async def extract_response_text_from_cortex_response(response: Any) -> str:
     """
     Extract meaningful response text from various LLM response formats.
 

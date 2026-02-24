@@ -64,7 +64,7 @@ async def test_message_chain_triggers_corrector_for_unregistered_action(monkeypa
     msg = SimpleNamespace()
     msg.chat_id = 123
     msg.interface_path = "telegram_bot/123"
-    msg.from_llm = True
+    msg.from_cortex = True
 
     # Call the message chain as if the source was LLM
     result = await message_chain.handle_incoming_message(
@@ -127,7 +127,7 @@ async def test_message_chain_triggers_corrector_for_unregistered_top_level_key(
         fake_extract_json,
     )
 
-    msg = SimpleNamespace(chat_id=123, interface_path="telegram_bot/123", from_llm=True)
+    msg = SimpleNamespace(chat_id=123, interface_path="telegram_bot/123", from_cortex=True)
 
     result = await message_chain.handle_incoming_message(
         bot=None,
@@ -234,7 +234,7 @@ async def test_no_fallback_if_partial_success(monkeypatch):
     msg = SimpleNamespace()
     msg.chat_id = 42
     msg.interface_path = "telegram_bot/42"
-    msg.from_llm = True
+    msg.from_cortex = True
 
     # limit retries to 1 so we hit the exhaustion branch quickly
     result = await message_chain.handle_incoming_message(
@@ -281,7 +281,7 @@ async def test_fallback_on_technical_error(monkeypatch):
         fake_send,
     )
 
-    msg = SimpleNamespace(chat_id=99, interface_path="fake/99", from_llm=True)
+    msg = SimpleNamespace(chat_id=99, interface_path="fake/99", from_cortex=True)
     result = await message_chain.handle_incoming_message(
         bot=None,
         message=msg,

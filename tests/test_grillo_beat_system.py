@@ -110,24 +110,24 @@ async def test_grillo_outreach_prompt_generation() -> None:
 async def test_grillo_response_extraction() -> None:
     """Test response text extraction from various formats."""
     from plugins.grillo.grillo_response_recorder import (
-        extract_response_text_from_llm_response,
+        extract_response_text_from_cortex_response,
     )
 
-    result = await extract_response_text_from_llm_response("Simple string response")
+    result = await extract_response_text_from_cortex_response("Simple string response")
     assert result == "Simple string response"
 
-    result = await extract_response_text_from_llm_response({"message": "Dict message"})
+    result = await extract_response_text_from_cortex_response({"message": "Dict message"})
     assert result == "Dict message"
 
-    result = await extract_response_text_from_llm_response({"content": "Dict content"})
+    result = await extract_response_text_from_cortex_response({"content": "Dict content"})
     assert result == "Dict content"
 
-    result = await extract_response_text_from_llm_response(
+    result = await extract_response_text_from_cortex_response(
         {"actions": [{"type": "message", "payload": {"text": "Action text"}}]}
     )
     assert "Action text" in result
 
-    result = await extract_response_text_from_llm_response(None)
+    result = await extract_response_text_from_cortex_response(None)
     assert result == ""
 
 

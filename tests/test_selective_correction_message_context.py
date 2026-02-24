@@ -39,7 +39,7 @@ async def test_request_selective_correction_includes_message_in_context(monkeypa
     ]
 
     original_message = SimpleNamespace()
-    original_message.from_llm = True
+    original_message.from_cortex = True
     original_message.chat_id = 999
     original_message.thread_id = None
 
