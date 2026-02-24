@@ -1183,7 +1183,14 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         # Only send response if it's not None (meaning command was recognized)
         if response is not None:
-            await update.message.reply_text(response, parse_mode="Markdown")
+            try:
+                await update.message.reply_text(response, parse_mode="Markdown")
+            except Exception as md_err:
+                # Markdown parse error: retry as plain text so the reply is never lost
+                log_error(
+                    f"[telegram_bot] Markdown parse error, retrying plain text: {md_err}"
+                )
+                await update.message.reply_text(response)
     except Exception as e:
         log_error(f"[telegram_bot] Error handling command: {e}")
         await update.message.reply_text("❌ Error processing command.")
@@ -1287,7 +1294,13 @@ async def cortex_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             command_text, user_id, "telegram_bot", interface_context
         )
         if response is not None:
-            await update.message.reply_text(response, parse_mode="Markdown")
+            try:
+                await update.message.reply_text(response, parse_mode="Markdown")
+            except Exception as md_err:
+                log_error(
+                    f"[telegram_bot] Markdown parse error in cortex_command, retrying plain: {md_err}"
+                )
+                await update.message.reply_text(response)
     except Exception as e:
         log_error(f"[telegram_bot] Error handling cortex command: {e}")
         await update.message.reply_text("❌ Error processing command.")
