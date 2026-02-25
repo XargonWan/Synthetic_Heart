@@ -1345,4 +1345,13 @@ async def build_live_system_instruction(
         "Do not output JSON, markdown, or structured data — just speak naturally."
     )
 
+    # Inform the model about context updates injected by the system
+    parts.append(
+        "Occasionally you may receive context updates enclosed in brackets or "
+        "sent as system messages. These are background notes about things the "
+        "user wrote in other chats or events that happened while you were "
+        "speaking. Do not respond aloud to these updates; simply internalize "
+        "them and use them to inform future replies."
+    )
+
     return "\n\n".join(parts)

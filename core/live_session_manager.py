@@ -81,6 +81,10 @@ class LiveSessionState:
         "_session",
         "_receive_task",
         "_ctx",
+        # History/caching tracking
+        "last_injected_ts",
+        "generating",  # whether a model turn is currently in progress
+        "pending_context_updates",  # queued texts awaiting flush
     )
 
     def __init__(
@@ -96,6 +100,12 @@ class LiveSessionState:
         self.is_active: bool = False
         self._session: Any = None  # genai AsyncSession
         self._receive_task: asyncio.Task[None] | None = None
+        # Cursor for incremental guild-history sync loop
+        # (not used by context-update hook)
+        self.last_injected_ts: str | None = None
+        # live-turn state
+        self.generating: bool = False
+        self.pending_context_updates: list[str] = []
 
     @property
     def elapsed_seconds(self) -> float:
@@ -501,7 +511,6 @@ class LiveSessionManager:
         so that the live prompt will see the text history as if it had been
         uttered in voice.
         """
-        last_ts = None
         try:
             while True:
                 await asyncio.sleep(self.history_sync_interval)
@@ -519,8 +528,10 @@ class LiveSessionManager:
                         save_chat_message,
                     )
 
+                    # Use the shared cursor from state so on-turn injection and
+                    # the periodic sync loop never re-send the same messages.
                     new_msgs = await load_chat_history_for_guild(
-                        guild_id, since=last_ts
+                        guild_id, since=state.last_injected_ts
                     )
                     for msg in new_msgs:
                         text = msg.get("text") or ""
@@ -535,9 +546,9 @@ class LiveSessionManager:
                                 sender_id=msg.get("sender_id"),
                                 timestamp=msg.get("timestamp"),
                             )
-                        # update last_ts regardless so we don't re-fetch the same
+                        # advance shared cursor regardless so we don't re-fetch
                         if msg.get("timestamp"):
-                            last_ts = msg.get("timestamp")
+                            state.last_injected_ts = msg["timestamp"]
                 except Exception as e:
                     log_warning(
                         f"[live_session] History sync error for guild {guild_id}: {e}"
@@ -546,6 +557,68 @@ class LiveSessionManager:
             log_debug(
                 f"[live_session] History sync loop cancelled for guild {guild_id}"
             )
+
+    async def send_context_update(self, guild_id: int, text: str) -> None:
+        """Send or buffer a system-role context update message to a Live API session.
+
+        If the session is currently in the middle of a model turn we cannot
+        safely inject the text yet (it would be appended to the turn that has
+        already been processed).  In that case we queue the update on
+        ``state.pending_context_updates`` and it will be flushed by
+        ``_receive_loop`` when the current turn completes.  Otherwise we send
+        immediately with ``turn_complete=False`` so the text is merged into the
+        next outgoing turn.
+        """
+        state = self._sessions.get(guild_id)
+        if not state or not state.is_active or not state._session:
+            return
+
+        # buffer if model currently generating
+        if getattr(state, "generating", False):
+            state.pending_context_updates.append(text)
+            log_debug(
+                f"[live_session] Buffered context update for guild {guild_id}: {text[:60]}"
+            )
+            return
+
+        try:
+            await state._session.send_client_content(
+                turns=types.Content(role="system", parts=[types.Part(text=text)]),
+                turn_complete=False,
+            )
+            log_info(
+                f"[live_session] Sent context update to guild {guild_id}: {text[:60]}"
+            )
+        except Exception as e:
+            log_warning(
+                f"[live_session] Failed to send context update for guild {guild_id}: {e}"
+            )
+
+    async def _flush_pending_updates(self, guild_id: int) -> None:
+        """Internal helper: send and clear any buffered context updates.
+
+        This is called by ``_receive_loop`` when a model turn completes, but it
+        can also be invoked manually by tests.
+        """
+        state = self._sessions.get(guild_id)
+        if not state or not state.is_active or not state._session:
+            return
+        if not state.pending_context_updates:
+            return
+        for upd in list(state.pending_context_updates):
+            try:
+                await state._session.send_client_content(
+                    turns=types.Content(role="system", parts=[types.Part(text=upd)]),
+                    turn_complete=False,
+                )
+                log_info(
+                    f"[live_session] Flushed buffered context update for guild {guild_id}: {upd[:60]}"
+                )
+            except Exception as e:
+                log_warning(
+                    f"[live_session] Failed flush context update for guild {guild_id}: {e}"
+                )
+        state.pending_context_updates.clear()
 
     async def send_text(self, guild_id: int, text: str) -> None:
         """Send a text message into the Live API session context.
@@ -636,6 +709,7 @@ class LiveSessionManager:
                         if it is not None:
                             t = getattr(it, "text", None)
                             if t:
+                                # simply accumulate user transcription fragments
                                 user_parts.append(t)
                         ot = getattr(sc, "output_transcription", None)
                         if ot is not None:
@@ -679,6 +753,11 @@ class LiveSessionManager:
                         )
                     except Exception as e:
                         log_warning(f"[live_session] Turn complete callback error: {e}")
+
+                # Model has finished generating; clear generating flag and flush
+                # any buffered updates.
+                state.generating = False
+                await self._flush_pending_updates(guild_id)
 
                 if not state.is_active:
                     break

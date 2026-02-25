@@ -137,6 +137,21 @@ Reconnection:
 4. Opens a new session.
 
 **Note:** Conversation context is not preserved across reconnections yet.
+
+### Automatic context updates
+The live session now receives immediate context updates whenever Synth
+captures a new message from any non-live interface (Telegram, regular
+Discord, etc.).  These updates are delivered as **system-role** messages via
+`send_client_content()` with `turn_complete=False`, meaning they are
+appended directly into whichever turn is currently in progress.  If the
+model is currently responding when the update arrives it will be buffered
+and flushed as soon as the response completes, ensuring the update is
+available for the next user utterance.  The persona treats these notes as
+background information and does not speak aloud in response.  This
+behaviour guarantees that when the user speaks again in a live voice session
+the model will already have incorporated any recent cross-channel
+communication.
+
 Future work: inject a conversation summary via `send_client_content()` or
 use Google's session resumption feature.
 
