@@ -1,4 +1,5 @@
 import asyncio
+import pytest
 from types import SimpleNamespace
 
 import pytest
