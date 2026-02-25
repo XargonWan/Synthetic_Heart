@@ -93,7 +93,11 @@ async def test_message_chain_filters_duplicate_actions_on_retry(monkeypatch):
     call_types = []
 
     async def fake_run_actions(actions, ctx, bot, message):
-        types = [a.get("type") or a.get("action") for a in (actions or []) if isinstance(a, dict)]
+        types = [
+            a.get("type") or a.get("action")
+            for a in (actions or [])
+            if isinstance(a, dict)
+        ]
         call_types.append(types)
         processed = []
         failed = []
@@ -103,20 +107,26 @@ async def test_message_chain_filters_duplicate_actions_on_retry(monkeypatch):
                 failed.append({"action": actions[1], "errors": ["fail"]})
         return {"processed": processed, "failed_actions": failed, "errors": []}
 
-    async def fake_corrector(text, bot=None, context=None, chat_id=None, thread_id=None, **kwargs):
+    async def fake_corrector(
+        text, bot=None, context=None, chat_id=None, thread_id=None, **kwargs
+    ):
         # always return same text so the loop re-parses the original actions
         return text
 
     def fake_extract_json(text, return_metadata=False):
         return (
-            {"actions": [
-                {"type": "first", "payload": {}},
-                {"type": "second", "payload": {}},
-            ]},
+            {
+                "actions": [
+                    {"type": "first", "payload": {}},
+                    {"type": "second", "payload": {}},
+                ]
+            },
             {},
         )
 
-    monkeypatch.setattr("core.transport_layer.extract_json_from_text", fake_extract_json)
+    monkeypatch.setattr(
+        "core.transport_layer.extract_json_from_text", fake_extract_json
+    )
     monkeypatch.setattr("core.action_parser.run_actions", fake_run_actions)
     monkeypatch.setattr("core.transport_layer.run_corrector_middleware", fake_corrector)
     monkeypatch.setattr(
@@ -156,7 +166,11 @@ async def test_partial_success_filters_non_successful_action(monkeypatch):
     call_types = []
 
     async def fake_run_actions(actions, ctx, bot, message):
-        types = [a.get("type") or a.get("action") for a in (actions or []) if isinstance(a, dict)]
+        types = [
+            a.get("type") or a.get("action")
+            for a in (actions or [])
+            if isinstance(a, dict)
+        ]
         call_types.append(types)
         processed = []
         failed = []
@@ -168,19 +182,25 @@ async def test_partial_success_filters_non_successful_action(monkeypatch):
                 failed.append({"action": actions[1], "errors": ["error"]})
         return {"processed": processed, "failed_actions": failed, "errors": []}
 
-    async def fake_corrector(text, bot=None, context=None, chat_id=None, thread_id=None, **kwargs):
+    async def fake_corrector(
+        text, bot=None, context=None, chat_id=None, thread_id=None, **kwargs
+    ):
         return text
 
     def fake_extract_json(text, return_metadata=False):
         return (
-            {"actions": [
-                {"type": "alpha", "payload": {}},
-                {"type": "beta", "payload": {}},
-            ]},
+            {
+                "actions": [
+                    {"type": "alpha", "payload": {}},
+                    {"type": "beta", "payload": {}},
+                ]
+            },
             {},
         )
 
-    monkeypatch.setattr("core.transport_layer.extract_json_from_text", fake_extract_json)
+    monkeypatch.setattr(
+        "core.transport_layer.extract_json_from_text", fake_extract_json
+    )
     monkeypatch.setattr("core.action_parser.run_actions", fake_run_actions)
     monkeypatch.setattr("core.transport_layer.run_corrector_middleware", fake_corrector)
     monkeypatch.setattr(

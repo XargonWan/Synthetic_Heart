@@ -14,7 +14,14 @@ function injectChatStyles() {
         .synth-chat-footer { flex:0 0 auto; position:sticky; bottom:0; z-index:2; background: inherit; }
         .synth-chat-composer { width:100%; display:flex; gap:0.6rem; align-items:flex-end; padding:0.6rem 1rem; box-sizing:border-box; }
         #input { flex:1 1 auto; min-height:2.4rem; max-height:7rem; resize:none; }
-        #send { flex:0 0 auto; border-radius:50%; height:2.6rem; width:2.6rem; }
+        #send { flex:0 0 auto; border-radius:50%; height:2.6rem; width:2.6rem; cursor:pointer; transition: background 0.2s, transform 0.15s; }
+        #send.send-mode { /* text ready */ }
+        #send.mic-mode  { background: var(--accent, #6bfefe); color: #111; }
+        #send.recording { background: #d94; color: #fff; animation: synth-mic-pulse 0.9s ease-in-out infinite; }
+        @keyframes synth-mic-pulse {
+            0%,100% { transform:scale(1);   box-shadow:0 0 0 0   rgba(210,100,0,0.5); }
+            50%      { transform:scale(1.12); box-shadow:0 0 0 7px rgba(210,100,0,0);   }
+        }
         .synth-chat-archive { margin-left:auto; margin-top:0.6rem; margin-right:0.6rem; display:flex; gap:0.5rem; align-items:center; }
         .synth-chat-archive .pill { padding:0.4rem 0.6rem; }
         /* Message day separator */
@@ -50,7 +57,7 @@ function createChatTemplate() {
                 <div class="synth-chat-footer synth-chat-toolbar">
                     <form id="composer" class="synth-chat-composer" autocomplete="off">
                         <textarea id="input" placeholder="Type a message…" rows="2"></textarea>
-                        <button id="send" type="submit" disabled="disabled">➤</button>
+                        <button id="send" type="button">➤</button>
                     </form>
                 </div>
             </div>
@@ -310,12 +317,162 @@ export function initChatUI() {
 
         let ws = null;
 
-        function updateSendState() {
+        // ── Mic recording state ────────────────────────────────────────────
+        let micMediaRecorder = null;
+        let micAudioChunks   = [];
+        let micStream        = null;   // shared: ambient VAD + recording
+        let micAmbientCtx    = null;
+        let micAmbientAnalyser = null;
+        let micVADInterval   = null;
+        let micRecordingMode = null;   // 'ptt' | 'toggle' | null
+        let micPressTimer    = null;   // setTimeout id OR string 'long'
+        let micSilenceTimer  = null;
+        let micSpeaking      = false;
+        let micSilenceMs     = 0;
+        const MIC_LONG_PRESS_MS   = 300;   // ms before PTT activates
+        const MIC_SILENCE_SEND_MS = 2000;  // ms of silence → auto-send (toggle)
+        const MIC_VAD_THRESHOLD   = 0.015; // RMS volume threshold
+
+        // ── Button mode (➤ send / 🎤 mic / ⏹ recording) ──────────────────
+        function updateButtonMode() {
             if (!sendBtn || !input) return;
             const hasText = input.value.trim().length > 0;
             const wsReady = ws && ws.readyState === WebSocket.OPEN;
-            sendBtn.disabled = !(hasText && wsReady);
+            if (micRecordingMode) {
+                sendBtn.type        = 'button';
+                sendBtn.textContent = '⏹';
+                sendBtn.disabled    = false;
+                sendBtn.className   = 'recording';
+                sendBtn.title       = micRecordingMode === 'ptt' ? 'Release to send (PTT)' : 'Tap to stop & send';
+            } else if (hasText) {
+                sendBtn.type        = 'submit';
+                sendBtn.textContent = '➤';
+                sendBtn.disabled    = !wsReady;
+                sendBtn.className   = 'send-mode';
+                sendBtn.title       = 'Send message (Enter)';
+            } else {
+                sendBtn.type        = 'button';
+                sendBtn.textContent = '🎤';
+                sendBtn.disabled    = false;
+                sendBtn.className   = 'mic-mode';
+                sendBtn.title       = 'Hold to record (PTT) • Tap to toggle recording';
+            }
         }
+
+        // ── Ambient VAD (volume-based, triggers look-at-camera always) ───────
+        function _startVADLoop(stream) {
+            if (micVADInterval) return;
+            try {
+                micAmbientCtx = micAmbientCtx || new (window.AudioContext || window.webkitAudioContext)();
+                const src = micAmbientCtx.createMediaStreamSource(stream);
+                micAmbientAnalyser = micAmbientCtx.createAnalyser();
+                micAmbientAnalyser.fftSize = 512;
+                src.connect(micAmbientAnalyser);
+                micSpeaking = false; micSilenceMs = 0;
+                const buf = new Float32Array(micAmbientAnalyser.fftSize);
+                micVADInterval = setInterval(() => {
+                    try {
+                        if (!micAmbientAnalyser) return;
+                        micAmbientAnalyser.getFloatTimeDomainData(buf);
+                        const rms = Math.sqrt(buf.reduce((s, v) => s + v * v, 0) / buf.length);
+                        if (rms > MIC_VAD_THRESHOLD) {
+                            micSilenceMs = 0;
+                            if (!micSpeaking) {
+                                micSpeaking = true;
+                                try { if (typeof window._synthVADLookAtCamera === 'function') window._synthVADLookAtCamera(true); } catch (_) { /* ignore */ }
+                            }
+                            if (micRecordingMode === 'toggle') { clearTimeout(micSilenceTimer); micSilenceTimer = null; }
+                        } else {
+                            micSilenceMs += 100;
+                            if (micSpeaking && micSilenceMs > 400) {
+                                micSpeaking = false;
+                                try { if (typeof window._synthVADLookAtCamera === 'function') window._synthVADLookAtCamera(false); } catch (_) { /* ignore */ }
+                            }
+                            if (micRecordingMode === 'toggle' && !micSilenceTimer && micSilenceMs >= MIC_SILENCE_SEND_MS) {
+                                micSilenceTimer = setTimeout(() => { stopRecordingAndSend(); }, 0);
+                            }
+                        }
+                    } catch (_) { /* ignore */ }
+                }, 100);
+            } catch (e) { console.warn('[chat-window] VAD loop failed:', e); }
+        }
+
+        async function _ensureMicStream() {
+            if (micStream && micStream.active) return micStream;
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+                micStream = stream;
+                _startVADLoop(stream);
+                return stream;
+            } catch (e) { console.warn('[chat-window] Mic permission denied:', e); return null; }
+        }
+
+        // ── Recording ─────────────────────────────────────────────────
+        async function startRecording(mode) {
+            if (micRecordingMode) return;
+            const stream = await _ensureMicStream();
+            if (!stream) return;
+            try {
+                micAudioChunks = [];
+                const mt = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus'
+                    : (MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '');
+                micMediaRecorder = mt ? new MediaRecorder(stream, { mimeType: mt }) : new MediaRecorder(stream);
+                micMediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) micAudioChunks.push(e.data); };
+                micMediaRecorder.start(100);
+                micRecordingMode = mode;
+                updateButtonMode();
+            } catch (e) { console.warn('[chat-window] startRecording failed:', e); micRecordingMode = null; updateButtonMode(); }
+        }
+
+        async function stopRecordingAndSend() {
+            clearTimeout(micSilenceTimer); micSilenceTimer = null;
+            if (!micMediaRecorder || micRecordingMode === null) return;
+            micRecordingMode = null;
+            updateButtonMode();
+            await new Promise((resolve) => {
+                micMediaRecorder.onstop = async () => {
+                    try {
+                        const mt   = (micMediaRecorder && micMediaRecorder.mimeType) || 'audio/webm';
+                        const blob = new Blob(micAudioChunks, { type: mt });
+                        micAudioChunks = [];
+                        if (blob.size < 512) { resolve(); return; }
+                        const fd = new FormData();
+                        fd.append('file', blob, 'recording.webm');
+                        const resp = await fetch('/api/audio/upload', { method: 'POST', body: fd });
+                        if (!resp.ok) throw new Error(`upload HTTP ${resp.status}`);
+                        const data = await resp.json();
+                        const text = (data && data.text) ? String(data.text).trim() : '';
+                        if (text && ws && ws.readyState === WebSocket.OPEN) {
+                            ws.send(JSON.stringify({ text }));
+                            if (messages) appendMessage(messages, 'user', text, Date.now());
+                        }
+                    } catch (e) { console.warn('[chat-window] mic transcription failed:', e); }
+                    resolve();
+                };
+                try { micMediaRecorder.stop(); } catch (_) { resolve(); }
+                micMediaRecorder = null;
+            });
+        }
+
+        // ── PTT + toggle button interactions ───────────────────────────────
+        sendBtn.addEventListener('pointerdown', (e) => {
+            if (input.value.trim().length > 0) return;
+            e.preventDefault();
+            micPressTimer = setTimeout(() => { micPressTimer = 'long'; startRecording('ptt'); }, MIC_LONG_PRESS_MS);
+        });
+        sendBtn.addEventListener('pointerup', (e) => {
+            if (input.value.trim().length > 0) return;
+            e.preventDefault();
+            if (micPressTimer === 'long') {
+                stopRecordingAndSend();
+            } else {
+                clearTimeout(micPressTimer); micPressTimer = null;
+                if (micRecordingMode === 'toggle') { stopRecordingAndSend(); }
+                else { _ensureMicStream().then((s) => { if (s) startRecording('toggle'); }); }
+            }
+        });
+        sendBtn.addEventListener('pointerleave',  () => { if (micPressTimer !== 'long') { clearTimeout(micPressTimer); micPressTimer = null; } });
+        sendBtn.addEventListener('pointercancel', () => { if (micPressTimer !== 'long') { clearTimeout(micPressTimer); micPressTimer = null; } });
 
         function connectWs() {
             try {
@@ -326,17 +483,21 @@ export function initChatUI() {
                 ws.onopen = () => {
                     if (statusLabel) statusLabel.textContent = 'Connected';
                     if (statusIndicator) statusIndicator.classList.add('online');
-                    updateSendState();
+                    updateButtonMode();
+                    // Try to start ambient VAD immediately if mic permission already granted.
+                    // This lets Synth look at the camera even when not in recording mode.
+                    // Silently ignored if permission hasn't been granted yet.
+                    _ensureMicStream().catch(() => {});
                 };
                 ws.onclose = () => {
                     if (statusLabel) statusLabel.textContent = 'Disconnected';
                     if (statusIndicator) statusIndicator.classList.remove('online');
-                    updateSendState();
+                    updateButtonMode();
                 };
                 ws.onerror = () => {
                     if (statusLabel) statusLabel.textContent = 'Disconnected';
                     if (statusIndicator) statusIndicator.classList.remove('online');
-                    updateSendState();
+                    updateButtonMode();
                 };
                 window.pendingAnimationCommands = window.pendingAnimationCommands || window.pendingAnimationCommands;
                 ws.onmessage = (event) => {
@@ -396,7 +557,7 @@ export function initChatUI() {
         }
 
         if (input) {
-            input.addEventListener('input', updateSendState);
+            input.addEventListener('input', updateButtonMode);
             // Send on Enter (Shift+Enter for newline)
             input.addEventListener('keydown', (ev) => {
                 try {
@@ -421,7 +582,7 @@ export function initChatUI() {
                     ws.send(JSON.stringify({ text }));
                     appendMessage(messages, 'user', text, Date.now());
                     input.value = '';
-                    updateSendState();
+                    updateButtonMode();
                     // keep focus on input
                     try { input.focus(); } catch (e) { /* ignore */ }
                 } catch (e) {
@@ -431,6 +592,7 @@ export function initChatUI() {
         }
 
         connectWs();
+        updateButtonMode(); // set initial icon state
         try {
             if (typeof localStorage !== 'undefined' && localStorage.getItem && localStorage.getItem(TYPING_INDICATOR_KEY)) {
                 // Respect configured RESPONSE_TIMEOUT: if typing indicator timestamp is older than allowed, clear it

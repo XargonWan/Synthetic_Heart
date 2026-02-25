@@ -24,3 +24,8 @@ pytest>=7.0.0
 pytest-asyncio>=0.21.0
 python-multipart
 ftfy
+
+# Optional local STT engine for Auris; does NOT include the model data.
+# The first time you select the "vosk" engine in WebUI it will download
+# ~50 MB of model files into ~/.cache/vosk/vosk-model-small-en-us.
+vosk>=0.3.45

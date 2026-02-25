@@ -4991,6 +4991,44 @@ import * as THREE from 'three';
             };
             window.animationHandler = animationHandler;
             console.log('[synth_webui] Animation functions exposed globally via window.VRMAnimations');
+
+            // ── VAD look-at-camera API ─────────────────────────────────────
+            // Call  window._synthVADLookAtCamera(true)  when the user is speaking
+            // to make the avatar look at the camera.
+            // Call  window._synthVADLookAtCamera(false) on silence / mic off.
+            let __synthVADLookInterval = null;
+            window._synthVADLookAtCamera = function _synthVADLookAtCamera(active) {
+                try {
+                    if (active) {
+                        // Keep __synthKnockLook alive with strong camera blend
+                        if (!__synthVADLookInterval) {
+                            __synthVADLookInterval = setInterval(function () {
+                                try {
+                                    if (!__synthKnockLook) return;
+                                    __synthKnockLook.maxStrength  = 0.92;
+                                    __synthKnockLook.durationMs   = 800;
+                                    __synthKnockLook.startedAt    = Date.now();
+                                    __synthKnockLook.activeUntil  = Date.now() + 1200;
+                                } catch (e) { /* ignore */ }
+                            }, 200);
+                        }
+                    } else {
+                        // Stop renewal; let the effect smoothly decay
+                        if (__synthVADLookInterval) {
+                            clearInterval(__synthVADLookInterval);
+                            __synthVADLookInterval = null;
+                        }
+                        try {
+                            if (__synthKnockLook) {
+                                // Short grace period so the head doesn't snap away instantly
+                                __synthKnockLook.maxStrength = 0.32;
+                                __synthKnockLook.activeUntil = Date.now() + 600;
+                            }
+                        } catch (e) { /* ignore */ }
+                    }
+                } catch (e) { console.warn('[synth_webui] _synthVADLookAtCamera error', e); }
+            };
+            // ── End VAD look-at-camera API ─────────────────────────────────
             console.log('[synth_webui] animationHandler exposed globally');
             try {
                 const keys = Object.keys(animationHandler || {}).sort();

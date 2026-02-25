@@ -30,6 +30,7 @@ getting started.
    cortex
    interfaces
    plugins
+   auris_vox
    vrm_animations
    webui_controls
    gemini/synth-live-voice-integration

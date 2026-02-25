@@ -659,7 +659,46 @@ async def handle_media_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         log_debug(f"[telegram_bot] Media file downloaded to {input_path}")
 
-        # Process with Plugin (Gemini Live)
+        # ------------------------------------------------------------------
+        # PRIMARY PATH: Auris STT → enqueue as text message
+        # ------------------------------------------------------------------
+        auris_handled = False
+        try:
+            from core.core_initializer import PLUGIN_REGISTRY
+
+            auris = PLUGIN_REGISTRY.get("auris_plugin")
+            if auris is not None:
+                log_debug(
+                    "[telegram_bot] Auris plugin found — attempting transcription."
+                )
+                transcribed = await auris.transcribe_audio(input_path, media_type_hint)
+                if transcribed:
+                    log_info(f"[telegram_bot] Auris transcription: {transcribed[:120]}")
+                    # Wrap the Telegram message so the queue sees `text = transcribed`
+                    wrapped = MessageWrapper(message, text=transcribed)
+                    await message_queue.enqueue(
+                        context.bot,
+                        wrapped,
+                        interface_id="telegram_bot",
+                        original_message=message,
+                        skip_mention_check=True,
+                    )
+                    auris_handled = True
+                else:
+                    log_warning(
+                        "[telegram_bot] Auris returned no transcription; falling back."
+                    )
+        except Exception as _auris_err:
+            log_warning(
+                f"[telegram_bot] Auris path failed ({_auris_err}); falling back to Live API."
+            )
+
+        if auris_handled:
+            return
+
+        # ------------------------------------------------------------------
+        # FALLBACK PATH: LLM live processing (e.g. Gemini Live API)
+        # ------------------------------------------------------------------
         if plugin_instance.plugin:
             # Check for new method name first, fall back to old if needed (though we updated it)
             handler_method = getattr(

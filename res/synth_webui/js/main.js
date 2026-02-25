@@ -273,6 +273,9 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
         const componentsCortexList = document.getElementById('components-cortex-list');
         const componentsInterfacesList = document.getElementById('components-interfaces-list');
         const componentsPluginsList = document.getElementById('components-plugins-list');
+        const componentsVoxList = document.getElementById('components-vox-list');
+        const componentsAurisList = document.getElementById('components-auris-list');
+        const componentsLiveList = document.getElementById('components-live-list');
         const configGeneralList = document.getElementById('config-general-list');
         const configAdvancedList = document.getElementById('config-advanced-list');
         const configDisclaimer = document.getElementById('config-env-disclaimer');
@@ -2044,6 +2047,9 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     const componentsCortexListEl = document.getElementById('components-cortex-list');
                     const componentsInterfacesListEl = document.getElementById('components-interfaces-list');
                     const componentsPluginsListEl = document.getElementById('components-plugins-list');
+                    const componentsVoxListEl = document.getElementById('components-vox-list');
+                    const componentsAurisListEl = document.getElementById('components-auris-list');
+                    const componentsLiveListEl = document.getElementById('components-live-list');
                     if (!componentsCortexListEl || !componentsInterfacesListEl || !componentsPluginsListEl) return;
                     const res = await fetch('/api/components');
                     // Handle non-2xx responses gracefully and display server-provided
@@ -2447,6 +2453,64 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     renderDetailsList(data.interfaces || [], componentsInterfacesListEl);
                     renderDetailsList(data.plugins || [], componentsPluginsListEl);
 
+                    // ── Audio registry selectors (Vox / Auris / Live) ──────────────
+                    const setupRegistrySelect = (selectId, infoId, labelId, descId, engines, configKey) => {
+                        const sel = document.getElementById(selectId);
+                        const info = document.getElementById(infoId);
+                        const lbl = document.getElementById(labelId);
+                        const desc = document.getElementById(descId);
+                        if (!sel) return;
+                        if (!engines || !engines.length) {
+                            sel.style.display = 'none';
+                            return;
+                        }
+                        sel.innerHTML = '';
+                        engines.forEach((eng) => {
+                            const opt = document.createElement('option');
+                            opt.value = eng.name;
+                            opt.textContent = eng.display_name || eng.name;
+                            if (eng.active) opt.selected = true;
+                            sel.appendChild(opt);
+                        });
+                        const updateInfo = () => {
+                            const current = engines.find(e => e.name === sel.value) || engines[0] || null;
+                            if (current && info) {
+                                info.style.display = '';
+                                if (lbl) lbl.textContent = current.display_name || current.name || '—';
+                                if (desc) desc.textContent = current.description || current.label || '—';
+                            }
+                        };
+                        updateInfo();
+                        if (!sel.dataset.bound) {
+                            sel.addEventListener('change', async () => {
+                                updateInfo();
+                                if (!configKey) return;
+                                try {
+                                    const r = await fetch('/api/config', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ key: configKey, value: sel.value })
+                                    });
+                                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                                    window.showToast && window.showToast(selectId.replace('-engine-select', '').toUpperCase() + ' engine updated to ' + sel.value);
+                                    await loadComponentsSummary();
+                                } catch (e) {
+                                    console.error('[synth_webui] Failed to switch engine for ' + configKey, e);
+                                    window.showToast && window.showToast('Failed to switch engine', true);
+                                }
+                            });
+                            sel.dataset.bound = '1';
+                        }
+                    };
+
+                    setupRegistrySelect('vox-engine-select',  'vox-engine-info',  'vox-engine-label',  'vox-engine-description',  data.vox  || [], 'ACTIVE_VOX_ENGINE');
+                    setupRegistrySelect('auris-engine-select','auris-engine-info','auris-engine-label','auris-engine-description', data.auris || [], 'ACTIVE_AURIS_ENGINE');
+                    setupRegistrySelect('live-engine-select', 'live-engine-info', 'live-engine-label', 'live-engine-description',  data.live || [], null);  // Live has no single active-engine config key
+
+                    if (componentsVoxListEl)   renderDetailsList(data.vox   || [], componentsVoxListEl);
+                    if (componentsAurisListEl) renderDetailsList(data.auris || [], componentsAurisListEl);
+                    if (componentsLiveListEl)  renderDetailsList(data.live  || [], componentsLiveListEl);
+
                     // Render cortex scope selectors (Grillo / Trainer / Live)
                     try {
                         const cortexScopesEl = document.getElementById('cortex-scopes');
@@ -2500,6 +2564,12 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     if (componentsCortexListEl) componentsCortexListEl.innerHTML = '<div class="meta">Failed to load components.</div>';
                     if (componentsInterfacesListEl) componentsInterfacesListEl.innerHTML = '<div class="meta">Failed to load components.</div>';
                     if (componentsPluginsListEl) componentsPluginsListEl.innerHTML = '<div class="meta">Failed to load components.</div>';
+                    const componentsVoxListErrEl = document.getElementById('components-vox-list');
+                    const componentsAurisListErrEl = document.getElementById('components-auris-list');
+                    const componentsLiveListErrEl = document.getElementById('components-live-list');
+                    if (componentsVoxListErrEl) componentsVoxListErrEl.innerHTML = '<div class="meta">Failed to load components.</div>';
+                    if (componentsAurisListErrEl) componentsAurisListErrEl.innerHTML = '<div class="meta">Failed to load components.</div>';
+                    if (componentsLiveListErrEl) componentsLiveListErrEl.innerHTML = '<div class="meta">Failed to load components.</div>';
                 }
             }
 

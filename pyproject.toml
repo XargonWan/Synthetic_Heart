@@ -42,6 +42,14 @@ dependencies = [
     "discord-ext-voice-recv>=0.5.2a179",
 ]
 
+[project.optional-dependencies]
+# Install one or more extras to enable the corresponding audio engine.
+# Example: uv pip install '.[silero]'
+silero    = ["silero-vad>=5.1", "torch>=2.0"]
+audio     = ["silero-vad>=5.1", "torch>=2.0"]  # meta-extra: core realtime VAD
+vosk      = ["vosk>=0.3.45"]                    # local CPU STT (Auris vosk engine)
+# kitten / harmony / chatterbox / qwen3tts: install manually when packages are published to PyPI
+
 [dependency-groups]
 dev = [
     "pytest>=8.0.0",

@@ -1,8 +1,11 @@
 <section class="tab-panel" id="tab-components" data-tab="components" role="tabpanel">
     <div class="settings-grid" style="flex-direction: column;">
         <article class="card">
-            <h2>Cortex Engines</h2>
-            <div class="meta">A <strong>Cortex</strong> is a category of runtime engines (e.g., <em>llm_provider</em>, <em>selenium_engine</em>, <em>live</em>, <em>agent</em>). Choose the Cortex kind first, then pick an engine. Each engine shows a short label explaining its intended use (provided by the engine registration).</div>
+            <h2>Engines</h2>
+
+            <!-- ── Cortex ────────────────────────────────────────────────────── -->
+            <h3 style="margin:0 0 6px; font-size:1rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em;">Cortex</h3>
+            <div class="meta" style="margin-bottom:10px;">A <strong>Cortex</strong> is a category of runtime LLM backends (e.g. <em>llm_provider</em>, <em>selenium_engine</em>, <em>agent</em>). Choose the Cortex kind first, then pick an engine.</div>
             <div id="components-cortex">
                 <div class="meta" id="components-cortex-summary">Loading…</div>
 
@@ -35,6 +38,51 @@
                 </div>
 
                 <div class="components-list" id="components-cortex-list"></div>
+            </div>
+
+            <!-- ── Vox ────────────────────────────────────────────────────── -->
+            <div style="margin-top:28px; padding-top:20px; border-top:1px solid var(--border,#444);">
+                <h3 style="margin:0 0 6px; font-size:1rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em;">Vox — Text to Speech</h3>
+                <div class="meta" style="margin-bottom:10px;">File-based TTS engines. Select the active engine using the dropdown below.</div>
+                <div id="vox-controls" style="display:flex; gap:12px; align-items:flex-start; margin-bottom:12px; flex-wrap:wrap;">
+                    <select id="vox-engine-select" style="padding:8px 12px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; font-size:1rem; min-width:220px;">
+                    </select>
+                    <div id="vox-engine-info" class="meta" style="min-width:260px; display:none;">
+                        <div style="font-weight:600;" id="vox-engine-label">—</div>
+                        <div style="font-size:0.9rem; color:var(--muted);" id="vox-engine-description">—</div>
+                    </div>
+                </div>
+                <div class="components-list" id="components-vox-list"><div class="meta">Loading…</div></div>
+            </div>
+
+            <!-- ── Auris ───────────────────────────────────────────────────── -->
+            <div style="margin-top:28px; padding-top:20px; border-top:1px solid var(--border,#444);">
+                <h3 style="margin:0 0 6px; font-size:1rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em;">Auris — Speech to Text</h3>
+                <div class="meta" style="margin-bottom:10px;">File-based STT engines. Select the active engine using the dropdown below.</div>
+                <div id="auris-controls" style="display:flex; gap:12px; align-items:flex-start; margin-bottom:12px; flex-wrap:wrap;">
+                    <select id="auris-engine-select" style="padding:8px 12px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; font-size:1rem; min-width:220px;">
+                    </select>
+                    <div id="auris-engine-info" class="meta" style="min-width:260px; display:none;">
+                        <div style="font-weight:600;" id="auris-engine-label">—</div>
+                        <div style="font-size:0.9rem; color:var(--muted);" id="auris-engine-description">—</div>
+                    </div>
+                </div>
+                <div class="components-list" id="components-auris-list"><div class="meta">Loading…</div></div>
+            </div>
+
+            <!-- ── Live ────────────────────────────────────────────────────── -->
+            <div style="margin-top:28px; padding-top:20px; border-top:1px solid var(--border,#444);">
+                <h3 style="margin:0 0 6px; font-size:1rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em;">Live — Real-time Streaming</h3>
+                <div class="meta" style="margin-bottom:10px;">Bidirectional streaming engines (audio in + TTS out in real time). VAD is handled by <code>core.vad_service</code> — not listed here.</div>
+                <div id="live-controls" style="display:flex; gap:12px; align-items:flex-start; margin-bottom:12px; flex-wrap:wrap;">
+                    <select id="live-engine-select" style="padding:8px 12px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; font-size:1rem; min-width:220px;">
+                    </select>
+                    <div id="live-engine-info" class="meta" style="min-width:260px; display:none;">
+                        <div style="font-weight:600;" id="live-engine-label">—</div>
+                        <div style="font-size:0.9rem; color:var(--muted);" id="live-engine-description">—</div>
+                    </div>
+                </div>
+                <div class="components-list" id="components-live-list"><div class="meta">Loading…</div></div>
             </div>
         </article>
         <article class="card">

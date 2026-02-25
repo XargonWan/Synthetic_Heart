@@ -460,6 +460,9 @@ class SynthWebUIInterface:
         self.app.post("/api/log-console")(self.log_console_endpoint)
         self.app.websocket("/ws")(self.websocket_endpoint)
         self.app.websocket("/logs")(self.logs_ws_endpoint)
+        # Auris audio endpoints
+        self.app.post("/api/audio/upload")(self.audio_upload_endpoint)
+        self.app.websocket("/api/audio/stream")(self.audio_stream_ws_endpoint)
         self.app.get("/api/vrm")(self.list_vrm_models)
         self.app.get("/api/vrm/active")(self.get_active_vrm_endpoint)
         self.app.post("/api/vrm")(self.upload_vrm_model)
@@ -1728,6 +1731,262 @@ class SynthWebUIInterface:
                 await websocket.close()
             except Exception:
                 pass  # Websocket might already be closed
+
+    # ------------------------------------------------------------------
+    # Auris audio endpoints
+    # ------------------------------------------------------------------
+
+    async def audio_upload_endpoint(
+        self,
+        file: UploadFile = File(...),
+        engine: Optional[str] = Form(None),
+    ):
+        """POST /api/audio/upload — transcribe an uploaded audio file via Auris.
+
+        Multipart form fields:
+        - ``file``: the audio file (wav, ogg, mp4, …)
+        - ``engine``: optional engine override (default: active auris engine)
+
+        Returns JSON: ``{"text": "...", "engine": "..."}`` or
+        ``{"error": "..."}`` with an appropriate HTTP status.
+        """
+        if not file or not file.filename:
+            raise HTTPException(status_code=400, detail="No file uploaded")
+
+        try:
+            from core.core_initializer import PLUGIN_REGISTRY
+
+            auris = PLUGIN_REGISTRY.get("auris_plugin")
+            if auris is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Auris STT subsystem is not loaded. Enable AURIS_ENABLED.",
+                )
+
+            # Save to a temp file
+            tmp_dir = Path("tmp") / "auris_upload"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            suffix = Path(file.filename).suffix or ".audio"
+            tmp_path = tmp_dir / f"webui_{uuid.uuid4().hex}{suffix}"
+            try:
+                contents = await file.read()
+                tmp_path.write_bytes(contents)
+
+                mime_hint = file.content_type or None
+                transcribed_engine = engine or getattr(
+                    auris, "_active_engine_name", None
+                )
+                text = await auris.transcribe_audio(
+                    str(tmp_path), mime_type=mime_hint, engine_name=engine
+                )
+            finally:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+            if text is None:
+                return JSONResponse(
+                    {"error": "Transcription returned no text"},
+                    status_code=422,
+                )
+            return JSONResponse({"text": text, "engine": transcribed_engine})
+
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} audio_upload_endpoint error: {exc}")
+            return JSONResponse({"error": str(exc)}, status_code=500)
+
+    async def audio_stream_ws_endpoint(
+        self, websocket: WebSocket
+    ):  # pragma: no cover - runtime streaming
+        """WebSocket /api/audio/stream — real-time STT via VAD or a Live engine.
+
+        Protocol (client → server):
+        - Text frame ``{"sample_rate": 16000, "engine": "vad"}``: **must** be
+          sent first to configure the session.
+          ``engine`` values: ``"vad"`` / ``"silero"`` → use the core
+          ``VADService`` (local, always available when silero-vad is installed);
+          any other value → route to the Live streaming registry.
+        - Binary frames: raw PCM s16le audio chunks at the negotiated sample rate.
+
+        Protocol (server → client):
+        - ``{"type": "ready",   "session_id": "..."}`` — sent once after setup.
+        - ``{"type": "partial", "text": "..."}`` — interim transcript segment.
+        - ``{"type": "final",   "text": "..."}`` — final transcript (is_final=True).
+        - ``{"type": "vad",     "signal": "speech_start"|"speech_end"}`` — VAD events.
+        - ``{"type": "error",   "detail": "..."}`` — error notification.
+        """
+        await websocket.accept()
+        session_id = f"ws_{uuid.uuid4().hex}"
+        live_engine = None  # only set when using LIVE_REGISTRY
+
+        try:
+            import json as _json
+
+            from core.vad_service import VAD_SERVICE
+
+            # ── Config frame ────────────────────────────────────────────────
+            sample_rate = 16000
+            engine_name = "vad"
+            try:
+                config_raw = await asyncio.wait_for(
+                    websocket.receive_text(), timeout=5.0
+                )
+                config = _json.loads(config_raw)
+                sample_rate = int(config.get("sample_rate", 16000))
+                engine_name = str(config.get("engine", engine_name))
+            except asyncio.TimeoutError:
+                pass
+            except Exception:
+                pass
+
+            # ── Route: core VADService vs Live registry ──────────────────────
+            _VAD_ALIASES = {"vad", "silero", ""}
+
+            if engine_name in _VAD_ALIASES:
+                # ── VAD path (core service) ──────────────────────────────────
+                if not VAD_SERVICE.is_available():
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "detail": (
+                                "Silero VAD not available. "
+                                "Install the 'silero' extra: "
+                                "pip install '.[silero]'"
+                            ),
+                        }
+                    )
+                    await websocket.close()
+                    return
+
+                VAD_SERVICE.open_session(session_id)
+                await websocket.send_json({"type": "ready", "session_id": session_id})
+                log_info(
+                    f"{LOG_PREFIX} VAD stream session started: {session_id}, sr={sample_rate}"
+                )
+
+                try:
+                    while True:
+                        try:
+                            data = await asyncio.wait_for(
+                                websocket.receive_bytes(), timeout=30.0
+                            )
+                        except asyncio.TimeoutError:
+                            break
+                        except WebSocketDisconnect:
+                            break
+                        except Exception:
+                            break
+
+                        events = VAD_SERVICE.process_chunk(
+                            session_id, data, sample_rate
+                        )
+                        for evt in events:
+                            try:
+                                await websocket.send_json(
+                                    {"type": "vad", "signal": evt}
+                                )
+                            except Exception:
+                                break
+                finally:
+                    pending = VAD_SERVICE.close_session(session_id)
+                    for evt in pending:
+                        try:
+                            await websocket.send_json({"type": "vad", "signal": evt})
+                        except Exception:
+                            pass
+
+            else:
+                # ── Live engine path (bidirectional, e.g. gemini_live) ────────
+                from core.live_registry import LIVE_REGISTRY
+                from plugins.live_base import LiveEventType
+
+                try:
+                    live_engine = LIVE_REGISTRY.load_engine(engine_name)
+                except ValueError as exc:
+                    await websocket.send_json({"type": "error", "detail": str(exc)})
+                    await websocket.close()
+                    return
+
+                if not live_engine.supports_input:
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "detail": (
+                                f"Live engine '{engine_name}' does not support audio input / STT. "
+                                "Use POST /api/audio/upload for file-based transcription instead."
+                            ),
+                        }
+                    )
+                    await websocket.close()
+                    return
+
+                await live_engine.open_session(session_id, sample_rate=sample_rate)
+                await websocket.send_json({"type": "ready", "session_id": session_id})
+
+                log_info(
+                    f"{LOG_PREFIX} Live stream session started: {session_id}, "
+                    f"engine={engine_name}, sr={sample_rate}"
+                )
+
+                async def _receive_audio() -> None:
+                    while True:
+                        try:
+                            data = await asyncio.wait_for(
+                                websocket.receive_bytes(), timeout=30.0
+                            )
+                            await live_engine.send_audio(session_id, data, sample_rate)
+                        except asyncio.TimeoutError:
+                            break
+                        except WebSocketDisconnect:
+                            break
+                        except Exception:
+                            break
+
+                async def _forward_events() -> None:
+                    async for event in live_engine.receive_events(session_id):
+                        try:
+                            if event.type == LiveEventType.TRANSCRIPT:
+                                etype = "final" if event.is_final else "partial"
+                                await websocket.send_json(
+                                    {"type": etype, "text": event.text}
+                                )
+                            elif event.type == LiveEventType.VAD:
+                                await websocket.send_json(
+                                    {"type": "vad", "signal": event.vad_signal}
+                                )
+                            elif event.type == LiveEventType.AUDIO and event.audio:
+                                await websocket.send_bytes(event.audio)
+                            elif event.type == LiveEventType.ERROR:
+                                await websocket.send_json(
+                                    {"type": "error", "detail": event.detail}
+                                )
+                        except Exception:
+                            break
+
+                await _receive_audio()
+                await live_engine.close_session(session_id)
+                live_engine = None
+                await _forward_events()
+
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} audio_stream_ws_endpoint error: {exc}")
+            try:
+                await websocket.send_json({"type": "error", "detail": str(exc)})
+            except Exception:
+                pass
+        finally:
+            if live_engine is not None:
+                try:
+                    await live_engine.close_session(session_id)
+                except Exception:
+                    pass
+            try:
+                await websocket.close()
+            except Exception:
+                pass
 
     async def _broadcast_action_state(self, state: Optional[Dict[str, Any]]) -> None:
         """
@@ -6214,7 +6473,7 @@ class SynthWebUIInterface:
         except Exception as exc:
             log_warning(f"{LOG_PREFIX} unable to check dev components status: {exc}")
 
-        # Build a cortex -> engines mapping for the UI
+        # Build a cortex -> engines mapping for the UI (exclude 'live' — shown in its own section)
         by_cortex: dict[str, list[dict]] = {}
         try:
             for e in cortex_engines:
@@ -6222,6 +6481,97 @@ class SynthWebUIInterface:
                 by_cortex.setdefault(k, []).append(e)
         except Exception:
             by_cortex = {}
+
+        # Remove 'live' from cortex kinds — it gets its own top-level section
+        available_cortexs = [k for k in available_cortexs if k != "live"]
+
+        # Build Vox / Auris / Live engine lists for the dedicated UI sections
+        def _caps_desc(caps: dict) -> str:
+            active = [k for k, v in (caps or {}).items() if v]
+            return ", ".join(active) if active else "none"
+
+        vox_data: list[dict] = []
+        try:
+            from core.vox_registry import VOX_REGISTRY
+
+            active_vox: str | None = None
+            try:
+                active_vox = config_registry.get_value("ACTIVE_VOX_ENGINE", None)
+            except Exception:
+                pass
+            for _name in VOX_REGISTRY.get_available_engines():
+                _meta = VOX_REGISTRY.get_engine_meta(_name)
+                _caps = _meta.get("capabilities") or {}
+                vox_data.append(
+                    {
+                        "name": _name,
+                        "display_name": _name.replace("_", " ").title(),
+                        "label": _meta.get("label", ""),
+                        "capabilities": _caps,
+                        "description": f"TTS engine — capabilities: {_caps_desc(_caps)}",
+                        "status": "success",
+                        "details": f"Active" if _name == active_vox else "",
+                        "error": None,
+                        "active": _name == active_vox,
+                    }
+                )
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} unable to build Vox engine list: {exc}")
+
+        auris_data: list[dict] = []
+        try:
+            from core.auris_registry import AURIS_REGISTRY
+
+            active_auris: str | None = None
+            try:
+                active_auris = config_registry.get_value("ACTIVE_AURIS_ENGINE", None)
+            except Exception:
+                pass
+            for _name in AURIS_REGISTRY.get_available_engines():
+                _meta = AURIS_REGISTRY.get_engine_meta(_name)
+                _caps = _meta.get("capabilities") or {}
+                auris_data.append(
+                    {
+                        "name": _name,
+                        "display_name": _name.replace("_", " ").title(),
+                        "label": _meta.get("label", ""),
+                        "capabilities": _caps,
+                        "description": f"STT engine — capabilities: {_caps_desc(_caps)}",
+                        "status": "success",
+                        "details": "Active" if _name == active_auris else "",
+                        "error": None,
+                        "active": _name == active_auris,
+                    }
+                )
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} unable to build Auris engine list: {exc}")
+
+        # Live section: cortex engines with kind='live' + LIVE_REGISTRY engines
+        live_data: list[dict] = list(by_cortex.get("live", []))
+        try:
+            from core.live_registry import LIVE_REGISTRY
+
+            existing_names = {e["name"] for e in live_data}
+            for _name in LIVE_REGISTRY.get_available_engines():
+                if _name in existing_names:
+                    continue
+                _meta = LIVE_REGISTRY.get_engine_meta(_name)
+                _caps = _meta.get("capabilities") or {}
+                live_data.append(
+                    {
+                        "name": _name,
+                        "display_name": _name.replace("_", " ").title(),
+                        "label": _meta.get("label", ""),
+                        "capabilities": _caps,
+                        "description": f"Live streaming engine — capabilities: {_caps_desc(_caps)}",
+                        "status": "success",
+                        "details": "",
+                        "error": None,
+                        "active": False,
+                    }
+                )
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} unable to build Live engine list: {exc}")
 
         # Build scope overrides for the UI (Grillo, Trainer, Live cortex selectors)
         cortex_scopes: list[dict] = []
@@ -6264,6 +6614,9 @@ class SynthWebUIInterface:
                 "by_cortex": by_cortex,
                 "scopes": cortex_scopes,
             },
+            "vox": vox_data,
+            "auris": auris_data,
+            "live": live_data,
             "interfaces": interfaces_data,
             "plugins": plugins_data,
             "summary": component_summary,
