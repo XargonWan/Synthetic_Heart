@@ -55,6 +55,7 @@ VALID_BIO_FIELDS = {
     "not_likes",
     "information",
     "past_events",
+    "feelings",
     "contacts",
     "social_accounts",
     "privacy",
@@ -69,6 +70,7 @@ DEFAULTS = {
     "not_likes": [],
     "information": "",
     "past_events": [],
+    "feelings": [],
     "contacts": {},
     "social_accounts": [],  # Changed from {} to []
     "privacy": "default",

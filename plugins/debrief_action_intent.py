@@ -150,7 +150,8 @@ class DebriefActionIntentPlugin:
             return None
 
         if not (
-            context.get("from_llm") or getattr(original_message, "from_llm", False)
+            context.get("from_cortex")
+            or getattr(original_message, "from_cortex", False)
         ):
             return None
 

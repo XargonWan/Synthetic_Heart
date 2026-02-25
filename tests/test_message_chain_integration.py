@@ -53,7 +53,7 @@ class TestMessageChainIntegration(unittest.TestCase):
         mock_corrector.return_value = None
 
         # Create fake message
-        msg = SimpleNamespace(chat_id=123, text="Hello world", from_llm=False)
+        msg = SimpleNamespace(chat_id=123, text="Hello world", from_cortex=False)
 
         # Process message
         result = await message_chain.handle_incoming_message(
@@ -78,7 +78,7 @@ class TestMessageChainIntegration(unittest.TestCase):
 
         # Create fake message with JSON
         json_text = '{"type": "message_telegram_bot", "payload": {"text": "Test", "target": "123"}}'
-        msg = SimpleNamespace(chat_id=123, text=json_text, from_llm=False)
+        msg = SimpleNamespace(chat_id=123, text=json_text, from_cortex=False)
 
         # Process message
         result = await message_chain.handle_incoming_message(
@@ -104,7 +104,7 @@ class TestMessageChainIntegration(unittest.TestCase):
 
         # Create fake message with invalid JSON
         invalid_json = '{"type": "message_telegram_bot", "payload": {"text": "Test", "target": "123"'  # Missing closing brace
-        msg = SimpleNamespace(chat_id=123, text=invalid_json, from_llm=False)
+        msg = SimpleNamespace(chat_id=123, text=invalid_json, from_cortex=False)
 
         # Process message
         result = await message_chain.handle_incoming_message(
@@ -127,7 +127,7 @@ class TestMessageChainIntegration(unittest.TestCase):
 
         # Create system message
         system_json = '{"system_message": {"type": "output", "message": "test"}}'
-        msg = SimpleNamespace(chat_id=123, text=system_json, from_llm=False)
+        msg = SimpleNamespace(chat_id=123, text=system_json, from_cortex=False)
 
         # Process message
         result = await message_chain.handle_incoming_message(
@@ -181,7 +181,7 @@ class TestMessageChainIntegration(unittest.TestCase):
         msg = SimpleNamespace(
             chat_id=123,
             text=json_text,
-            from_llm=True,
+            from_cortex=True,
             interface_path="telegram_bot/123",
         )
 
@@ -247,7 +247,7 @@ class TestMessageChainIntegration(unittest.TestCase):
         msg = SimpleNamespace(
             chat_id=123,
             text=json_text,
-            from_llm=True,
+            from_cortex=True,
             interface_path="telegram_bot/123",
         )
 
@@ -316,7 +316,7 @@ class TestMessageChainIntegration(unittest.TestCase):
         msg = SimpleNamespace(
             chat_id=123,
             text=json_text,
-            from_llm=True,
+            from_cortex=True,
             interface_path="telegram_bot/123",
         )
 

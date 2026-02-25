@@ -53,4 +53,7 @@ async def test_get_context_snippets_pulls_memories(monkeypatch):
 
     # Should include at least one diary snippet and at least one memory snippet
     assert any(s.startswith("[memory]") for s in snippets)
-    assert any(s.startswith("[telegram_bot]") or s.startswith("[unknown]") or "diary" in s for s in snippets)
+    assert any(
+        s.startswith("[telegram_bot]") or s.startswith("[unknown]") or "diary" in s
+        for s in snippets
+    )

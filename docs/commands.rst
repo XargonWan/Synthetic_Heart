@@ -48,3 +48,11 @@ Administration
 * ``/logchat`` – Set the current chat as the log chat.
 * ``/manage_chat_id [reset <id>|reset this]`` – Reset stored mapping for a chat.
 
+Voice Control (Discord only)
+----------------------------
+
+* ``/leave [<guild id|channel name>]`` – Disconnect the bot from a voice
+  channel.  When run without arguments, if the bot is connected to more than
+  one channel it will list the active connections and explain how to target a
+  specific one.
+

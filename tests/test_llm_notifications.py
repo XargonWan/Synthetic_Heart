@@ -137,13 +137,15 @@ async def test_cortex_command_lists_engines():
 
         mock_list_engines.side_effect = _list
         res = await command_registry.cortex_command()
-        assert "live (base): `manual`" in res
+        assert "base: `manual`" in res
         assert "grillo override: `grillo_engine`" in res
         assert "trainer override: `trainer_engine`" in res
         assert "llm_provider:" in res
         assert "selenium_engine:" in res
         assert "`llm_provider/manual`" in res
         assert "`selenium_engine/selenium_gemini`" in res
+        # default config should not show any live override when not set
+        assert "live override" not in res
 
     # also verify the 'default' case when there is no override configured
     with (
@@ -227,6 +229,50 @@ async def test_cortex_command_ambiguous_shortname():
 
 
 @pytest.mark.asyncio
+async def test_cortex_command_kind_only_uses_default():
+    """Specifying only a cortex kind should activate its default engine."""
+    from core import command_registry
+
+    # build mock registry with two kinds and default engines
+    mock_reg = Mock()
+    mock_reg._engine_meta = {
+        "gemini_live": {"cortex": "live"},
+        "other_engine": {"cortex": "live"},
+        "gemini_api": {"cortex": "llm_provider"},
+    }
+    # ensure default engine logic returns gemini_live for kind live
+    mock_reg.get_default_engine = Mock(return_value="gemini_live")
+    mock_reg.get_available_engines = Mock(
+        side_effect=lambda kind=None: [
+            "gemini_live",
+            "other_engine" if kind == "live" else [],
+        ]
+        if kind == "live"
+        else (["gemini_api"] if kind == "llm_provider" else [])
+    )
+
+    with (
+        patch("core.cortex_registry.get_cortex_registry", return_value=mock_reg),
+        patch(
+            "core.config.get_active_cortex_engine",
+            new=AsyncMock(return_value="gemini_live"),
+        ),
+        patch(
+            "core.config.list_available_cortexs",
+            return_value=["live", "llm_provider"],
+        ),
+        patch(
+            "core.config.list_available_cortex_engines",
+            side_effect=lambda k=None: mock_reg.get_available_engines(k),
+        ),
+        patch("core.config.switch_active_cortex_engine", new=AsyncMock()),
+    ):
+        # providing only a kind is not allowed - should produce an error
+        res = await command_registry.cortex_command("live")
+        assert "Cortex `live` not found" in res or "Invalid format" in res
+
+
+@pytest.mark.asyncio
 async def test_llm_alias_deprecation_prefix():
     from core import command_registry
 
@@ -264,6 +310,10 @@ async def test_cortex_grillo_command_sets_override():
         mock_set.assert_awaited_with("grillo", "manual")
         assert "override for grillo updated to `manual`" in res
 
+    # help message should document kind syntax
+    help_text = await command_registry.cortex_grillo_command()
+    assert "/cortex_grillo <kind>/<engine>" in help_text
+
     # listing behaviour
     with patch("core.config.get_active_cortex_engine", new=AsyncMock(return_value="g")):
         with patch(
@@ -288,6 +338,9 @@ async def test_cortex_trainer_command_sets_override():
         res = await command_registry.cortex_trainer_command("selenium_gemini")
         mock_set.assert_awaited_with("trainer", "selenium_gemini")
         assert "override for trainer updated to `selenium_gemini`" in res
+
+    help_text = await command_registry.cortex_trainer_command()
+    assert "/cortex_trainer <kind>/<engine>" in help_text
 
 
 @pytest.mark.asyncio

@@ -14,7 +14,7 @@ async def test_whitelisted_mode_enforces_allowed_list(monkeypatch):
     )
 
     original_message = SimpleNamespace()
-    original_message.from_llm = True
+    original_message.from_cortex = True
 
     # Allowed action should execute (we patch plugin)
     executed = {}
@@ -63,7 +63,7 @@ async def test_autonomous_mode_ignores_whitelist(monkeypatch):
     await config_registry.set_value("AUTONOMY_ALLOWED_ACTIONS", ["some_other_action"])
 
     original_message = SimpleNamespace()
-    original_message.from_llm = True
+    original_message.from_cortex = True
 
     executed = {}
 

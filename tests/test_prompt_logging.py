@@ -1,5 +1,3 @@
-
-
 def make_dummy_message():
     class Dummy:
         text = "hello"
@@ -8,8 +6,10 @@ def make_dummy_message():
         message_id = "m1"
         # isoformat-compatible placeholder
         from datetime import datetime
+
         date = datetime.utcnow()
         from_user = None
+
     return Dummy()
 
 

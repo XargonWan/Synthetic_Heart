@@ -63,7 +63,9 @@ class SeleniumGeminiPlugin(SeleniumLLMBase):
         # (chatgpt plugin does this too; Gemini previously neglected it, leading
         # to misleading log messages like "chatgpt did not start processing").
         try:
-            from cortex.selenium_engine.selenium_llm_base import set_active_selenium_limits
+            from cortex.selenium_engine.selenium_llm_base import (
+                set_active_selenium_limits,
+            )
 
             # set_active_selenium_limits takes max_prompt_chars and llm_name;
             # use default model for initial value

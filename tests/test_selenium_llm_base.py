@@ -80,7 +80,9 @@ def _import_sandboxed_selenium_llm_base():
         common_exceptions.StaleElementReferenceException = (
             StaleElementReferenceException
         )
-        common_exceptions.ElementClickInterceptedException = ElementClickInterceptedException
+        common_exceptions.ElementClickInterceptedException = (
+            ElementClickInterceptedException
+        )
 
         # Minimal By class used in the code (e.g., By.CSS_SELECTOR)
         class By:
@@ -174,7 +176,6 @@ def test_extract_response_text_raises_frozen_on_driver_connection_errors():
     This ensures the existing recovery/restart logic is exercised instead of silently
     swallowing driver-level failures.
     """
-    import pytest
 
     slb = _import_sandboxed_selenium_llm_base()
     obj = slb.SeleniumLLMBase()

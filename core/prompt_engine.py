@@ -357,7 +357,9 @@ async def build_json_prompt(
     # debug: log full prompt payload for reconstruction
     try:
         full_text = json_dumps(input_payload)
-        log_debug(f"[json_prompt] ⏹️ Final prompt built ({len(full_text)} chars): {full_text}")
+        log_debug(
+            f"[json_prompt] ⏹️ Final prompt built ({len(full_text)} chars): {full_text}"
+        )
     except Exception as e:
         log_debug(f"[json_prompt] Failed to dump final prompt for logging: {e}")
 
@@ -1341,6 +1343,15 @@ async def build_live_system_instruction(
         "Keep responses concise — a few sentences at most unless asked for detail. "
         "You can express emotions through tone and word choice. "
         "Do not output JSON, markdown, or structured data — just speak naturally."
+    )
+
+    # Inform the model about context updates injected by the system
+    parts.append(
+        "Occasionally you may receive context updates enclosed in brackets or "
+        "sent as system messages. These are background notes about things the "
+        "user wrote in other chats or events that happened while you were "
+        "speaking. Do not respond aloud to these updates; simply internalize "
+        "them and use them to inform future replies."
     )
 
     return "\n\n".join(parts)

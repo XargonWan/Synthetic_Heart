@@ -11,7 +11,7 @@ async def test_corrector_invoked_when_top_level_message_without_message_action(
     called = {}
 
     async def fake_run_corrector_middleware(
-        text, bot=None, context=None, chat_id=None, interface_path=None
+        text, bot=None, context=None, chat_id=None, interface_path=None, **kwargs
     ):
         called["text"] = text
         called["bot"] = bot
@@ -34,13 +34,14 @@ async def test_corrector_invoked_when_top_level_message_without_message_action(
     }"""
 
     message = SimpleNamespace()
-    message.from_llm = True
+    message.from_cortex = True
     message.chat_id = 12345
     message.interface_path = "telegram_bot/12345"
 
+    # include a cortex-origin flag in context to mirror real transport use
     result = await corrector_orchestrator(
         llm_text,
-        context={"interface": "telegram"},
+        context={"interface": "telegram", "from_cortex": True},
         bot=None,
         message=message,
         max_retries=1,
@@ -59,3 +60,143 @@ async def test_corrector_invoked_when_top_level_message_without_message_action(
         ctx.get("correction_context")
         and "message" in ctx["correction_context"].get("instruction", "")
     )
+    # Make sure our origin flag is passed via context when message isn't useful
+    assert ctx.get("from_cortex")
+
+    # If we drop all actions (simulate only invalid ones), the orchestrator
+    # should return False (blocking) even without middleware involvement.
+    called.clear()
+    bad = '{"type":"message_unknown","payload":{}}'
+    result2 = await corrector_orchestrator(
+        bad,
+        context={"interface": "telegram", "from_cortex": True},
+        bot=None,
+        message=message,
+        max_retries=1,
+    )
+    assert result2 is False
+
+
+@pytest.mark.asyncio
+async def test_message_chain_filters_duplicate_actions_on_retry(monkeypatch):
+    """When a correction retry occurs, previously-successful action types
+    should be removed from the next run_actions payload.
+
+    We stub out run_actions to simulate a partial success on the first
+    invocation (first action processed, second action failed) and return the
+    same text from the corrector so the chain would normally re-send both
+    actions.  The filter logic added to message_chain should strip the
+    successful type before the second call.
+    """
+    from core import message_chain
+
+    call_types = []
+
+    async def fake_run_actions(actions, ctx, bot, message):
+        types = [a.get("type") or a.get("action") for a in (actions or []) if isinstance(a, dict)]
+        call_types.append(types)
+        processed = []
+        failed = []
+        if actions:
+            processed.append(actions[0])
+            if len(actions) > 1:
+                failed.append({"action": actions[1], "errors": ["fail"]})
+        return {"processed": processed, "failed_actions": failed, "errors": []}
+
+    async def fake_corrector(text, bot=None, context=None, chat_id=None, thread_id=None, **kwargs):
+        # always return same text so the loop re-parses the original actions
+        return text
+
+    def fake_extract_json(text, return_metadata=False):
+        return (
+            {"actions": [
+                {"type": "first", "payload": {}},
+                {"type": "second", "payload": {}},
+            ]},
+            {},
+        )
+
+    monkeypatch.setattr("core.transport_layer.extract_json_from_text", fake_extract_json)
+    monkeypatch.setattr("core.action_parser.run_actions", fake_run_actions)
+    monkeypatch.setattr("core.transport_layer.run_corrector_middleware", fake_corrector)
+    monkeypatch.setattr(
+        "core.action_parser.get_supported_action_types",
+        lambda: {"first", "second"},
+    )
+
+    msg = SimpleNamespace(chat_id=1, interface_path="telegram_bot/1", from_cortex=True)
+    # allow two retries so the second invocation happens
+    await message_chain.handle_incoming_message(
+        bot=None,
+        message=msg,
+        text="{}",
+        source="llm",
+        context={"max_retries": 2},
+    )
+
+    # ensure we called run_actions twice and the second call dropped the
+    # previously successful "first" action
+    assert len(call_types) == 2
+    assert call_types[0] == ["first", "second"]
+    assert call_types[1] == ["second"]
+
+
+@pytest.mark.asyncio
+async def test_partial_success_filters_non_successful_action(monkeypatch):
+    """Similar to the previous test but emphasises the corrector loop.
+
+    We simulate one action succeeding and one failing on the first
+    run_actions call. The fake corrector simply echoes back the same text so
+    that parsing will produce both actions again.  The second run_actions
+    invocation should therefore only receive the action that failed earlier
+    (i.e. non-successful).
+    """
+    from core import message_chain
+
+    call_types = []
+
+    async def fake_run_actions(actions, ctx, bot, message):
+        types = [a.get("type") or a.get("action") for a in (actions or []) if isinstance(a, dict)]
+        call_types.append(types)
+        processed = []
+        failed = []
+        if actions:
+            # mark first item as processed (success)
+            processed.append(actions[0])
+            # second action always fails
+            if len(actions) > 1:
+                failed.append({"action": actions[1], "errors": ["error"]})
+        return {"processed": processed, "failed_actions": failed, "errors": []}
+
+    async def fake_corrector(text, bot=None, context=None, chat_id=None, thread_id=None, **kwargs):
+        return text
+
+    def fake_extract_json(text, return_metadata=False):
+        return (
+            {"actions": [
+                {"type": "alpha", "payload": {}},
+                {"type": "beta", "payload": {}},
+            ]},
+            {},
+        )
+
+    monkeypatch.setattr("core.transport_layer.extract_json_from_text", fake_extract_json)
+    monkeypatch.setattr("core.action_parser.run_actions", fake_run_actions)
+    monkeypatch.setattr("core.transport_layer.run_corrector_middleware", fake_corrector)
+    monkeypatch.setattr(
+        "core.action_parser.get_supported_action_types",
+        lambda: {"alpha", "beta"},
+    )
+
+    msg = SimpleNamespace(chat_id=2, interface_path="telegram_bot/2", from_cortex=True)
+    await message_chain.handle_incoming_message(
+        bot=None,
+        message=msg,
+        text="{}",
+        source="llm",
+        context={"max_retries": 2},
+    )
+
+    assert len(call_types) == 2
+    assert call_types[0] == ["alpha", "beta"]
+    assert call_types[1] == ["beta"]

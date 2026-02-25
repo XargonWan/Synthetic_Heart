@@ -363,6 +363,35 @@ class HistoryEngine:
                             f"[history_engine] Could not load cached messages for current chat: {e}"
                         )
 
+                # If this is a live voice interface and live-history syncing is enabled,
+                # include global cross-interface history as well so the prompt sees both
+                # the local voice/chat stream and any unrelated messages from the
+                # same guild/user context.  This mirrors the behaviour of the normal
+                # prompt path and guards against stale data if the periodic sync task
+                # missed something.
+                if interface_path and interface_path.startswith("discord_live_"):
+                    try:
+                        from core.config_manager import config_registry as _cfg
+
+                        if _cfg.get_value(
+                            "LIVE_SYNC_CHAT_HISTORY", True, value_type=bool
+                        ):
+                            from core.chat_history_cache import load_global_chat_history
+
+                            global_hist = await load_global_chat_history(
+                                limit=verbosity * 5 if verbosity > 0 else 100
+                            )
+                            # merge and sort by timestamp so chronology is preserved
+                            combined = list(msgs) + list(global_hist)
+
+                            def _sort_key(m: Any) -> str:
+                                return str(m.get("timestamp", ""))
+
+                            combined.sort(key=_sort_key)
+                            msgs = combined
+                    except Exception as _e:
+                        log_debug(f"[history_engine] live merge skipped: {_e}")
+
                 for m in msgs[-verbosity:] if verbosity > 0 else []:
                     line = _entry_to_text_with_source(
                         m, current_interface_path=interface_path

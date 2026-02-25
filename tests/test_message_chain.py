@@ -11,7 +11,7 @@ class TestMessageChain(unittest.TestCase):
         """System messages of type 'error' should be blocked without correction."""
         mock_corrector.return_value = "{}"
 
-        msg = SimpleNamespace(chat_id=123, text="", from_llm=False)
+        msg = SimpleNamespace(chat_id=123, text="", from_cortex=False)
         result = await message_chain.handle_incoming_message(
             bot=None,
             message=msg,
@@ -27,7 +27,7 @@ class TestMessageChain(unittest.TestCase):
         """Event/output system messages should be forwarded without invoking the corrector."""
         mock_corrector.return_value = "{}"
 
-        msg = SimpleNamespace(chat_id=123, text="", from_llm=False)
+        msg = SimpleNamespace(chat_id=123, text="", from_cortex=False)
 
         for sm_type in ["event", "output"]:
             with self.subTest(sm_type=sm_type):
@@ -46,7 +46,7 @@ class TestMessageChain(unittest.TestCase):
         """Invalid JSON from non-LLM sources should bypass the corrector."""
         mock_corrector.return_value = "{}"
 
-        msg = SimpleNamespace(chat_id=123, text="", from_llm=False)
+        msg = SimpleNamespace(chat_id=123, text="", from_cortex=False)
         result = await message_chain.handle_incoming_message(
             bot=None,
             message=msg,

@@ -1562,7 +1562,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
                                     const idInput = document.createElement('input');
                                     idInput.type = 'text';
-                                    idInput.placeholder = 'Trainer ID';
+                                    idInput.placeholder = 'Trainer ID or username';
                                     idInput.value = entry && entry.id ? entry.id : '';
                                     idInput.disabled = !isEditable;
 
@@ -2446,6 +2446,52 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     renderDetailsList(byCortex[toRenderKind] || [], componentsCortexListEl);
                     renderDetailsList(data.interfaces || [], componentsInterfacesListEl);
                     renderDetailsList(data.plugins || [], componentsPluginsListEl);
+
+                    // Render cortex scope selectors (Grillo / Trainer / Live)
+                    try {
+                        const cortexScopesEl = document.getElementById('cortex-scopes');
+                        if (cortexScopesEl && data.cortex && Array.isArray(data.cortex.scopes) && data.cortex.scopes.length) {
+                            cortexScopesEl.innerHTML = '';
+                            const scopeHeader = document.createElement('div');
+                            scopeHeader.style.cssText = 'width:100%; font-size:0.85rem; color:var(--muted); font-weight:600; text-transform:uppercase; letter-spacing:0.05em; margin-bottom:4px;';
+                            scopeHeader.textContent = 'Scope overrides';
+                            cortexScopesEl.appendChild(scopeHeader);
+                            data.cortex.scopes.forEach((scope) => {
+                                const wrap = document.createElement('div');
+                                wrap.style.cssText = 'display:flex; align-items:center; gap:6px;';
+                                const lbl = document.createElement('label');
+                                lbl.style.cssText = 'font-size:0.88rem; color:var(--muted); white-space:nowrap;';
+                                lbl.textContent = scope.label + ':';
+                                const sel = document.createElement('select');
+                                sel.style.cssText = 'padding:5px 10px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:8px; font-size:0.88rem;';
+                                (scope.options || []).forEach((opt) => {
+                                    const o = document.createElement('option');
+                                    o.value = opt;
+                                    o.textContent = opt;
+                                    if (opt === scope.value) o.selected = true;
+                                    sel.appendChild(o);
+                                });
+                                sel.addEventListener('change', async () => {
+                                    try {
+                                        const res = await fetch('/api/config', {
+                                            method: 'POST',
+                                            headers: { 'Content-Type': 'application/json' },
+                                            body: JSON.stringify({ key: scope.key, value: sel.value })
+                                        });
+                                        if (!res.ok) throw new Error('HTTP ' + res.status);
+                                        window.showToast && window.showToast(scope.label + ' cortex updated');
+                                    } catch (e) {
+                                        console.error('[synth_webui] Failed to update scope cortex', e);
+                                        window.showToast && window.showToast('Failed to update ' + scope.label + ' cortex', true);
+                                        sel.value = scope.value; // revert
+                                    }
+                                });
+                                wrap.appendChild(lbl);
+                                wrap.appendChild(sel);
+                                cortexScopesEl.appendChild(wrap);
+                            });
+                        }
+                    } catch (e) { console.debug('[synth_webui] scope selectors render failed', e); }
                 } catch (e) {
                     console.error('[synth_webui] Failed to load components', e);
                     const componentsCortexListEl = document.getElementById('components-cortex-list');

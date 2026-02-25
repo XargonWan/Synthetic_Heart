@@ -27,7 +27,7 @@ async def test_message_chain_triggers_corrector_for_unregistered_action(monkeypa
         # Simulate no correction returned
         return None
 
-    async def fake_extract_json(text, return_metadata=False):
+    def fake_extract_json(text, return_metadata=False):
         # Return parsed JSON and empty metadata
         return (
             {
@@ -44,11 +44,12 @@ async def test_message_chain_triggers_corrector_for_unregistered_action(monkeypa
             {},
         )
 
-    # Ensure supported types do NOT include bare 'message'
+    # Return an empty set of supported types to force the message action
+    # to be treated as unsupported and trigger the corrector.
     monkeypatch.setattr(
         action_parser,
         "get_supported_action_types",
-        lambda: set(["message_telegram_bot", "message_discord_bot"]),
+        lambda: set(),
     )
 
     monkeypatch.setattr(
@@ -63,7 +64,7 @@ async def test_message_chain_triggers_corrector_for_unregistered_action(monkeypa
     msg = SimpleNamespace()
     msg.chat_id = 123
     msg.interface_path = "telegram_bot/123"
-    msg.from_llm = True
+    msg.from_cortex = True
 
     # Call the message chain as if the source was LLM
     result = await message_chain.handle_incoming_message(
@@ -94,7 +95,7 @@ async def test_message_chain_triggers_corrector_for_unregistered_top_level_key(
         called["count"] += 1
         return None
 
-    async def fake_extract_json(text, return_metadata=False):
+    def fake_extract_json(text, return_metadata=False):
         parsed = {
             "actions": [
                 {
@@ -108,18 +109,13 @@ async def test_message_chain_triggers_corrector_for_unregistered_top_level_key(
         }
         return (parsed, {})
 
-    # Supported actions do not include bare 'message'
+    # Use an empty supported set so that the synthetic "message" action
+    # generated from the unregistered top-level key is considered invalid
+    # and triggers correction.
     monkeypatch.setattr(
         action_parser,
         "get_supported_action_types",
-        lambda: set(
-            [
-                "create_personal_diary_entry",
-                "message_telegram_bot",
-                "message_discord_bot",
-                "use_animation",
-            ]
-        ),
+        lambda: set(),
     )
 
     monkeypatch.setattr(
@@ -131,7 +127,9 @@ async def test_message_chain_triggers_corrector_for_unregistered_top_level_key(
         fake_extract_json,
     )
 
-    msg = SimpleNamespace(chat_id=123, interface_path="telegram_bot/123", from_llm=True)
+    msg = SimpleNamespace(
+        chat_id=123, interface_path="telegram_bot/123", from_cortex=True
+    )
 
     result = await message_chain.handle_incoming_message(
         bot=None,
@@ -167,3 +165,132 @@ async def test_normalize_message_unknown_obeys_supported_actions(monkeypatch):
     actions2 = [{"type": "message_unknown", "payload": {"text": "hi"}}]
     normalized2 = message_chain._normalize_message_unknown(actions2, "telegram_bot/123")
     assert normalized2[0]["type"] == "message_unknown"
+
+
+@pytest.mark.asyncio
+async def test_no_fallback_if_partial_success(monkeypatch):
+    """If at least one action has already run we should not send a generic
+    LLM-failure message when correction retries are exhausted.
+    """
+    # prepare hooks
+    called = {
+        "fallback": 0,
+        "corrector": 0,
+    }
+
+    async def fake_corrector(
+        text, bot=None, context=None, chat_id=None, thread_id=None
+    ):
+        called["corrector"] += 1
+        return None
+
+    def fake_extract_json(text, return_metadata=False):
+        # return two actions of known-supported types so one can fail during execution
+        return (
+            {
+                "actions": [
+                    {"type": "good", "payload": {}},
+                    {"type": "bad", "payload": {}},
+                ]
+            },
+            {},
+        )
+
+    async def fake_run_actions(actions, ctx, bot, message):
+        # simulate partial success: first action succeeds, second fails
+        processed = [actions[0]] if actions else []
+        failed = []
+        if len(actions) > 1:
+            failed.append({"action": actions[1], "errors": ["oops"]})
+        return {"processed": processed, "failed_actions": failed, "errors": []}
+
+    monkeypatch.setattr(
+        "core.transport_layer.run_corrector_middleware",
+        fake_corrector,
+    )
+    monkeypatch.setattr(
+        "core.transport_layer.extract_json_from_text",
+        fake_extract_json,
+    )
+    # make sure both types are considered supported so early validation does not
+    # short-circuit the loop
+    monkeypatch.setattr(
+        action_parser,
+        "get_supported_action_types",
+        lambda: {"good", "bad"},
+    )
+    monkeypatch.setattr(
+        "core.action_parser.run_actions",
+        fake_run_actions,
+    )
+
+    async def fake_send(bot, message, reason, context=None):
+        called["fallback"] += 1
+        return "fallback"
+
+    monkeypatch.setattr(
+        "core.message_chain.send_llm_fallback_message",
+        fake_send,
+    )
+
+    msg = SimpleNamespace()
+    msg.chat_id = 42
+    msg.interface_path = "telegram_bot/42"
+    msg.from_cortex = True
+
+    # limit retries to 1 so we hit the exhaustion branch quickly
+    result = await message_chain.handle_incoming_message(
+        bot=None,
+        message=msg,
+        text="{}",
+        source="llm",
+        context={"max_retries": 1},
+    )
+
+    # we should have run the corrector at least once
+    assert called["corrector"] >= 1
+    # fallback should NOT have been sent because at least one action executed
+    assert called["fallback"] == 0
+    assert result == message_chain.ACTIONS_EXECUTED
+
+
+@pytest.mark.asyncio
+async def test_fallback_on_technical_error(monkeypatch):
+    """If action execution throws before anything runs, a fallback message is
+    emitted and LLM_FAILED is returned."""
+    called = {"fallback": 0}
+
+    def fake_extract_json(text, return_metadata=False):
+        return ({"actions": [{"type": "dummy_action", "payload": {}}]}, {})
+
+    async def crashing_run(actions, ctx, bot, message):
+        raise RuntimeError("boom")
+
+    async def fake_send(bot, message, reason, context=None):
+        called["fallback"] += 1
+        return "fallback"
+
+    monkeypatch.setattr(
+        "core.transport_layer.extract_json_from_text",
+        fake_extract_json,
+    )
+    monkeypatch.setattr(
+        "core.action_parser.run_actions",
+        crashing_run,
+    )
+    monkeypatch.setattr(
+        "core.message_chain.send_llm_fallback_message",
+        fake_send,
+    )
+
+    msg = SimpleNamespace(chat_id=99, interface_path="fake/99", from_cortex=True)
+    result = await message_chain.handle_incoming_message(
+        bot=None,
+        message=msg,
+        text="{}",
+        source="llm",
+        context={},
+    )
+
+    assert called["fallback"] == 1
+    assert result == message_chain.LLM_FAILED

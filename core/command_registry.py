@@ -60,6 +60,9 @@ async def handle_command_message(
     command_name = parts[0]
     if command_name.startswith("/"):
         command_name = command_name[1:]  # Remove leading slash
+    # Strip @botname suffix that Telegram appends in group chats (e.g. /cortex@synth_bot)
+    if "@" in command_name:
+        command_name = command_name.split("@", 1)[0]
 
     args = parts[1:] if len(parts) > 1 else []
 
@@ -80,10 +83,17 @@ async def handle_command_message(
         import inspect
 
         sig = inspect.signature(handler)
+        log_debug(f"[command_registry] Executing command: {command_name} args={args}")
         if "interface_context" in sig.parameters:
             result = await handler(*args, interface_context=interface_context)
         else:
             result = await handler(*args)
+        # Ensure every registered command that does something always returns feedback
+        if not result:
+            result = f"✅ /{command_name} eseguito."
+        log_debug(
+            f"[command_registry] Command {command_name} returned: {result[:80] if result else None}"
+        )
         return result
     except Exception as e:
         log_debug(f"[command_registry] Error executing command {command_name}: {e}")
@@ -315,6 +325,7 @@ async def _resolve_cortex_choice(choice_raw: str) -> str:
         reverse_map.setdefault(eng, []).append(k or "unknown")
 
     choice = choice_raw.strip()
+
     if "/" in choice:
         parts = choice.split("/", 1)
         if len(parts) != 2:
@@ -420,9 +431,24 @@ async def cortex_command(*args) -> str:
         trainer_display = _fmt_override("trainer", trainer)
 
         lines: list[str] = ["*Active Cortex engines:*"]
-        lines.append(f"• live (base): `{base}`")
-        lines.append(f"• grillo override: `{grillo_display}`")
+        # show base engine separately from any live override
+        lines.append(f"• base: `{base}`")
+        # trainer and grillo overrides always shown (even if Default)
         lines.append(f"• trainer override: `{trainer_display}`")
+        lines.append(f"• grillo override: `{grillo_display}`")
+        # optionally show live override when configured and different from base
+        try:
+            from core.config import config_registry
+
+            live_override = config_registry.get_value("LIVE_CORTEX", "Default")
+        except Exception:
+            live_override = "Default"
+        if (
+            live_override
+            and live_override not in ("Default", "", None)
+            and live_override != base
+        ):
+            lines.append(f"• live override: `{live_override}`")
         lines.append("\n*Available Cortex Engines:*")
         for k in sorted(kind_map.keys()):
             engines = kind_map.get(k) or []
@@ -445,58 +471,14 @@ async def cortex_command(*args) -> str:
     except ValueError as ve:
         return str(ve)
 
-    # Final step: switch via central helper
+    # Final step: switch via central helper.
+    # use_hot_swap=True calls load_plugin() directly — much lighter than
+    # initialize_all() and avoids leaving selenium polling tasks hanging
+    # with driver=None when the old engine is torn down mid-request.
     try:
         from core.config import switch_active_cortex_engine
 
-        await switch_active_cortex_engine(selected_engine, use_hot_swap=False)
-        return f"✅ Cortex engine dynamically updated to `{selected_engine}`."
-    except Exception as e:
-        return f"❌ Error loading plugin: {e}"
-
-    choice_raw = str(args[0]).strip()
-
-    # Fully-qualified form: kind/name
-    if "/" in choice_raw:
-        parts = choice_raw.split("/", 1)
-        if len(parts) != 2:
-            return (
-                "❌ Invalid format. Use `/cortex <kind>/<engine>` or `/cortex <engine>`"
-            )
-        kind, name = parts[0], parts[1]
-        if kind not in kind_map:
-            return f"❌ Cortex kind `{kind}` not recognised. Available kinds: {', '.join(sorted(kind_map.keys()))}"
-        if name not in kind_map.get(kind, []):
-            return f"❌ Engine `{name}` not found for cortex `{kind}`."
-        selected_engine = name
-    else:
-        # Short-name resolution: find exact or substring matches across all engines
-        candidates = [
-            e for e in all_engines if e == choice_raw or choice_raw.lower() in e.lower()
-        ]
-        # Prefer exact match
-        exact = [e for e in candidates if e == choice_raw]
-        if len(exact) == 1:
-            selected_engine = exact[0]
-        elif len(candidates) == 1:
-            selected_engine = candidates[0]
-        elif len(candidates) > 1:
-            # Ambiguous — show full qualified options
-            opts = []
-            for e in sorted(set(candidates)):
-                ks = reverse_map.get(e, [])
-                for kk in sorted(ks):
-                    opts.append(f"{kk}/{e}")
-            hint = "\n".join(f"/cortex {o}" for o in opts)
-            return f"❌ Found multiple matching engines for '{choice_raw}'. Which one did you mean?\n{hint}"
-        else:
-            return f"❌ Cortex `{choice_raw}` not found."
-
-    # Final step: switch via central helper
-    try:
-        from core.config import switch_active_cortex_engine
-
-        await switch_active_cortex_engine(selected_engine, use_hot_swap=False)
+        await switch_active_cortex_engine(selected_engine, use_hot_swap=True)
         return f"✅ Cortex engine dynamically updated to `{selected_engine}`."
     except Exception as e:
         return f"❌ Error loading plugin: {e}"
@@ -544,7 +526,7 @@ async def cortex_grillo_command(*args) -> str:
         engines = list_available_cortex_engines(None)
         msg = f"*Active Cortex (grillo override):* `{current}`\n\n*Available:*"
         msg += "\n" + "\n".join(f"• `{name}`" for name in engines)
-        msg += "\n\nTo change: `/cortex_grillo <engine>`"
+        msg += "\n\nTo change: `/cortex_grillo <kind>/<engine>` or `/cortex_grillo <engine>`"
         return msg
 
     choice_raw = str(args[0]).strip()
@@ -574,7 +556,7 @@ async def cortex_trainer_command(*args) -> str:
         engines = list_available_cortex_engines(None)
         msg = f"*Active Cortex (trainer override):* `{current}`\n\n*Available:*"
         msg += "\n" + "\n".join(f"• `{name}`" for name in engines)
-        msg += "\n\nTo change: `/cortex_trainer <engine>`"
+        msg += "\n\nTo change: `/cortex_trainer <kind>/<engine>` or `/cortex_trainer <engine>`"
         return msg
 
     choice_raw = str(args[0]).strip()
@@ -904,3 +886,41 @@ async def cancel_command(*args, interface_context=None) -> str:
 
 register_command("cancel", cancel_command)
 register_command("logchat", logchat_command)
+
+
+async def clean_chat_link_command(*args: str, interface_context: Any = None) -> str:
+    """Remove the path link between a chat_id and its conversation folder.
+
+    Usage:
+      /clean_chat_link <chat_id>  – Remove the mapping for the given chat_id.
+      /clean_chat_link            – Remove the mapping for the *current* chat
+                                    (requires interface_context).
+    """
+    from core.recent_chats import clear_chat_path, get_chat_path
+
+    # Resolve target chat_id
+    if args:
+        try:
+            target_id: int | str = int(args[0])
+        except ValueError:
+            return "❌ Use: `/clean_chat_link <chat_id>` where chat_id is an integer."
+    else:
+        # Try to infer from interface context
+        target_id_raw: int | str | None = None
+        if interface_context and isinstance(interface_context, dict):
+            update = interface_context.get("update")
+            if update and getattr(update, "effective_chat", None):
+                target_id_raw = update.effective_chat.id
+        if target_id_raw is None:
+            return "❌ Use: `/clean_chat_link <chat_id>` or run inside a chat."
+        target_id = target_id_raw
+
+    existing = get_chat_path(target_id)
+    if existing is None:
+        return f"⚠️ No chat link found for `{target_id}`."
+
+    clear_chat_path(target_id)
+    return f"✅ Chat link removed for `{target_id}` (was: `{existing}`)."
+
+
+register_command("clean_chat_link", clean_chat_link_command)
