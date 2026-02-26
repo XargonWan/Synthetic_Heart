@@ -651,6 +651,11 @@ async def handle_incoming_message(
         log_info(
             f"[flow] -> LLM plugin: handing off chat_id={getattr(message, 'chat_id', None)} interface={interface} prompt_len={len(json_dumps(prompt)) if isinstance(prompt, (dict, list)) else len(str(prompt))} pre_reduction_size={pre_size}"
         )
+        # debug log of the full prompt content for reconstruction
+        try:
+            log_debug(f"[flow] prompt content: {json_dumps(prompt)}")
+        except Exception:
+            pass
     except Exception:
         log_info(
             f"[flow] -> LLM plugin: handing off chat_id={getattr(message, 'chat_id', None)} interface={interface}"
@@ -666,6 +671,11 @@ async def handle_incoming_message(
             _log_llm_traffic(prompt, result, interface)
         except Exception as e:
             log_error(f"[plugin_instance] Failed to log LLM traffic: {e}")
+        # debug log response for full transaction replay
+        try:
+            log_debug(f"[flow] LLM raw response: {result}")
+        except Exception:
+            pass
 
         # Update Grillo activity log if this was a Grillo beat
         # This ensures the raw LLM response is persisted even if actions fail or don't write back
@@ -821,39 +831,6 @@ async def handle_incoming_message(
             # Don't return ACTIONS_EXECUTED as a message to the webui
             if chain_result == "ACTIONS_EXECUTED":
                 return None
-
-            # === FALLBACK: If the LLM DID NOT produce interface actions, send a short ACK
-            # This avoids leaving users with only a reaction and no reply when the LLM's
-            # output didn't contain a `message_*` action (e.g. only memory writes or diary entries).
-            try:
-                # Heuristic: if chain_result is truthy and not ACTIONS_EXECUTED, assume
-                # no message actions were executed. Send a brief acknowledgement so the
-                # user knows their message was processed and a fuller reply may follow.
-                # Avoid duplicating when the LLM explicitly returned a user-facing message
-                # as an action (handled above with ACTIONS_EXECUTED).
-                ack_text = (
-                    "Ricevuto! Sto elaborando la tua richiesta e ti rispondo a breve."
-                )
-                # Use bot.send_message if available (Telegram/Discord wrappers support similar call signatures)
-                if bot and hasattr(bot, "send_message"):
-                    try:
-                        # Prefer to reply in-thread when possible
-                        kwargs = {"chat_id": getattr(message, "chat_id", None)}
-                        reply_id = getattr(message, "message_id", None)
-                        if reply_id:
-                            kwargs["reply_to_message_id"] = reply_id
-                        await bot.send_message(**kwargs, text=ack_text)
-                        log_debug(
-                            "[plugin_instance] Sent fallback ACK to user after LLM produced no message actions"
-                        )
-                    except Exception as e:
-                        log_debug(f"[plugin_instance] Failed to send fallback ACK: {e}")
-                else:
-                    log_debug(
-                        "[plugin_instance] No bot.send_message available for fallback ACK"
-                    )
-            except Exception as e:
-                log_debug(f"[plugin_instance] Fallback ACK logic failed: {e}")
 
             return chain_result
 

@@ -330,6 +330,10 @@ async def gather_recon_contributions(
     Returns list of normalized contribution dicts.
     """
     enabled = bool(config_registry.get_var("ENABLE_RECON", True))
+    # start-of-flow logging
+    log_debug(
+        f"[recon] gather_recon_contributions start: enabled={enabled} text={text!r} tags={tags} keywords={keywords} max_results={max_results}"
+    )
     if not enabled:
         log_debug("[recon] ENABLE_RECON disabled, skipping contributions")
         return []
@@ -406,6 +410,7 @@ async def gather_recon_contributions(
         system_lines.append(f"- {key}: {instruction}")
     system_lines.append("Do not add any extra keys or commentary.")
     system_prompt = "\n".join(system_lines)
+    log_debug(f"[recon] system_prompt:\n{system_prompt}")
 
     # Shared user prompt (message + history)
     local_text, global_text = await _build_recon_history_texts_async(
@@ -416,6 +421,7 @@ async def gather_recon_contributions(
         f"Recent local history:\n{local_text}\n\n"
         f"Recent global history:\n{global_text}\n"
     )
+    log_debug(f"[recon] user_prompt:\n{user_prompt}")
 
     # Single LLM call
     engine = None
@@ -448,6 +454,7 @@ async def gather_recon_contributions(
             ),
             timeout=timeout,
         )
+        log_debug(f"[recon] LLM response:\n{llm_text}")
     except Exception as e:
         log_warning(f"[recon] Combined Recon LLM call failed: {e}")
         return []
@@ -461,6 +468,7 @@ async def gather_recon_contributions(
 
     if not isinstance(parsed, dict):
         log_warning("[recon] Combined Recon response did not parse as JSON object")
+        log_debug(f"[recon] parsed output: {parsed!r}")
         return []
 
     # Dispatch responses to plugins
@@ -471,6 +479,7 @@ async def gather_recon_contributions(
         key = plugin.get_recon_key()
         plugin_name = plugin.__class__.__name__
         data = parsed.get(key)
+        log_debug(f"[recon] dispatching parsed data to {plugin_name}: {data!r}")
         try:
             res = await plugin.parse_recon_response(
                 data,
@@ -484,6 +493,7 @@ async def gather_recon_contributions(
         except Exception as e:
             log_warning(f"[recon] Recon plugin {plugin_name} parse failed: {e}")
             res = []
+        log_debug(f"[recon] {plugin_name} returned {res!r}")
         if res:
             log_debug(
                 f"[recon] Recon plugin {plugin_name} returned {len(res)} contribution(s)"
@@ -504,7 +514,9 @@ async def gather_recon_contributions(
             dedup.append(c)
 
     dedup.sort(key=lambda x: int(x.get("priority", 0)), reverse=True)
+    log_debug(f"[recon] raw contributions before dedup: {contributions!r}")
     log_info(f"[recon] Collected {len(dedup)} contributions from plugins")
+    log_debug(f"[recon] final deduplicated contributions: {dedup!r}")
     return dedup
 
 

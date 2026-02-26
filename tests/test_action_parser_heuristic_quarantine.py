@@ -9,7 +9,7 @@ from core.action_parser import run_actions
 async def test_heuristic_recovered_action_quarantined(monkeypatch):
     # Create an LLM-originated message
     msg = SimpleNamespace()
-    msg.from_llm = True
+    msg.from_cortex = True
 
     action = {
         "type": "message_telegram_bot",

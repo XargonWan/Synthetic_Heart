@@ -140,6 +140,17 @@ Updated Behavior
      - If validation fails (unsupported type or invalid parameters), the **corrector** will be invoked to request a selective correction from the LLM. This ensures the LLM is explicitly asked to fix names or payloads and prevents implicit guessing by the core.
      - Component authors or integrators can register explicit alias resolvers via ``get_validation_registry().register_action_alias(alias_name, resolver)`` when an environment requires it, but this is opt-in and not applied automatically.
 
+     - **Blocking invalid actions at the source:** when the corrector is triggered it will
+       prevent the original AI output from being forwarded to interfaces unless the
+       JSON actions are fully valid. This removes the need for message deduplication
+       in normal operation and avoids duplicate/malformed replies reaching users.
+
+     - **Origin detection:** the core marks model-generated messages using a
+       single `from_cortex` flag (previously `from_cortex`).  The corrector only
+       operates on messages where this flag is present (or its legacy aliases);
+       callers such as `cortex_response_send` and `message_chain` now populate it
+       automatically.
+
 No Hardcoding
 ~~~~~~~~~~~~~
 

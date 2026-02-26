@@ -101,6 +101,10 @@ class CortexRegistry:
             n for n, meta in self._engine_meta.items() if meta.get("cortex") == cortex
         ]
 
+    def get_engines_by_cortex(self, cortex: str) -> List[str]:
+        """Return all engine names registered under a specific cortex kind."""
+        return self.get_available_engines(cortex=cortex)
+
     def find_engine_by_capabilities(
         self, cortex: str, required: Capabilities
     ) -> Optional[str]:

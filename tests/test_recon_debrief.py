@@ -6,8 +6,23 @@ class FakeReconPlugin:
     def __init__(self):
         self.called = False
 
+    # simple preflight hook (not really used by combined path, but required for
+    # eligible list)
     async def get_recon_contributions(self, **kwargs):
+        return []
+
+    # implement combined recon interface so gather_recon_contributions will
+    # include us in the LLM prompt and eventually call parse_recon_response
+    def get_recon_key(self):
+        return "FAKE"
+
+    def get_recon_instruction(self):
+        return "Return an empty list"
+
+    async def parse_recon_response(self, data, **kwargs):
+        # mark that we were invoked by recon
         self.called = True
+        # pretend we produced a contribution
         return [{"snippet": "recent memory", "source": "test"}]
 
     def on_debrief(
@@ -18,10 +33,42 @@ class FakeReconPlugin:
         self.context = context
 
 
-async def test_recon_and_debrief_hooks(monkeypatch):
+async def test_recon_and_debrief_hooks(monkeypatch, caplog, capsys):
+    # ensure synth logger is at DEBUG level so our extra log_debug calls run
+    import logging
+    import core.logging_utils as logmod
+
+    logmod.setup_logging().setLevel(logging.DEBUG)
+    caplog.set_level(logging.DEBUG, logger="synth")
+
+    # caplog won't capture because logger writes to stdout, we'll inspect capsys later
+
     fake = FakeReconPlugin()
     # Register fake plugin
     PLUGIN_REGISTRY["fake_recon"] = fake
+    # prepare a dummy engine so recon prompt can run without reaching out to
+    # real LLM services; ensure it returns valid JSON with our plugin key
+    import core.cortex_registry as registry_mod
+    import core.config as config_mod
+
+    class DummyEngine:
+        async def generate_response(self, messages):
+            # we don't care about the actual prompt, just return empty JSON
+            return '{"FAKE": []}'
+
+    class DummyRegistry:
+        def get_engine(self, name):
+            return DummyEngine()
+
+        def load_engine(self, name):
+            return DummyEngine()
+
+    monkeypatch.setattr(registry_mod, "get_cortex_registry", lambda: DummyRegistry())
+
+    async def fake_active():
+        return "dummy"
+
+    monkeypatch.setattr(config_mod, "get_active_cortex_engine", fake_active)
 
     # Patch plugin_instance to return empty actions so loop still runs
     import core.plugin_instance as plugin_instance
@@ -80,6 +127,10 @@ async def test_recon_and_debrief_hooks(monkeypatch):
     if task:
         await task
 
+    # recon contributions should have been collected (logged earlier)
+    # parse_recon_response should have flipped this flag
     assert getattr(fake, "called", False) is True
     assert getattr(fake, "debrief_called", True) is True
     assert fake.context.get("task_id") == task_id
+
+    # we don't need to inspect logs here; previous assertions ensure basic hooks ran

@@ -130,14 +130,57 @@ class ReconLanguageEvaluatorPlugin:
         if not engine or not hasattr(engine, "generate_response"):
             return []
 
+        # Build local (interface) history only; global history must not influence
+        # language detection per requirements.
+        local_lines: list[str] = []
+        interface_path = getattr(message, "interface_path", None)
+        try:
+            if isinstance(context_memory, dict) and interface_path in context_memory:
+                raw = list(context_memory.get(interface_path, []))
+                for item in raw[-6:]:
+                    if isinstance(item, dict):
+                        sender = (
+                            item.get("sender_name") or item.get("sender") or "unknown"
+                        )
+                        content = (
+                            item.get("text")
+                            or item.get("message_text")
+                            or item.get("content")
+                            or ""
+                        )
+                        if content:
+                            local_lines.append(f"[{sender}] {content}")
+        except Exception:
+            pass
+
+        try:
+            from core.chat_history_cache import load_chat_history
+
+            if interface_path:
+                cached = await load_chat_history(interface_path)
+                for item in list(cached)[-6:]:
+                    sender = item.get("sender_name") or "unknown"
+                    content = item.get("text") or ""
+                    if content:
+                        local_lines.append(f"[{sender}] {content}")
+        except Exception:
+            pass
+
+        local_text = "\n".join(local_lines) if local_lines else "(none)"
+
         system_prompt = (
             "This is a Recon prompt, please execute what is requested below:\n"
             "- Detect the primary language of the conversation.\n"
+            "Use ONLY the user message and recent history from the same interface path.\n"
+            "Do NOT consider global chat or any other interface history when choosing the language.\n"
             'Return ONLY valid JSON: {"language_code":"it"}.\n'
             "Use BCP-47 language codes (e.g., en, it, es, fr)."
         )
 
-        user_prompt = f"User message:\n{text.strip()}\n"
+        user_prompt = (
+            f"User message:\n{text.strip()}\n\n"
+            f"Recent interface history:\n{local_text}\n"
+        )
 
         try:
             llm_text = await engine.generate_response(

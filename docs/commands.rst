@@ -29,7 +29,15 @@ User Management
 Cortex Control
 -----------
 
-* ``/cortex`` – Show and select the current Cortex engine (deprecated alias: ``/llm``).
+* ``/cortex`` – Show and select the current Cortex engine (deprecated alias: ``/llm``).  The status message now lists which engine is active for the
+  live/base context as well as any ``grillo`` or ``trainer`` overrides.
+* ``/cortex_live <engine>`` – Explicit alias for changing the *live* (base)
+  cortex.  Same behavior as ``/cortex`` but the name makes the intent clearer.
+* ``/cortex_grillo <engine>`` – Set or show the cortex engine used for grillo
+  background beats.  Without an argument the command lists the current
+  override and available engines.
+* ``/cortex_trainer <engine>`` – Same as ``/cortex_grillo`` but targets the
+  trainer scope.
 * ``/model`` – View or set the active model.
 
 Administration
@@ -39,4 +47,12 @@ Administration
 * ``/purge_map [days]`` – Remove chat mappings older than ``days`` (default 7).
 * ``/logchat`` – Set the current chat as the log chat.
 * ``/manage_chat_id [reset <id>|reset this]`` – Reset stored mapping for a chat.
+
+Voice Control (Discord only)
+----------------------------
+
+* ``/leave [<guild id|channel name>]`` – Disconnect the bot from a voice
+  channel.  When run without arguments, if the bot is connected to more than
+  one channel it will list the active connections and explain how to target a
+  specific one.
 

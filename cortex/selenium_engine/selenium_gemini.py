@@ -1,6 +1,6 @@
 # Import the base Selenium LLM library
 from cortex.selenium_engine.selenium_llm_base import SeleniumLLMBase
-from core.logging_utils import log_debug
+from core.logging_utils import log_debug, log_info
 from selenium.webdriver.common.by import By
 import time
 
@@ -58,6 +58,22 @@ class SeleniumGeminiPlugin(SeleniumLLMBase):
 
         # Update interface limits based on current model
         self._update_interface_limits()
+
+        # Ensure the global Selenium limits/name reflect Gemini engine
+        # (chatgpt plugin does this too; Gemini previously neglected it, leading
+        # to misleading log messages like "chatgpt did not start processing").
+        try:
+            from cortex.selenium_engine.selenium_llm_base import (
+                set_active_selenium_limits,
+            )
+
+            # set_active_selenium_limits takes max_prompt_chars and llm_name;
+            # use default model for initial value
+            limit = self.model_limits_map.get(self.default_model, 0)
+            set_active_selenium_limits(limit, "gemini")
+        except Exception:
+            # defensive; failure here shouldn't crash initialization
+            log_debug("[selenium_gemini] failed to set active selenium limits")
 
         # Set up Gemini-specific selectors - the base will use these for automation
         # IMPORTANT: Order matters - fast/working selectors first to avoid long timeouts
@@ -146,14 +162,33 @@ class SeleniumGeminiPlugin(SeleniumLLMBase):
 
         If logged in, returns the configured model or default.
         If not logged in, returns 'unlogged' with reduced limits.
+
+        Also update global prompt limits/name whenever the model is checked.
         """
         # Auto-detection: if not logged in, use unlogged model
         if not self.is_user_logged_in():
             log_debug("[selenium_gemini] User not logged in, using 'unlogged' model")
-            return "unlogged"
+            model = "unlogged"
+        else:
+            # User is logged in, return configured model
+            model = self._get_current_model_name()
 
-        # User is logged in, return configured model
-        return self._get_current_model_name()
+        # update global limits/name if we know the model
+        if model in self.model_limits_map:
+            try:
+                from cortex.selenium_engine.selenium_llm_base import (
+                    set_active_selenium_limits,
+                )
+
+                limit = self.model_limits_map[model]
+                set_active_selenium_limits(limit, f"gemini_{model}")
+                log_debug(
+                    f"[selenium_gemini] Updated global limits for model {model}: {limit} chars"
+                )
+            except Exception:
+                log_debug("[selenium_gemini] could not update active selenium limits")
+
+        return model
 
     def get_interface_limits(self) -> dict:
         """Get the limits and capabilities for Selenium Gemini interface."""

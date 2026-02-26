@@ -252,34 +252,53 @@ def _fallback_to_trainer(message: str) -> None:
     registry = get_interface_registry()
     for interface_name in registry.get_interface_names():
         trainer_id = get_trainer_id(interface_name)
-        if trainer_id and interface_name in INTERFACE_REGISTRY:
-            log_info(
-                f"[notifier] Fallback: sending to {interface_name} trainer {trainer_id}"
-            )
-            iface = INTERFACE_REGISTRY.get(interface_name)
-            if iface:
+        if not trainer_id or interface_name not in INTERFACE_REGISTRY:
+            continue
 
-                async def send_to_trainer():
-                    try:
-                        message_data = {"text": message, "target": trainer_id}
-                        await iface.send_message(message_data)
-                        log_info(
-                            f"[notifier] Message sent to {interface_name} trainer successfully"
-                        )
-                    except Exception as e:
-                        log_warning(
-                            f"[notifier] Failed to send to {interface_name} trainer: {repr(e)}"
-                        )
-
+        # trainer_id may be a list; iterate numeric entries only
+        ids_to_try: list[int] = []
+        if isinstance(trainer_id, (list, tuple)):
+            for t in trainer_id:
                 try:
-                    loop = asyncio.get_running_loop()
-                    if loop and loop.is_running():
-                        loop.create_task(send_to_trainer())
-                    else:
-                        _safe_schedule_async(send_to_trainer())
-                except RuntimeError:
-                    _safe_schedule_async(send_to_trainer())
-                return
+                    ids_to_try.append(int(t))
+                except Exception:
+                    # ignore non-int values when doing fallback send
+                    continue
+        else:
+            try:
+                ids_to_try.append(int(trainer_id))
+            except Exception:
+                ids_to_try = []
+
+        for tid in ids_to_try:
+            log_info(f"[notifier] Fallback: sending to {interface_name} trainer {tid}")
+            iface = INTERFACE_REGISTRY.get(interface_name)
+            if not iface:
+                break
+
+            async def send_to_trainer(target_id: int):
+                try:
+                    message_data = {"text": message, "target": target_id}
+                    await iface.send_message(message_data)
+                    log_info(
+                        f"[notifier] Message sent to {interface_name} trainer successfully"
+                    )
+                except Exception as e:
+                    log_warning(
+                        f"[notifier] Failed to send to {interface_name} trainer: {repr(e)}"
+                    )
+
+            try:
+                loop = asyncio.get_running_loop()
+                if loop and loop.is_running():
+                    loop.create_task(send_to_trainer(tid))
+                else:
+                    _safe_schedule_async(send_to_trainer(tid))
+            except RuntimeError:
+                _safe_schedule_async(send_to_trainer(tid))
+        # we attempted all numeric ids for this interface and either sent or skipped
+        if ids_to_try:
+            return
 
     # No fallback available
     log_warning(f"[notifier] No trainer available, message lost: {message[:50]}...")

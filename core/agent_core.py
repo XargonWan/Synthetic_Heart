@@ -345,7 +345,7 @@ class AgentLoopManager:
 
                 # Create a synthetic original_message to mark origin from LLM
                 orig_msg = SimpleNamespace(
-                    from_llm=True,
+                    from_cortex=True,
                     chat_id=f"agent_task_{task_id}",
                     message_id=int(time.time() * 1000) % 1_000_000,
                     text=raw_text,
@@ -354,7 +354,7 @@ class AgentLoopManager:
 
                 # Run actions via action parser
                 try:
-                    context = {"from_llm": True, "task_id": task_id, "iteration": i}
+                    context = {"from_cortex": True, "task_id": task_id, "iteration": i}
                     run_result = await run_actions(actions, context, None, orig_msg)
                 except Exception as e:
                     run_result = {

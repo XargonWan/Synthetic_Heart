@@ -349,12 +349,16 @@ async def handle_incoming_message(
         except Exception:
             ctx["original_user_message"] = ""
 
-    # Mark LLM-origin in context (not on message object, as Telegram Message objects are immutable)
-    is_from_llm = True if source == "llm" else ctx.get("from_llm", False)
-    ctx["from_llm"] = is_from_llm
+    # Mark cortex-origin in context (not on message object, as Telegram
+    # Message objects are immutable). We normalise on "from_cortex" internally.
+    is_cortex_origin = True if source == "llm" else ctx.get("from_cortex", False)
+    # also honor explicit cortex/ai flags in context (legacy support)
+    if not is_cortex_origin:
+        is_cortex_origin = bool(ctx.get("from_cortex") or ctx.get("from_ai"))
+    ctx["from_cortex"] = is_cortex_origin
 
     # Preserve raw LLM response text for Debrief/intent-recovery plugins
-    if is_from_llm:
+    if is_cortex_origin:
         try:
             ctx["llm_response_text"] = text or ""
         except Exception:
@@ -363,7 +367,8 @@ async def handle_incoming_message(
     # Also set on message object if possible (for corrector_orchestrator and action_parser detection)
     try:
         if hasattr(message, "__dict__") or isinstance(message, type({})):
-            message.from_llm = is_from_llm
+            # keep legacy attr for compatibility but core uses from_cortex
+            message.from_cortex = is_cortex_origin
     except (AttributeError, TypeError):
         pass  # Message object is immutable (Telegram Message); use ctx instead
 
@@ -394,7 +399,7 @@ async def handle_incoming_message(
     )
 
     # Process LLM messages for emotional state updates
-    if ctx.get("from_llm", False) or source == "llm":
+    if ctx.get("from_cortex", False) or source == "llm":
         log_info("[message_chain] 🎭 Starting emotion processing for LLM message...")
         try:
             from core.persona_manager import get_persona_manager
@@ -448,11 +453,13 @@ async def handle_incoming_message(
 
     # Check for action result delivery context - these responses should have minimal retries
     # to prevent cascading loops when processing action outputs (e.g., memory_search results)
-    is_action_result = False
+    # (value read later if needed)
     try:
         system_message = ctx.get("system_message", {})
         if isinstance(system_message, dict):
-            is_action_result = system_message.get("is_action_result_delivery", False)
+            # note: we only read is_action_result when necessary later, ignore
+            # for now to keep lint happy
+            _ = system_message.get("is_action_result_delivery", False)
             custom_max = system_message.get("max_correction_attempts")
             if custom_max is not None and isinstance(custom_max, int):
                 max_retries = min(max_retries, custom_max)
@@ -461,6 +468,13 @@ async def handle_incoming_message(
                 )
     except Exception:
         pass
+
+    # Track whether any actions have successfully executed during the loop.
+    # If at least one action ran, we consider the iteration partially successful and
+    # avoid sending a generic fallback message later on. This matches the
+    # requirement that "LLM failure" should only be emitted when the entire
+    # iteration failed (or there was a technical error with no reply at all).
+    actions_executed_during_loop = False
 
     while True:
         log_info(
@@ -522,6 +536,43 @@ async def handle_incoming_message(
                 actions = parsed
             elif isinstance(parsed, dict) and "type" in parsed:
                 actions = [parsed]
+            elif isinstance(parsed, dict) and "recovery_actions" in parsed:
+                # Debrief plugins sometimes return {"recovery_actions": [{"action_type": ..., "payload": ...}]}
+                # Normalize this to the standard {"actions": [{"type": ..., "payload": ...}]} format.
+                raw_recovery = parsed.get("recovery_actions")
+                if isinstance(raw_recovery, list):
+                    normalized_recovery = []
+                    for item in raw_recovery:
+                        if not isinstance(item, dict):
+                            continue
+                        # action_type → type (debrief uses action_type, core uses type)
+                        atype = (
+                            item.get("action_type")
+                            or item.get("type")
+                            or item.get("action")
+                        )
+                        if not atype:
+                            continue
+                        normalized_recovery.append(
+                            {"type": atype, "payload": item.get("payload", {})}
+                        )
+                    if normalized_recovery:
+                        log_info(
+                            f"[message_chain] 🔄 Normalizing recovery_actions → actions "
+                            f"({len(normalized_recovery)} item(s)): "
+                            f"{[a['type'] for a in normalized_recovery]}"
+                        )
+                        actions = normalized_recovery
+                    else:
+                        log_warning(
+                            "[message_chain] recovery_actions list was empty or malformed - triggering corrector"
+                        )
+                        parsed = None
+                else:
+                    log_warning(
+                        "[message_chain] recovery_actions field is not a list - triggering corrector"
+                    )
+                    parsed = None
             elif isinstance(parsed, dict) and "action" in parsed:
                 # Normalize Gemini-style {"action": "...", "action_input"|"content": "..."} to standard format
                 # This handles LLMs that output the older single-action format
@@ -573,8 +624,10 @@ async def handle_incoming_message(
                 # We already allow certain metadata keys (e.g. "feelings") via the validation registry.
                 # Any other top-level key is treated as an invalid action type so the corrector
                 # can regenerate the response using only registered actions.
-                is_from_llm = source == "llm" or getattr(message, "from_llm", False)
-                if is_from_llm and isinstance(parsed, dict):
+                is_from_cortex = source == "llm" or getattr(
+                    message, "from_cortex", False
+                )
+                if is_from_cortex and isinstance(parsed, dict):
                     try:
                         from core.validation_registry import get_validation_registry
 
@@ -627,7 +680,21 @@ async def handle_incoming_message(
                     supported_action_types = set()
 
                 # Only enforce this for LLM-originated responses
-                if is_from_llm and isinstance(actions, list):
+                if is_from_cortex and isinstance(actions, list):
+                    # quick mapping: some models may output a generic "message"
+                    # action when they really intend to send text to the current
+                    # interface.  Convert it to a concrete type based on the
+                    # context path to avoid unnecessary corrector loops.
+                    if ctx_interface_path:
+                        for act in actions:
+                            if isinstance(act, dict) and act.get("type") == "message":
+                                if ctx_interface_path.startswith("telegram_bot"):
+                                    act["type"] = "message_telegram_bot"
+                                elif ctx_interface_path.startswith("discord_bot"):
+                                    act["type"] = "message_discord_bot"
+                                else:
+                                    act["type"] = "message_synth_webui"
+
                     unsupported = []
                     for idx, act in enumerate(actions):
                         if not isinstance(act, dict):
@@ -651,6 +718,7 @@ async def handle_incoming_message(
                         # Attach correction context and force correction path
                         correction_context = {
                             "successful_actions": [],
+                            "successful_types": [],
                             "failed_actions": unsupported,
                             "had_json_errors": False,
                             "original_text": text,
@@ -705,7 +773,7 @@ async def handle_incoming_message(
                 # Note: LLM decides freely whether to respond to user or not
                 # If no message_telegram_bot action is included, user simply receives nothing
                 # Log for debugging purposes
-                if source == "llm" or getattr(message, "from_llm", False):
+                if source == "llm" or getattr(message, "from_cortex", False):
                     has_user_response = False
                     has_tts = False
                     user_message_action = None
@@ -988,6 +1056,18 @@ async def handle_incoming_message(
                                 f"[message_chain] Skipping TTS auto-inject for non-user-facing interface: {interface_path}"
                             )
 
+                    # at this point we may not have computed the
+                    # various interface flags (they're defined only in
+                    # the branch above). ensure they exist so the
+                    # warning logic doesn't crash when has_user_response
+                    # is False.
+                    if "is_user_facing" not in locals():
+                        is_user_facing = False
+                    if "is_grillo_internal" not in locals():
+                        is_grillo_internal = False
+                    if "is_internal_chat" not in locals():
+                        is_internal_chat = False
+
                     if not has_user_response:
                         if (
                             is_user_facing
@@ -1121,10 +1201,31 @@ async def handle_incoming_message(
                         log_debug(
                             f"[message_chain] EXECUTING ACTIONS: count={len(actions) if actions else 0}, interface_path={ctx.get('interface_path')}, chat_id={ctx.get('chat_id')}, action_types={[a.get('type') or a.get('action') for a in (actions or []) if isinstance(a, dict)]}"
                         )
+                        # filter out previously-successful types when retrying
+                        if attempt > 0:
+                            cc = getattr(message, "correction_context", None) or {}
+                            successful_types = cc.get("successful_types", [])
+                            if successful_types and isinstance(actions, list):
+                                filtered = []
+                                for act in actions:
+                                    atype = None
+                                    if isinstance(act, dict):
+                                        atype = act.get("type") or act.get("action")
+                                    if atype in successful_types:
+                                        log_debug(
+                                            f"[message_chain] Removing previously successful action type '{atype}' from retry payload"
+                                        )
+                                    else:
+                                        filtered.append(act)
+                                actions = filtered
                         result = await run_actions(actions, ctx, bot, message)
                         processed = result.get("processed", [])
                         failed = result.get("failed_actions", [])
                         errors = result.get("errors", [])
+
+                        # remember if we actually ran anything
+                        if processed:
+                            actions_executed_during_loop = True
 
                         log_info(
                             f"[message_chain] Actions result: {len(processed)} successful, {len(failed)} failed"
@@ -1168,7 +1269,7 @@ async def handle_incoming_message(
                             pass
 
                         if needs_correction and (
-                            source == "llm" or getattr(message, "from_llm", False)
+                            source == "llm" or getattr(message, "from_cortex", False)
                         ):
                             # Some actions failed or JSON was corrupted - request selective correction
                             log_warning(
@@ -1178,6 +1279,11 @@ async def handle_incoming_message(
                             # Build correction context with info about what succeeded and what failed
                             correction_context = {
                                 "successful_actions": processed,
+                                "successful_types": [
+                                    (a.get("type") or a.get("action"))
+                                    for a in processed
+                                    if isinstance(a, dict)
+                                ],
                                 "failed_actions": failed,
                                 "errors": errors,
                                 "had_json_errors": metadata.get("recovered", False),
@@ -1209,15 +1315,28 @@ async def handle_incoming_message(
 
                     except Exception as e:
                         log_warning(f"[message_chain] Failed to run actions: {e}")
-                        # If action execution fails, don't continue with correction loop
-                        # This prevents cascading failures and loops
-                        return BLOCKED
+                        # On a hard exception during action execution we treat it as a
+                        # technical failure. If nothing has run yet, propagate an LLM
+                        # failure so the interface can show a fallback message. If some
+                        # actions already succeeded we simply report ACTIONS_EXECUTED so
+                        # the user isn't spammed with unrelated error texts.
+                        if not actions_executed_during_loop:
+                            failure_reason = f"Action execution exception: {e}"
+                            try:
+                                await send_llm_fallback_message(
+                                    bot, message, failure_reason, context=ctx
+                                )
+                            except Exception:
+                                pass
+                            return LLM_FAILED
+                        else:
+                            return ACTIONS_EXECUTED
 
         # Not parsed. If it's from LLM, always attempt correction regardless of braces
         # If it's non-LLM source, don't attempt correction
         # IMPORTANT: Only attempt correction for LLM messages that failed JSON parsing
         # Non-LLM messages and messages that don't require correction should be blocked
-        if source != "llm" and not getattr(message, "from_llm", False):
+        if source != "llm" and not getattr(message, "from_cortex", False):
             log_debug("[message_chain] Non-LLM source; no correction needed")
             return BLOCKED
 
@@ -1233,15 +1352,35 @@ async def handle_incoming_message(
             failure_reason = (
                 f"Exhausted {max_retries} correction attempts for invalid JSON"
             )
-            log_warning(f"[message_chain] {failure_reason}; sending fallback message")
-            await send_llm_fallback_message(bot, message, failure_reason, context=ctx)
-            return LLM_FAILED
+            if not actions_executed_during_loop:
+                log_warning(
+                    f"[message_chain] {failure_reason}; sending fallback message"
+                )
+                await send_llm_fallback_message(
+                    bot, message, failure_reason, context=ctx
+                )
+                return LLM_FAILED
+            else:
+                log_warning(
+                    f"[message_chain] {failure_reason} but {len(actions or [])} action(s) already executed; skipping fallback"
+                )
+                return ACTIONS_EXECUTED
 
         if text in tried_texts:
             failure_reason = "Correction loop detected - same text repeated"
-            log_warning(f"[message_chain] {failure_reason}; sending fallback message")
-            await send_llm_fallback_message(bot, message, failure_reason, context=ctx)
-            return LLM_FAILED
+            if not actions_executed_during_loop:
+                log_warning(
+                    f"[message_chain] {failure_reason}; sending fallback message"
+                )
+                await send_llm_fallback_message(
+                    bot, message, failure_reason, context=ctx
+                )
+                return LLM_FAILED
+            else:
+                log_warning(
+                    f"[message_chain] {failure_reason} but some actions already executed; skipping fallback"
+                )
+                return ACTIONS_EXECUTED
 
         tried_texts.add(text)
 
@@ -1279,13 +1418,19 @@ async def handle_incoming_message(
                 failure_reason = (
                     f"Corrector returned no correction after {attempt} attempts"
                 )
-                log_warning(
-                    f"[message_chain] {failure_reason}; sending fallback message"
-                )
-                await send_llm_fallback_message(
-                    bot, message, failure_reason, context=ctx
-                )
-                return LLM_FAILED
+                if not actions_executed_during_loop:
+                    log_warning(
+                        f"[message_chain] {failure_reason}; sending fallback message"
+                    )
+                    await send_llm_fallback_message(
+                        bot, message, failure_reason, context=ctx
+                    )
+                    return LLM_FAILED
+                else:
+                    log_warning(
+                        f"[message_chain] {failure_reason} but some actions already executed; skipping fallback"
+                    )
+                    return ACTIONS_EXECUTED
             # On no-correction, loop and let retry counter enforce blocking
             await asyncio.sleep(0.5)
             continue
@@ -1295,7 +1440,7 @@ async def handle_incoming_message(
         text = corrected
         source = "llm"
         ctx["original_text"] = text  # Track in context instead of on message object
-        ctx["from_llm"] = True  # Track in context instead of on message object
+        ctx["from_cortex"] = True  # Track in context instead of on message object
         # loop continues
 
 

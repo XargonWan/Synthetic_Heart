@@ -50,7 +50,6 @@ from core.message_sender import (
 )
 from core.config import (
     get_active_cortex_engine,
-    list_available_cortex_engines,
     set_log_chat_id_and_thread,
     get_log_chat_id_sync,
 )
@@ -1184,7 +1183,14 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         # Only send response if it's not None (meaning command was recognized)
         if response is not None:
-            await update.message.reply_text(response, parse_mode="Markdown")
+            try:
+                await update.message.reply_text(response, parse_mode="Markdown")
+            except Exception as md_err:
+                # Markdown parse error: retry as plain text so the reply is never lost
+                log_error(
+                    f"[telegram_bot] Markdown parse error, retrying plain text: {md_err}"
+                )
+                await update.message.reply_text(response)
     except Exception as e:
         log_error(f"[telegram_bot] Error handling command: {e}")
         await update.message.reply_text("❌ Error processing command.")
@@ -1267,46 +1273,37 @@ async def manage_chat_id_command(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def cortex_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    log_info(
-        f"[telegram_bot] Cortex command received from user {update.effective_user.id}"
-    )
+    """Legacy handler kept for backwards compatibility.
 
-    if not is_trainer(update.effective_user.id):
-        log_warning(
-            f"[telegram_bot] Cortex command rejected: user {update.effective_user.id} != get_trainer_id() {get_trainer_id()}"
-        )
-        return
-
-    args = context.args
-    log_info(f"[telegram_bot] Cortex command args: {args}")
-
-    current = await get_active_cortex_engine()
-    available = list_available_cortex_engines()
-
-    if not args:
-        msg = f"*Active Cortex:* `{current}`\n\n*Available:*"
-        msg += "\n" + "\n".join(f"• `{name}`" for name in available)
-        msg += "\n\nTo change: `/cortex <name>`"
-        await update.message.reply_text(msg, parse_mode="Markdown")
-        return
-
-    choice = args[0]
-    if choice not in available:
-        await update.message.reply_text(f"❌ Cortex `{choice}` not found.")
-        return
+    The real work is performed by :func:`core.command_registry.handle_command_message`.
+    This function simply delegates so that any future changes to `/cortex` output
+    (including scope overrides) are automatically honoured.
+    """
+    # the generic handler will take care of permission checks
+    command_text = update.message.text
+    user_id = update.effective_user.id if update.effective_user else None
+    interface_context = {
+        "update": update,
+        "context": context,
+        "bot": context.bot,
+        "interface_id": "telegram_bot",
+    }
 
     try:
-        from core.config import switch_active_cortex_engine
-
-        # Use the centralized switch function with full reinitialization for Telegram
-        await switch_active_cortex_engine(choice, use_hot_swap=False)
-        await update.message.reply_text(
-            f"✅ Cortex engine dynamically updated to `{choice}`."
+        response = await handle_command_message(
+            command_text, user_id, "telegram_bot", interface_context
         )
-    except ValueError as e:
-        await update.message.reply_text(f"❌ Cortex not available: {e}")
+        if response is not None:
+            try:
+                await update.message.reply_text(response, parse_mode="Markdown")
+            except Exception as md_err:
+                log_error(
+                    f"[telegram_bot] Markdown parse error in cortex_command, retrying plain: {md_err}"
+                )
+                await update.message.reply_text(response)
     except Exception as e:
-        await update.message.reply_text(f"❌ Error loading plugin: {e}")
+        log_error(f"[telegram_bot] Error handling cortex command: {e}")
+        await update.message.reply_text("❌ Error processing command.")
 
 
 async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2186,7 +2183,7 @@ class TelegramInterface:
                 msg.original_text = json.dumps(correction_payload, ensure_ascii=False)
                 msg.thread_id = None
                 msg.date = datetime.utcnow()
-                msg.from_llm = False
+                msg.from_cortex = False
                 if action_parser is not None:
                     try:
                         await action_parser.corrector_orchestrator(
@@ -2200,37 +2197,15 @@ class TelegramInterface:
                 return
             if not row:
                 # Use orchestrator instead of legacy corrector for not-found
-                try:
-                    from core import action_parser
-                    import json
-                    from types import SimpleNamespace
-                    from datetime import datetime
-                except Exception:
-                    action_parser = None
-                correction_payload = {
-                    "system_message": {
-                        "type": "error",
-                        "message": f"Channel or thread not found for name {chat_name or thread_name}",
-                        "your_reply": payload,
-                    }
-                }
-                msg = SimpleNamespace()
-                msg.chat_id = None
-                msg.text = ""
-                msg.original_text = json.dumps(correction_payload, ensure_ascii=False)
-                msg.thread_id = None
-                msg.date = datetime.utcnow()
-                msg.from_llm = False
-                if action_parser is not None:
-                    try:
-                        await action_parser.corrector_orchestrator(
-                            text=msg.original_text,
-                            context={"interface": "telegram"},
-                            bot=self.bot,
-                            message=msg,
-                        )
-                    except Exception:
-                        pass
+                from core.transport_layer import notify_corrector_of_system_message
+
+                await notify_corrector_of_system_message(
+                    json.dumps(correction_payload, ensure_ascii=False),
+                    self.bot,
+                    chat_id=None,
+                    thread_id=None,
+                    interface="telegram",
+                )
                 return
             chat_id = row.get("chat_id", chat_id)
             thread_id = row.get("thread_id", thread_id)
@@ -2327,71 +2302,27 @@ class TelegramInterface:
         except BadRequest as e:
             if "chat not found" in str(e).lower():
                 # Use orchestrator instead of legacy corrector
-                try:
-                    from core import action_parser
-                    import json
-                    from types import SimpleNamespace
-                    from datetime import datetime
-                except Exception:
-                    action_parser = None
-                correction_payload = {
-                    "system_message": {
-                        "type": "error",
-                        "message": f"Chat {chat_id} not found",
-                        "your_reply": payload,
-                    }
-                }
-                msg = SimpleNamespace()
-                msg.chat_id = chat_id
-                msg.text = ""
-                msg.original_text = json.dumps(correction_payload, ensure_ascii=False)
-                msg.thread_id = thread_id
-                msg.date = datetime.utcnow()
-                msg.from_llm = False
-                if action_parser is not None:
-                    try:
-                        await action_parser.corrector_orchestrator(
-                            text=msg.original_text,
-                            context={"interface": "telegram"},
-                            bot=self.bot,
-                            message=msg,
-                        )
-                    except Exception:
-                        pass
+                from core.transport_layer import notify_corrector_of_system_message
+
+                await notify_corrector_of_system_message(
+                    json.dumps(correction_payload, ensure_ascii=False),
+                    self.bot,
+                    chat_id=chat_id,
+                    thread_id=thread_id,
+                    interface="telegram",
+                )
                 return
             else:
                 # Generic error -> request correction via orchestrator
-                try:
-                    from core import action_parser
-                    import json
-                    from types import SimpleNamespace
-                    from datetime import datetime
-                except Exception:
-                    action_parser = None
-                correction_payload = {
-                    "system_message": {
-                        "type": "error",
-                        "message": str(e),
-                        "your_reply": payload,
-                    }
-                }
-                msg = SimpleNamespace()
-                msg.chat_id = chat_id
-                msg.text = ""
-                msg.original_text = json.dumps(correction_payload, ensure_ascii=False)
-                msg.thread_id = thread_id
-                msg.date = datetime.utcnow()
-                msg.from_llm = False
-                if action_parser is not None:
-                    try:
-                        await action_parser.corrector_orchestrator(
-                            text=msg.original_text,
-                            context={"interface": "telegram"},
-                            bot=self.bot,
-                            message=msg,
-                        )
-                    except Exception:
-                        pass
+                from core.transport_layer import notify_corrector_of_system_message
+
+                await notify_corrector_of_system_message(
+                    json.dumps(correction_payload, ensure_ascii=False),
+                    self.bot,
+                    chat_id=chat_id,
+                    thread_id=thread_id,
+                    interface="telegram",
+                )
                 return
         await self._verify_delivery(sent_message, payload, original_message)
 

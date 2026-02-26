@@ -1386,7 +1386,7 @@ class EventPlugin(AIPluginBase):
 
             message = SimpleNamespace(
                 interface_path=interface_path,
-                from_llm=False,  # This is from the system, not the LLM
+                from_cortex=False,  # This is from the system, not the LLM
             )
 
             action = {
