@@ -397,7 +397,7 @@
         }
         #messages {
             flex: 1;
-            overflow-y: auto;
+            overflow-y: hidden;
             padding: 1.2rem 1.4rem;
             display: flex;
             flex-direction: column;
@@ -1128,7 +1128,9 @@ window.__SYNTH_CONFIG = {
   WEB_DEBUG: '%%WEB_DEBUG%%' === '1',
   CHAT_RESIZABLE: '%%CHAT_RESIZABLE%%' === 'true',
   WEBUI_ACCENT_COLOR: "%%WEBUI_ACCENT_COLOR%%",
-  WEBUI_ACCENT_PRESETS: %%WEBUI_ACCENT_PRESETS%%
+  WEBUI_ACCENT_PRESETS: %%WEBUI_ACCENT_PRESETS%%,
+  VOX_ENABLED: '%%VOX_ENABLED%%' === 'true',
+  VOX_AUDIO_CACHE_SIZE: %%VOX_AUDIO_CACHE_SIZE%%
 };
 </script>
 

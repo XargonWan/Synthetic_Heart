@@ -40,15 +40,59 @@ dependencies = [
     "webdriver-manager>=4.0.1",
     "setuptools>=70.0.0",
     "discord-ext-voice-recv>=0.5.2a179",
+    # Auris/Vox default audio engines (packages that exist on PyPI and build cleanly)
+    "vosk>=0.3.45",                    # local STT; model downloaded at runtime
+    "silero-vad>=5.1",                # real-time VAD service (core/vad_service)
+    "torch>=2.0",                     # required by silero-vad & qwen3tts
+    "transformers>=4.40",             # required by qwen3tts Vox engine
+    "soundfile>=0.12",                # audio I/O for qwen3tts
+    # chatterbox-tts: depends on pkuseg which has build issues – install manually
+    # harmony-speech-engine: not on PyPI – install manually from GitHub
+    # kittentts: not yet on PyPI – install manually
 ]
 
 [project.optional-dependencies]
 # Install one or more extras to enable the corresponding audio engine.
-# Example: uv pip install '.[silero]'
-silero    = ["silero-vad>=5.1", "torch>=2.0"]
-audio     = ["silero-vad>=5.1", "torch>=2.0"]  # meta-extra: core realtime VAD
-vosk      = ["vosk>=0.3.45"]                    # local CPU STT (Auris vosk engine)
-# kitten / harmony / chatterbox / qwen3tts: install manually when packages are published to PyPI
+# Example: uv pip install '.[silero]' or uv pip install '.[vosk,qwen3tts]'
+
+# ── Auris STT engines ─────────────────────────────────────────────────────────
+vosk      = ["vosk>=0.3.45"]          # local CPU STT (Auris vosk engine)
+                                       # ~50 MB model downloaded on first use
+
+# ── Real-time VAD / Live engines ──────────────────────────────────────────────
+silero    = ["silero-vad>=5.1", "torch>=2.0"]   # SileroVAD (core/vad_service)
+audio     = ["silero-vad>=5.1", "torch>=2.0"]   # alias: same as silero
+
+# ── Vox TTS engines ───────────────────────────────────────────────────────────
+# qwen3tts: Qwen3-TTS via Hugging Face transformers pipeline
+qwen3tts  = ["transformers>=4.40", "soundfile>=0.12", "torch>=2.0"]
+
+# chatterbox: Resemble AI Chatterbox expressive TTS
+# Note: depends on pkuseg which may require manual build steps and is not
+# always available in the build environment.  This engine is therefore *not*
+# included in the automatic dependency resolution; install it separately if
+# you want to enable expressive local TTS.
+# To add it to the Docker image, see the post-`uv sync` pip commands in
+# the Dockerfile.
+# chatterbox = ["chatterbox-tts>=0.1.3"]   # install manually if needed
+
+# harmony: Harmony Speech Engine (install from GitHub until PyPI release)
+# pip install git+https://github.com/harmony-speech/harmony-speech-engine.git
+# harmony   = ["harmony-speech-engine"]   # NOT on PyPI – install manually
+
+# kitten: KittenTTS (not yet on PyPI; install manually from project repo)
+# kitten    = ["kittentts"]               # NOT on PyPI – install manually
+
+# ── Meta-extras ───────────────────────────────────────────────────────────────
+# Install everything needed for local audio (no cloud API keys required):
+# uv pip install '.[all-audio]'
+all-audio  = [
+    "vosk>=0.3.45",
+    "silero-vad>=5.1",
+    "torch>=2.0",
+    "transformers>=4.40",
+    "soundfile>=0.12",
+]
 
 [dependency-groups]
 dev = [

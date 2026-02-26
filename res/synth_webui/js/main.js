@@ -150,6 +150,9 @@ try {
     if (window.__SYNTH_CONFIG.RESPONSE_TIMEOUT !== undefined) window.RESPONSE_TIMEOUT = window.__SYNTH_CONFIG.RESPONSE_TIMEOUT;
     if (window.__SYNTH_CONFIG.FAILED_MESSAGE_TEXT !== undefined) window.FAILED_MESSAGE_TEXT = window.__SYNTH_CONFIG.FAILED_MESSAGE_TEXT;
     if (window.__SYNTH_CONFIG.WEB_DEBUG !== undefined) window.__synth_web_debug_enabled = window.__SYNTH_CONFIG.WEB_DEBUG;
+    // Vox (TTS) flags – used by chat-window.mjs for auto-play and replay
+    if (window.__SYNTH_CONFIG.VOX_ENABLED !== undefined) window.VOX_ENABLED = window.__SYNTH_CONFIG.VOX_ENABLED;
+    if (window.__SYNTH_CONFIG.VOX_AUDIO_CACHE_SIZE !== undefined) window.VOX_AUDIO_CACHE_SIZE = Number(window.__SYNTH_CONFIG.VOX_AUDIO_CACHE_SIZE) || 40;
 
     // Apply accent color from server-rendered runtime config (if provided)
     try {
@@ -1043,7 +1046,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 const configDisclaimerEl = document.getElementById('config-env-disclaimer');
                 const configAdvancedWarningEl = document.getElementById('config-advanced-warning');
                 if (!configGeneralListEl || !configAdvancedListEl) return;
-                const response = await fetch('/api/config');
+                const response = await fetch((window.__getApiBase ? window.__getApiBase() : '') + '/api/config');
                 if (!response.ok) throw new Error('HTTP ' + response.status);
                 const payload = await response.json();
                 const items = Array.isArray(payload.items) ? payload.items : [];
@@ -1175,7 +1178,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                     // Show a download link pointing to the file endpoint
                                     const link = document.createElement('a');
                                     link.textContent = (typeof value === 'string') ? value.split('/').pop() : 'file';
-                                    link.href = `/api/config/${encodeURIComponent(item.key)}/file`;
+                                    link.href = (window.__getApiBase ? window.__getApiBase() : '') + `/api/config/${encodeURIComponent(item.key)}/file`;
                                     link.target = '_blank';
                                     current.appendChild(link);
                                 } catch (e) {
@@ -2506,6 +2509,74 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     setupRegistrySelect('vox-engine-select',  'vox-engine-info',  'vox-engine-label',  'vox-engine-description',  data.vox  || [], 'ACTIVE_VOX_ENGINE');
                     setupRegistrySelect('auris-engine-select','auris-engine-info','auris-engine-label','auris-engine-description', data.auris || [], 'ACTIVE_AURIS_ENGINE');
                     setupRegistrySelect('live-engine-select', 'live-engine-info', 'live-engine-label', 'live-engine-description',  data.live || [], null);  // Live has no single active-engine config key
+
+                    // ── Vosk language selector ─────────────────────────────────
+                    const voskLangSelect = document.getElementById('auris-vosk-language');
+                    const VOSK_LANGUAGES = [
+                        {code:'en-us', label:'English (US)'},
+                        {code:'it-it', label:'Italiano'},
+                        {code:'fr-fr', label:'Français'},
+                        {code:'es-es', label:'Español'},
+                    ];
+                    function populateVoskLanguages(){
+                        if(!voskLangSelect) return;
+                        voskLangSelect.innerHTML = '';
+                        VOSK_LANGUAGES.forEach(l=>{
+                            const opt = document.createElement('option');
+                            opt.value = l.code;
+                            opt.textContent = l.label;
+                            voskLangSelect.appendChild(opt);
+                        });
+                    }
+                    async function updateVoskLangVisibility(){
+                        if(!voskLangSelect) return;
+                        const aurisSel = document.getElementById('auris-engine-select');
+                        if(aurisSel && aurisSel.value === 'vosk'){
+                            voskLangSelect.style.display = '';
+                            populateVoskLanguages();
+                            // fetch current config value
+                            try{
+                                const r = await fetch('/api/config');
+                                if(r.ok){
+                                    const cfg = await r.json();
+                                    const item = Array.isArray(cfg.items)? cfg.items.find(i=>i.key==='VOSK_LANGUAGE') : null;
+                                    if(item && item.value) voskLangSelect.value = item.value;
+                                }
+                            }catch(e){/* ignore */}
+                        } else {
+                            voskLangSelect.style.display = 'none';
+                        }
+                    }
+                    if (voskLangSelect && !voskLangSelect.dataset.bound) {
+                        voskLangSelect.addEventListener('change', async () => {
+                            const lang = voskLangSelect.value;
+                            try {
+                                await fetch('/api/config', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ key: 'VOSK_LANGUAGE', value: lang })
+                                });
+                                const r2 = await fetch('/api/auris/vosk/download', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                                    body: `language=${encodeURIComponent(lang)}`
+                                });
+                                if (!r2.ok) throw new Error('download failed');
+                                window.showToast && window.showToast('Vosk language set to ' + lang + ', model download started');
+                            } catch (e) {
+                                console.error('[synth_webui] Vosk language update failed', e);
+                                window.showToast && window.showToast('Failed to set Vosk language', true);
+                            }
+                        });
+                        voskLangSelect.dataset.bound = '1';
+                    }
+                    // ensure visibility reflects current engine choice
+                    updateVoskLangVisibility();
+                    // re-run when auris engine selection changes
+                    const aurisSel = document.getElementById('auris-engine-select');
+                    if(aurisSel){
+                        aurisSel.addEventListener('change', updateVoskLangVisibility);
+                    }
 
                     if (componentsVoxListEl)   renderDetailsList(data.vox   || [], componentsVoxListEl);
                     if (componentsAurisListEl) renderDetailsList(data.auris || [], componentsAurisListEl);

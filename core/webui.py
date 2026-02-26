@@ -462,6 +462,8 @@ class SynthWebUIInterface:
         self.app.websocket("/logs")(self.logs_ws_endpoint)
         # Auris audio endpoints
         self.app.post("/api/audio/upload")(self.audio_upload_endpoint)
+        # helper endpoint for Vosk language selection/download
+        self.app.post("/api/auris/vosk/download")(self.vosk_model_download)
         self.app.websocket("/api/audio/stream")(self.audio_stream_ws_endpoint)
         self.app.get("/api/vrm")(self.list_vrm_models)
         self.app.get("/api/vrm/active")(self.get_active_vrm_endpoint)
@@ -983,6 +985,41 @@ class SynthWebUIInterface:
                 if str(self._get_chat_resizable()).lower() in ("1", "true", "yes")
                 else "false",
             }
+
+            # Vox (TTS) flags exposed to the WebUI client
+            try:
+                _vox_enabled = bool(
+                    config_registry.get_value(
+                        "VOX_ENABLED",
+                        False,
+                        value_type=bool,
+                        group="plugins",
+                        component="vox_plugin",
+                    )
+                    or config_registry.get_value(
+                        "TTS_ENABLED",
+                        False,
+                        value_type=bool,
+                        group="plugins",
+                        component="tts_lipsync",
+                    )
+                )
+            except Exception:
+                _vox_enabled = False
+            try:
+                _vox_cache = int(
+                    config_registry.get_value(
+                        "VOX_AUDIO_CACHE_SIZE",
+                        40,
+                        value_type=int,
+                        group="plugins",
+                        component="vox_plugin",
+                    )
+                )
+            except Exception:
+                _vox_cache = 40
+            replacements["%%VOX_ENABLED%%"] = "true" if _vox_enabled else "false"
+            replacements["%%VOX_AUDIO_CACHE_SIZE%%"] = str(_vox_cache)
 
             # Accent color config + presets (exposed to client as runtime config)
             try:
@@ -1796,6 +1833,30 @@ class SynthWebUIInterface:
             raise
         except Exception as exc:
             log_error(f"{LOG_PREFIX} audio_upload_endpoint error: {exc}")
+            return JSONResponse({"error": str(exc)}, status_code=500)
+
+    async def vosk_model_download(self, language: str = Form(...)):
+        """POST /api/auris/vosk/download
+
+        Trigger download of the Vosk model for *language* and update the
+        ``VOSK_LANGUAGE`` config variable accordingly.  Returns ``{success: true}``
+        when the download is initiated (it may occur asynchronously).
+        """
+        try:
+            from core.config_manager import config_registry
+
+            config_registry.set_value("VOSK_LANGUAGE", language)
+            # attempt immediate model load/download
+            from plugins.auris_engines.vosk_engine import (
+                _load_model,
+                _model_path_from_language,
+            )
+
+            path = _model_path_from_language(language)
+            _load_model(path)  # side effect may download
+            return JSONResponse({"success": True, "language": language})
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} vosk_model_download error: {exc}")
             return JSONResponse({"error": str(exc)}, status_code=500)
 
     async def audio_stream_ws_endpoint(
@@ -2658,7 +2719,8 @@ class SynthWebUIInterface:
     ) -> None:
         if isinstance(payload_or_chat_id, dict):
             payload = payload_or_chat_id
-            text = payload.get("text", text)
+            # Accept both "text" (standard) and "value" (legacy synthetic-action mapping)
+            text = payload.get("text") or payload.get("value") or text
             chat_id = (
                 payload.get("interface_path")
                 or payload.get("target")
@@ -2840,6 +2902,72 @@ class SynthWebUIInterface:
             log_debug(
                 f"{LOG_PREFIX} Failed to clear session processing meta after send: {e}"
             )
+
+    async def send_tts_audio(
+        self,
+        session_id: str,
+        audio_path: str,
+        text: Optional[str] = None,
+        lipsync_data: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Push a TTS audio playback event to a WebUI session.
+
+        Called by :class:`~plugins.vox_plugin.VoxPlugin` immediately after the
+        audio file has been written to disk.  The client will auto-play the
+        audio and attach click-to-replay functionality to the last synth
+        message bubble.  The URL is derived from *audio_path* so it is
+        accessible via the ``/static`` mount.
+
+        Args:
+            session_id:   WebUI session identifier (plain or ``synth_webui/<id>`` form).
+            audio_path:   Absolute or relative filesystem path to the audio file.
+            text:         Optional caption / message text (for accessibility).
+            lipsync_data: Optional phoneme/timing dict forwarded to the animator.
+
+        Returns:
+            ``True`` if the message was delivered, ``False`` if no websocket was found.
+        """
+        # Normalise session_id – strip "synth_webui/" prefix if present
+        sid = str(session_id)
+        if "/" in sid:
+            parts = sid.split("/")
+            if len(parts) >= 2 and parts[0] == INTERFACE_NAME:
+                sid = parts[1]
+
+        websocket = self.connections.get(sid)
+        if not websocket:
+            log_warning(f"{LOG_PREFIX} send_tts_audio: no websocket for session {sid}")
+            return False
+
+        # Derive a client-accessible URL from the filesystem path.
+        # Audio is stored under the /static mount, e.g.
+        #   res/synth_webui/static/audio/tts/vox_123.wav → /static/audio/tts/vox_123.wav
+        try:
+            from pathlib import Path as _Path
+
+            p = _Path(audio_path)
+            parts_list = list(p.parts)
+            try:
+                idx = parts_list.index("static")
+                url = "/" + "/".join(parts_list[idx:])
+            except ValueError:
+                url = "/static/audio/tts/" + p.name
+        except Exception:
+            url = "/static/audio/tts/" + str(audio_path).rsplit("/", 1)[-1]
+
+        payload: Dict[str, Any] = {"type": "tts-play", "url": url}
+        if text is not None:
+            payload["text"] = text
+        if lipsync_data:
+            payload["lipsync"] = lipsync_data
+
+        try:
+            await websocket.send_json(payload)
+            log_info(f"{LOG_PREFIX} TTS audio dispatched to session {sid}: {url}")
+            return True
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} send_tts_audio failed for session {sid}: {exc}")
+            return False
 
     async def _webui_clear_pending_thinking(self, session_id: str) -> None:
         pending = self._pending_thinking_actions.get(session_id)
@@ -6510,7 +6638,7 @@ class SynthWebUIInterface:
                         "capabilities": _caps,
                         "description": f"TTS engine — capabilities: {_caps_desc(_caps)}",
                         "status": "success",
-                        "details": f"Active" if _name == active_vox else "",
+                        "details": "Active" if _name == active_vox else "",
                         "error": None,
                         "active": _name == active_vox,
                     }

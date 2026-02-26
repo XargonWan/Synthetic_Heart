@@ -298,7 +298,7 @@ For reliable test execution, run the test suite inside a Python virtual environm
 
    python -m venv venv
    source venv/bin/activate
-   pip install -r requirements.txt
+   uv sync
    pytest tests/test_grillo_prevent_duplicates.py -q
 
 This avoids contaminating the global Python environment and ensures deterministic dependency versions.

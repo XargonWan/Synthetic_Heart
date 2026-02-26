@@ -80,6 +80,21 @@ register_exposed_var(
     advanced=True,
 )
 
+register_exposed_var(
+    "VOSK_LANGUAGE",
+    label="Vosk Language",
+    default="en-us",
+    value_type=str,
+    ui_type="string",
+    description=(
+        "Language code used when auto-downloading a Vosk model. "
+        "The WebUI shows a dropdown when the active Auris engine is vosk."
+    ),
+    scope="plugins",
+    component="auris_plugin",
+    advanced=True,
+)
+
 
 # ---------------------------------------------------------------------------
 # Plugin class

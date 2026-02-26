@@ -640,11 +640,17 @@ async def handle_incoming_message(
                             synthetic_actions = []
                             for key in extra_keys:
                                 value = parsed.get(key)
-                                payload = (
-                                    value
-                                    if isinstance(value, dict)
-                                    else {"value": value}
-                                )
+                                # When a string value is stored under a message-like
+                                # root key (e.g. {"message": "hello"}) the LLM
+                                # probably intended a text reply.  Map it to
+                                # {"text": ...} so that message_synth_webui and
+                                # other send_message implementations can find it.
+                                if isinstance(value, dict):
+                                    payload = value
+                                elif key in ("message", "text", "reply", "response") and isinstance(value, str):
+                                    payload = {"text": value}
+                                else:
+                                    payload = {"value": value}
                                 synthetic_actions.append(
                                     {"type": key, "payload": payload}
                                 )

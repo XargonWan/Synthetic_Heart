@@ -98,7 +98,7 @@ WORKDIR /app
 
 # 1. Copy dependency files FIRST (for caching)
 COPY pyproject.toml uv.lock ./
-# (Optional fallback if you don't have lockfiles yet: COPY requirements.txt . )
+# (Optional fallback if you don't have lockfiles yet: COPY requirements.txt . )  # kept for backwards compatibility, not needed in normal builds
 
 # 2. Tell uv to create the venv at /app/venv (Matching your old structure)
 ENV UV_PROJECT_ENVIRONMENT=/app/venv
@@ -108,14 +108,23 @@ ENV UV_PROJECT_ENVIRONMENT=/app/venv
 # --frozen: Uses the exact versions from uv.lock
 RUN uv sync --frozen --no-cache
 
+
 # --- [App Setup] ---
 # Copy scripts
 COPY automation_tools/cleanup_chrome.sh /usr/local/bin/cleanup_chrome.sh
 COPY automation_tools/container_synth.sh /app/synth.sh
 RUN chmod +x /usr/local/bin/cleanup_chrome.sh /app/synth.sh
 
-# Copy application code
+# Copy application code (includes vendor packages)
 COPY . /app
+
+# Some audio engines are not published on PyPI (or have problematic build
+# dependencies) and therefore cannot appear in pyproject.toml.  We install
+# vendored stub packages here via pip; the real engines can be swapped in by
+# installing the appropriate GitHub repo or wheel in a later step if desired.
+RUN pip install /app/vendor/harmony_speech_engine
+RUN pip install /app/vendor/chatterbox_tts
+RUN pip install /app/vendor/kittentts
 
 # Cleanup & Permissions
 RUN rm -rf /app/s6-services /app/automation_tools

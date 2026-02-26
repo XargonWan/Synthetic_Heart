@@ -18,7 +18,10 @@ Configuration (via exposed vars, all optional)
     Absolute or relative path to the Vosk model directory.
     Default: ``~/.cache/vosk/vosk-model-small-en-us``.
 ``VOSK_LANGUAGE``
-    Language code used when no explicit model path is set.
+    Language code used when no explicit model path is set.  In the WebUI a
+    language selector appears when the active Auris engine is ``vosk``; choosing
+    a value here will also trigger an automatic model download on the backend
+    (first transcription will also download if invoked programmatically).
     Default: ``en-us``.
 
 Audio conversion
@@ -42,12 +45,27 @@ from core.logging_utils import log_error, log_info, log_warning
 from plugins.auris_base import AurisEngineBase
 
 _MODEL_CACHE: dict[str, Any] = {}  # path → vosk.Model singleton
+# default points only to english; other languages will be derived dynamically
 _DEFAULT_MODEL_PATH = Path.home() / ".cache" / "vosk" / "vosk-model-small-en-us"
 _SMALL_MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
 
+# map of language codes -> download URL; we only populate a few common ones here,
+# fall back to a templated URL (may need manual correction if the version changes).
+_LANGUAGE_URLS: dict[str, str] = {
+    "en-us": _SMALL_MODEL_URL,
+    "it-it": "https://alphacephei.com/vosk/models/vosk-model-small-it-0.22.zip",
+    "fr-fr": "https://alphacephei.com/vosk/models/vosk-model-small-fr-0.22.zip",
+    "es-es": "https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip",
+}
+
 
 def _load_model(model_path: Path) -> Any:
-    """Load (or return cached) a vosk.Model from *model_path*."""
+    """Load (or return cached) a vosk.Model from *model_path*.
+
+    If the directory does not exist it will be downloaded automatically; the
+    download URL is inferred from the language code embedded in the directory
+    name (e.g. ``vosk-model-small-it-it``).
+    """
     key = str(model_path.resolve())
     if key in _MODEL_CACHE:
         return _MODEL_CACHE[key]
@@ -78,19 +96,28 @@ def _load_model(model_path: Path) -> Any:
 
 
 def _download_model(dest: Path) -> None:
-    """Download and extract the small English Vosk model."""
+    """Download and extract a small Vosk model appropriate for *dest*.
+
+    The target language is inferred from the directory name (prefix
+    ``vosk-model-small-``).  If a known URL is registered in
+    :data:`_LANGUAGE_URLS` it will be used; otherwise a generic URL template is
+    attempted.  Failures just log a warning and leave the directory missing.
+    """
     try:
         import urllib.request
         import zipfile
 
+        # determine language code from dest name
+        lang = dest.name.replace("vosk-model-small-", "")
+        url = _LANGUAGE_URLS.get(lang) or f"https://alphacephei.com/vosk/models/vosk-model-small-{lang}-0.22.zip"
+
         dest.parent.mkdir(parents=True, exist_ok=True)
-        zip_path = dest.parent / "vosk-model-small-en-us.zip"
-        log_info(f"[auris/vosk] Downloading model from {_SMALL_MODEL_URL} …")
-        urllib.request.urlretrieve(_SMALL_MODEL_URL, zip_path)
+        zip_path = dest.parent / (f"{dest.name}.zip")
+        log_info(f"[auris/vosk] Downloading model ({lang}) from {url} …")
+        urllib.request.urlretrieve(url, zip_path)
 
         log_info("[auris/vosk] Extracting model…")
         with zipfile.ZipFile(zip_path, "r") as zf:
-            # The zip contains a top-level directory; extract into parent then rename
             top = zf.namelist()[0].split("/")[0]
             zf.extractall(dest.parent)
         extracted = dest.parent / top
@@ -101,8 +128,32 @@ def _download_model(dest: Path) -> None:
         log_info(f"[auris/vosk] Model downloaded to {dest}")
     except Exception as exc:
         log_warning(
-            f"[auris/vosk] Auto-download failed: {exc}. Download manually from {_SMALL_MODEL_URL}"
+            f"[auris/vosk] Auto-download failed: {exc}. Download manually from {url if 'url' in locals() else _SMALL_MODEL_URL}"
         )
+
+
+
+
+def _get_default_language() -> str:
+    """Return configured VOSK_LANGUAGE (default 'en-us')."""
+    try:
+        from core.config_manager import config_registry  # type: ignore[import]
+
+        lang = config_registry.get_value("VOSK_LANGUAGE", "en-us") or "en-us"
+        return str(lang)
+    except Exception:
+        return "en-us"
+
+
+def _default_model_path() -> Path:
+    """Return the default model path based on the current language setting."""
+    lang = _get_default_language()
+    return Path.home() / ".cache" / "vosk" / f"vosk-model-small-{lang}"
+
+
+def _model_path_from_language(lang: str) -> Path:
+    """Helper for constructing a model directory given a language code."""
+    return Path.home() / ".cache" / "vosk" / f"vosk-model-small-{lang}"
 
 
 def _convert_to_wav16k(src: str) -> str | None:
@@ -164,7 +215,8 @@ class VoskAurisEngine(AurisEngineBase):
                 return Path(raw).expanduser()
         except Exception:
             pass
-        return _DEFAULT_MODEL_PATH
+        # no explicit path, fall back to language-specific default
+        return _default_model_path()
 
     # ------------------------------------------------------------------
     # AurisEngineBase

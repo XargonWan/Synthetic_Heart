@@ -113,6 +113,21 @@ register_exposed_var(
     advanced=False,
 )
 
+register_exposed_var(
+    "VOX_AUDIO_CACHE_SIZE",
+    label="Vox Audio Cache Size",
+    default=40,
+    value_type=int,
+    ui_type="number",
+    description=(
+        "Maximum number of TTS audio clips the WebUI keeps in memory for replay. "
+        "When the limit is exceeded, older clips are silently dropped. Default: 40."
+    ),
+    scope="plugins",
+    component="vox_plugin",
+    advanced=True,
+)
+
 # Legacy aliases (read by the HTTP engine via its original config keys)
 # tts_lipsync variables are intentionally kept so existing .env files keep working.
 

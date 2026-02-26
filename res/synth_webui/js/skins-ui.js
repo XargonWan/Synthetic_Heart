@@ -2,11 +2,13 @@
 (function(){
     'use strict';
 
+    const _apiBase = (window.__getApiBase && window.__getApiBase()) || '';
+
     async function fetchSkins(){
         const grid = document.getElementById('skins-grid');
         if(!grid) return;
         try {
-            const res = await fetch('/api/skins');
+            const res = await fetch(_apiBase + '/api/skins');
             if (!res.ok) throw new Error('Failed to load skins: HTTP ' + res.status);
             const data = await res.json();
             // The API returns an array of skins
@@ -56,7 +58,7 @@
 
     async function activateSkin(name){
         try{
-            const res = await fetch(`/api/skins/${encodeURIComponent(name)}/activate`, {method:'POST'});
+            const res = await fetch(_apiBase + `/api/skins/${encodeURIComponent(name)}/activate`, {method:'POST'});
             if(!res.ok) throw new Error('Activate failed');
             await fetchSkins();
             if(window.refreshModels) await window.refreshModels();
@@ -65,7 +67,7 @@
 
     async function clearUploaded(){
         try{
-            const res = await fetch('/api/skins/uploaded/clear', {method:'POST'});
+            const res = await fetch(_apiBase + '/api/skins/uploaded/clear', {method:'POST'});
             if(!res.ok) throw new Error('Clear failed');
             await fetchSkins();
             if(window.refreshModels) await window.refreshModels();

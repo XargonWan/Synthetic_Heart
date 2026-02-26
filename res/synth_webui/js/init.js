@@ -22,10 +22,10 @@ if ('serviceWorker' in navigator) {
                 const payload = JSON.stringify({ level: String(level || 'info'), message: String(message || '') });
                 if (navigator && typeof navigator.sendBeacon === 'function') {
                     const blob = new Blob([payload], { type: 'application/json' });
-                    navigator.sendBeacon('/api/log-console', blob);
+                    navigator.sendBeacon((window.__getApiBase ? window.__getApiBase() : '') + '/api/log-console', blob);
                     return;
                 }
-                fetch('/api/log-console', {
+                fetch((window.__getApiBase ? window.__getApiBase() : '') + '/api/log-console', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: payload,
@@ -95,3 +95,19 @@ function refreshTopbarHeight() {
 }
 window.addEventListener('resize', () => { refreshTopbarHeight(); });
 document.addEventListener('DOMContentLoaded', () => { refreshTopbarHeight(); });
+
+// When the webui is fronted by nginx (ports 3000/3001), API requests need to be
+// directed at the backend port (9009/9010) since nginx does not proxy /api.
+// This helper returns a prefix string to prepend to all fetch paths.  If null
+// or empty the caller can safely use relative URLs.
+function _getApiBase() {
+    try {
+        const port = window.location.port;
+        if (port === '3000' || port === '3001' || port === '9007') {
+            const proto = window.location.protocol === 'https:' ? 'https' : 'http';
+            return `${proto}://${window.location.hostname}:9009`;
+        }
+    } catch (_) {}
+    return '';
+}
+window.__getApiBase = _getApiBase;

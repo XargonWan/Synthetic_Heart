@@ -270,8 +270,14 @@ Component Import Errors
 **Solutions**:
 
 1. Ensure the module is in the correct ``_dev`` directory
-2. Check for missing dependencies in ``requirements.txt``
-3. Verify the import paths are correct (use ``interface_dev.module_name`` not ``interface.module_name``)
+2. Check for missing dependencies in ``pyproject.toml`` (use `uv sync` to install).
+   * Note: some engines (harmony, chatterbox, kitten) are not on PyPI and
+     are installed directly in the Docker image via `pip` commands.  If the
+     build fails it means one of those repositories was unreachable or its
+     dependencies could not be built (e.g. pkuseg for chatterbox).  Fixing the
+     underlying issue or updating the `Dockerfile` with additional build
+     dependencies is required; users should not attempt to manually install
+     inside a running container.3. Verify the import paths are correct (use ``interface_dev.module_name`` not ``interface.module_name``)
 4. Check Python syntax in the dev module
 
 See Also
