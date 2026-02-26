@@ -1686,13 +1686,61 @@ async def run_corrector_middleware(
                 )
                 # If corrected contains valid JSON, return it (do not echo to chat)
                 try:
-                    if extract_json_from_text(corrected):
-                        log_info(
-                            "[corrector_middleware] Received corrected JSON from LLM"
-                        )
-                        return corrected
-                except Exception:
-                    pass
+                    parsed_json, _ = extract_json_from_text(
+                        corrected, return_metadata=True
+                    )
+                    if parsed_json:
+                        # Special-case enforcement for ollama_serve: if the original
+                        # interface was `ollama_serve`, make sure any `message_*`
+                        # actions are routed back to `message_ollama_serve` and
+                        # their payload.interface_path points to `ollama_serve/...`.
+                        if originating_interface == "ollama_serve" and isinstance(
+                            parsed_json, dict
+                        ):
+                            rewritten = False
+                            actions = parsed_json.get("actions", [])
+                            if isinstance(actions, list):
+                                for act in actions:
+                                    if not isinstance(act, dict):
+                                        continue
+                                    a_type = act.get("type", "")
+                                    # Rewrite any message_* target to message_ollama_serve
+                                    if (
+                                        a_type.startswith("message_")
+                                        and a_type != "message_ollama_serve"
+                                    ):
+                                        act["type"] = "message_ollama_serve"
+                                        rewritten = True
+
+                                    # Ensure payload.interface_path is an ollama_serve path
+                                    payload = act.get("payload") or {}
+                                    if isinstance(payload, dict):
+                                        iface_path = payload.get("interface_path", "")
+                                        if not iface_path.startswith("ollama_serve"):
+                                            id_for_iface = chat_id or (
+                                                context.get("chat_id")
+                                                if context
+                                                else None
+                                            )
+                                            payload["interface_path"] = (
+                                                f"ollama_serve/{id_for_iface or '<chat_id>'}"
+                                            )
+                                            act["payload"] = payload
+                                            rewritten = True
+                            if rewritten:
+                                # Serialize back to JSON string before returning
+                                corrected = json.dumps(parsed_json, ensure_ascii=False)
+                                log_info(
+                                    "[corrector_middleware] Rewrote corrected actions to 'message_ollama_serve' for originating interface 'ollama_serve'"
+                                )
+                                # Return rewritten JSON immediately for ollama_serve origin
+                                return corrected
+
+                except Exception as e:
+                    log_warning(
+                        f"[corrector_middleware] Exception while processing corrected JSON: {e}"
+                    )
+                    log_debug(getattr(e, "__traceback__", str(e)))
 
                 # Not valid JSON yet — DO NOT send LLM suggestion to chat (policy)
                 log_debug(

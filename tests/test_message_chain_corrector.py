@@ -167,3 +167,51 @@ async def test_normalize_message_unknown_obeys_supported_actions(monkeypatch):
     actions2 = [{"type": "message_unknown", "payload": {"text": "hi"}}]
     normalized2 = message_chain._normalize_message_unknown(actions2, "telegram_bot/123")
     assert normalized2[0]["type"] == "message_unknown"
+
+
+@pytest.mark.asyncio
+async def test_corrector_forces_message_to_ollama_serve(monkeypatch):
+    """When the originating interface is `ollama_serve`, corrected JSON must
+    route message actions back to `message_ollama_serve` and set
+    `payload.interface_path` accordingly."""
+    import json
+
+    class FakeLLM:
+        async def handle_incoming_message(self, bot, message, prompt):
+            # Reply with JSON that targets the wrong interface (synth_webui)
+            return json.dumps(
+                {
+                    "actions": [
+                        {
+                            "type": "message_synth_webui",
+                            "payload": {
+                                "text": "Hello",
+                                "interface_path": "synth_webui/1",
+                            },
+                        }
+                    ]
+                }
+            )
+
+    # Patch plugin_instance.get_plugin to return our fake LLM
+    import core.plugin_instance as plugin_instance
+
+    monkeypatch.setattr(plugin_instance, "get_plugin", lambda: FakeLLM())
+
+    from core.transport_layer import run_corrector_middleware, extract_json_from_text
+
+    corrected = await run_corrector_middleware(
+        text="malformed json",
+        bot=None,
+        context={
+            "interface": "ollama_serve",
+            "interface_path": "ollama_serve/ollama:abc123",
+        },
+        chat_id="ollama:abc123",
+    )
+
+    assert corrected is not None
+    parsed, _ = extract_json_from_text(corrected, return_metadata=True)
+    assert parsed is not None
+    assert parsed["actions"][0]["type"] == "message_ollama_serve"
+    assert parsed["actions"][0]["payload"]["interface_path"].startswith("ollama_serve/")

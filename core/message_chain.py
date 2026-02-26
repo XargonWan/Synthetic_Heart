@@ -474,7 +474,11 @@ async def handle_incoming_message(
         metadata = {}
         try:
             log_info("[message_chain] Attempting to extract JSON from text...")
-            parsed, metadata = extract_json_from_text(text, return_metadata=True)
+            _maybe = extract_json_from_text(text, return_metadata=True)
+            if asyncio.iscoroutine(_maybe):
+                parsed, metadata = await _maybe
+            else:
+                parsed, metadata = _maybe
             log_info(
                 f"[message_chain] JSON extraction completed: parsed={parsed is not None} recovered={metadata.get('recovered')}"
             )

@@ -14,7 +14,7 @@ class InterfaceRegistry:
     def __init__(self):
         self._interfaces: Dict[str, Any] = {}
         self._interface_configs: Dict[str, Dict[str, Any]] = {}
-        self._trainer_ids: Dict[str, int] = {}
+        self._trainer_ids: Dict[str, int | str] = {}
 
     def register_interface(
         self,
@@ -50,14 +50,21 @@ class InterfaceRegistry:
         """Get names of all registered interfaces."""
         return list(self._interfaces.keys())
 
-    def set_trainer_id(self, interface_name: str, trainer_id: int):
+    def set_trainer_id(self, interface_name: str, trainer_id: int | str):
         """Set the trainer ID for a specific interface."""
         self._trainer_ids[interface_name] = trainer_id
         log_debug(
             f"[interfaces_registry] Set trainer ID {trainer_id} for interface {interface_name}"
         )
 
-    def get_trainer_id(self, interface_name: str) -> Optional[int]:
+    def replace_trainer_ids(self, mapping: Dict[str, int | str]) -> None:
+        """Replace all trainer IDs with the provided mapping."""
+        self._trainer_ids = dict(mapping)
+        log_debug(
+            f"[interfaces_registry] Replaced trainer IDs ({len(self._trainer_ids)} entries)"
+        )
+
+    def get_trainer_id(self, interface_name: str) -> Optional[int | str]:
         """Get the trainer ID for a specific interface."""
         return self._trainer_ids.get(interface_name)
 

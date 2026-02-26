@@ -1060,17 +1060,29 @@ class SynthWebUIInterface:
                     ctx.verify_mode = ssl.CERT_NONE
                     with socket.create_connection((host, port), timeout=1) as sock:
                         with ctx.wrap_socket(sock, server_hostname=host) as ssock:
-                            return {"protocol": "https", "details": f"TLS handshake succeeded on port {port}", "port": port}
+                            return {
+                                "protocol": "https",
+                                "details": f"TLS handshake succeeded on port {port}",
+                                "port": port,
+                            }
                 else:
                     with socket.create_connection((host, port), timeout=1) as sock:
-                        return {"protocol": "http", "details": f"Plain TCP connect succeeded on port {port}", "port": port}
+                        return {
+                            "protocol": "http",
+                            "details": f"Plain TCP connect succeeded on port {port}",
+                            "port": port,
+                        }
             except Exception as e:
                 if proto == "https":
                     https_err = str(e)
                 else:
                     http_err = str(e)
 
-        return {"protocol": "none", "details": f"https_err={https_err}; http_err={http_err}", "port": None}
+        return {
+            "protocol": "none",
+            "details": f"https_err={https_err}; http_err={http_err}",
+            "port": None,
+        }
 
     def _get_chat_resizable(self) -> bool:
         """Return whether chat should be resizable (from config/DB)."""

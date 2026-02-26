@@ -688,7 +688,9 @@ async def _consumer_loop() -> None:
 
             # Check if user is trainer for this interface
             registry = get_interface_registry()
-            interface_id = getattr(user_msg, "interface_id", "unknown")
+            interface_id = final.get("interface") or getattr(
+                user_msg, "interface_id", "unknown"
+            )
             is_trainer = registry.is_trainer(interface_id, user_id)
 
             if not is_trainer and not rate_limit.is_allowed(
@@ -772,6 +774,7 @@ async def _consumer_loop() -> None:
                     if isinstance(context, dict):
                         context["interface_path"] = interface_path
                         context["thread_id"] = thread_id
+                        context["is_trainer"] = is_trainer
                         # Propagate per-message history_scope when present so prompt_engine/history_engine can honour it
                         hs = final.get("history_scope")
                         if hs is not None:

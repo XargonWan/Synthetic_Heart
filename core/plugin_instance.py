@@ -348,6 +348,34 @@ async def handle_incoming_message(
         except Exception:
             pass
 
+        original_plugin_name = (
+            plugin.__class__.__module__.split(".")[-1] if plugin is not None else None
+        )
+        desired_plugin_name = original_plugin_name
+        should_restore_plugin = False
+
+        try:
+            if isinstance(context_memory_or_prompt, dict):
+                if context_memory_or_prompt.get("is_trainer"):
+                    from core.config import get_active_cortex_engine
+
+                    desired_plugin_name = await get_active_cortex_engine(
+                        scope="trainer"
+                    )
+        except Exception as e:
+            log_warning(f"[plugin_instance] Failed to resolve trainer cortex: {e}")
+
+        if (
+            desired_plugin_name
+            and original_plugin_name
+            and desired_plugin_name != original_plugin_name
+        ):
+            log_info(
+                f"[plugin_instance] Switching cortex for trainer message: {original_plugin_name} -> {desired_plugin_name}"
+            )
+            await load_plugin(desired_plugin_name, ensure_started=True)
+            should_restore_plugin = True
+
         if message is None and isinstance(context_memory_or_prompt, dict):
             prompt = context_memory_or_prompt
             message = SimpleNamespace(
@@ -740,6 +768,7 @@ async def handle_incoming_message(
             log_info(
                 "[plugin_instance] ⏳ About to await message_chain_handle (this may freeze)"
             )
+            chain_result = None
             try:
                 chain_result = await message_chain_handle(
                     bot=bot,
@@ -758,8 +787,6 @@ async def handle_incoming_message(
                 log_error(
                     f"[plugin_instance] ❌ message_chain_handle raised exception: {e}"
                 )
-                raise
-
             log_debug(
                 f"[plugin_instance] Message chain processed LLM response: {chain_result}"
             )
@@ -834,6 +861,17 @@ async def handle_incoming_message(
     except Exception as e:
         log_error(f"[plugin_instance] LLM plugin raised an exception: {e}")
         raise
+    finally:
+        if should_restore_plugin and original_plugin_name:
+            try:
+                await load_plugin(original_plugin_name, ensure_started=True)
+                log_info(
+                    f"[plugin_instance] Restored cortex after trainer message: {original_plugin_name}"
+                )
+            except Exception as e:
+                log_warning(
+                    f"[plugin_instance] Failed to restore cortex {original_plugin_name}: {e}"
+                )
 
 
 def get_supported_models():

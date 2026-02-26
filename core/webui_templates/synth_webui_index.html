@@ -77,6 +77,11 @@
                 </article>
                 <article class="card" id="config-general-card">
                     <h2>Configuration</h2>
+                    <div class="config-search-row">
+                        <input id="config-search" type="search" placeholder="Search settings (name, label, description, group)" />
+                        <button id="config-search-clear" class="btn-ghost" type="button">Clear</button>
+                    </div>
+                    <div class="meta" id="config-search-status"></div>
                     <div class="config-list" id="config-general-list">
                         <div class="meta">Loading…</div>
                     </div>
@@ -177,6 +182,9 @@
         /* Card collapser styling (minimal, visual handled by JS/CSS elsewhere) */
         .card.collapsed .card-content { display: none; }
         .card-collapser { background: transparent; border: none; color: var(--text-soft); cursor: pointer; margin-right: 8px; }
+        .config-search-row { display: flex; gap: 0.6rem; align-items: center; margin: 0.6rem 0 0.2rem; }
+        .config-search-row input[type="search"] { flex: 1 1 auto; min-width: 200px; padding: 0.55rem 0.75rem; border-radius: 10px; border: 1px solid var(--border); background: var(--background); color: var(--text); }
+        .config-search-row input[type="search"]::placeholder { color: var(--text-soft); }
     </style>
 
     <script>
@@ -5541,6 +5549,7 @@
     <!-- Visible install button for PWA (shown only when install is available) -->
     <button id="synth-install-btn" title="Install Synthetic Heart" aria-label="Install Synthetic Heart">⬇️</button>
 <script src="/js/utils.js"></script>
+<script src="/js/settings.js?v=%%STATIC_VERSION%%"></script>
 <script src="/js/main.js?v=%%STATIC_VERSION%%"></script>
 
 <!-- Legacy tokens for unit tests (harmless): selk && selk.https_port ; tryOpen ; preferredProto ; otherPort ; details.appendChild(summary) ; host === '127.0.0.1' ; host === 'localhost' ; const st = last.animation_state || window.__synth_current_animation_state || null -->
