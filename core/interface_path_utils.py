@@ -11,11 +11,11 @@ Examples:
 - discord_bot/Xargon - Discord bot, user Xargon
 """
 
-from typing import Optional, List, Tuple, Dict, Any
+from typing import Optional, List, Tuple, Dict, Any, Union
 from core.logging_utils import log_debug
 
 
-def build_interface_path(interface_name: str, *levels: str) -> str:
+def build_interface_path(interface_name: str, *levels: Any) -> str:
     """Build an interface path from components.
 
     Args:
