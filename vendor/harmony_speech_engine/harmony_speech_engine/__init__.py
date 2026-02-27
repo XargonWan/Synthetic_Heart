@@ -1,4 +1,3 @@
-
 class HarmonySpeechUnavailable(Exception):
     pass
 

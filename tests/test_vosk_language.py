@@ -1,7 +1,5 @@
-import os
 from pathlib import Path
 
-import pytest
 
 from core.config_manager import config_registry
 from plugins.auris_engines import vosk_engine

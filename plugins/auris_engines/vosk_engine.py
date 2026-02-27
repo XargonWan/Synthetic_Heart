@@ -109,7 +109,10 @@ def _download_model(dest: Path) -> None:
 
         # determine language code from dest name
         lang = dest.name.replace("vosk-model-small-", "")
-        url = _LANGUAGE_URLS.get(lang) or f"https://alphacephei.com/vosk/models/vosk-model-small-{lang}-0.22.zip"
+        url = (
+            _LANGUAGE_URLS.get(lang)
+            or f"https://alphacephei.com/vosk/models/vosk-model-small-{lang}-0.22.zip"
+        )
 
         dest.parent.mkdir(parents=True, exist_ok=True)
         zip_path = dest.parent / (f"{dest.name}.zip")
@@ -130,8 +133,6 @@ def _download_model(dest: Path) -> None:
         log_warning(
             f"[auris/vosk] Auto-download failed: {exc}. Download manually from {url if 'url' in locals() else _SMALL_MODEL_URL}"
         )
-
-
 
 
 def _get_default_language() -> str:
@@ -297,6 +298,12 @@ ENGINE_CLASS = VoskAurisEngine
 register_auris_engine(
     name="vosk",
     module_path=__name__,
-    capabilities={"file_based": True, "realtime": False, "vad": False, "local": True, "offline": True},
+    capabilities={
+        "file_based": True,
+        "realtime": False,
+        "vad": False,
+        "local": True,
+        "offline": True,
+    },
     label="Vosk STT (local, offline, CPU-only) — requires a Vosk model (~50 MB, auto-downloaded on first use when you select this engine in the WebUI).",
 )

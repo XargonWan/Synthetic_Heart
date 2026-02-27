@@ -39,6 +39,7 @@ from fastapi.staticfiles import StaticFiles
 from core.core_initializer import register_interface
 from core.logging_utils import _LOG_FILE, log_debug, log_error, log_info, log_warning
 from core.config_manager import config_registry
+from core.variables_engine import register_exposed_var
 from core.message_chain import (
     get_failed_message_text,
     RESPONSE_TIMEOUT,
@@ -52,6 +53,23 @@ import mimetypes
 
 BRAND_NAME = "Synthetic Heart"
 INTERFACE_NAME = "synth_webui"
+
+# exposed configuration variable to toggle experimental multi-session mode
+register_exposed_var(
+    "MULTI_SESSION",
+    label="Enable multi-session WebUI (experimental)",
+    default=False,
+    value_type=bool,
+    ui_type="boolean",
+    description=(
+        "When true each browser connection receives its own session ID. "
+        "This is an experimental mode; history/animation state is not "
+        "persisted across container restarts and behaviour may be unstable."
+    ),
+    scope="core",
+    component="webui",
+    advanced=True,
+)
 LOG_PREFIX = "[synth_webui]"
 WEBUI_LOG = "webui"  # Log file name for WebUI (logs/webui.log)
 # Internal chat/component identifier used when interacting with the LLM and
@@ -209,6 +227,8 @@ class SynthWebUIInterface:
         backups_dir = os.environ.get("SYNTH_BACKUPS_DIR", "backups")
         self.session_id_file = Path(backups_dir) / "webui_session_id.txt"
         self.session_id = None
+        # helper value cache for multi-session flag (not used - evaluations are cheap)
+        # self._multi_session_cache: Optional[bool] = None
         try:
             self._ensure_persistent_session_id()
         except Exception:
@@ -984,6 +1004,9 @@ class SynthWebUIInterface:
                 "%%CHAT_RESIZABLE%%": "true"
                 if str(self._get_chat_resizable()).lower() in ("1", "true", "yes")
                 else "false",
+                "%%MULTI_SESSION%%": "true"
+                if self._multi_session_enabled()
+                else "false",
             }
 
             # Vox (TTS) flags exposed to the WebUI client
@@ -1522,14 +1545,18 @@ class SynthWebUIInterface:
             pass
         await websocket.accept()
         # Use persistent session id when available (single session per deploy)
-        session_id = self.session_id or str(uuid.uuid4())
-        # Ensure session id is persisted if it was generated now
-        if not self.session_id:
-            self.session_id = session_id
-            try:
-                self._ensure_persistent_session_id(force_write=True)
-            except Exception:
-                pass
+        # choose session id depending on mode
+        if self._multi_session_enabled():
+            session_id = str(uuid.uuid4())
+        else:
+            session_id = self.session_id or str(uuid.uuid4())
+            # Ensure session id is persisted if it was generated now
+            if not self.session_id:
+                self.session_id = session_id
+                try:
+                    self._ensure_persistent_session_id(force_write=True)
+                except Exception:
+                    pass
         self.connections[session_id] = websocket
         self.message_history.setdefault(session_id, deque(maxlen=self.max_history))
         await websocket.send_json({"type": "session", "session_id": session_id})
@@ -2620,12 +2647,37 @@ class SynthWebUIInterface:
                 f"{LOG_PREFIX} Failed to persist chat message for {session_id}: {e}"
             )
 
+    def _multi_session_enabled(self) -> bool:
+        """Return True if the experimental multi-session flag is active.
+
+        This flag is exposed via a configurable variable; reading it is cheap
+        so we query the registry on each call to ensure runtime toggles take
+        effect (even though the feature is mostly intended to be set once)."""
+        try:
+            return bool(
+                config_registry.get_value(
+                    "MULTI_SESSION",
+                    False,
+                    value_type=bool,
+                    group="core",
+                    component="webui",
+                )
+            )
+        except Exception:
+            return False
+
     def _ensure_persistent_session_id(self, force_write: bool = False) -> None:
         """Ensure there's a persistent session id on disk for WebUI single-session deployments.
 
         If a session id file exists, read it; otherwise generate one and persist it.
         """
         try:
+            # if multi-session is enabled we do not persist or read any file
+            if self._multi_session_enabled():
+                log_debug(
+                    f"{LOG_PREFIX} MULTI_SESSION enabled; skipping persistent session file"
+                )
+                return
             if not self.session_id_file.parent.exists():
                 self.session_id_file.parent.mkdir(parents=True, exist_ok=True)
             if self.session_id_file.exists() and not force_write:

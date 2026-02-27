@@ -1,4 +1,3 @@
-
 class ChatterboxUnavailable(Exception):
     pass
 

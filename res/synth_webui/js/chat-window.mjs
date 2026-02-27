@@ -1,5 +1,8 @@
 // chat-window.mjs — encapsulated Chat window management using SynthWindowManager/WinBox
 
+// Experimental flag carried from server via __SYNTH_CONFIG -> main.js
+const MULTI_SESSION = (typeof window !== 'undefined' && window.MULTI_SESSION) || false;
+
 // Inject chat-specific styles (keeps chat CSS encapsulated inside this module)
 function injectChatStyles() {
     try {
@@ -1122,12 +1125,13 @@ function saveChatState() {
         }
         const chatEl = document.getElementById('chat');
         if (!chatEl) return;
+        const storage = MULTI_SESSION ? sessionStorage : localStorage;
         const stateKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}` : `${CHAT_WINDOW_STATE_KEY}`;
         let state = 'normal';
         if (chatEl.classList.contains('minimized')) state = 'minimized';
         else if (chatEl.classList.contains('maximized')) state = 'maximized';
         else if (chatEl.classList.contains('expanded')) state = 'expanded';
-        try { localStorage.setItem(stateKey, state); } catch (e) { /* ignore */ }
+        try { storage.setItem(stateKey, state); } catch (e) { /* ignore */ }
 
         const rectKey = sessionId ? `${CHAT_RECT_KEY}-${sessionId}` : `${CHAT_RECT_KEY}`;
         try {
@@ -1138,7 +1142,7 @@ function saveChatState() {
                 width: Math.round(rect.width),
                 height: Math.round(rect.height)
             };
-            localStorage.setItem(rectKey, JSON.stringify(payload));
+            storage.setItem(rectKey, JSON.stringify(payload));
         } catch (e) { /* ignore */ }
     } catch (e) { /* ignore */ }
 }
@@ -1153,10 +1157,11 @@ function restoreChatState() {
         if (!chatEl) return;
         // Restore rect
         try {
-            const rectKey = sessionId ? `${CHAT_RECT_KEY}-${sessionId}` : `${CHAT_RECT_KEY}`;
+            const storage = MULTI_SESSION ? sessionStorage : localStorage;
+        const rectKey = sessionId ? `${CHAT_RECT_KEY}-${sessionId}` : `${CHAT_RECT_KEY}`;
             const legacyMobileKey = sessionId ? `${CHAT_RECT_KEY}-${sessionId}-mobile` : `${CHAT_RECT_KEY}-mobile`;
             const legacyDesktopKey = sessionId ? `${CHAT_RECT_KEY}-${sessionId}-desktop` : `${CHAT_RECT_KEY}-desktop`;
-            const rectRaw = localStorage.getItem(rectKey) || localStorage.getItem(legacyDesktopKey) || localStorage.getItem(legacyMobileKey) || localStorage.getItem(sessionId ? `${CHAT_RECT_KEY}-${sessionId}` : CHAT_RECT_KEY) || localStorage.getItem(CHAT_RECT_KEY);
+            const rectRaw = storage.getItem(rectKey) || storage.getItem(legacyDesktopKey) || storage.getItem(legacyMobileKey) || storage.getItem(sessionId ? `${CHAT_RECT_KEY}-${sessionId}` : CHAT_RECT_KEY) || storage.getItem(CHAT_RECT_KEY);
             if (rectRaw) {
                 const rect = JSON.parse(rectRaw);
                 // If the stored rect is positioned near the top of the viewport (likely an accidental top-left placement),
@@ -1174,7 +1179,7 @@ function restoreChatState() {
                         chatEl.style.right = 'auto';
                         if (typeof rect.width === 'number' && rect.width >= 260) chatEl.style.width = rect.width + 'px';
                         if (typeof rect.height === 'number' && rect.height >= 180) chatEl.style.height = rect.height + 'px';
-                        try { localStorage.removeItem(rectKey); } catch (e) { /* ignore */ }
+                        try { (MULTI_SESSION ? sessionStorage : localStorage).removeItem(rectKey); } catch (e) { /* ignore */ }
                     } catch (e) { /* ignore */ }
                 } else {
                     if (typeof rect.left === 'number') chatEl.style.left = rect.left + 'px';
@@ -1192,10 +1197,11 @@ function restoreChatState() {
 
         // Restore window state
         try {
-            const stateKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}` : `${CHAT_WINDOW_STATE_KEY}`;
+            const storage = MULTI_SESSION ? sessionStorage : localStorage;
+        const stateKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}` : `${CHAT_WINDOW_STATE_KEY}`;
             const legacyMobileKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}-mobile` : `${CHAT_WINDOW_STATE_KEY}-mobile`;
             const legacyDesktopKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}-desktop` : `${CHAT_WINDOW_STATE_KEY}-desktop`;
-            const localState = localStorage.getItem(stateKey) || localStorage.getItem(legacyDesktopKey) || localStorage.getItem(legacyMobileKey) || localStorage.getItem(sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}` : CHAT_WINDOW_STATE_KEY) || localStorage.getItem(CHAT_WINDOW_STATE_KEY);
+            const localState = storage.getItem(stateKey) || storage.getItem(legacyDesktopKey) || storage.getItem(legacyMobileKey) || storage.getItem(sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}` : CHAT_WINDOW_STATE_KEY) || storage.getItem(CHAT_WINDOW_STATE_KEY);
             const chatToggleBtn = document.getElementById('chat-toggle');
             if (localState === 'minimized') {
                 chatEl.classList.add('hidden');

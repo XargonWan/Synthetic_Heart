@@ -1,4 +1,3 @@
-
 class KittenUnavailable(Exception):
     pass
 

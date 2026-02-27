@@ -150,6 +150,7 @@ try {
     if (window.__SYNTH_CONFIG.RESPONSE_TIMEOUT !== undefined) window.RESPONSE_TIMEOUT = window.__SYNTH_CONFIG.RESPONSE_TIMEOUT;
     if (window.__SYNTH_CONFIG.FAILED_MESSAGE_TEXT !== undefined) window.FAILED_MESSAGE_TEXT = window.__SYNTH_CONFIG.FAILED_MESSAGE_TEXT;
     if (window.__SYNTH_CONFIG.WEB_DEBUG !== undefined) window.__synth_web_debug_enabled = window.__SYNTH_CONFIG.WEB_DEBUG;
+    if (window.__SYNTH_CONFIG.MULTI_SESSION !== undefined) window.MULTI_SESSION = window.__SYNTH_CONFIG.MULTI_SESSION;
     // Vox (TTS) flags – used by chat-window.mjs for auto-play and replay
     if (window.__SYNTH_CONFIG.VOX_ENABLED !== undefined) window.VOX_ENABLED = window.__SYNTH_CONFIG.VOX_ENABLED;
     if (window.__SYNTH_CONFIG.VOX_AUDIO_CACHE_SIZE !== undefined) window.VOX_AUDIO_CACHE_SIZE = Number(window.__SYNTH_CONFIG.VOX_AUDIO_CACHE_SIZE) || 40;
