@@ -329,9 +329,11 @@ Configuration variables:
 
 UI: These variables are exposed in the WebUI under **Configurations → Grillo** (they are visible by default, not in the Advanced subsection). Other Grillo-related plugin settings (e.g. ``GRILLO_OBSERVER_*``) appear under **Configurations → Grillo → Grillo Observer** and History Evaluator settings appear under **Configurations → Grillo → History Evaluator**.
 
-Observer memory flag:
+Observer configuration flags:
 
 - ``GRILLO_OBSERVER_STORE_MEMORIES`` (bool, default: ``True``) — when enabled, the observer persists sampled snippets as passive memories.
+- ``GRILLO_OBSERVER_SELF_WINDOW`` (float, default: ``43200``) — time window (seconds) during which a chat whose last message was sent by the synth is ignored when gathering snippets. Helps prevent loops when our own question has not been answered yet.
+- ``GRILLO_OBSERVER_LAST_RUN_TS`` (float, default: ``0.0``) — internal timestamp (UTC) of the last observer run. This value is persisted across restarts and usually does not need manual editing.
 
 Notes:
 

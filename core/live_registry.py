@@ -51,7 +51,7 @@ class LiveRegistry:
         """Register a Live engine.
 
         Args:
-            name:         Short unique identifier (e.g. ``"gemini_live"``, ``"harmony_live"``).  
+            name:         Short unique identifier (e.g. ``"gemini_live"``, ``"harmony_live"``).
             module_path:  Dotted import path to the module containing ``ENGINE_CLASS``.
             capabilities: Optional dict of boolean capability flags.
             label:        Human-readable description shown in the WebUI.

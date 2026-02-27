@@ -61,5 +61,9 @@ async def test_request_selective_correction_includes_message_in_context(monkeypa
     assert "correction_context" in ctx
     # The correction_context should reference the failed action type
     cc = ctx["correction_context"]
-    assert "FAILED ACTIONS" or "failed_actions"  # just ensure we have the block
-    assert any("message_send" in str(v) for v in cc["instruction"].split("\n")) or True
+    # ensure the instruction contains the failed action name and the error text
+    assert (
+        "FAILED ACTIONS" in cc["instruction"] or "failed_actions" in cc["instruction"]
+    )
+    assert "message_send" in cc["instruction"]
+    assert "Unsupported type" in cc["instruction"]

@@ -12,6 +12,7 @@ from core.config_manager import config_registry
 
 # Import RESTRICT_ACTIONS from image_processor (already registered there)
 from core.image_processor import RESTRICT_ACTIONS
+import json
 
 # Global dictionary to track retry attempts per chat/message thread for the corrector
 # Use a ConfigVar so consumers always see the latest value (set via WebUI/API)
@@ -141,6 +142,41 @@ async def _maybe_record_grillo_outbound_message(
     except Exception as e:
         # Never fail message sending because of Grillo tracking
         log_debug(f"[action_parser] Failed to record Grillo outbound message: {e}")
+
+
+async def _grillo_recent_same_message(
+    interface_path: str, text: str, window: float
+) -> bool:
+    """Return True if the synth sent *text* to *interface_path* within *window* seconds.
+
+    This is a light database lookup used by Grillo beats to avoid repeating the
+    very same question over and over when the conversation has not progressed.
+    """
+    if not interface_path or not text:
+        return False
+    try:
+        from core.db import execute_query
+        from datetime import datetime, timedelta
+
+        threshold = datetime.utcnow() - timedelta(seconds=window)
+        rows = await execute_query(
+            """
+            SELECT COUNT(*)
+            FROM chat_history_cache
+            WHERE interface_path = %s
+              AND COALESCE(sender_id,'') IN (%s,%s)
+              AND text = %s
+              AND timestamp > %s
+            """,
+            (interface_path, "self", "synth", text, threshold),
+        )
+        if rows and len(rows) > 0:
+            r = rows[0]
+            count = int(r[0] if isinstance(r, (list, tuple)) else r.get("cnt", 0))
+            return count > 0
+    except Exception as e:
+        log_debug(f"[action_parser] grillo dedupe lookup failed: {e}")
+    return False
 
 
 ERROR_RETRY_POLICY = {
@@ -298,13 +334,18 @@ def get_supported_action_types() -> set[str]:
 def _normalize_payload(action_type: str, payload: dict) -> None:
     """Normalize payload by converting string numbers to int for numeric fields.
 
-    This makes the system more flexible by accepting both "2" and 2 for numeric IDs.
+    This makes the system more flexible by accepting both ``"2"`` and ``2`` for
+    numeric IDs.  We also strip surrounding whitespace so ``" 42 "`` works, and
+    we recursively normalize nested dictionaries.
+
     Modifies the payload dict in-place.
 
     Fields that should be integers:
     - chat_id: Chat identifier
     - user_id: User identifier
-    - Any field ending with _id
+    - message_id
+    - animation_state
+    - Any field ending with ``_id``
     """
     # Fields that should always be integers
     int_fields = {"chat_id", "user_id", "message_id", "animation_state"}
@@ -314,33 +355,60 @@ def _normalize_payload(action_type: str, payload: dict) -> None:
         if key.endswith("_id") and key not in int_fields:
             int_fields.add(key)
 
+    def _coerce(value):
+        """Try to convert a value to an int if it looks like one."""
+        if isinstance(value, str):
+            s = value.strip()
+            if s.lstrip("-").isdigit():
+                try:
+                    return int(s)
+                except (ValueError, TypeError):
+                    pass
+        return value
+
     # Normalize top-level fields
     for field in int_fields:
         if field in payload:
-            value = payload[field]
-            if isinstance(value, str) and value.isdigit():
-                try:
-                    payload[field] = int(value)
-                    log_debug(
-                        f"[action_parser] Normalized {action_type}.payload.{field}: '{value}' -> {int(value)}"
-                    )
-                except (ValueError, TypeError):
-                    pass
+            orig = payload[field]
+            coerced = _coerce(orig)
+            if coerced is not orig:
+                payload[field] = coerced
+                log_debug(
+                    f"[action_parser] Normalized {action_type}.payload.{field}: '{orig}' -> {coerced}"
+                )
 
     # Normalize nested dict fields (like target: {chat_id: ...})
-    for key, value in payload.items():
+    for key, value in list(payload.items()):
         if isinstance(value, dict):
             for nested_field in int_fields:
                 if nested_field in value:
-                    nested_value = value[nested_field]
-                    if isinstance(nested_value, str) and nested_value.isdigit():
-                        try:
-                            value[nested_field] = int(nested_value)
-                            log_debug(
-                                f"[action_parser] Normalized {action_type}.payload.{key}.{nested_field}: '{nested_value}' -> {int(nested_value)}"
-                            )
-                        except (ValueError, TypeError):
-                            pass
+                    orig = value[nested_field]
+                    coerced = _coerce(orig)
+                    if coerced is not orig:
+                        value[nested_field] = coerced
+                        log_debug(
+                            f"[action_parser] Normalized {action_type}.payload.{key}.{nested_field}: '{orig}' -> {coerced}"
+                        )
+
+
+def _attempt_auto_fix(actions: list) -> bool:
+    """Apply simple corrections to payloads, returning True if anything changed.
+
+    At the moment the only fix is to re-run ``_normalize_payload`` (which
+    converts numeric-string IDs into ints and strips whitespace); this lets us
+    recover from trivial type mismatches without pinging the LLM again.  If we
+    discover additional common errors we can extend this helper.
+    """
+    modified = False
+    for a in actions:
+        payload = a.get("payload")
+        if isinstance(payload, dict):
+            before = json.dumps(payload, sort_keys=True)
+            _normalize_payload(a.get("type", ""), payload)
+            after = json.dumps(payload, sort_keys=True)
+            if before != after:
+                modified = True
+    return modified
 
 
 def _validate_payload(action_type: str, payload: dict, errors: List[str]) -> None:
@@ -1280,6 +1348,40 @@ async def run_actions(actions: Any, context: Dict[str, Any], bot, original_messa
                 hasattr(original_message, "from_cortex")
                 and getattr(original_message, "from_cortex")
             ) or context.get("from_cortex", False)
+
+            # Grillo-specific dedupe: if this run originated from a Grillo beat and
+            # the message text has already been sent to the same interface_path
+            # within the self-window, discard the action early.  This guard works
+            # even if the snippet collector failed to filter the chat.
+            if is_from_cortex and context.get("grillo_beat"):
+                try:
+                    action_type = action.get("type") or ""
+                    if action_type.startswith("message"):
+                        payload = action.get("payload") or {}
+                        text = payload.get("text")
+                        interface_path = payload.get("interface_path") or context.get(
+                            "interface_path"
+                        )
+                        # use same window as snippet skip for consistency
+                        window = float(
+                            config_registry.get_value(
+                                "GRILLO_OBSERVER_SELF_WINDOW",
+                                43200,
+                                group="grillo",
+                                component="grillo_chat_observer",
+                            )
+                        )
+                        if text and interface_path:
+                            if await _grillo_recent_same_message(
+                                interface_path, text, window
+                            ):
+                                log_info(
+                                    "[action_parser] Suppressing duplicate Grillo outbound message (within self-window)"
+                                )
+                                continue
+                except Exception as e:
+                    log_debug(f"[action_parser] Grillo dedupe check failed: {e}")
+
             if is_from_cortex:
                 try:
                     # Centralized safety decision
@@ -2120,22 +2222,36 @@ async def corrector_orchestrator(
 
         try:
             result = await run_actions(actions, context, bot, message)
-            # Check if any actions were processed successfully
+            # If at least one action was processed successfully, consider it a success
+            # even when other actions produced errors (partial success).  We must check
+            # `processed` BEFORE `errors` to preserve this invariant.
             if isinstance(result, dict) and result.get("processed"):
                 log_info(
                     "[corrector_orchestrator] Actions executed successfully - interrupting correction loop"
                 )
                 return True
-            elif isinstance(result, dict) and result.get("errors"):
+            # No actions processed.  If there are errors, attempt trivial auto-fix
+            # (e.g. numeric-string → int coercion) before giving up entirely.
+            if isinstance(result, dict) and result.get("errors"):
+                if _attempt_auto_fix(actions):
+                    log_info(
+                        "[corrector_orchestrator] Attempting automatic fix for minor errors"
+                    )
+                    result2 = await run_actions(actions, context, bot, message)
+                    if isinstance(result2, dict) and result2.get("processed"):
+                        log_info(
+                            "[corrector_orchestrator] Automatic fix succeeded; continuing without LLM correction"
+                        )
+                        return True
                 log_warning(
                     f"[corrector_orchestrator] Actions failed with errors: {result.get('errors')}"
                 )
                 return False
-            else:
-                log_info(
-                    "[corrector_orchestrator] Actions executed successfully - interrupting correction loop"
-                )
-                return True
+            # No processed and no explicit errors – treat as success (empty but valid)
+            log_info(
+                "[corrector_orchestrator] Actions executed successfully - interrupting correction loop"
+            )
+            return True
         except Exception as e:
             log_warning(f"[corrector_orchestrator] Failed to run actions: {e}")
             return False

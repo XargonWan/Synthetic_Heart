@@ -647,7 +647,12 @@ async def handle_incoming_message(
                                 # other send_message implementations can find it.
                                 if isinstance(value, dict):
                                     payload = value
-                                elif key in ("message", "text", "reply", "response") and isinstance(value, str):
+                                elif key in (
+                                    "message",
+                                    "text",
+                                    "reply",
+                                    "response",
+                                ) and isinstance(value, str):
                                     payload = {"text": value}
                                 else:
                                     payload = {"value": value}
