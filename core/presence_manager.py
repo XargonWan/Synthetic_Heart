@@ -21,10 +21,8 @@ presence_config = {
 # 🧠 Emotion → re-evaluation + crystallization
 async def evaluate_emotions():
     emotions = await get_active_emotions()
-    now = datetime.now(timezone.utc)
 
     for em in emotions:
-        check_time = datetime.fromisoformat(em["next_check"].replace("Z", "+00:00"))
         log_debug(f"[PresenceManager] Reassessing emotion {em['id']} ({em['emotion']})")
 
         delta = await process_triggers_for_emotion(em)  # returns +1, -1, 0, etc.

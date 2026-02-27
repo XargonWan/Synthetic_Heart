@@ -483,9 +483,6 @@ async def enqueue_low_priority(
     except Exception:
         pass
 
-    user_id = (
-        getattr(message.from_user, "id", "unknown") if message.from_user else "unknown"
-    )
     chat_id = getattr(message, "chat_id", "unknown")
     thread_id = getattr(message, "thread_id", None) or getattr(
         message, "message_thread_id", None
@@ -555,7 +552,6 @@ async def compact_similar_messages(first: dict, limit: int = 5) -> list:
             prio, counter, item = item_tuple
         else:
             prio, item = item_tuple
-            counter = None
         if (
             item["chat_id"] == chat_id
             and item.get("thread_id") == thread_id

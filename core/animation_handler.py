@@ -1136,7 +1136,7 @@ class AnimationHandler:
                     _, prev_descriptor = self._resolve_animation_descriptor(
                         self.current_animation
                     )
-                    prev_structure = self._analyze_animation_structure(
+                    self._analyze_animation_structure(
                         prev_descriptor, self.current_animation
                     )
 

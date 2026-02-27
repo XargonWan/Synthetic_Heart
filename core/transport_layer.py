@@ -1531,7 +1531,6 @@ async def run_corrector_middleware(
                 # Selective correction: tell LLM what succeeded and what needs fixing
                 successful = correction_context.get("successful_actions", [])
                 failed = correction_context.get("failed_actions", [])
-                errors = correction_context.get("errors", [])
 
                 correction_message_text = (
                     f"PARTIAL SUCCESS - Some actions completed, others failed.\n\n"

@@ -1059,7 +1059,7 @@ class SynthWebUIInterface:
                     ctx.check_hostname = False
                     ctx.verify_mode = ssl.CERT_NONE
                     with socket.create_connection((host, port), timeout=1) as sock:
-                        with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+                        with ctx.wrap_socket(sock, server_hostname=host):
                             return {
                                 "protocol": "https",
                                 "details": f"TLS handshake succeeded on port {port}",
@@ -6571,7 +6571,7 @@ class SynthWebUIInterface:
                 # Reload the engine
                 log_info(f"{LOG_PREFIX} Reloading engine '{component_name}'...")
                 try:
-                    new_instance = cortex_registry.load_engine(component_name)
+                    cortex_registry.load_engine(component_name)
                     log_info(
                         f"{LOG_PREFIX} Cortex engine '{component_name}' reloaded successfully"
                     )

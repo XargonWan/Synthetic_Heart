@@ -777,7 +777,6 @@ class PersonaManager(PluginBase):
             # Get fresh values from config registry
             name = config_registry.get_value("SYNTH_NAME", "SyntH")
             profile = config_registry.get_value("SYNTH_PROFILE", "")
-            aliases_raw = config_registry.get_value("SYNTH_ALIASES", [])
 
             # Check if values actually changed
             if self._current_persona:
