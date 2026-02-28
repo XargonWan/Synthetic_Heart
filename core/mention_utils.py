@@ -1,3 +1,5 @@
+from core.logging_utils import log_debug
+
 # Hardcoded fallback aliases for synth
 synth_ALIASES = ["synth", "synthetic heart"]
 
@@ -77,7 +79,6 @@ def get_current_aliases() -> list[str]:
     return deduped
 
 
-from core.logging_utils import log_debug
 
 
 async def get_bot_username(bot):

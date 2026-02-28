@@ -1,5 +1,4 @@
 import asyncio
-from datetime import datetime, timezone
 from core.db import get_recent_responses, insert_memory
 from core.db import (
     get_active_emotions,

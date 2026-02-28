@@ -7,6 +7,7 @@ import asyncio
 from typing import Any, Dict, Optional
 from types import SimpleNamespace
 from core.logging_utils import log_debug, log_warning, log_error, log_info
+from plugins.grillo.grillo_impl import GrilloPlugin
 
 # Interface-specific utilities are loaded dynamically by interfaces.
 # The transport layer provides generic messaging functionality only.
@@ -1214,17 +1215,17 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
                 )
 
                 # After processing actions, check if there's text outside the JSON that should be sent
-                if json_metadata and (
-                    json_metadata.get("prefix") or json_metadata.get("suffix")
+                if json_data and (
+                    json_data.get("prefix") or json_data.get("suffix")
                 ):
                     companion_text = ""
 
                     # Combine prefix and suffix, removing duplicate content
-                    if json_metadata.get("prefix"):
-                        companion_text = json_metadata.get("prefix", "").strip()
+                    if json_data.get("prefix"):
+                        companion_text = json_data.get("prefix", "").strip()
 
-                    if json_metadata.get("suffix"):
-                        suffix_text = json_metadata.get("suffix", "").strip()
+                    if json_data.get("suffix"):
+                        suffix_text = json_data.get("suffix", "").strip()
                         if companion_text:
                             companion_text += "\n" + suffix_text
                         else:
@@ -1845,7 +1846,7 @@ async def notify_corrector_of_system_message(
         log_debug(f"[transport] notify_corrector_of_system_message failed: {e}")
     return
 
-    # Normalize LLM text for mojibake / double-escaped sequences BEFORE parsing
+    """ # Normalize LLM text for mojibake / double-escaped sequences BEFORE parsing
     try:
         from core.text_utils import normalize_for_outbound
 
@@ -2192,4 +2193,4 @@ async def notify_corrector_of_system_message(
         return await universal_send(interface_send_func, *args, text=text, **kwargs)
     except Exception as e:
         log_warning(f"[transport] message_chain delegation failed: {e}")
-        return await universal_send(interface_send_func, *args, text=text, **kwargs)
+        return await universal_send(interface_send_func, *args, text=text, **kwargs) """

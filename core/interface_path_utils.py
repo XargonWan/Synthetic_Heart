@@ -11,7 +11,7 @@ Examples:
 - discord_bot/Xargon - Discord bot, user Xargon
 """
 
-from typing import Optional, List, Tuple, Dict, Any, Union
+from typing import Optional, List, Tuple, Dict, Any
 from core.logging_utils import log_debug
 
 
