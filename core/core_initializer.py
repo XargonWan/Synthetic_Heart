@@ -67,6 +67,7 @@ class CoreInitializer:
 
         # Runtime flag for dev components (NOT persistent, resets on restart)
         self._enable_dev_components = False
+        self._trainer_listener_registered = False
 
     def enable_dev_components(self, enabled: bool = True):
         """Enable or disable dev components discovery. NOT persistent across restarts."""
@@ -290,6 +291,25 @@ class CoreInitializer:
                 log_info("[core_initializer] Notifying all config listeners...")
                 config_registry.notify_all_listeners()
                 log_info("[core_initializer] ✅ All config listeners notified")
+
+                # Apply trainer IDs from DB and keep registry in sync with updates.
+                self._configure_trainer_ids()
+                if not self._trainer_listener_registered:
+                    def _refresh_trainer_ids(_value):
+                        try:
+                            self._configure_trainer_ids()
+                        except Exception as exc:
+                            log_warning(
+                                f"[core_initializer] Failed to refresh trainer IDs: {exc}"
+                            )
+
+                    try:
+                        config_registry.add_listener("TRAINER_IDS", _refresh_trainer_ids)
+                        self._trainer_listener_registered = True
+                    except Exception as exc:
+                        log_warning(
+                            f"[core_initializer] Failed to register TRAINER_IDS listener: {exc}"
+                        )
 
                 # CRITICAL: Reload persona after config values are updated from DB
                 # This ensures SYNTH_NAME, SYNTH_PROFILE, etc. are correct in the persona object
@@ -600,13 +620,13 @@ class CoreInitializer:
     def _configure_trainer_ids(self):
         """Configure trainer IDs from environment configuration."""
         from core.interfaces_registry import get_interface_registry
-        from core.config import TRAINER_IDS
+        from core.config import get_trainer_ids
 
         registry = get_interface_registry()
 
-        # Set trainer IDs from configuration
-        for interface_name, trainer_id in TRAINER_IDS.items():
-            registry.set_trainer_id(interface_name, trainer_id)
+        trainer_ids = get_trainer_ids()
+        registry.replace_trainer_ids(trainer_ids)
+        for interface_name, trainer_id in trainer_ids.items():
             log_debug(
                 f"[core_initializer] Configured trainer ID {trainer_id} for {interface_name}"
             )

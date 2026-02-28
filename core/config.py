@@ -34,27 +34,23 @@ Send a notification to the trainer via the centralized logic in core/notifier.py
 load_dotenv(dotenv_path="/app/.env", override=False)
 
 
-def _parse_trainer_ids(raw_value: str) -> dict[str, int]:
+def _parse_trainer_ids(raw_value: str) -> dict[str, int | str]:
     """Parse TRAINER_IDS string into a mapping."""
-    mapping = {}
+    mapping: dict[str, int | str] = {}
     if not raw_value:
         return mapping
     for entry in raw_value.split(","):
-        if ":" in entry:
-            interface_name, trainer_id = entry.split(":", 1)
-            mapping[interface_name.strip()] = int(trainer_id.strip())
-    return mapping
-
-
-def _parse_trainer_ids(raw_value: str) -> dict[str, int]:
-    """Parse TRAINER_IDS string into a mapping."""
-    mapping = {}
-    if not raw_value:
-        return mapping
-    for entry in raw_value.split(","):
-        if ":" in entry:
-            interface_name, trainer_id = entry.split(":", 1)
-            mapping[interface_name.strip()] = int(trainer_id.strip())
+        if ":" not in entry:
+            continue
+        interface_name, trainer_id = entry.split(":", 1)
+        interface_name = interface_name.strip()
+        trainer_id = trainer_id.strip()
+        if not interface_name or not trainer_id:
+            continue
+        try:
+            mapping[interface_name] = int(trainer_id)
+        except ValueError:
+            mapping[interface_name] = trainer_id
     return mapping
 
 
@@ -72,15 +68,14 @@ _TRAINER_IDS_RAW = config_registry.get_var(
 )
 
 
-def get_trainer_ids() -> dict[str, int]:
+def get_trainer_ids() -> dict[str, int | str]:
     """Parse and return current trainer IDs mapping."""
     return _parse_trainer_ids(str(_TRAINER_IDS_RAW))
 
 
-def get_trainer_id(interface_name: str) -> int | None:
+def get_trainer_id(interface_name: str) -> int | str | None:
     """Return the trainer ID for the given interface."""
     return get_trainer_ids().get(interface_name)
-    return None
 
 
 # Backwards compatibility: module-level TRAINER_IDS mapping expected by some

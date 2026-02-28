@@ -199,10 +199,73 @@ class ReconLanguageEvaluatorPlugin:
         except Exception:
             parsed = None
 
-        if not isinstance(parsed, dict):
-            return []
+        # parsed might be None or not contain language_code; don't early-return so
+        # we can attempt a history-based fallback when possible.
+        language_code = ""
+        if isinstance(parsed, dict):
+            language_code = str(parsed.get("language_code") or "").strip()
 
-        language_code = str(parsed.get("language_code") or "").strip()
+        # If LLM couldn't detect language from the immediate message text,
+        # try a history-based fallback using the message's interface_path.
+        if not language_code:
+            try:
+                # determine interface_path from message (supports object or dict)
+                interface_path = None
+                if message:
+                    interface_path = getattr(message, "interface_path", None) or (
+                        message.get("interface_path")
+                        if isinstance(message, dict)
+                        else None
+                    )
+
+                if interface_path:
+                    # load recent chat history and build a compact prompt
+                    from core.chat_history_cache import load_chat_history
+
+                    hist = await load_chat_history(interface_path)
+                    hist_items = list(hist)[-6:]
+                    hist_lines = []
+                    for item in hist_items:
+                        txt = item.get("text") or item.get("message_text") or ""
+                        sender = (
+                            item.get("sender_name") or item.get("sender") or "unknown"
+                        )
+                        if txt:
+                            hist_lines.append(f"[{sender}] {txt}")
+
+                    if hist_lines and engine:
+                        history_prompt = "\n".join(hist_lines)
+                        user_prompt = f'Chat history for {interface_path}:\n{history_prompt}\n\nDetect the primary language of the conversation and return ONLY valid JSON: {{"language_code": "xx"}}.'
+                        try:
+                            llm_text2 = await engine.generate_response(
+                                [
+                                    {"role": "system", "content": system_prompt},
+                                    {"role": "user", "content": user_prompt},
+                                ]
+                            )
+                            parsed2 = None
+                            try:
+                                parsed2 = extract_json_from_text(
+                                    llm_text2, return_metadata=False
+                                )
+                            except Exception:
+                                parsed2 = None
+
+                            if isinstance(parsed2, dict):
+                                language_code = str(
+                                    parsed2.get("language_code") or ""
+                                ).strip()
+                                if language_code:
+                                    log_info(
+                                        f"[recon_lang] Fallback language detected from history {interface_path}: {language_code}"
+                                    )
+                        except Exception as e:
+                            log_warning(
+                                f"[recon_lang] History-based detection failed: {e}"
+                            )
+            except Exception as e:
+                log_warning(f"[recon_lang] History fallback error: {e}")
+
         if not language_code:
             return []
 

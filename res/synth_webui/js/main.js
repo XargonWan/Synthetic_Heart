@@ -1848,8 +1848,21 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
                 const general = items.filter((item) => !item.advanced && (!omitAccent || item.key !== 'WEBUI_ACCENT_COLOR'));
                 const advanced = items.filter((item) => item.advanced && (!omitAccent || item.key !== 'WEBUI_ACCENT_COLOR'));
-                renderGrouped(general, configGeneralListEl);
-                renderGrouped(advanced, configAdvancedListEl);
+
+                const settingsHelper = window.SynthSettings;
+                if (settingsHelper && typeof settingsHelper.bindConfigSearch === 'function') {
+                    settingsHelper.bindConfigSearch({
+                        general,
+                        advanced,
+                        renderGrouped,
+                        configGeneralListEl,
+                        configAdvancedListEl,
+                        statusEl: document.getElementById('config-search-status')
+                    });
+                } else {
+                    renderGrouped(general, configGeneralListEl);
+                    renderGrouped(advanced, configAdvancedListEl);
+                }
 
                 if (configExpandAll && !configExpandAll.dataset.bound) {
                     configExpandAll.dataset.bound = '1';
@@ -1859,6 +1872,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     configCollapseAll.dataset.bound = '1';
                     configCollapseAll.addEventListener('click', () => setConfigSectionsCollapsed(true));
                 }
+
 
                 // --- Render a prominent Accent control at the top of Settings (Appearance card)
                 try {
