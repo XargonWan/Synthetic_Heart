@@ -705,9 +705,9 @@ async def _grillo_fire_and_forget(
             log_info(
                 f"[grillo] Auto-executed {len(actions_to_exec)} action(s); result: {result}"
             )
-            if GrilloPlugin:
+            if grillo_plugin and hasattr(grillo_plugin, "create_activity_log"):
                 try:
-                    activity_id = await GrilloPlugin.create_activity_log(
+                    activity_id = await grillo_plugin.create_activity_log(
                         beat_type="grillo_auto_exec",
                         prompt_text=str(
                             {"user": original_user_message, "llm_reply": llm_reply}
@@ -2122,7 +2122,7 @@ async def notify_corrector_of_system_message(
                         checker_context["last_action_result"] = getattr(
                             message, "last_action_result"
                         )
-                    # Attach the final chain result (ACTIONS_EXECUTED / FORWARD_AS_TEXT / etc.)
+                    # Attach the final chain result (ACTIONS_EXECUTED / BLOCKED / LLM_FAILED / etc.)
                     try:
                         checker_context["chain_result"] = result
                     except Exception:

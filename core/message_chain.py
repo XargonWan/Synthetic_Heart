@@ -18,7 +18,10 @@ parser will only operate on model outputs.
 Return codes:
 - ACTIONS_EXECUTED -> actions parsed and executed
 - BLOCKED -> message blocked (exhausted retries or explicit ignore)
-- FORWARD_AS_TEXT -> not JSON-like; caller may forward plain text to interface
+- LLM_FAILED -> LLM produced invalid output and all corrector attempts were exhausted
+
+Note: the LLM must always reply with valid JSON actions. Plain text from the LLM
+is treated as a correctable error; the corrector will request valid JSON format.
 """
 
 import asyncio
@@ -30,7 +33,6 @@ from core.config_manager import config_registry
 
 # Result constants
 ACTIONS_EXECUTED = "ACTIONS_EXECUTED"
-FORWARD_AS_TEXT = "FORWARD_AS_TEXT"
 BLOCKED = "BLOCKED"
 LLM_FAILED = "LLM_FAILED"
 
@@ -975,7 +977,8 @@ async def handle_incoming_message(
                                 tts_already_executed = True
 
                         # Determine if we should skip TTS
-                        # Skip for: internal grillo beats, internal chats, system messages, autonomous messages, AND already-executed TTS
+                        # Skip for: internal grillo beats, internal chats, system messages, autonomous messages, already-executed TTS,
+                        # or if the request_tts flag/feature is off
                         should_skip_tts = (
                             is_grillo_internal
                             or is_internal_chat
@@ -983,11 +986,52 @@ async def handle_incoming_message(
                             or is_autonomous
                             or tts_already_executed
                         )
+                        # honor explicit request flag passed via context or wrapped message
+                        if context and isinstance(context, dict):
+                            if context.get("request_tts") is False:
+                                should_skip_tts = True
 
-                        # Additional check: if TTS endpoints are not configured, skip auto-inject
+                        # If TTS disabled globally, skip regardless
                         try:
                             from core.config_manager import config_registry
 
+                            vox_enabled = config_registry.get_value(
+                                "VOX_ENABLED",
+                                False,
+                                value_type=bool,
+                                group="plugins",
+                                component="vox_plugin",
+                            )
+                            if not vox_enabled:
+                                should_skip_tts = True
+                        except Exception:
+                            pass
+
+                        # Additional check: if Vox/TTS is disabled, skip auto-inject
+                        try:
+                            from core.config_manager import config_registry
+
+                            # Vox is the new canonical toggle; legacy TTS_ENABLED/TTS_ENDPOINTS
+                            # are only consulted for backward compatibility.  We deliberately
+                            # do *not* require the old TTS_ENDPOINTS string to be set when
+                            # VOX_ENABLED is true, since modern deployments use engines from
+                            # the Vox registry instead.
+                            vox_enabled = config_registry.get_value(
+                                "VOX_ENABLED",
+                                False,
+                                value_type=bool,
+                                group="plugins",
+                                component="vox_plugin",
+                            )
+                            if not vox_enabled:
+                                should_skip_tts = True
+                                log_debug(
+                                    "[message_chain] Skipping TTS auto-inject because VOX_ENABLED is False"
+                                )
+
+                            # Legacy fallbacks (we keep them so existing installs with only
+                            # TTS_ENDPOINTS continue to behave as before).  These checks only
+                            # add additional skip reasons; they do not override vox_enabled.
                             tts_raw = config_registry.get_value(
                                 "TTS_ENDPOINTS",
                                 "",
@@ -1004,19 +1048,19 @@ async def handle_incoming_message(
                             )
 
                             if not tts_raw:
-                                should_skip_tts = True
                                 log_debug(
-                                    "[message_chain] Skipping TTS auto-inject because TTS_ENDPOINTS is not configured"
+                                    "[message_chain] (legacy) TTS_ENDPOINTS not configured"
+                                )
+                                # note: we don't force skip here, because VOX_ENABLED \n                                # may already permit TTS without endpoints
+                            if not bool(tts_enabled):
+                                log_debug(
+                                    "[message_chain] (legacy) TTS_ENABLED is False"
                                 )
 
-                            # If TTS is explicitly disabled via WebUI, skip injection
-                            if not bool(tts_enabled):
-                                should_skip_tts = True
-                                log_debug(
-                                    "[message_chain] Skipping TTS auto-inject because TTS_ENABLED is False"
-                                )
                         except Exception as e:
-                            log_debug(f"[message_chain] Error checking TTS config: {e}")
+                            log_debug(
+                                f"[message_chain] Error checking Vox/TTS config: {e}"
+                            )
 
                         if should_skip_tts:
                             skip_reason = []
@@ -1037,7 +1081,9 @@ async def handle_incoming_message(
                             log_debug(
                                 f"[message_chain] Skipping TTS auto-inject: {', '.join(skip_reason)}"
                             )
-                        elif is_user_facing:
+                        elif is_user_facing or (context and context.get("request_tts")):
+                            # With the new strategy we honor explicit TTS requests even when
+                            # they come from non-WebUI interfaces (voice note, etc.).
                             if (
                                 text_to_speak
                                 and isinstance(text_to_speak, str)
@@ -1058,6 +1104,9 @@ async def handle_incoming_message(
                                 actions.append(tts_action)
                                 # Update has_tts flag since we just added it
                                 has_tts = True
+                                # clear request flag so we don't duplicate later
+                                if context and isinstance(context, dict):
+                                    context.pop("request_tts", None)
                         else:
                             log_debug(
                                 f"[message_chain] Skipping TTS auto-inject for non-user-facing interface: {interface_path}"
@@ -1339,10 +1388,14 @@ async def handle_incoming_message(
                         else:
                             return ACTIONS_EXECUTED
 
-        # Not parsed. If it's from LLM, always attempt correction regardless of braces
-        # If it's non-LLM source, don't attempt correction
-        # IMPORTANT: Only attempt correction for LLM messages that failed JSON parsing
-        # Non-LLM messages and messages that don't require correction should be blocked
+        # Not parsed. Only attempt correction for LLM-origin messages.
+        # Non-LLM messages (interface/system source) are blocked without correction.
+        # Plain text from the LLM is treated as a correctable error: the corrector
+        # will request a valid JSON response from the model.
+        if source == "llm":
+            log_debug(
+                "[message_chain] LLM returned non-JSON output; activating corrector to request JSON format"
+            )
         if source != "llm" and not getattr(message, "from_cortex", False):
             log_debug("[message_chain] Non-LLM source; no correction needed")
             return BLOCKED

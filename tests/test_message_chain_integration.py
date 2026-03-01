@@ -4,6 +4,7 @@
 import unittest
 import sys
 import os
+import asyncio
 from unittest.mock import patch, AsyncMock, MagicMock
 from types import SimpleNamespace
 
@@ -45,11 +46,12 @@ class TestMessageChainIntegration(unittest.TestCase):
 
     @patch("core.transport_layer.run_corrector_middleware")
     @patch("core.action_parser.run_actions")
-    async def test_text_message_forwarded(self, mock_run_actions, mock_corrector):
-        """Test that plain text messages are forwarded as TEXT."""
+    async def test_non_llm_plain_text_is_blocked(
+        self, mock_run_actions, mock_corrector
+    ):
+        """Non-LLM plain text (source='interface') is blocked without invoking the corrector."""
         from core import message_chain
 
-        # Mock corrector to not be called for plain text
         mock_corrector.return_value = None
 
         # Create fake message
@@ -63,8 +65,8 @@ class TestMessageChainIntegration(unittest.TestCase):
             source="interface",
         )
 
-        # Should forward as text
-        self.assertEqual(result, message_chain.FORWARD_AS_TEXT)
+        # Should block non-LLM messages that contain no valid JSON actions
+        self.assertEqual(result, message_chain.BLOCKED)
         mock_corrector.assert_not_called()
 
     @patch("core.transport_layer.run_corrector_middleware")
@@ -119,6 +121,61 @@ class TestMessageChainIntegration(unittest.TestCase):
         mock_corrector.assert_called_once()
         mock_run_actions.assert_called_once()
 
+    @patch("core.config_manager.config_registry.get_value")
+    @patch("core.transport_layer.run_corrector_middleware")
+    @patch("core.action_parser.run_actions")
+    async def test_auto_inject_tts_for_webui(
+        self, mock_run_actions, mock_corrector, mock_get_value
+    ):
+        """LLM JSON replies to WebUI should automatically gain a tts_speak when VOX_ENABLED."""
+        from core import message_chain
+
+        def fake_get_value(key, default=None, **kwargs):
+            if key == "VOX_ENABLED":
+                return True
+            return default
+
+        mock_get_value.side_effect = fake_get_value
+
+        class FakeVar:
+            def __init__(self, value):
+                self.value = value
+
+        def fake_get_var(name, default=None, **kwargs):
+            if name == "MESSAGE_ACTION_TYPES":
+                return FakeVar(["message_synth_webui"])
+            return default
+
+        from unittest.mock import patch
+
+        get_var_patcher = patch(
+            "core.config_manager.config_registry.get_var", new=fake_get_var
+        )
+        get_var_patcher.start()
+
+        json_text = '{"actions": [{"type": "message_synth_webui", "payload": {"text": "Hello","interface_path": "synth_webui/xyz"}}]}'
+        msg = SimpleNamespace(
+            chat_id=456,
+            text=json_text,
+            from_cortex=True,
+            interface_path="synth_webui/xyz",
+        )
+
+        result = await message_chain.handle_incoming_message(
+            bot=MagicMock(),
+            message=msg,
+            text=json_text,
+            source="llm",
+            interface_path="synth_webui/xyz",
+        )
+
+        self.assertEqual(result, message_chain.ACTIONS_EXECUTED)
+        mock_run_actions.assert_called_once()
+        called_actions = mock_run_actions.call_args[0][0]
+        types = [a.get("type") for a in called_actions if isinstance(a, dict)]
+        self.assertIn("tts_speak", types)
+        get_var_patcher.stop()
+
     @patch("core.transport_layer.run_corrector_middleware")
     @patch("core.action_parser.run_actions")
     async def test_system_message_blocked(self, mock_run_actions, mock_corrector):
@@ -145,16 +202,20 @@ class TestMessageChainIntegration(unittest.TestCase):
     @patch("core.config_manager.config_registry.get_value")
     @patch("core.transport_layer.run_corrector_middleware")
     @patch("core.action_parser.run_actions")
-    async def test_tts_not_injected_when_unconfigured(
+    async def test_tts_not_injected_when_vox_disabled(
         self, mock_run_actions, mock_corrector, mock_get_value
     ):
-        """When TTS endpoints are not configured, message TTS should not be auto-injected."""
+        """If VOX_ENABLED is false, no tts_speak should be added (legacy config irrelevant)."""
         from core import message_chain
 
-        # Simulate TTS_ENDPOINTS not set
+        # Simulate VOX_DISABLED (and leave legacy values empty)
         def fake_get_value(key, default=None, **kwargs):
+            if key == "VOX_ENABLED":
+                return False
             if key == "TTS_ENDPOINTS":
                 return ""
+            if key == "TTS_ENABLED":
+                return False
             return default
 
         mock_get_value.side_effect = fake_get_value
@@ -169,14 +230,13 @@ class TestMessageChainIntegration(unittest.TestCase):
                 return FakeVar(["message_telegram_bot"])
             return default
 
-        # Patch get_var
         from unittest.mock import patch
 
         get_var_patcher = patch(
             "core.config_manager.config_registry.get_var", new=fake_get_var
         )
         get_var_patcher.start()
-        # Create LLM-origin JSON message with a user-facing message action
+
         json_text = '{"actions": [{"type": "message_telegram_bot", "payload": {"text": "Hello world", "interface_path": "telegram_bot/123"}}]}'
         msg = SimpleNamespace(
             chat_id=123,
@@ -193,14 +253,11 @@ class TestMessageChainIntegration(unittest.TestCase):
             interface_path="telegram_bot/123",
         )
 
-        # Ensure run_actions was called
         self.assertEqual(result, message_chain.ACTIONS_EXECUTED)
         mock_run_actions.assert_called_once()
 
-        # Stop patcher
         get_var_patcher.stop()
 
-        # Inspect the actions passed to run_actions - should have no tts_speak injected
         called_actions = mock_run_actions.call_args[0][0]
         types = [a.get("type") for a in called_actions if isinstance(a, dict)]
         self.assertNotIn("tts_speak", types)
@@ -208,23 +265,24 @@ class TestMessageChainIntegration(unittest.TestCase):
     @patch("core.config_manager.config_registry.get_value")
     @patch("core.transport_layer.run_corrector_middleware")
     @patch("core.action_parser.run_actions")
-    async def test_tts_injected_when_configured(
+    async def test_tts_injected_when_vox_enabled(
         self, mock_run_actions, mock_corrector, mock_get_value
     ):
-        """When TTS endpoints are configured, message TTS should be auto-injected for user-facing messages."""
+        """When VOX_ENABLED is true, message TTS should be auto-injected regardless of legacy endpoints."""
         from core import message_chain
 
-        # Simulate TTS_ENDPOINTS set
+        # Simulate VOX_ENABLED True; leave legacy values blank to emulate new setup
         def fake_get_value(key, default=None, **kwargs):
-            if key == "TTS_ENDPOINTS":
-                return "http://example/endpoint"
-            if key == "TTS_ENABLED":
+            if key == "VOX_ENABLED":
                 return True
+            if key == "TTS_ENDPOINTS":
+                return ""
+            if key == "TTS_ENABLED":
+                return False
             return default
 
         mock_get_value.side_effect = fake_get_value
 
-        # Ensure message action types include telegram message so we detect a user response
         class FakeVar:
             def __init__(self, value):
                 self.value = value
@@ -234,7 +292,6 @@ class TestMessageChainIntegration(unittest.TestCase):
                 return FakeVar(["message_telegram_bot"])
             return default
 
-        # Patch get_var
         from unittest.mock import patch
 
         get_var_patcher = patch(
@@ -242,7 +299,6 @@ class TestMessageChainIntegration(unittest.TestCase):
         )
         get_var_patcher.start()
 
-        # Create LLM-origin JSON message with a user-facing message action
         json_text = '{"actions": [{"type": "message_telegram_bot", "payload": {"text": "Hello world", "interface_path": "telegram_bot/123"}}]}'
         msg = SimpleNamespace(
             chat_id=123,
@@ -259,17 +315,11 @@ class TestMessageChainIntegration(unittest.TestCase):
             interface_path="telegram_bot/123",
         )
 
-        # Ensure run_actions was called
         self.assertEqual(result, message_chain.ACTIONS_EXECUTED)
         mock_run_actions.assert_called_once()
 
-        # Stop patcher
         get_var_patcher.stop()
 
-        # Stop patcher
-        get_var_patcher.stop()
-
-        # Inspect the actions passed to run_actions - should include a tts_speak action
         called_actions = mock_run_actions.call_args[0][0]
         types = [a.get("type") for a in called_actions if isinstance(a, dict)]
         self.assertIn("tts_speak", types)
@@ -283,8 +333,10 @@ class TestMessageChainIntegration(unittest.TestCase):
         """When TTS is explicitly disabled via WebUI (TTS_ENABLED=False) it should not be auto-injected even if endpoints are set."""
         from core import message_chain
 
-        # Simulate TTS_ENDPOINTS set but TTS_ENABLED False
+        # Simulate VOX_ENABLED False (new flag) and legacy endpoints set but TTS_ENABLED False
         def fake_get_value(key, default=None, **kwargs):
+            if key == "VOX_ENABLED":
+                return False
             if key == "TTS_ENDPOINTS":
                 return "http://example/endpoint"
             if key == "TTS_ENABLED":
@@ -339,6 +391,151 @@ class TestMessageChainIntegration(unittest.TestCase):
         called_actions = mock_run_actions.call_args[0][0]
         types = [a.get("type") for a in called_actions if isinstance(a, dict)]
         self.assertNotIn("tts_speak", types)
+
+    @patch("core.config_manager.config_registry.get_value")
+    @patch("core.transport_layer.run_corrector_middleware")
+    @patch("core.action_parser.run_actions")
+    async def test_request_tts_flag_triggers_audio(
+        self, mock_run_actions, mock_corrector, mock_get_value
+    ):
+        """If context.request_tts=True we force a tts_speak injection regardless of interface."""
+        from core import message_chain
+
+        # simulate vox enabled
+        def fake_get_value(key, default=None, **kwargs):
+            if key == "VOX_ENABLED":
+                return True
+            return default
+
+        mock_get_value.side_effect = fake_get_value
+
+        class FakeVar:
+            def __init__(self, value):
+                self.value = value
+
+        def fake_get_var(name, default=None, **kwargs):
+            if name == "MESSAGE_ACTION_TYPES":
+                return FakeVar(["message_telegram_bot"])
+            return default
+
+        from unittest.mock import patch
+
+        get_var_patcher = patch(
+            "core.config_manager.config_registry.get_var", new=fake_get_var
+        )
+        get_var_patcher.start()
+
+        json_text = '{"actions": [{"type": "message_telegram_bot", "payload": {"text": "Hi","interface_path": "telegram_bot/123"}}]}'
+        msg = SimpleNamespace(
+            chat_id=123,
+            text=json_text,
+            from_cortex=True,
+            interface_path="telegram_bot/123",
+        )
+        # attach flag to message so plugin_instance will propagate it
+        msg.request_tts = True
+
+        result = await message_chain.handle_incoming_message(
+            bot=MagicMock(),
+            message=msg,
+            text=json_text,
+            source="llm",
+            interface_path="telegram_bot/123",
+            context={"request_tts": True},
+        )
+
+        self.assertEqual(result, message_chain.ACTIONS_EXECUTED)
+        mock_run_actions.assert_called_once()
+        get_var_patcher.stop()
+
+        called_actions = mock_run_actions.call_args[0][0]
+        types = [a.get("type") for a in called_actions if isinstance(a, dict)]
+        self.assertIn("tts_speak", types)
+
+    @patch("core.config_manager.config_registry.get_value")
+    @patch("core.transport_layer.run_corrector_middleware")
+    @patch("core.action_parser.run_actions")
+    async def test_request_tts_respects_vox_flag(
+        self, mock_run_actions, mock_corrector, mock_get_value
+    ):
+        """When VOX_ENABLED=False, request_tts should not cause audio injection."""
+        from core import message_chain
+
+        def fake_get_value(key, default=None, **kwargs):
+            if key == "VOX_ENABLED":
+                return False
+            return default
+
+        mock_get_value.side_effect = fake_get_value
+
+        class FakeVar:
+            def __init__(self, value):
+                self.value = value
+
+        def fake_get_var(name, default=None, **kwargs):
+            if name == "MESSAGE_ACTION_TYPES":
+                return FakeVar(["message_telegram_bot"])
+            return default
+
+        from unittest.mock import patch
+
+        get_var_patcher = patch(
+            "core.config_manager.config_registry.get_var", new=fake_get_var
+        )
+        get_var_patcher.start()
+
+        json_text = '{"actions": [{"type": "message_telegram_bot", "payload": {"text": "Hello","interface_path": "telegram_bot/123"}}]}'
+        msg = SimpleNamespace(
+            chat_id=123,
+            text=json_text,
+            from_cortex=True,
+            interface_path="telegram_bot/123",
+        )
+        msg.request_tts = True
+
+        result = await message_chain.handle_incoming_message(
+            bot=MagicMock(),
+            message=msg,
+            text=json_text,
+            source="llm",
+            interface_path="telegram_bot/123",
+            context={"request_tts": True},
+        )
+
+        self.assertEqual(result, message_chain.ACTIONS_EXECUTED)
+        mock_run_actions.assert_called_once()
+        get_var_patcher.stop()
+
+        called_actions = mock_run_actions.call_args[0][0]
+        types = [a.get("type") for a in called_actions if isinstance(a, dict)]
+        self.assertNotIn("tts_speak", types)
+
+    @patch("core.transport_layer.run_corrector_middleware")
+    async def test_plain_text_webui_triggers_corrector(self, mock_corrector):
+        """Plain text LLM replies to WebUI must activate the corrector, not Vox.speak directly.
+
+        The LLM must always produce valid JSON actions (including tts_speak for audio).
+        When it returns plain text the corrector is invoked to request JSON format.
+        """
+        from core import message_chain
+
+        # Corrector returns None → chain exhausts retries → LLM_FAILED
+        mock_corrector.return_value = None
+
+        msg = SimpleNamespace(
+            chat_id=123, interface_path="synth_webui/42", from_cortex=True
+        )
+        result = await message_chain.handle_incoming_message(
+            bot=MagicMock(),
+            message=msg,
+            text="Hello world",
+            source="llm",
+            context={"interface_path": "synth_webui/42", "max_retries": 1},
+        )
+
+        # Corrector must have been invoked (not Vox.speak)
+        mock_corrector.assert_called_once()
+        self.assertEqual(result, message_chain.LLM_FAILED)
 
     def test_json_extraction(self):
         """Test JSON extraction from text."""

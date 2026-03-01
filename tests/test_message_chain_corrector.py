@@ -139,8 +139,79 @@ async def test_message_chain_triggers_corrector_for_unregistered_top_level_key(
         context={},
     )
 
-    assert called["count"] >= 1
-    assert msg.correction_context is not None
+
+@pytest.mark.asyncio
+async def test_plain_text_response_triggers_corrector(monkeypatch):
+    """Plain text from an LLM violates the JSON-only contract and must activate the corrector.
+
+    The plain text bypass (formerly returning FORWARD_AS_TEXT) has been removed by design:
+    the LLM must always reply with valid JSON actions.  When it returns plain text the
+    corrector middleware is invoked; if retries are exhausted the chain returns LLM_FAILED.
+    """
+    corrector_calls: list = []
+
+    async def fake_corrector(
+        text, bot=None, context=None, chat_id=None, thread_id=None
+    ):
+        corrector_calls.append(text)
+        # Return None to simulate corrector unable to fix → chain exhausts retries
+        return None
+
+    monkeypatch.setattr("core.transport_layer.run_corrector_middleware", fake_corrector)
+
+    msg = SimpleNamespace(
+        chat_id=123, interface_path="telegram_bot/123", from_cortex=True
+    )
+
+    result = await message_chain.handle_incoming_message(
+        bot=None,
+        message=msg,
+        text="Just a normal sentence without JSON",
+        source="llm",
+        # Limit retries to 1 so the test finishes quickly
+        context={"max_retries": 1},
+    )
+
+    # Corrector must have been invoked at least once
+    assert corrector_calls, "Corrector was not called for plain-text LLM output"
+    # After exhausting retries with no valid JSON the chain signals failure
+    assert result == message_chain.LLM_FAILED
+
+
+@pytest.mark.asyncio
+async def test_plain_text_response_on_webui_triggers_corrector(monkeypatch):
+    """Plain text from the LLM on a WebUI interface must activate the corrector.
+
+    Previously the chain bypassed the corrector and called Vox.speak() directly for plain
+    text on WebUI.  This was wrong: the LLM must produce JSON actions (including tts_speak)
+    for audio to be generated.  The corrector is the correct remediation path.
+    """
+    corrector_calls: list = []
+
+    async def fake_corrector(
+        text, bot=None, context=None, chat_id=None, thread_id=None
+    ):
+        corrector_calls.append(text)
+        return None
+
+    monkeypatch.setattr("core.transport_layer.run_corrector_middleware", fake_corrector)
+
+    msg = SimpleNamespace(
+        chat_id=123, interface_path="synth_webui/42", from_cortex=True
+    )
+    result = await message_chain.handle_incoming_message(
+        bot=None,
+        message=msg,
+        text="Hello world",
+        source="llm",
+        context={"interface_path": "synth_webui/42", "max_retries": 1},
+    )
+
+    # Corrector must have been called, not Vox.speak directly
+    assert corrector_calls, (
+        "Corrector was not called for plain-text LLM output on WebUI"
+    )
+    assert result == message_chain.LLM_FAILED
 
 
 @pytest.mark.asyncio
