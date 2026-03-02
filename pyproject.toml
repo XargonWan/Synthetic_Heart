@@ -46,6 +46,7 @@ dependencies = [
     "torch>=2.0",                     # required by silero-vad & qwen3tts
     "transformers>=4.40",             # required by qwen3tts Vox engine
     "soundfile>=0.12",                # audio I/O for qwen3tts
+    "omegaconf>=2.3",                 # required by Silero TTS (kitten engine)
     # chatterbox-tts: depends on pkuseg which has build issues – install manually
     # harmony-speech-engine: not on PyPI – install manually from GitHub
     # kittentts: not yet on PyPI – install manually
@@ -66,6 +67,9 @@ audio     = ["silero-vad>=5.1", "torch>=2.0"]   # alias: same as silero
 # ── Vox TTS engines ───────────────────────────────────────────────────────────
 # qwen3tts: Qwen3-TTS via Hugging Face transformers pipeline
 qwen3tts  = ["transformers>=4.40", "soundfile>=0.12", "torch>=2.0"]
+
+# kitten: Silero TTS V3 via torch.hub (CPU-capable, ~55 MB model)
+kitten    = ["torch>=2.0", "soundfile>=0.12", "omegaconf>=2.3"]
 
 # chatterbox: Resemble AI Chatterbox expressive TTS
 # Note: depends on pkuseg which may require manual build steps and is not

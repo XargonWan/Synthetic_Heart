@@ -108,12 +108,7 @@ def test_template_includes_multisession_placeholder():
 
 def test_ws_closure_notification_present():
     # sanity-check that the base template includes the user notification text we added
-    path = (
-        Path(__file__).parent.parent
-        / "core"
-        / "webui_templates"
-        / "base.html"
-    )
+    path = Path(__file__).parent.parent / "core" / "webui_templates" / "base.html"
     content = path.read_text(encoding="utf-8")
     assert "Connection lost" in content
     assert "Chat WebSocket error" in content
@@ -130,10 +125,13 @@ async def test_disconnect_cleans_up(tmp_path, monkeypatch):
         def __init__(self):
             self.sent = []
             self._msgs = ["hello"]
+
         async def accept(self):
             pass
+
         async def send_json(self, payload):
             self.sent.append(payload)
+
         async def receive_text(self):
             if self._msgs:
                 return self._msgs.pop(0)
@@ -162,4 +160,3 @@ async def test_render_index_reflects_flag(tmp_path):
     await config_registry.set_value("MULTI_SESSION", True)
     html_true = webui._render_index()
     assert "MULTI_SESSION: 'true' === 'true'" in html_true
-

@@ -665,8 +665,6 @@ def _plugins_for(action_type: str) -> List[Any]:
 
     for plugin in loaded_plugins:
         try:
-            supported = None
-
             if hasattr(plugin, "get_supported_action_types"):
                 action_types = plugin.get_supported_action_types()
                 log_debug(
@@ -740,7 +738,6 @@ def _plugins_for(action_type: str) -> List[Any]:
 
     for name, iface in INTERFACE_REGISTRY.items():
         try:
-            supported = None
             if hasattr(iface, "get_supported_action_types"):
                 action_types = iface.get_supported_action_types()
                 log_debug(
@@ -1034,6 +1031,15 @@ async def _handle_plugin_action(
                 )
                 if inspect.iscoroutine(result):
                     result = await result
+                # If a plugin explicitly skips this action, fall through to the next handler.
+                # "skipped" means "I'm not handling this — try the next plugin".
+                if isinstance(result, dict) and result.get("status") == "skipped":
+                    log_info(
+                        f"[action_parser] ⏭️ Plugin {plugin.__class__.__name__} skipped "
+                        f"action '{action_type}' (reason: {result.get('reason', 'unknown')}); "
+                        "trying next plugin"
+                    )
+                    continue
                 log_info(
                     f"[action_parser] ✅ Successfully executed action via {plugin_iface}"
                 )
@@ -1581,7 +1587,6 @@ async def _create_diary_entry_for_actions(processed_actions, context, original_m
         # Extract relevant information
         interface_name = context.get("interface", "unknown")
         chat_id = getattr(original_message, "chat_id", None)
-        interface_path = getattr(original_message, "interface_path", None)
 
         # Prefer LLM-provided diary metadata when present.
         # This avoids generic/hardcoded reflections unrelated to the real context.
@@ -2293,7 +2298,7 @@ async def corrector_orchestrator(
             return False
 
         # increment retry counter
-        attempt_count = _increment_retry(message)
+        _increment_retry(message)
         attempt += 1
 
         # Call the corrector (transport-layer middleware)

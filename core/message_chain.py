@@ -1062,6 +1062,17 @@ async def handle_incoming_message(
                                 f"[message_chain] Error checking Vox/TTS config: {e}"
                             )
 
+                        # For Telegram/Discord, only auto-inject TTS for voice-originated
+                        # messages. WebUI, Matrix and Ollama always get TTS when VOX is active.
+                        _is_voice_input = bool(ctx.get("is_voice_input", False))
+                        _iface_tts_prefix = (ctx.get("interface_path") or "").split(
+                            "/"
+                        )[0]
+                        _voice_only_tts_ifaces = {"telegram_bot", "discord_bot"}
+                        tts_allowed = (
+                            _iface_tts_prefix not in _voice_only_tts_ifaces
+                        ) or _is_voice_input
+
                         if should_skip_tts:
                             skip_reason = []
                             if is_grillo_internal:
@@ -1081,7 +1092,9 @@ async def handle_incoming_message(
                             log_debug(
                                 f"[message_chain] Skipping TTS auto-inject: {', '.join(skip_reason)}"
                             )
-                        elif is_user_facing or (context and context.get("request_tts")):
+                        elif (is_user_facing and tts_allowed) or (
+                            context and context.get("request_tts")
+                        ):
                             # With the new strategy we honor explicit TTS requests even when
                             # they come from non-WebUI interfaces (voice note, etc.).
                             if (
@@ -1099,6 +1112,11 @@ async def handle_incoming_message(
                                         "emotion": payload.get("emotion")
                                         if isinstance(payload, dict)
                                         else None,
+                                        # Flag: auto-injected by message_chain (not emitted
+                                        # by the LLM). VoxPlugin uses this to suppress the
+                                        # text fallback when TTS fails — text was already
+                                        # sent by the message_*_bot action.
+                                        "__auto_injected": True,
                                     },
                                 }
                                 actions.append(tts_action)
@@ -1117,6 +1135,8 @@ async def handle_incoming_message(
                     # the branch above). ensure they exist so the
                     # warning logic doesn't crash when has_user_response
                     # is False.
+                    if "interface_path" not in locals():
+                        interface_path = ctx.get("interface_path") or ""
                     if "is_user_facing" not in locals():
                         is_user_facing = False
                     if "is_grillo_internal" not in locals():

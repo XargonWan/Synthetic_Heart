@@ -176,6 +176,7 @@ class VoxPlugin(AIPluginBase):
         emotion: str | None = None,
         engine_name: str | None = None,
         merged_text: str | None = None,
+        allow_fallback: bool = True,
     ) -> dict[str, Any]:
         """Full TTS pipeline: generate → write → dispatch → lip-sync.
 
@@ -203,6 +204,21 @@ class VoxPlugin(AIPluginBase):
         if not interface_path and original_message:
             interface_path = getattr(original_message, "interface_path", None)
 
+        async def _fallback(msg_text: str) -> dict[str, Any]:
+            """Delegate to _send_fallback only when allowed.
+
+            When ``allow_fallback=False`` (auto-injected TTS actions) we suppress
+            the text fallback to avoid sending a duplicate: the text was already
+            dispatched by the preceding ``message_*_bot`` action.
+            """
+            if allow_fallback:
+                return await self._send_fallback(msg_text, interface_path)
+            log_warning(
+                "[vox_plugin] TTS failed (auto-injected action); "
+                "suppressing text fallback to avoid duplicate message."
+            )
+            return {"status": "error", "reason": "tts_failed_no_fallback_allowed"}
+
         # --- Clean text for the engine ---
         clean = _EMOJI_RE.sub("", text)
         clean = _MULTI_SPACE_RE.sub(" ", clean).strip()
@@ -215,7 +231,7 @@ class VoxPlugin(AIPluginBase):
             engine = VOX_REGISTRY.load_engine(name)
         except ValueError as exc:
             log_error(f"[vox_plugin] Cannot load engine '{name}': {exc}")
-            return await self._send_fallback(merged_text or text, interface_path)
+            return await _fallback(merged_text or text)
 
         # --- Generate audio ---
         try:
@@ -228,7 +244,7 @@ class VoxPlugin(AIPluginBase):
 
         if not audio_bytes:
             log_warning(f"[vox_plugin] Engine '{name}' returned no audio.")
-            return await self._send_fallback(merged_text or text, interface_path)
+            return await _fallback(merged_text or text)
 
         # --- Write to disk ---
         filename = f"vox_{int(time.time())}.wav"
@@ -237,11 +253,11 @@ class VoxPlugin(AIPluginBase):
             self._write_audio(out_path, audio_bytes, engine)
         except Exception as exc:
             log_error(f"[vox_plugin] Failed to write audio file: {exc}")
-            return await self._send_fallback(merged_text or text, interface_path)
+            return await _fallback(merged_text or text)
 
         if not out_path.exists():
             log_error(f"[vox_plugin] Written file not found: {out_path}")
-            return await self._send_fallback(merged_text or text, interface_path)
+            return await _fallback(merged_text or text)
 
         # --- Optional lip-sync metadata ---
         lipsync_data: dict | None = None
@@ -330,6 +346,9 @@ class VoxPlugin(AIPluginBase):
             context=context,
             original_message=original_message,
             merged_text=payload.get("__merged_text"),
+            # Suppress text fallback for auto-injected TTS: text was already
+            # dispatched by message_*_bot and a duplicate would confuse the user.
+            allow_fallback=not payload.get("__auto_injected", False),
         )
 
     # ------------------------------------------------------------------
@@ -436,7 +455,7 @@ class VoxPlugin(AIPluginBase):
             return
 
         try:
-            from core.interface_path_utils import parse_interface_path  # type: ignore[import]
+            from core.interface_path_utils import parse_interface_path
 
             iface_name, levels = parse_interface_path(interface_path)
             target_iface = INTERFACE_REGISTRY.get(iface_name)
@@ -507,7 +526,7 @@ class VoxPlugin(AIPluginBase):
             return {"status": "error", "reason": "tts_failed_no_fallback"}
 
         try:
-            from core.interface_path_utils import parse_interface_path  # type: ignore[import]
+            from core.interface_path_utils import parse_interface_path
 
             iface_name, _ = parse_interface_path(interface_path)
             target_iface = INTERFACE_REGISTRY.get(iface_name)

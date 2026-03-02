@@ -772,6 +772,10 @@ async def _consumer_loop() -> None:
                     if isinstance(context, dict):
                         context["interface_path"] = interface_path
                         context["thread_id"] = thread_id
+                        # Propagate voice input flag from interface (used by message_chain TTS auto-inject)
+                        _queued_msg = final.get("message")
+                        if getattr(_queued_msg, "is_voice_input", False):
+                            context["is_voice_input"] = True
                         # Propagate per-message history_scope when present so prompt_engine/history_engine can honour it
                         hs = final.get("history_scope")
                         if hs is not None:

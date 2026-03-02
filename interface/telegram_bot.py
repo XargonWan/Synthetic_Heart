@@ -1176,7 +1176,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Wrap message to add wake/sleep flag for prompt engine
         wrapped_message = MessageWrapper(
-            message, is_wake_sleep_command=is_wake_sleep_command
+            message,
+            is_wake_sleep_command=is_wake_sleep_command,
+            # Flag: tells message_chain to auto-inject TTS only for voice-originated messages.
+            is_voice_input=bool(
+                getattr(message, "voice", None) or getattr(message, "video_note", None)
+            ),
         )
 
         await message_queue.enqueue(
