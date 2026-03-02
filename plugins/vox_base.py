@@ -101,6 +101,33 @@ class VoxEngineBase(ABC):
         return None
 
     # ------------------------------------------------------------------
+    # Optional — speaker metadata / samples
+    # ------------------------------------------------------------------
+
+    def get_speakers(self) -> list[dict]:
+        """Return a list of available speaker definitions.
+
+        Each entry should be a dict containing at least ``code`` and ``name``.
+        Engines may also include a ``language`` field or other metadata that
+        can be used by the UI.  The core Vox plugin will call this method when
+        the WebUI requests ``/api/vox/speakers``; it is not required for
+        all engines.
+
+        Default implementation returns an empty list.
+        """
+        return []
+
+    def sample(self, speaker: str) -> bytes:
+        """Return a short WAV sample for the given speaker code.
+
+        The WebUI will call the ``/api/vox/sample`` endpoint to fetch a
+        preview when the user clicks "Listen".  Engines may cache or
+        pre-generate the clip; if the requested speaker is not supported they
+        should raise ``NotImplementedError`` or return ``b""``.
+        """
+        raise NotImplementedError("engine does not provide samples")
+
+    # ------------------------------------------------------------------
     # Lifecycle hooks (optional)
     # ------------------------------------------------------------------
 

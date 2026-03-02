@@ -33,7 +33,7 @@ from fastapi import (
     Request,
     HTTPException,
 )
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from core.core_initializer import register_interface
@@ -482,9 +482,26 @@ class SynthWebUIInterface:
         self.app.websocket("/logs")(self.logs_ws_endpoint)
         # Auris audio endpoints
         self.app.post("/api/audio/upload")(self.audio_upload_endpoint)
-        # helper endpoint for Vosk language selection/download
+        # helper endpoint for Vosk language selection (legacy compat, delegates to MODEL_MANAGER)
         self.app.post("/api/auris/vosk/download")(self.vosk_model_download)
+        # Model management endpoints (SSOT: MODEL_MANAGER)
+        self.app.get("/api/models")(self.list_models)
+        self.app.get("/api/models/{model_id}")(self.get_model_detail)
+        self.app.post("/api/models/{model_id}/download")(self.start_model_download)
+        self.app.get("/api/models/{model_id}/progress")(self.get_model_progress)
+        self.app.delete("/api/models/{model_id}")(self.delete_model)
+        self.app.get("/api/models/{model_id}/sample/{voice}")(self.model_sample_voice)
+        self.app.get("/api/models/{model_id}/voice/{voice}/exists")(
+            self.model_voice_sample_exists
+        )
+        self.app.post("/api/models/{model_id}/voice/{voice}/generate")(
+            self.model_generate_voice_sample
+        )
         self.app.websocket("/api/audio/stream")(self.audio_stream_ws_endpoint)
+
+        # Vox metadata/sample endpoints
+        self.app.get("/api/vox/speakers")(self.vox_speakers)
+        self.app.get("/api/vox/sample")(self.vox_sample)
         self.app.get("/api/vrm")(self.list_vrm_models)
         self.app.get("/api/vrm/active")(self.get_active_vrm_endpoint)
         self.app.post("/api/vrm")(self.upload_vrm_model)
@@ -1862,29 +1879,323 @@ class SynthWebUIInterface:
             log_error(f"{LOG_PREFIX} audio_upload_endpoint error: {exc}")
             return JSONResponse({"error": str(exc)}, status_code=500)
 
-    async def vosk_model_download(self, language: str = Form(...)):
-        """POST /api/auris/vosk/download
+    # ------------------------------------------------------------------
+    # Vox metadata/sample endpoints
+    # ------------------------------------------------------------------
 
-        Trigger download of the Vosk model for *language* and update the
-        ``VOSK_LANGUAGE`` config variable accordingly.  Returns ``{success: true}``
-        when the download is initiated (it may occur asynchronously).
+    async def vox_speakers(self, request: Request):
+        """GET /api/vox/speakers?engine=<name>"""
+        from core.config_manager import config_registry
+        from core.vox_registry import VOX_REGISTRY
+
+        engine_name = request.query_params.get("engine") or config_registry.get_value(
+            "ACTIVE_VOX_ENGINE", "kitten", value_type=str
+        )
+        reg = VOX_REGISTRY
+        try:
+            engine = reg.load_engine(engine_name)
+        except ValueError:
+            raise HTTPException(status_code=404, detail="Engine not found")
+        try:
+            speakers = engine.get_speakers()
+        except Exception:
+            speakers = []
+        return JSONResponse(speakers)
+
+    async def vox_sample(self, request: Request):
+        """GET /api/vox/sample?engine=<name>&speaker=<code>"""
+        from core.config_manager import config_registry
+        from core.vox_registry import VOX_REGISTRY
+
+        engine_name = request.query_params.get("engine") or config_registry.get_value(
+            "ACTIVE_VOX_ENGINE", "kitten", value_type=str
+        )
+        speaker = request.query_params.get("speaker")
+        if not speaker:
+            raise HTTPException(status_code=400, detail="speaker parameter required")
+        reg = VOX_REGISTRY
+        try:
+            engine = reg.load_engine(engine_name)
+        except ValueError:
+            raise HTTPException(status_code=404, detail="Engine not found")
+        try:
+            data = engine.sample(speaker)
+        except NotImplementedError:
+            raise HTTPException(status_code=404, detail="No sample available")
+        return Response(data, media_type="audio/wav")
+
+    # ------------------------------------------------------------------
+    # Model management endpoints  (SSOT: core.model_manager.MODEL_MANAGER)
+    # ------------------------------------------------------------------
+
+    async def vosk_model_download(self, language: str = Form(...)):
+        """POST /api/auris/vosk/download  — legacy compat shim.
+
+        Looks up the Vosk model_id for *language* and delegates to
+        ``MODEL_MANAGER.download()``.  Also updates ``VOSK_LANGUAGE`` so the
+        engine picks up the new model on next load.
         """
         try:
             from core.config_manager import config_registry
+            from core.model_manager import MODEL_MANAGER
 
+            # lang → model_id mapping (mirrors vosk_engine._LANG_TO_MODEL_ID)
+            _LANG_MAP: dict[str, str] = {
+                "en": "vosk-en-us",
+                "en-us": "vosk-en-us",
+                "en-gb": "vosk-en-us",
+                "it": "vosk-it-it",
+                "it-it": "vosk-it-it",
+                "fr": "vosk-fr-fr",
+                "fr-fr": "vosk-fr-fr",
+                "es": "vosk-es-es",
+                "es-es": "vosk-es-es",
+                "de": "vosk-de-de",
+                "de-de": "vosk-de-de",
+                "pt": "vosk-pt-pt",
+                "pt-pt": "vosk-pt-pt",
+                "zh": "vosk-zh-cn",
+                "zh-cn": "vosk-zh-cn",
+                "ja": "vosk-ja-jp",
+                "ja-jp": "vosk-ja-jp",
+                "ko": "vosk-ko-kr",
+                "ko-kr": "vosk-ko-kr",
+            }
+            model_id = _LANG_MAP.get(language.lower(), f"vosk-{language.lower()}")
             config_registry.set_value("VOSK_LANGUAGE", language)
-            # attempt immediate model load/download
-            from plugins.auris_engines.vosk_engine import (
-                _load_model,
-                _model_path_from_language,
-            )
+            # Fire-and-forget in background so the endpoint always returns immediately;
+            # clients can poll /api/models/{id}/progress to track completion.
+            import asyncio as _asyncio
 
-            path = _model_path_from_language(language)
-            _load_model(path)  # side effect may download
-            return JSONResponse({"success": True, "language": language})
+            _asyncio.create_task(MODEL_MANAGER.download(model_id))
+            log_info(f"{LOG_PREFIX} vosk_model_download: started {model_id}")
+            return JSONResponse(
+                {"success": True, "language": language, "model_id": model_id}
+            )
         except Exception as exc:
             log_error(f"{LOG_PREFIX} vosk_model_download error: {exc}")
             return JSONResponse({"error": str(exc)}, status_code=500)
+
+    async def list_models(self, request: Request) -> JSONResponse:
+        """GET /api/models[?plugin_id=<id>]  — return all registered models with status."""
+        from core.model_manager import MODEL_MANAGER
+
+        plugin_filter = request.query_params.get("plugin_id")
+        catalog = MODEL_MANAGER.catalog()
+        if plugin_filter:
+            catalog = [m for m in catalog if m["plugin_id"] == plugin_filter]
+        return JSONResponse({"models": catalog})
+
+    async def get_model_detail(self, model_id: str) -> JSONResponse:
+        """GET /api/models/{model_id}  — return single model info with sample list."""
+        from core.model_manager import MODEL_MANAGER
+
+        spec = MODEL_MANAGER.get_spec(model_id)
+        if not spec:
+            raise HTTPException(
+                status_code=404, detail=f"Model '{model_id}' not registered"
+            )
+        catalog_entry = next(
+            (m for m in MODEL_MANAGER.catalog() if m["model_id"] == model_id), None
+        )
+        if not catalog_entry:
+            raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+        catalog_entry["samples"] = MODEL_MANAGER.list_samples(model_id)
+        return JSONResponse(catalog_entry)
+
+    async def start_model_download(self, model_id: str) -> JSONResponse:
+        """POST /api/models/{model_id}/download  — start async download of a model."""
+        from core.model_manager import MODEL_MANAGER
+
+        spec = MODEL_MANAGER.get_spec(model_id)
+        if not spec:
+            raise HTTPException(
+                status_code=404, detail=f"Model '{model_id}' not registered"
+            )
+        if MODEL_MANAGER.is_downloaded(model_id):
+            return JSONResponse({"status": "already_downloaded", "model_id": model_id})
+        if MODEL_MANAGER.download_progress(model_id) is not None:
+            return JSONResponse({"status": "in_progress", "model_id": model_id})
+        # Fire-and-forget in background
+        import asyncio as _asyncio
+
+        _asyncio.create_task(MODEL_MANAGER.download(model_id))
+        log_info(f"{LOG_PREFIX} Model download started: {model_id}")
+        return JSONResponse({"status": "started", "model_id": model_id})
+
+    async def get_model_progress(self, model_id: str) -> JSONResponse:
+        """GET /api/models/{model_id}/progress  — poll download progress (0-1) or status."""
+        from core.model_manager import MODEL_MANAGER
+
+        progress = MODEL_MANAGER.download_progress(model_id)
+        downloaded = MODEL_MANAGER.is_downloaded(model_id)
+        return JSONResponse(
+            {
+                "model_id": model_id,
+                "downloaded": downloaded,
+                "in_progress": progress is not None,
+                "progress": progress,
+            }
+        )
+
+    async def delete_model(self, model_id: str) -> JSONResponse:
+        """DELETE /api/models/{model_id}  — remove a downloaded model from disk."""
+        from core.model_manager import MODEL_MANAGER
+
+        spec = MODEL_MANAGER.get_spec(model_id)
+        if not spec:
+            raise HTTPException(
+                status_code=404, detail=f"Model '{model_id}' not registered"
+            )
+        if not MODEL_MANAGER.is_downloaded(model_id):
+            raise HTTPException(
+                status_code=404, detail=f"Model '{model_id}' is not downloaded"
+            )
+        ok = MODEL_MANAGER.delete(model_id)
+        if ok:
+            return JSONResponse({"deleted": True, "model_id": model_id})
+        return JSONResponse(
+            {"deleted": False, "error": "Delete failed"}, status_code=500
+        )
+
+    async def model_sample_voice(
+        self, model_id: str, voice: str, request: Request
+    ) -> Response:
+        """GET /api/models/{model_id}/sample/{voice}?lang=en  — stream a sample MP3.
+
+        Returns 404 if the sample does not exist for the requested language so
+        the client can show a "Generate" button instead of a play button.
+        """
+        from core.model_manager import MODEL_MANAGER
+
+        lang = request.query_params.get("lang", "en")
+        # Try pre-generated file first
+        samples = MODEL_MANAGER.list_samples(model_id, lang=lang)
+        sample = next((s for s in samples if s.get("voice") == voice), None)
+        if sample:
+            path = Path(sample["path"])
+            if path.exists():
+                return Response(path.read_bytes(), media_type="audio/mpeg")
+        # No pre-generated file: 404 so the UI knows to show Generate button
+        raise HTTPException(
+            status_code=404,
+            detail=f"Sample for '{model_id}/{voice}' (lang={lang}) not yet generated",
+        )
+
+    async def model_voice_sample_exists(
+        self, model_id: str, voice: str, request: Request
+    ) -> JSONResponse:
+        """GET /api/models/{model_id}/voice/{voice}/exists?lang=en
+
+        Lightweight existence check — returns ``{"exists": true/false, "url": str|null}``.
+        """
+        from core.model_manager import MODEL_MANAGER
+
+        lang = request.query_params.get("lang", "en")
+        exists = MODEL_MANAGER.sample_exists(model_id, voice, lang)
+        url: str | None = None
+        if exists:
+            url = MODEL_MANAGER._sample_url(model_id, voice, lang)
+        return JSONResponse(
+            {
+                "exists": exists,
+                "url": url,
+                "model_id": model_id,
+                "voice": voice,
+                "lang": lang,
+            }
+        )
+
+    async def model_generate_voice_sample(
+        self, model_id: str, voice: str, request: Request
+    ) -> JSONResponse:
+        """POST /api/models/{model_id}/voice/{voice}/generate?lang=en
+
+        Generate a voice sample on-the-go.  Runs synchronously in an executor
+        so the endpoint returns the result (or an error) once generation is
+        complete (usually < 15 s).
+
+        Returns ``{"url": "..."}`` on success or ``{"error": "..."}`` with HTTP 500.
+        """
+        import asyncio as _asyncio
+        from core.model_manager import MODEL_MANAGER
+        from core.vox_registry import VOX_REGISTRY
+
+        lang = request.query_params.get("lang", "en")
+
+        spec = MODEL_MANAGER.get_spec(model_id)
+        if not spec:
+            raise HTTPException(
+                status_code=404, detail=f"Model '{model_id}' not registered"
+            )
+        if not MODEL_MANAGER.is_downloaded(model_id):
+            raise HTTPException(
+                status_code=404,
+                detail=f"Model '{model_id}' is not downloaded",
+            )
+        if voice not in spec.voices:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Voice '{voice}' not found in model '{model_id}'",
+            )
+
+        # Resolve gender for this voice (needed by edge-tts gender filter)
+        gender = "N"
+        for vm in spec.voices_meta:
+            if vm.name == voice:
+                gender = vm.gender
+                break
+
+        # Import generator helper lazily to avoid circular imports
+        import inspect
+
+        def _generate_fn(text: str, v: str | None) -> "bytes | None":
+            # Try VOX engine first
+            for engine_name in VOX_REGISTRY.get_available_engines():
+                try:
+                    engine = VOX_REGISTRY.load_engine(engine_name)
+                    if not hasattr(engine, "sample"):
+                        continue
+                    sig = inspect.signature(engine.sample)
+                    data: bytes | None = (
+                        engine.sample(text, v)
+                        if len(sig.parameters) == 2
+                        else engine.sample(v)
+                    )
+                    if data:
+                        return data
+                except Exception:
+                    continue
+            # edge-tts fallback with correct locale + gender
+            try:
+                from scripts.generate_model_samples import _edge_generate, _tweak_audio
+
+                data = _edge_generate(text, v, lang=lang, gender=gender)
+                if data:
+                    return _tweak_audio(data, v, lang)
+            except Exception:
+                pass
+            return None
+
+        loop = _asyncio.get_event_loop()
+        try:
+            path = await loop.run_in_executor(
+                None,
+                lambda: MODEL_MANAGER.ensure_sample(
+                    model_id, voice, _generate_fn, lang=lang
+                ),
+            )
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} model_generate_voice_sample error: {exc}")
+            return JSONResponse({"error": str(exc)}, status_code=500)
+
+        if not path:
+            return JSONResponse({"error": "Sample generation failed"}, status_code=500)
+
+        url = MODEL_MANAGER._sample_url(model_id, voice, lang)
+        return JSONResponse(
+            {"url": url, "model_id": model_id, "voice": voice, "lang": lang}
+        )
 
     async def audio_stream_ws_endpoint(
         self, websocket: WebSocket

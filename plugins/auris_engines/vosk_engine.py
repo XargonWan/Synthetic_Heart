@@ -1,27 +1,28 @@
 # plugins/auris_engines/vosk_engine.py
 """Auris STT engine: Vosk (local, CPU-only, no cloud).
 
-Vosk uses offline neural models for speech-to-text.  The smallest English
-model (``vosk-model-small-en-us``) is ~50 MB and runs well on CPU.
+Vosk uses offline neural models for speech-to-text.  Models are **not**
+bundled in the container image; the user selects and downloads them through
+the WebUI → Components → Manage Models panel.
 
 Requirements
 ------------
-* ``vosk`` Python package (``pip install vosk`` or ``uv add vosk``).
-* A downloaded Vosk model directory, pointed to by ``VOSK_MODEL_PATH``.
-  If the path does not exist the engine will attempt to download the small
-  English model automatically using the ``vosk`` downloader utility (requires
-  internet access on first run only).
+* ``vosk`` Python package (``uv add vosk``).
+* ``ffmpeg`` in PATH for audio conversion.
+
+Model storage
+-------------
+All models are managed by ``core.model_manager.MODEL_MANAGER``.  The engine
+looks up the model directory via ``MODEL_MANAGER.model_dir(model_id)``; it
+will never auto-download without explicit user action.
 
 Configuration (via exposed vars, all optional)
 ----------------------------------------------
 ``VOSK_MODEL_PATH``
-    Absolute or relative path to the Vosk model directory.
-    Default: ``~/.cache/vosk/vosk-model-small-en-us``.
+    Absolute or relative path to override the model directory.
+    Leave blank to use the Model Manager's storage.
 ``VOSK_LANGUAGE``
-    Language code used when no explicit model path is set.  In the WebUI a
-    language selector appears when the active Auris engine is ``vosk``; choosing
-    a value here will also trigger an automatic model download on the backend
-    (first transcription will also download if invoked programmatically).
+    Language code; the matching model must be downloaded first.
     Default: ``en-us``.
 
 Audio conversion
@@ -42,29 +43,159 @@ from typing import Any
 
 from core.auris_registry import register_auris_engine
 from core.logging_utils import log_error, log_info, log_warning
+from core.model_manager import MODEL_MANAGER, ModelSpec
 from plugins.auris_base import AurisEngineBase
 
 _MODEL_CACHE: dict[str, Any] = {}  # path → vosk.Model singleton
-# default points only to english; other languages will be derived dynamically
-_DEFAULT_MODEL_PATH = Path.home() / ".cache" / "vosk" / "vosk-model-small-en-us"
-_SMALL_MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
 
-# map of language codes -> download URL; we only populate a few common ones here,
-# fall back to a templated URL (may need manual correction if the version changes).
-_LANGUAGE_URLS: dict[str, str] = {
-    "en-us": _SMALL_MODEL_URL,
-    "it-it": "https://alphacephei.com/vosk/models/vosk-model-small-it-0.22.zip",
-    "fr-fr": "https://alphacephei.com/vosk/models/vosk-model-small-fr-0.22.zip",
-    "es-es": "https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip",
+# ---------------------------------------------------------------------------
+# Vosk model catalog — registered with MODEL_MANAGER at import time.
+# The model_id convention is  vosk-<lang>  e.g. vosk-en-us.
+# ---------------------------------------------------------------------------
+_VOSK_MODELS: list[ModelSpec] = [
+    ModelSpec(
+        model_id="vosk-en-us",
+        plugin_id="auris_vosk",
+        display_name="Vosk English (US) — small",
+        description="Compact offline English STT model (~50 MB).",
+        tags=["stt", "local", "offline", "cpu"],
+        size_mb=50,
+        voices=[],
+        language="en",
+        download_url="https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip",
+    ),
+    ModelSpec(
+        model_id="vosk-en-us-large",
+        plugin_id="auris_vosk",
+        display_name="Vosk English (US) — large",
+        description="High-accuracy offline English STT model (~1.8 GB).",
+        tags=["stt", "local", "offline", "cpu"],
+        size_mb=1800,
+        voices=[],
+        language="en",
+        download_url="https://alphacephei.com/vosk/models/vosk-model-en-us-0.42-gigaspeech.zip",
+    ),
+    ModelSpec(
+        model_id="vosk-it-it",
+        plugin_id="auris_vosk",
+        display_name="Vosk Italiano — small",
+        description="Compact offline Italian STT model (~50 MB).",
+        tags=["stt", "local", "offline", "cpu"],
+        size_mb=50,
+        voices=[],
+        language="it",
+        download_url="https://alphacephei.com/vosk/models/vosk-model-small-it-0.22.zip",
+    ),
+    ModelSpec(
+        model_id="vosk-fr-fr",
+        plugin_id="auris_vosk",
+        display_name="Vosk Français — small",
+        description="Compact offline French STT model (~50 MB).",
+        tags=["stt", "local", "offline", "cpu"],
+        size_mb=50,
+        voices=[],
+        language="fr",
+        download_url="https://alphacephei.com/vosk/models/vosk-model-small-fr-0.22.zip",
+    ),
+    ModelSpec(
+        model_id="vosk-es-es",
+        plugin_id="auris_vosk",
+        display_name="Vosk Español — small",
+        description="Compact offline Spanish STT model (~50 MB).",
+        tags=["stt", "local", "offline", "cpu"],
+        size_mb=50,
+        voices=[],
+        language="es",
+        download_url="https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip",
+    ),
+    ModelSpec(
+        model_id="vosk-de-de",
+        plugin_id="auris_vosk",
+        display_name="Vosk Deutsch — small",
+        description="Compact offline German STT model (~50 MB).",
+        tags=["stt", "local", "offline", "cpu"],
+        size_mb=50,
+        voices=[],
+        language="de",
+        download_url="https://alphacephei.com/vosk/models/vosk-model-small-de-0.15.zip",
+    ),
+    ModelSpec(
+        model_id="vosk-pt-pt",
+        plugin_id="auris_vosk",
+        display_name="Vosk Português — small",
+        description="Compact offline Portuguese STT model (~50 MB).",
+        tags=["stt", "local", "offline", "cpu"],
+        size_mb=50,
+        voices=[],
+        language="pt",
+        download_url="https://alphacephei.com/vosk/models/vosk-model-small-pt-0.3.zip",
+    ),
+    ModelSpec(
+        model_id="vosk-zh-cn",
+        plugin_id="auris_vosk",
+        display_name="Vosk 中文 (Chinese) — small",
+        description="Compact offline Mandarin STT model (~50 MB).",
+        tags=["stt", "local", "offline", "cpu"],
+        size_mb=50,
+        voices=[],
+        language="zh",
+        download_url="https://alphacephei.com/vosk/models/vosk-model-small-cn-0.22.zip",
+    ),
+    ModelSpec(
+        model_id="vosk-ja-jp",
+        plugin_id="auris_vosk",
+        display_name="Vosk 日本語 (Japanese) — small",
+        description="Compact offline Japanese STT model (~50 MB).",
+        tags=["stt", "local", "offline", "cpu"],
+        size_mb=50,
+        voices=[],
+        language="ja",
+        download_url="https://alphacephei.com/vosk/models/vosk-model-small-ja-0.22.zip",
+    ),
+    ModelSpec(
+        model_id="vosk-ko-kr",
+        plugin_id="auris_vosk",
+        display_name="Vosk 한국어 (Korean) — small",
+        description="Compact offline Korean STT model (~50 MB).",
+        tags=["stt", "local", "offline", "cpu"],
+        size_mb=50,
+        voices=[],
+        language="ko",
+        download_url="https://alphacephei.com/vosk/models/vosk-model-small-ko-0.22.zip",
+    ),
+]
+
+for _vspec in _VOSK_MODELS:
+    MODEL_MANAGER.register(_vspec)
+
+# language-code → model_id mapping (default small models)
+_LANG_TO_MODEL_ID: dict[str, str] = {
+    "en-us": "vosk-en-us",
+    "en": "vosk-en-us",
+    "it-it": "vosk-it-it",
+    "it": "vosk-it-it",
+    "fr-fr": "vosk-fr-fr",
+    "fr": "vosk-fr-fr",
+    "es-es": "vosk-es-es",
+    "es": "vosk-es-es",
+    "de-de": "vosk-de-de",
+    "de": "vosk-de-de",
+    "pt-pt": "vosk-pt-pt",
+    "pt": "vosk-pt-pt",
+    "zh": "vosk-zh-cn",
+    "zh-cn": "vosk-zh-cn",
+    "ja": "vosk-ja-jp",
+    "ja-jp": "vosk-ja-jp",
+    "ko": "vosk-ko-kr",
+    "ko-kr": "vosk-ko-kr",
 }
 
 
 def _load_model(model_path: Path) -> Any:
     """Load (or return cached) a vosk.Model from *model_path*.
 
-    If the directory does not exist it will be downloaded automatically; the
-    download URL is inferred from the language code embedded in the directory
-    name (e.g. ``vosk-model-small-it-it``).
+    The model directory must already exist (downloaded via MODEL_MANAGER).
+    No automatic download is attempted here.
     """
     key = str(model_path.resolve())
     if key in _MODEL_CACHE:
@@ -74,13 +205,10 @@ def _load_model(model_path: Path) -> Any:
 
         vosk.SetLogLevel(-1)  # suppress verbose Kaldi output
         if not model_path.exists():
-            log_info(
-                f"[auris/vosk] Model not found at {model_path}; attempting download…"
+            log_warning(
+                f"[auris/vosk] Model directory not found: {model_path}. "
+                "Download the model via WebUI → Components → Manage Models."
             )
-            _download_model(model_path)
-
-        if not model_path.exists():
-            log_error(f"[auris/vosk] Model directory still missing: {model_path}")
             return None
 
         model = vosk.Model(str(model_path))
@@ -95,46 +223,6 @@ def _load_model(model_path: Path) -> Any:
         return None
 
 
-def _download_model(dest: Path) -> None:
-    """Download and extract a small Vosk model appropriate for *dest*.
-
-    The target language is inferred from the directory name (prefix
-    ``vosk-model-small-``).  If a known URL is registered in
-    :data:`_LANGUAGE_URLS` it will be used; otherwise a generic URL template is
-    attempted.  Failures just log a warning and leave the directory missing.
-    """
-    try:
-        import urllib.request
-        import zipfile
-
-        # determine language code from dest name
-        lang = dest.name.replace("vosk-model-small-", "")
-        url = (
-            _LANGUAGE_URLS.get(lang)
-            or f"https://alphacephei.com/vosk/models/vosk-model-small-{lang}-0.22.zip"
-        )
-
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        zip_path = dest.parent / (f"{dest.name}.zip")
-        log_info(f"[auris/vosk] Downloading model ({lang}) from {url} …")
-        urllib.request.urlretrieve(url, zip_path)
-
-        log_info("[auris/vosk] Extracting model…")
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            top = zf.namelist()[0].split("/")[0]
-            zf.extractall(dest.parent)
-        extracted = dest.parent / top
-        if extracted != dest:
-            extracted.rename(dest)
-
-        zip_path.unlink(missing_ok=True)
-        log_info(f"[auris/vosk] Model downloaded to {dest}")
-    except Exception as exc:
-        log_warning(
-            f"[auris/vosk] Auto-download failed: {exc}. Download manually from {url if 'url' in locals() else _SMALL_MODEL_URL}"
-        )
-
-
 def _get_default_language() -> str:
     """Return configured VOSK_LANGUAGE (default 'en-us')."""
     try:
@@ -147,14 +235,25 @@ def _get_default_language() -> str:
 
 
 def _default_model_path() -> Path:
-    """Return the default model path based on the current language setting."""
+    """Return the model path managed by MODEL_MANAGER for the current language."""
     lang = _get_default_language()
-    return Path.home() / ".cache" / "vosk" / f"vosk-model-small-{lang}"
+    model_id = _LANG_TO_MODEL_ID.get(lang, f"vosk-{lang}")
+    # If explicitly overridden by VOSK_MODEL_PATH, use that.
+    try:
+        from core.config_manager import config_registry  # type: ignore[import]
+
+        raw = config_registry.get_value("VOSK_MODEL_PATH", None)
+        if raw and str(raw) not in ("", "None"):
+            return Path(raw).expanduser()
+    except Exception:
+        pass
+    return MODEL_MANAGER.model_dir(model_id)
 
 
 def _model_path_from_language(lang: str) -> Path:
-    """Helper for constructing a model directory given a language code."""
-    return Path.home() / ".cache" / "vosk" / f"vosk-model-small-{lang}"
+    """Return the MODEL_MANAGER storage path for a given language code."""
+    model_id = _LANG_TO_MODEL_ID.get(lang.lower(), f"vosk-{lang.lower()}")
+    return MODEL_MANAGER.model_dir(model_id)
 
 
 def _convert_to_wav16k(src: str) -> str | None:

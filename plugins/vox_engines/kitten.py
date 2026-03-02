@@ -1,14 +1,22 @@
 # plugins/vox_engines/kitten.py
-"""Vox TTS engine: Kitten — lightweight TTS via Silero V3 (CPU-capable).
+"""Vox TTS engine: KittenTTS — lightweight neural TTS (CPU-optimised).
 
-Uses Silero TTS (https://github.com/snakers4/silero-models) loaded via
-torch.hub.  The 54 MB English model is downloaded on first use and cached
-in ``~/.cache/torch/hub``.
+Uses the KittenML HuggingFace models::
 
-Requirements (already present in the SyntH venv):
-    torch, torchaudio, soundfile, omegaconf
+    KittenML/kitten-tts-mini-0.8     (~450 MB, 8 voices)
+    KittenML/kitten-tts-micro-0.8    (~300 MB, 8 voices)
+    KittenML/kitten-tts-nano-0.8     (~150 MB, 8 voices)
+    KittenML/kitten-tts-nano-0.8-int8 (~150 MB INT8, 8 voices)
 
-Registration is performed at import time.
+Models are **not** bundled in the container image.  The user selects and
+downloads each model through the WebUI → Components → Manage Models panel.
+
+Requirements
+------------
+``kittentts`` package (``uv add kittentts`` or installed from
+https://github.com/KittenML/KittenTTS).
+``pydub`` for WAV→MP3 conversion of sample files (optional, graceful degradation).
+``soundfile`` for WAV serialisation.
 """
 
 from __future__ import annotations
@@ -19,100 +27,294 @@ from typing import Any
 
 from core.config_manager import config_registry
 from core.logging_utils import log_error, log_info, log_warning
+from core.model_manager import MODEL_MANAGER, ModelSpec, VoiceSpec
 from core.variables_engine import register_exposed_var
 from core.vox_registry import register_vox_engine
 from plugins.vox_base import VoxEngineBase
 
 # ---------------------------------------------------------------------------
-# Module-level model cache (loaded once, reused across calls)
+# Available voices with gender metadata (all KittenML models share this list)
 # ---------------------------------------------------------------------------
-_model: Any = None
-_model_lock = threading.Lock()
+_KITTEN_VOICE_META: list[VoiceSpec] = [
+    VoiceSpec(name="Bella", gender="F", languages=["*"]),
+    VoiceSpec(name="Jasper", gender="M", languages=["*"]),
+    VoiceSpec(name="Luna", gender="F", languages=["*"]),
+    VoiceSpec(name="Bruno", gender="M", languages=["*"]),
+    VoiceSpec(name="Rosie", gender="F", languages=["*"]),
+    VoiceSpec(name="Hugo", gender="M", languages=["*"]),
+    VoiceSpec(name="Kiki", gender="F", languages=["*"]),
+    VoiceSpec(name="Leo", gender="M", languages=["*"]),
+]
 
-_SILERO_LANG = "en"
-_SILERO_SPEAKER_MODEL = "v3_en"
-_SILERO_SPEAKER = "en_1"  # one of: en_0 … en_117
-_SILERO_SAMPLE_RATE = 24000  # must be 8000 | 24000 | 48000
+# Flat list kept for backward-compat code that only needs names
+_KITTEN_VOICES: list[str] = [v.name for v in _KITTEN_VOICE_META]
 
-# Expose Kitten-specific settings in the WebUI → Components section.
+_DEFAULT_VOICE = "Bella"
+_DEFAULT_MODEL = "kitten-tts-nano-0.8"
+_SAMPLE_RATE = 24000
+
+# ---------------------------------------------------------------------------
+# Register models with the Model Manager (one entry per HF model variant)
+# ---------------------------------------------------------------------------
+_MODEL_SPECS: list[ModelSpec] = [
+    ModelSpec(
+        model_id="kitten-tts-mini-0.8",
+        plugin_id="vox_kitten",
+        display_name="KittenTTS Mini 0.8",
+        description="Highest quality KittenTTS variant (~450 MB). Best for production use.",
+        tags=["tts", "local", "cpu", "neural"],
+        size_mb=450,
+        voices_meta=_KITTEN_VOICE_META,
+        supported_languages=["en"],
+        hf_repo_id="KittenML/kitten-tts-mini-0.8",
+    ),
+    ModelSpec(
+        model_id="kitten-tts-micro-0.8",
+        plugin_id="vox_kitten",
+        display_name="KittenTTS Micro 0.8",
+        description="Balanced quality/speed KittenTTS variant (~300 MB).",
+        tags=["tts", "local", "cpu", "neural"],
+        size_mb=300,
+        voices_meta=_KITTEN_VOICE_META,
+        supported_languages=["en"],
+        hf_repo_id="KittenML/kitten-tts-micro-0.8",
+    ),
+    ModelSpec(
+        model_id="kitten-tts-nano-0.8",
+        plugin_id="vox_kitten",
+        display_name="KittenTTS Nano 0.8",
+        description="Fast, lightweight KittenTTS variant (~150 MB). Recommended for CPU-only setups.",
+        tags=["tts", "local", "cpu", "neural", "recommended"],
+        size_mb=150,
+        voices_meta=_KITTEN_VOICE_META,
+        supported_languages=["en"],
+        hf_repo_id="KittenML/kitten-tts-nano-0.8",
+    ),
+    ModelSpec(
+        model_id="kitten-tts-nano-0.8-int8",
+        plugin_id="vox_kitten",
+        display_name="KittenTTS Nano 0.8 INT8",
+        description="INT8 quantised nano variant (~150 MB). Lower memory footprint.",
+        tags=["tts", "local", "cpu", "neural", "quantised"],
+        size_mb=150,
+        voices_meta=_KITTEN_VOICE_META,
+        supported_languages=["en"],
+        hf_repo_id="KittenML/kitten-tts-nano-0.8-int8",
+    ),
+]
+
+for _spec in _MODEL_SPECS:
+    MODEL_MANAGER.register(_spec)
+
+# ---------------------------------------------------------------------------
+# Expose engine settings in the WebUI → Components section
+# ---------------------------------------------------------------------------
 register_exposed_var(
-    "KITTEN_SPEAKER",
-    label="Kitten TTS — Speaker",
-    default="en_1",
+    "KITTEN_MODEL",
+    label="Kitten TTS — Model",
+    default=_DEFAULT_MODEL,
     value_type=str,
     ui_type="select",
-    options=[f"en_{i}" for i in range(118)],
-    description="Silero V3 speaker ID (en_0 … en_117). Changes Kitten's voice.",
+    options=[s.model_id for s in _MODEL_SPECS],
+    description=(
+        "Which KittenTTS model variant to use. "
+        "Download the model first via the Manage Models panel."
+    ),
     scope="plugins",
     component="vox_plugin",
     advanced=False,
 )
 
 register_exposed_var(
-    "KITTEN_SAMPLE_RATE",
-    label="Kitten TTS — Sample Rate (Hz)",
-    default=24000,
-    value_type=int,
+    "KITTEN_VOICE",
+    label="Kitten TTS — Voice",
+    default=_DEFAULT_VOICE,
+    value_type=str,
     ui_type="select",
-    options=[8000, 24000, 48000],
-    description="Audio sample rate in Hz. Must be 8000, 24000 or 48000.",
+    options=_KITTEN_VOICES,
+    description="Active voice for KittenTTS synthesis.",
     scope="plugins",
     component="vox_plugin",
-    advanced=True,
+    advanced=False,
 )
 
-
-def _load_model() -> Any:
-    """Load (and cache) the Silero TTS model. Thread-safe."""
-    global _model
-    if _model is not None:
-        return _model
-    with _model_lock:
-        if _model is not None:
-            return _model
-        try:
-            import torch
-
-            log_info(
-                "[vox/kitten] Loading Silero TTS model (first run may download ~55 MB)…"
-            )
-            model, _ = torch.hub.load(
-                repo_or_dir="snakers4/silero-models",
-                model="silero_tts",
-                language=_SILERO_LANG,
-                speaker=_SILERO_SPEAKER_MODEL,
-                trust_repo=True,
-                verbose=False,
-            )
-            model.to(torch.device("cpu"))
-            _model = model
-            log_info("[vox/kitten] Silero TTS model ready.")
-        except Exception as exc:
-            log_error(f"[vox/kitten] Failed to load Silero model: {exc}")
-    return _model
+# ---------------------------------------------------------------------------
+# Model cache (one instance per model_id to avoid repeated loads)
+# ---------------------------------------------------------------------------
+_model_cache: dict[str, Any] = {}
+_model_cache_lock = threading.Lock()
 
 
+def _get_model(model_id: str) -> Any | None:
+    """Return a cached KittenTTS instance, loading from disk if needed."""
+    with _model_cache_lock:
+        if model_id in _model_cache:
+            return _model_cache[model_id]
+
+    if not MODEL_MANAGER.is_downloaded(model_id):
+        log_warning(
+            f"[vox/kitten] Model '{model_id}' is not downloaded. "
+            "Download it via the WebUI → Components → Manage Models."
+        )
+        return None
+
+    model_path = MODEL_MANAGER.model_dir(model_id)
+    try:
+        from kittentts import KittenTTS  # type: ignore[import]
+
+        log_info(f"[vox/kitten] Loading KittenTTS from {model_path} …")
+        instance = KittenTTS(str(model_path))
+        with _model_cache_lock:
+            _model_cache[model_id] = instance
+        log_info(f"[vox/kitten] KittenTTS '{model_id}' ready.")
+        return instance
+    except ImportError:
+        log_error(
+            "[vox/kitten] 'kittentts' package not installed. "
+            "Install from https://github.com/KittenML/KittenTTS"
+        )
+    except Exception as exc:
+        log_error(f"[vox/kitten] Failed to load model '{model_id}': {exc}")
+    return None
+
+
+def _audio_to_mp3(audio_array: Any, sample_rate: int) -> bytes | None:
+    """Convert a numpy-compatible audio array to MP3 bytes via pydub (optional)."""
+    try:
+        import soundfile as sf
+        from pydub import AudioSegment  # type: ignore[import]
+
+        arr = audio_array
+        if hasattr(arr, "numpy"):
+            arr = arr.numpy()
+        wav_buf = io.BytesIO()
+        sf.write(wav_buf, arr, sample_rate, format="WAV")
+        wav_buf.seek(0)
+        seg = AudioSegment.from_wav(wav_buf)
+        mp3_buf = io.BytesIO()
+        seg.export(mp3_buf, format="mp3", bitrate="128k")
+        return mp3_buf.getvalue()
+    except Exception:
+        return None
+
+
+def _audio_to_wav(audio_array: Any, sample_rate: int) -> bytes | None:
+    """Convert numpy audio array to WAV bytes."""
+    try:
+        import soundfile as sf
+
+        arr = audio_array
+        if hasattr(arr, "numpy"):
+            arr = arr.numpy()
+        buf = io.BytesIO()
+        sf.write(buf, arr, sample_rate, format="WAV")
+        return buf.getvalue()
+    except Exception as exc:
+        log_error(f"[vox/kitten] WAV conversion failed: {exc}")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# KittenVoxEngine
+# ---------------------------------------------------------------------------
 class KittenVoxEngine(VoxEngineBase):
-    """Kitten engine — CPU-capable TTS via Silero V3."""
+    """KittenTTS engine — CPU-capable neural TTS via KittenML HuggingFace models."""
 
-    display_name = "Kitten (Silero TTS)"
+    display_name = "KittenTTS"
+
+    def _active_model_id(self) -> str:
+        return str(
+            config_registry.get_value(
+                "KITTEN_MODEL",
+                _DEFAULT_MODEL,
+                value_type=str,
+                group="plugins",
+                component="vox_plugin",
+            )
+        )
+
+    def _active_voice(self) -> str:
+        return str(
+            config_registry.get_value(
+                "KITTEN_VOICE",
+                _DEFAULT_VOICE,
+                value_type=str,
+                group="plugins",
+                component="vox_plugin",
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # Speaker metadata helpers (used by /api/vox/speakers endpoint)
+    # ------------------------------------------------------------------
+
+    def get_speakers(self) -> list[dict]:
+        """Return list of voice dicts for the currently-selected model."""
+        model_id = self._active_model_id()
+        spec = MODEL_MANAGER.get_spec(model_id)
+        voices = spec.voices if spec else _KITTEN_VOICES
+        return [{"code": v, "name": v, "language": "en"} for v in voices]
+
+    def sample(self, speaker: str, text_hint: str | None = None) -> bytes:
+        """Return MP3 bytes for a pre-generated voice sample.
+
+        The method accepts an optional ``text_hint`` which is the sample text
+        that the caller would like the engine to speak; this is used by the
+        generator to append the voice name so each file is distinct.  Backward
+        compatibility is preserved by defaulting to ``None``.
+
+        Generates the sample on first call if the model is downloaded.
+        Raises NotImplementedError if sample cannot be produced.
+        """
+
+        def _generate(text: str, voice: str | None) -> bytes | None:
+            # incorporate the voice into the prompt so samples are recognisable
+            if voice:
+                text = f"{text} (voice {voice})"
+            model_id = self._active_model_id()
+            tts = _get_model(model_id)
+            if tts is None:
+                return None
+            try:
+                audio = tts.generate(text=text, voice=voice)
+                mp3 = _audio_to_mp3(audio, _SAMPLE_RATE)
+                return mp3 if mp3 else _audio_to_wav(audio, _SAMPLE_RATE)
+            except Exception as exc:
+                log_error(f"[vox/kitten] sample generation failed: {exc}")
+                return None
+
+        model_id = self._active_model_id()
+        # ensure_sample will call _generate with the spec's sample_text
+        path = MODEL_MANAGER.ensure_sample(model_id, speaker, _generate)
+        if path and path.exists():
+            return path.read_bytes()
+        raise NotImplementedError(
+            f"No sample available for voice '{speaker}' "
+            f"(model '{model_id}' may not be downloaded)."
+        )
 
     @property
     def output_format(self) -> str:
         return "wav"
 
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
     def setup(self) -> None:
-        try:
-            import torch  # noqa: F401
-            import soundfile  # noqa: F401
-        except ImportError as exc:
+        model_id = self._active_model_id()
+        if MODEL_MANAGER.is_downloaded(model_id):
+            t = threading.Thread(target=_get_model, args=(model_id,), daemon=True)
+            t.start()
+        else:
             log_warning(
-                f"[vox/kitten] Missing dependency: {exc}. TTS will be unavailable."
+                f"[vox/kitten] Model '{model_id}' not downloaded — "
+                "TTS unavailable until the model is downloaded via the UI."
             )
-            return
-        # Pre-load model in background so first TTS call is fast.
-        t = threading.Thread(target=_load_model, daemon=True)
-        t.start()
+
+    # ------------------------------------------------------------------
+    # TTS generation
+    # ------------------------------------------------------------------
 
     def generate_tts(
         self,
@@ -120,48 +322,20 @@ class KittenVoxEngine(VoxEngineBase):
         emotion: str | None = None,
         **kwargs: Any,
     ) -> bytes | None:
-        try:
-            import soundfile as sf
-        except ImportError:
-            log_error("[vox/kitten] soundfile not installed.")
+        model_id = str(kwargs.get("model_id") or self._active_model_id())
+        voice = str(
+            kwargs.get("speaker") or kwargs.get("voice") or self._active_voice()
+        )
+
+        tts = _get_model(model_id)
+        if tts is None:
             return None
 
-        model = _load_model()
-        if model is None:
-            log_error("[vox/kitten] Silero model not available.")
-            return None
-
-        # Allow caller to override speaker/sample_rate; fall back to exposed config vars.
-        speaker = kwargs.get("speaker") or config_registry.get_value(
-            "KITTEN_SPEAKER",
-            _SILERO_SPEAKER,
-            value_type=str,
-            group="plugins",
-            component="vox_plugin",
-        )
-        sample_rate = int(
-            kwargs.get("sample_rate")
-            or config_registry.get_value(
-                "KITTEN_SAMPLE_RATE",
-                _SILERO_SAMPLE_RATE,
-                value_type=int,
-                group="plugins",
-                component="vox_plugin",
-            )
-        )
-        if sample_rate not in (8000, 24000, 48000):
-            log_warning(
-                f"[vox/kitten] Unsupported sample_rate {sample_rate}; defaulting to 24000."
-            )
-            sample_rate = 24000
-
         try:
-            audio = model.apply_tts(text=text, speaker=speaker, sample_rate=sample_rate)
-            buf = io.BytesIO()
-            sf.write(buf, audio.numpy(), sample_rate, format="WAV")
-            return buf.getvalue()
+            audio = tts.generate(text=text, voice=voice)
+            return _audio_to_wav(audio, _SAMPLE_RATE)
         except Exception as exc:
-            log_error(f"[vox/kitten] Synthesis failed: {exc}")
+            log_error(f"[vox/kitten] TTS generation failed: {exc}")
             return None
 
 
@@ -176,5 +350,5 @@ register_vox_engine(
         "streaming": False,
         "local": True,
     },
-    label="KittenTTS — lightweight TTS optimised for low-performance hardware.",
+    label="KittenTTS — lightweight neural TTS (CPU-friendly, multiple quality tiers).",
 )

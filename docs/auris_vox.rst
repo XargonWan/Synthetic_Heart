@@ -236,6 +236,28 @@ Configuration (all WebUI-configurable):
 
 Backward-compatibility:  All ``TTS_*`` config keys (``TTS_ENABLED``, ``TTS_ENDPOINTS``, ``TTS_TIMEOUT_SECONDS``, ``TTS_OUTPUT_DIR``) still work as before and are read by the ``http`` Vox engine.
 
+WebUI helper endpoints
+~~~~~~~~~~~~~~~~~~~~~~
+
+Two read-only HTTP endpoints support voice selection and sample playback in the
+web interface.  Engines may implement them if they expose multiple speakers or
+wish to supply short example clips.
+
+* ``GET /api/vox/speakers?engine=<name>``
+  returns a JSON array of speaker metadata for the specified engine (the
+  configured ``ACTIVE_VOX_ENGINE`` is used when the query parameter is
+  omitted).  The format is engine-specific; ``kitten`` returns
+  ``[{"code": "en_1", "name": "English Female 1", "language": "en"}, …]``.
+  If the engine is unknown a ``404`` is returned.
+
+* ``GET /api/vox/sample?engine=<name>&speaker=<code>``
+  streams a short WAV file for the given speaker.  Engines that cannot provide
+  samples should raise ``NotImplementedError`` which results in a ``404``.
+  A missing ``speaker`` parameter produces a ``400`` error.
+
+These helpers are used internally by ``res/synth_webui/js/main.js`` to
+populate the Kitten voice selector and play sample audio.
+
 Public API:
 
 .. code-block:: python

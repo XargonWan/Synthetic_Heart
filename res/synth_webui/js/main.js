@@ -2511,6 +2511,95 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     setupRegistrySelect('auris-engine-select','auris-engine-info','auris-engine-label','auris-engine-description', data.auris || [], 'ACTIVE_AURIS_ENGINE');
                     setupRegistrySelect('live-engine-select', 'live-engine-info', 'live-engine-label', 'live-engine-description',  data.live || [], null);  // Live has no single active-engine config key
 
+                    // ── Kitten (Silero V3) speaker selector ────────────────────
+                    const kittenSpeakerSelect = document.getElementById('kitten-speaker-select');
+                    const kittenPlayBtn = document.getElementById('kitten-play-btn');
+                    let kittenSpeakerList = [];
+
+                    function populateKittenSpeakers(currentValue) {
+                        if (!kittenSpeakerSelect) return;
+                        kittenSpeakerSelect.innerHTML = '';
+                        kittenSpeakerList.forEach(s => {
+                            const opt = document.createElement('option');
+                            opt.value = s.code;
+                            opt.textContent = s.name || s.code;
+                            if (String(currentValue) === s.code) opt.selected = true;
+                            kittenSpeakerSelect.appendChild(opt);
+                        });
+                    }
+
+                    async function loadKittenSpeakers() {
+                        try {
+                            const r = await fetch('/api/vox/speakers?engine=kitten');
+                            if (r.ok) {
+                                kittenSpeakerList = await r.json();
+                            } else {
+                                kittenSpeakerList = [];
+                            }
+                        } catch (e) {
+                            console.error('[synth_webui] failed to load kitten speakers', e);
+                            kittenSpeakerList = [];
+                        }
+                    }
+                    async function updateKittenControlsVisibility() {
+                        if (!kittenSpeakerSelect) return;
+                        const voxSel = document.getElementById('vox-engine-select');
+                        if (voxSel && voxSel.value === 'kitten') {
+                            // ensure we have the speaker list before populating
+                            await loadKittenSpeakers();
+                            kittenSpeakerSelect.style.display = '';
+                            kittenPlayBtn.style.display = '';
+                            try {
+                                const r = await fetch('/api/config');
+                                if (r.ok) {
+                                    const cfg = await r.json();
+                                    const item = Array.isArray(cfg.items)
+                                        ? cfg.items.find(i => i.key === 'KITTEN_SPEAKER')
+                                        : null;
+                                    populateKittenSpeakers(item && item.value ? item.value : 'en_1');
+                                } else {
+                                    populateKittenSpeakers('en_1');
+                                }
+                            } catch (e) {
+                                populateKittenSpeakers('en_1');
+                            }
+                        } else {
+                            kittenSpeakerSelect.style.display = 'none';
+                            if (kittenPlayBtn) kittenPlayBtn.style.display = 'none';
+                        }
+                    }
+                    if (kittenSpeakerSelect && !kittenSpeakerSelect.dataset.bound) {
+                        kittenSpeakerSelect.addEventListener('change', async () => {
+                            const speaker = kittenSpeakerSelect.value;
+                            try {
+                                await fetch('/api/config', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ key: 'KITTEN_SPEAKER', value: speaker })
+                                });
+                                window.showToast && window.showToast('Kitten speaker set to ' + speaker);
+                            } catch (e) {
+                                console.error('[synth_webui] Failed to set KITTEN_SPEAKER', e);
+                                window.showToast && window.showToast('Failed to save speaker', true);
+                            }
+                        });
+                        kittenSpeakerSelect.dataset.bound = '1';
+                    }
+                    if (kittenPlayBtn && !kittenPlayBtn.dataset.bound) {
+                        kittenPlayBtn.addEventListener('click', () => {
+                            const code = kittenSpeakerSelect.value;
+                            const audio = new Audio(`/api/vox/sample?engine=kitten&speaker=${code}`);
+                            audio.play();
+                        });
+                        kittenPlayBtn.dataset.bound = '1';
+                    }
+                    // show kitten controls now + wire engine change event
+                    updateKittenControlsVisibility();
+                    const voxEngineSel = document.getElementById('vox-engine-select');
+                    if (voxEngineSel) {
+                        voxEngineSel.addEventListener('change', updateKittenControlsVisibility);
+                    }
+
                     // ── Vosk language selector ─────────────────────────────────
                     const voskLangSelect = document.getElementById('auris-vosk-language');
                     const VOSK_LANGUAGES = [

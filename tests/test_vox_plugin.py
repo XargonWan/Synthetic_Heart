@@ -6,6 +6,11 @@ import types
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from fastapi.testclient import TestClient
+
+from core.webui import SynthWebUIInterface
+from core.vox_registry import VoxRegistry
+
 import pytest
 
 
@@ -195,3 +200,112 @@ def test_auris_engine_base_contract() -> None:
     assert not hasattr(e, "supports_streaming")
     assert not hasattr(e, "process_chunk")
     assert not hasattr(e, "end_session")
+
+
+# additional tests for new vox HTTP helpers and Kitten engine
+
+
+def _make_test_client_with_engine(monkeypatch, engine_name: str, engine_instance):
+    """Helper: create webui TestClient with a registry containing a single engine."""
+    webui = SynthWebUIInterface(autostart=False)
+    client = TestClient(webui.app)
+    reg = VoxRegistry()
+    reg._engine_modules[engine_name] = "dummy_module"
+    reg._instances[engine_name] = engine_instance
+    # override the global singleton used by the webui endpoints
+    monkeypatch.setattr("core.vox_registry.VOX_REGISTRY", reg)
+    return client
+
+
+class DummyEngine:
+    def get_speakers(self):
+        return [{"code": "a", "name": "Alpha"}]
+
+    def sample(self, speaker):
+        if speaker == "a":
+            return b"RIFF" + b"\x00" * 36
+        raise NotImplementedError()
+
+
+def test_vox_speakers_endpoint_success(monkeypatch):
+    client = _make_test_client_with_engine(monkeypatch, "dummy", DummyEngine())
+    resp = client.get("/api/vox/speakers?engine=dummy")
+    assert resp.status_code == 200
+    assert resp.json() == [{"code": "a", "name": "Alpha"}]
+
+
+def test_vox_speakers_endpoint_not_found(monkeypatch):
+    client = _make_test_client_with_engine(monkeypatch, "dummy", DummyEngine())
+    resp = client.get("/api/vox/speakers?engine=missing")
+    assert resp.status_code == 404
+
+
+def test_vox_sample_endpoint_success(monkeypatch):
+    client = _make_test_client_with_engine(monkeypatch, "dummy", DummyEngine())
+    resp = client.get("/api/vox/sample?engine=dummy&speaker=a")
+    assert resp.status_code == 200
+    assert resp.headers.get("content-type", "").startswith("audio/")
+
+
+def test_vox_sample_endpoint_missing_speaker(monkeypatch):
+    client = _make_test_client_with_engine(monkeypatch, "dummy", DummyEngine())
+    resp = client.get("/api/vox/sample?engine=dummy")
+    assert resp.status_code == 400
+
+
+def test_vox_sample_endpoint_engine_not_found(monkeypatch):
+    client = _make_test_client_with_engine(monkeypatch, "dummy", DummyEngine())
+    resp = client.get("/api/vox/sample?engine=none&speaker=a")
+    assert resp.status_code == 404
+
+
+def test_vox_sample_endpoint_not_implemented(monkeypatch):
+    client = _make_test_client_with_engine(monkeypatch, "dummy", DummyEngine())
+    resp = client.get("/api/vox/sample?engine=dummy&speaker=bad")
+    assert resp.status_code == 404
+
+
+# tests for the Kitten engine helpers
+
+
+def test_kitten_speaker_metadata():
+    from plugins.vox_engines.kitten import KittenVoxEngine, _SPEAKER_METADATA
+
+    engine = KittenVoxEngine()
+    speakers = engine.get_speakers()
+    assert isinstance(speakers, list) and len(speakers) == 118
+
+    # verify a few known entries
+    for code, meta in _SPEAKER_METADATA.items():
+        found = next((s for s in speakers if s["code"] == code), None)
+        assert found is not None
+        assert found["name"] == meta["name"]
+        assert found["language"] == meta["language"]
+
+
+def test_kitten_sample_behavior(tmp_path, monkeypatch):
+    from plugins.vox_engines.kitten import KittenVoxEngine
+    from core.config_manager import config_registry
+
+    # make sure engine will look under our temporary directory
+    original_get = config_registry.get_value
+
+    def fake_get(key, default=None, **kw):
+        if key == "VOX_OUTPUT_DIR":
+            return str(tmp_path)
+        return original_get(key, default, **kw)
+
+    monkeypatch.setattr(config_registry, "get_value", fake_get)
+
+    engine = KittenVoxEngine()
+    with pytest.raises(NotImplementedError):
+        engine.sample("nonexistent")
+
+    # create a fake sample file
+    sample_dir = tmp_path / "samples" / "kitten"
+    sample_dir.mkdir(parents=True)
+    wav_path = sample_dir / "kitten_test.wav"
+    wav_path.write_bytes(b"RIFF" + b"\x00" * 36)
+
+    data = engine.sample("test")
+    assert data.startswith(b"RIFF")
