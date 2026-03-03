@@ -528,6 +528,8 @@ class SynthWebUIInterface:
         self.app.post("/api/components/cortex")(self.set_cortex_engine)
         # Login control for Selenium-based engines
         self.app.post("/api/components/cortex/login")(self.cortex_login)
+        # Model selection for cortex engines
+        self.app.post("/api/components/cortex/model")(self.set_cortex_model)
         # Run component actions on demand (e.g., Run Now button)
         self.app.post("/api/components/run")(self.run_component)
         self.app.get("/api/logchat/info")(self.get_logchat_info)
@@ -6778,6 +6780,39 @@ class SynthWebUIInterface:
                 # If SeleniumLLMBase is not importable, just skip enrichment
                 pass
 
+            # Gather model information from engines that expose it
+            supported_models: list[str] = []
+            current_model: str | None = None
+            if instance is not None:
+                try:
+                    if hasattr(instance, "get_supported_models"):
+                        supported_models = instance.get_supported_models() or []
+                except Exception:
+                    pass
+                try:
+                    if hasattr(instance, "get_current_model"):
+                        current_model = instance.get_current_model()
+                except Exception:
+                    pass
+
+            # Re-evaluate health dynamically for loaded engines (init-time status
+            # may be stale, e.g. API key set after engine was first loaded)
+            engine_status = meta["status"]
+            engine_details = meta["details"]
+            engine_error = meta["error"]
+            if instance is not None and hasattr(instance, "get_health_status"):
+                try:
+                    ok, err_msg = core_initializer._evaluate_cortex_health(instance)
+                    if ok:
+                        engine_status = "success"
+                        engine_details = f"Cortex engine: {instance.__class__.__name__}"
+                        engine_error = ""
+                    else:
+                        engine_status = "failed"
+                        engine_error = err_msg or "Engine not ready"
+                except Exception:
+                    pass
+
             cortex_engines.append(
                 {
                     "name": engine_name,
@@ -6788,9 +6823,9 @@ class SynthWebUIInterface:
                     "label": cortex_reg._engine_meta.get(engine_name, {}).get(
                         "label", ""
                     ),
-                    "status": meta["status"],
-                    "details": meta["details"],
-                    "error": meta["error"],
+                    "status": engine_status,
+                    "details": engine_details,
+                    "error": engine_error,
                     "login_state": login_state,
                     "logged_in": logged_in,
                     "login_url": login_url,
@@ -6798,6 +6833,8 @@ class SynthWebUIInterface:
                     "cortex": cortex_reg._engine_meta.get(engine_name, {}).get(
                         "cortex", "llm_provider"
                     ),
+                    "supported_models": supported_models,
+                    "current_model": current_model,
                 }
             )
         interfaces_data: List[dict] = []
@@ -7149,6 +7186,75 @@ class SynthWebUIInterface:
             ) from exc
 
         return JSONResponse({"status": "ok", "active": name})
+
+    async def set_cortex_model(self, request: Request) -> JSONResponse:
+        """Set the active model for the currently loaded cortex engine.
+
+        Expects JSON: ``{"engine": "openrouter", "model": "anthropic/claude-sonnet-4"}``
+        """
+        try:
+            data = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+
+        engine_name = str(data.get("engine") or "").strip()
+        model_name = str(data.get("model") or "").strip()
+        if not engine_name or not model_name:
+            raise HTTPException(status_code=400, detail="Missing 'engine' or 'model'")
+
+        try:
+            from core.cortex_registry import get_cortex_registry
+
+            registry = get_cortex_registry()
+            instance = registry.get_engine(engine_name)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} unable to access Cortex registry: {exc}")
+            raise HTTPException(
+                status_code=500, detail="Unable to access Cortex registry"
+            ) from exc
+
+        if instance is None:
+            raise HTTPException(
+                status_code=404, detail=f"Engine '{engine_name}' not loaded"
+            )
+
+        if not hasattr(instance, "set_current_model"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Engine '{engine_name}' does not support model selection",
+            )
+
+        try:
+            instance.set_current_model(model_name)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            log_error(
+                f"{LOG_PREFIX} failed to set model '{model_name}' on {engine_name}: {exc}"
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to set model: {exc}",
+            ) from exc
+
+        # Also persist to the relevant config key if available
+        try:
+            model_config_keys = {
+                "openrouter": "OPENROUTER_DEFAULT_MODEL",
+                "gemini_api": "GEMINI_MODEL",
+            }
+            config_key = model_config_keys.get(engine_name)
+            if config_key:
+                config_registry.set_value(config_key, model_name)
+        except Exception as exc:
+            log_warning(
+                f"{LOG_PREFIX} model set on engine but config persist failed: {exc}"
+            )
+
+        log_info(f"{LOG_PREFIX} Model for '{engine_name}' set to '{model_name}'")
+        return JSONResponse(
+            {"status": "ok", "engine": engine_name, "model": model_name}
+        )
 
     async def cortex_login(self, request: Request):
         """Start the login flow for a Selenium-based Cortex engine (non-blocking).
