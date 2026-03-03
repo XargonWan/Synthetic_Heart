@@ -276,11 +276,24 @@ class TestMultimodalExtraction:
         assert parts[0]["type"] == "image_url"
         assert "data:image/jpeg;base64,AAAA" in parts[0]["image_url"]["url"]
 
-    def test_skips_non_image(self) -> None:
+    def test_extracts_audio_attachment(self) -> None:
         plugin = self._make_plugin()
         prompt = {
             "attachments": [
                 {"mime_type": "audio/mpeg", "data": "BBBB"},
+            ]
+        }
+        parts = plugin._extract_multimodal_parts(prompt)
+        assert len(parts) == 1
+        assert parts[0]["type"] == "input_audio"
+        assert parts[0]["input_audio"]["format"] == "mp3"
+        assert parts[0]["input_audio"]["data"] == "BBBB"
+
+    def test_skips_unsupported_mime(self) -> None:
+        plugin = self._make_plugin()
+        prompt = {
+            "attachments": [
+                {"mime_type": "application/pdf", "data": "CCCC"},
             ]
         }
         parts = plugin._extract_multimodal_parts(prompt)

@@ -27,6 +27,7 @@ import requests
 
 from core.ai_plugin_base import AIPluginBase
 from core.config_manager import config_registry
+from core.cortex_api_logger import log_cortex_request, log_cortex_response
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 
 ENGINE_LABEL = "OpenRouter — multi-provider LLM gateway (OpenAI-compatible)"
@@ -356,6 +357,18 @@ async def _catalog_refresh_loop(base_url: str, interval_minutes: int) -> None:
 # Supported image MIME types for OpenAI vision format
 _VISION_MIME_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 
+# Supported audio MIME types — sent as input_audio content parts (OpenAI format)
+_AUDIO_MIME_TYPES: dict[str, str] = {
+    "audio/ogg": "ogg",
+    "audio/mpeg": "mp3",
+    "audio/mp3": "mp3",
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+    "audio/mp4": "mp4",
+    "audio/webm": "webm",
+    "audio/flac": "flac",
+}
+
 
 def _parse_routes(raw: Any) -> dict[str, Any]:
     """Safely parse model routes from config (may be str or dict)."""
@@ -657,6 +670,37 @@ class OpenRouterPlugin(AIPluginBase):
                 multimodal_parts=multimodal_parts if multimodal_parts else None,
             )
 
+            # ── Audio fallback: transcribe & retry if provider rejects audio ─
+            if (
+                multimodal_parts
+                and "No endpoints found that support input audio" in response_text
+            ):
+                audio_parts = [
+                    p for p in multimodal_parts if p.get("type") == "input_audio"
+                ]
+                if audio_parts:
+                    log_info(
+                        "[openrouter] Provider rejected input_audio — "
+                        "transcribing via Gemini and retrying"
+                    )
+                    transcription = await self._transcribe_audio_via_gemini(audio_parts)
+                    # Keep non-audio parts (images), drop audio
+                    remaining = [
+                        p for p in multimodal_parts if p.get("type") != "input_audio"
+                    ]
+                    # Prepend transcription to the prompt text
+                    prompt_text = (
+                        f"[Voice message transcription]: {transcription}\n\n"
+                        + prompt_text
+                    )
+                    response_text = await self._openai_chat_completion(
+                        prompt_text=prompt_text,
+                        system_instruction=system_instruction,
+                        max_tokens=max_tokens,
+                        model=model,
+                        multimodal_parts=remaining if remaining else None,
+                    )
+
             log_debug(f"[openrouter] Received response ({len(response_text)} chars)")
             return response_text
 
@@ -672,6 +716,85 @@ class OpenRouterPlugin(AIPluginBase):
                     ]
                 }
             )
+
+    # ------------------------------------------------------------------
+    # Audio transcription fallback (via Gemini base cortex)
+    # ------------------------------------------------------------------
+
+    async def _transcribe_audio_via_gemini(
+        self, audio_parts: list[dict[str, Any]]
+    ) -> str:
+        """Transcribe audio content parts using Gemini when OpenRouter
+        rejects ``input_audio``.  Returns concatenated transcription text."""
+        transcriptions: list[str] = []
+        try:
+            from core.cortex_registry import get_cortex_registry
+
+            gemini = get_cortex_registry().get_engine("gemini_api")
+            if gemini is None or not getattr(gemini, "client", None):
+                log_warning(
+                    "[openrouter] Gemini engine not available for audio transcription"
+                )
+                return "[Voice message — audio could not be transcribed]"
+
+            from google.genai import types
+
+            for part in audio_parts:
+                inner = part.get("input_audio", {})
+                b64_data: str = inner.get("data", "")
+                fmt: str = inner.get("format", "ogg")
+                if not b64_data:
+                    continue
+
+                mime_map = {v: k for k, v in _AUDIO_MIME_TYPES.items()}
+                mime = mime_map.get(fmt, f"audio/{fmt}")
+                raw_bytes = base64.b64decode(b64_data)
+
+                log_debug(
+                    f"[openrouter] Transcribing audio ({len(raw_bytes)} bytes, "
+                    f"{mime}) via Gemini"
+                )
+
+                response = await gemini.client.aio.models.generate_content(
+                    model=gemini._current_model,
+                    contents=[
+                        types.Content(
+                            parts=[
+                                types.Part(
+                                    text=(
+                                        "Transcribe the following audio message "
+                                        "exactly as spoken. Output ONLY the "
+                                        "transcribed text."
+                                    )
+                                ),
+                                types.Part(
+                                    inline_data=types.Blob(
+                                        mime_type=mime, data=raw_bytes
+                                    )
+                                ),
+                            ]
+                        )
+                    ],
+                    config=types.GenerateContentConfig(
+                        system_instruction=(
+                            "You are a speech-to-text transcription system. "
+                            "Output ONLY the exact words spoken."
+                        ),
+                        response_mime_type="text/plain",
+                    ),
+                )
+                if response and response.text:
+                    transcriptions.append(response.text.strip())
+
+        except Exception as exc:
+            log_error(f"[openrouter] Audio transcription failed: {exc}")
+            return "[Voice message — audio transcription failed]"
+
+        return (
+            "\n".join(transcriptions)
+            if transcriptions
+            else "[Voice message — no speech detected]"
+        )
 
     # ------------------------------------------------------------------
     # OpenAI-compatible chat completion
@@ -766,6 +889,16 @@ class OpenRouterPlugin(AIPluginBase):
                 },
             ],
         }
+
+        # ── Log the outgoing request ──────────────────────────────────
+        log_cortex_request(
+            "openrouter",
+            model=resolved_model,
+            url=url,
+            headers=headers,
+            payload=payload,
+        )
+        _req_start = time.monotonic()
 
         def _do_request() -> requests.Response:
             return requests.post(url, headers=headers, json=payload, timeout=120)
@@ -864,6 +997,14 @@ class OpenRouterPlugin(AIPluginBase):
             if isinstance(error_msg, dict):
                 error_msg = error_msg.get("message", str(error_msg))
             log_error(f"[openrouter] API error: {error_msg}")
+            _elapsed = (time.monotonic() - _req_start) * 1000
+            log_cortex_response(
+                "openrouter",
+                model=resolved_model,
+                status=int(getattr(response, "status_code", 0) or 0),
+                error=str(error_msg),
+                elapsed_ms=_elapsed,
+            )
             return json.dumps(
                 {
                     "actions": [
@@ -913,6 +1054,17 @@ class OpenRouterPlugin(AIPluginBase):
                 f"completion_tokens={usage.get('completion_tokens')}, "
                 f"model={data.get('model', resolved_model)}"
             )
+
+        # ── Log the response ────────────────────────────────────────────
+        _elapsed = (time.monotonic() - _req_start) * 1000
+        log_cortex_response(
+            "openrouter",
+            model=data.get("model", resolved_model),
+            status=int(getattr(response, "status_code", 0) or 0),
+            body=content.strip(),
+            usage=usage,
+            elapsed_ms=_elapsed,
+        )
 
         return content.strip()
 
@@ -964,6 +1116,22 @@ class OpenRouterPlugin(AIPluginBase):
         }
         message_action = interface_to_action.get(interface, f"message_{interface}")
 
+        is_grillo = interface == "grillo" or (
+            isinstance(prompt_dict, dict) and prompt_dict.get("grillo_beat")
+        )
+
+        if is_grillo:
+            interface_hint = (
+                "CURRENT INTERFACE: grillo (INTERNAL)\n"
+                "This is an internal introspection beat. Do NOT output any message_* actions.\n"
+                "Use ONLY internal actions like 'create_personal_diary_entry', 'set_emotion', etc."
+            )
+        else:
+            interface_hint = (
+                f"CURRENT INTERFACE: {interface}\n"
+                f"TO SEND A MESSAGE TO THE USER: Use action type '{message_action}'"
+            )
+
         system_instruction = (
             "You are part of the 'Synthetic Heart' AI system.\n"
             "\n"
@@ -973,8 +1141,7 @@ class OpenRouterPlugin(AIPluginBase):
             '3. Use this structure: {"actions": [{"type": "action_name", "payload": {...}}]}\n'
             "4. NO markdown code blocks, NO explanations outside JSON\n"
             "\n"
-            f"CURRENT INTERFACE: {interface}\n"
-            f"TO SEND A MESSAGE TO THE USER: Use action type '{message_action}'\n"
+            f"{interface_hint}\n"
             "\n"
             "The prompt contains a complete action schema with available actions.\n"
             "Follow those instructions precisely.\n"
@@ -1148,11 +1315,13 @@ class OpenRouterPlugin(AIPluginBase):
                 mime_type, _ = mt.guess_type(str(file_path))
                 mime_type = mime_type or "application/octet-stream"
 
-            # Only include images (OpenAI vision format)
-            if mime_type not in _VISION_MIME_TYPES:
+            is_image = mime_type in _VISION_MIME_TYPES
+            is_audio = mime_type in _AUDIO_MIME_TYPES
+
+            if not is_image and not is_audio:
                 if mime_type and not mime_type.startswith("application/octet"):
                     log_debug(
-                        f"[openrouter] Skipping non-image attachment: {mime_type}"
+                        f"[openrouter] Skipping unsupported attachment: {mime_type}"
                     )
                 continue
 
@@ -1169,13 +1338,24 @@ class OpenRouterPlugin(AIPluginBase):
             if not b64_data:
                 continue
 
-            parts.append(
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{mime_type};base64,{b64_data}"},
-                }
-            )
-            log_debug(f"[openrouter] Added image part: {mime_type}")
+            if is_image:
+                parts.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime_type};base64,{b64_data}"},
+                    }
+                )
+                log_debug(f"[openrouter] Added image part: {mime_type}")
+            else:
+                # Audio — OpenAI input_audio format
+                audio_fmt = _AUDIO_MIME_TYPES[mime_type]
+                parts.append(
+                    {
+                        "type": "input_audio",
+                        "input_audio": {"data": b64_data, "format": audio_fmt},
+                    }
+                )
+                log_debug(f"[openrouter] Added audio part: {mime_type} -> {audio_fmt}")
 
         return parts
 
