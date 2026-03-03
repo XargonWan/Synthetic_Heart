@@ -476,10 +476,23 @@ async def handle_incoming_message(
                 )
 
         # Unified multimodal extraction (extract BEFORE prompt building so
-        # attachments flow through the pipeline with full context)
-        attachments = await _extract_multimodal_attachments(
-            bot, message, interface_name
+        # attachments flow through the pipeline with full context).
+        # Skip extraction when the message originated from STT voice transcription:
+        # the audio has already been converted to text, so re-downloading the voice
+        # file as an attachment would send a raw audio blob to the LLM alongside the
+        # transcription — causing confused/duplicate reasoning or failed routing.
+        _is_voice_input = isinstance(context_memory_or_prompt, dict) and bool(
+            context_memory_or_prompt.get("is_voice_input", False)
         )
+        if _is_voice_input:
+            attachments: list[dict] = []
+            log_debug(
+                "[plugin_instance] Skipping multimodal extraction: is_voice_input=True (message already transcribed)"
+            )
+        else:
+            attachments = await _extract_multimodal_attachments(
+                bot, message, interface_name
+            )
         if attachments:
             log_info(
                 f"[plugin_instance] Message contains {len(attachments)} attachments from user {user_id}"

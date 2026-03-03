@@ -2,6 +2,7 @@ import os
 import asyncio
 import audioop
 import threading
+import time
 from collections import deque
 from types import SimpleNamespace
 from typing import List, Any
@@ -1781,6 +1782,67 @@ class DiscordInterface:
                     message, "attachments", []
                 ),  # Add attachments for image processing
             )
+
+            # Attempt transcription of any audio attachment via Auris and
+            # bypass normal pipeline if successful. The interface merely
+            # writes the file and passes the text on; it does not notify
+            # the user itself.
+            try:
+                from core.core_initializer import PLUGIN_REGISTRY
+            except Exception:
+                PLUGIN_REGISTRY = {}
+
+            if PLUGIN_REGISTRY.get("auris_plugin"):
+                for attachment in getattr(message, "attachments", []):
+                    mime = getattr(attachment, "content_type", None)
+                    if mime and mime.startswith("audio/"):
+                        auris = PLUGIN_REGISTRY.get("auris_plugin")
+                        try:
+                            temp_dir = os.path.join(os.getcwd(), "tmp", "live_io")
+                            os.makedirs(temp_dir, exist_ok=True)
+                            ext = (
+                                ".ogg"
+                                if "ogg" in mime
+                                else os.path.splitext(
+                                    getattr(attachment, "filename", "")
+                                )[-1]
+                            )
+                            if not ext:
+                                ext = ".mp3"
+                            path = os.path.join(
+                                temp_dir,
+                                f"disc_{getattr(message, 'id', 'x')}_{int(time.time())}{ext}",
+                            )
+                            data = await attachment.read()
+                            with open(path, "wb") as f:
+                                f.write(data)
+                            log_debug(f"[discord_interface] wrote audio to {path}")
+                            transcribed = await auris.transcribe_audio(path, mime)
+                            if transcribed:
+                                wrapped.text = transcribed
+                                setattr(wrapped, "is_voice_input", True)
+                                await message_queue.enqueue(
+                                    self.client,
+                                    wrapped,
+                                    interface_id="discord_bot",
+                                    original_message=message,
+                                    skip_mention_check=True,
+                                )
+                                try:
+                                    os.remove(path)
+                                except Exception:
+                                    pass
+                                return
+                        except Exception as e:
+                            log_warning(
+                                f"[discord_interface] Auris transcription error: {e}"
+                            )
+                        finally:
+                            try:
+                                if path and os.path.exists(path):
+                                    os.remove(path)
+                            except Exception:
+                                pass
 
             # === Wake/Sleep & Attention Logic ===
             text_lower = content.lower()

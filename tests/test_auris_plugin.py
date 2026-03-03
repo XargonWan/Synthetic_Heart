@@ -171,8 +171,12 @@ async def test_vosk_autodownload_flag(monkeypatch, tmp_path):
                 size_mb=1,
             )
         )
-    # ensure directory does not exist
+    # ensure directory does not exist and clear any cached load result
     dest = MODEL_MANAGER.model_dir(model_id)
+    key = str(dest.resolve())
+    from plugins.auris_engines.vosk_engine import _MODEL_CACHE
+
+    _MODEL_CACHE.pop(key, None)
     if dest.exists():
         for child in dest.rglob("*"):
             if child.is_file():
@@ -191,10 +195,15 @@ async def test_vosk_autodownload_flag(monkeypatch, tmp_path):
 
     called = []
 
-    async def fake_download(mid, on_progress=None):
+    def fake_download_sync(mid, on_progress=None):
         called.append(mid)
         MODEL_MANAGER.model_dir(mid).mkdir(parents=True, exist_ok=True)
         return True
+
+    monkeypatch.setattr(MODEL_MANAGER, "_download_sync", fake_download_sync)
+
+    async def fake_download(mid, on_progress=None):
+        return fake_download_sync(mid, on_progress)
 
     monkeypatch.setattr(MODEL_MANAGER, "download", fake_download)
 
@@ -211,7 +220,7 @@ async def test_vosk_autodownload_flag(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_vosk_autodownload_skipped(monkeypatch, tmp_path, caplog):
+async def test_vosk_autodownload_skipped(monkeypatch, tmp_path):
     """With auto-download disabled the engine should log a warning and not attempt."""
     from core.config_manager import config_registry as cfg
     from core.model_manager import MODEL_MANAGER, ModelSpec
@@ -247,10 +256,15 @@ async def test_vosk_autodownload_skipped(monkeypatch, tmp_path, caplog):
 
     called = []
 
-    async def fake_download(mid, on_progress=None):
+    def fake_download_sync(mid, on_progress=None):
         called.append(mid)
         MODEL_MANAGER.model_dir(mid).mkdir(parents=True, exist_ok=True)
         return True
+
+    monkeypatch.setattr(MODEL_MANAGER, "_download_sync", fake_download_sync)
+
+    async def fake_download(mid, on_progress=None):
+        return fake_download_sync(mid, on_progress)
 
     monkeypatch.setattr(MODEL_MANAGER, "download", fake_download)
 

@@ -42,6 +42,8 @@ dependencies = [
     "discord-ext-voice-recv>=0.5.2a179",
     # Auris/Vox default audio engines (packages that exist on PyPI and build cleanly)
     "vosk>=0.3.45",                    # local STT; model downloaded at runtime
+    "faster-whisper>=1.0.0",          # language detection for VOSK_LANGUAGE=auto; tiny model (~75 MB) downloaded on first use
+    "onnxruntime<1.24",               # faster-whisper dep: 1.24+ dropped Python 3.10 wheels
     "silero-vad>=5.1",                # real-time VAD service (core/vad_service)
     "torch>=2.0",                     # required by silero-vad & qwen3tts
     "transformers>=4.40",             # required by qwen3tts Vox engine
@@ -96,6 +98,7 @@ kitten    = ["torch>=2.0", "soundfile>=0.12", "omegaconf>=2.3"]
 # uv pip install '.[all-audio]'
 all-audio  = [
     "vosk>=0.3.45",
+    "faster-whisper>=1.0.0",
     "silero-vad>=5.1",
     "torch>=2.0",
     "transformers>=4.40",

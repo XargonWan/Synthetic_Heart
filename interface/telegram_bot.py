@@ -604,6 +604,22 @@ async def handle_media_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     log_info(f"[telegram_bot] Handling live media message from {message.from_user.id}")
 
+    # react based on config if the message is directed (media is always treated as directed)
+    try:
+        from core.mention_utils import is_message_for_bot
+        from core.reaction_handler import get_reaction_emoji, react_when_mentioned
+        from core.core_initializer import INTERFACE_REGISTRY
+
+        directed, _reason = await is_message_for_bot(message, context.bot)
+        if directed:
+            emoji = get_reaction_emoji()
+            if emoji:
+                interface = INTERFACE_REGISTRY.get("telegram_bot")
+                if interface:
+                    await react_when_mentioned(interface, message, emoji)
+    except Exception as e:
+        log_debug(f"[telegram_bot] config reaction skipped/failed: {e}")
+
     # Determine media type and file_id
     file_id = None
     media_type_hint = "audio"
@@ -611,10 +627,12 @@ async def handle_media_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if message.voice:
         file_id = message.voice.file_id
         media_type_hint = "audio/ogg"
-        try:
-            await message.set_reaction("👂")
-        except Exception:
-            pass
+        # if no configured emoji, fall back to simple icon
+        if not get_reaction_emoji():
+            try:
+                await message.set_reaction("👂")
+            except Exception as exc:  # pragma: no cover - reaction may fail on old PTB
+                log_warning(f"[telegram_bot] failed to react to voice: {exc}")
         await context.bot.send_chat_action(
             chat_id=message.chat_id, action="record_voice"
         )
@@ -640,11 +658,13 @@ async def handle_media_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     if not file_id:
+        log_warning(f"[telegram_bot] live_media: no file_id available for {message}")
         return
 
     # Download file and process
     input_path = None
     try:
+        log_debug(f"[telegram_bot] live_media: downloading file {file_id}")
         new_file = await context.bot.get_file(file_id)
 
         # Create temp directory
@@ -667,31 +687,45 @@ async def handle_media_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
             from core.core_initializer import PLUGIN_REGISTRY
 
             auris = PLUGIN_REGISTRY.get("auris_plugin")
-            if auris is not None:
-                log_debug(
-                    "[telegram_bot] Auris plugin found — attempting transcription."
+            if auris is None:
+                log_warning(
+                    "[telegram_bot] Auris plugin not available, cannot transcribe voice."
                 )
-                transcribed = await auris.transcribe_audio(input_path, media_type_hint)
-                if transcribed:
-                    log_info(f"[telegram_bot] Auris transcription: {transcribed[:120]}")
-                    # Wrap the Telegram message so the queue sees `text = transcribed`
-                    wrapped = MessageWrapper(message, text=transcribed)
-                    await message_queue.enqueue(
-                        context.bot,
-                        wrapped,
-                        interface_id="telegram_bot",
-                        original_message=message,
-                        skip_mention_check=True,
-                    )
-                    auris_handled = True
-                else:
-                    log_warning(
-                        "[telegram_bot] Auris returned no transcription; falling back."
-                    )
+                # interface is a passthrough; do not inform user here
+                return
+
+            log_debug("[telegram_bot] Auris plugin found — attempting transcription.")
+            transcribed = await auris.transcribe_audio(input_path, media_type_hint)
+            if transcribed:
+                log_info(f"[telegram_bot] Auris transcription: {transcribed[:120]}")
+                # Wrap the Telegram message so the queue sees `text = transcribed`.
+                # `is_voice_input=True` propagates through message_queue → context dict
+                # so that message_chain can auto-inject `tts_speak` and prompt_engine
+                # can expose `input_source: \"voice\"` to the LLM.
+                wrapped = MessageWrapper(message, text=transcribed, is_voice_input=True)
+                await message_queue.enqueue(
+                    context.bot,
+                    wrapped,
+                    interface_id="telegram_bot",
+                    original_message=message,
+                    skip_mention_check=True,
+                )
+                auris_handled = True
+            else:
+                # Auris returned empty string; log a warning but *do not* abort.
+                # In case the engine failed (e.g. missing model) we still want to
+                # attempt the fallback live API path below rather than dropping the
+                # input silently.  The previous implementation returned early here
+                # which caused voice messages to vanish when Auris produced "".
+                log_warning(
+                    "[telegram_bot] Auris returned no transcription; continuing to fallback live API."
+                )
+                # auris_handled remains False so fallback will execute
         except Exception as _auris_err:
             log_warning(
-                f"[telegram_bot] Auris path failed ({_auris_err}); falling back to Live API."
+                f"[telegram_bot] Auris path failed ({_auris_err}); bypassing to fallback."
             )
+            # do not return yet; we still want to attempt fallback if plugin supports
 
         if auris_handled:
             return
@@ -738,8 +772,43 @@ async def handle_media_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 return
 
+        # no handler method found; try a small local transcription model
+        # as a last‑ditch attempt before giving up entirely.  This covers
+        # situations where the plugin is a ManualAIPlugin (which lacks
+        # handle_live_processing) or the active cortex engine failed to load.
+        log_warning(
+            "[telegram_bot] no live processing handler available for media; attempting local transcription fallback"
+        )
+        try:
+            # import lazily so we don't incur cost when not needed
+            from faster_whisper import WhisperModel
+
+            log_debug("[telegram_bot] loading Whisper tiny for local transcription")
+            model = WhisperModel("tiny", device="cpu")
+            segments, _info = model.transcribe(input_path)
+            text = " ".join(getattr(s, "text", "") for s in segments).strip()
+            if text:
+                log_info(f"[telegram_bot] local transcription result: {text[:120]}")
+                # enqueue exactly like Auris path rather than replying
+                wrapped = MessageWrapper(message, text=text, is_voice_input=True)
+                await message_queue.enqueue(
+                    context.bot,
+                    wrapped,
+                    interface_id="telegram_bot",
+                    original_message=message,
+                    skip_mention_check=True,
+                )
+                return
+            else:
+                log_debug("[telegram_bot] local transcription produced empty text")
+        except ImportError:
+            log_warning("[telegram_bot] faster-whisper not available for local fallback")
+        except Exception as e:
+            log_debug(f"[telegram_bot] local transcription failed: {e}")
+
+        # still nothing? give the generic message so the user knows we heard
         await message.reply_text(
-            "⚠️ Live media interactions are not supported by the current model."
+            "🤔 I received your media, but I couldn't process it right now."
         )
 
     except Exception as e:
@@ -782,19 +851,51 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # LIVE MEDIA HANDLING (Voice, Video, Video Note)
-    # Disabled: voice/video now flows through the normal message pipeline as
-    # multimodal attachments (static multimodal), preserving full context
-    # instead of being processed in isolation with a generic system prompt.
-    # if message.voice or message.video_note or message.video:
-    #     supports_live = False
-    #     if plugin_instance.plugin:
-    #         supports_live = getattr(
-    #             plugin_instance.plugin, "supports_voice_interaction", False
-    #         ) or hasattr(plugin_instance.plugin, "handle_live_processing")
-    #     if supports_live:
-    #         log_debug("[telegram_bot] Routing to Live Media Handler")
-    #         await handle_media_live(update, context)
-    #         return
+    # Earlier we disabled this and treated media as generic attachments,
+    # but the attachment path never transcribes audio.  To ensure voice
+    # messages are actually downloaded and fed to Auris or the plugin, we
+    # route them through the live media handler whenever a file_id is
+    # present.  This also provides clearer logging for debugging.
+    #
+    # Additionally, if the *current* message is a reply which tags/aliases the
+    # bot and the replied-to message contains media, we should still
+    # transcribe that original media.  This allows users to ask "transcribe"
+    # by replying to someone else's audio instead of forwarding it.
+
+    # check for reply-to-media first, since the incoming message may not
+    # itself contain media
+    if (
+        getattr(message, "reply_to_message", None)
+        and any(
+            getattr(message.reply_to_message, attr, None)
+            for attr in ("voice", "video", "video_note", "video", "photo")
+        )
+    ):
+        # only take this path if the user explicitly directed the bot
+        directed, _ = await is_message_for_bot(message, context.bot)
+        if directed:
+            log_debug(
+                "[telegram_bot] Reply to media detected with bot mention; routing to live media handler"
+            )
+            try:
+                # create a synthetic update containing the original media
+                from types import SimpleNamespace
+
+                fake_update = SimpleNamespace(message=message.reply_to_message)
+                await handle_media_live(fake_update, context)
+            except Exception as e:
+                log_error(f"[telegram_bot] live media handler failed: {e}")
+            return
+
+    if message.voice or message.video_note or message.video:
+        log_debug(
+            "[telegram_bot] Detected media message; routing to live media handler"
+        )
+        try:
+            await handle_media_live(update, context)
+        except Exception as e:
+            log_error(f"[telegram_bot] live media handler failed: {e}")
+        return
 
     user = message.from_user
     user_id = user.id

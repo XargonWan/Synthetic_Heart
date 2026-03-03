@@ -7,7 +7,11 @@ the WebUI → Components → Manage Models panel.
 
 Requirements
 ------------
-* ``vosk`` Python package (``uv add vosk``).
+* ``vosk`` Python package (bundled as a base dependency).
+* ``faster-whisper`` (bundled as a base dependency) — used for automatic
+  language detection when ``VOSK_LANGUAGE=auto``.  The Whisper-tiny model
+  (~75 MB) is downloaded from HuggingFace on first use; no model is
+  bundled in the container image.
 * ``ffmpeg`` in PATH for audio conversion.
 
 Model storage
@@ -22,8 +26,18 @@ Configuration (via exposed vars, all optional)
     Absolute or relative path to override the model directory.
     Leave blank to use the Model Manager's storage.
 ``VOSK_LANGUAGE``
-    Language code; the matching model must be downloaded first.
-    Default: ``en-us``.
+    Language code for the Vosk model to use (e.g. ``'en-us'``, ``'it'``,
+    ``'fr'``).  Default: ``'en-us'``.
+
+    Set to ``'auto'`` to detect the spoken language automatically.  When
+    ``faster-whisper`` is installed, a Whisper-tiny model (~75 MB,
+    downloaded once to the HuggingFace cache) probes the first ~30 s of
+    audio and returns the detected language; the matching Vosk model is
+    then loaded for transcription.  If ``faster-whisper`` is absent, falls
+    back to the first Vosk model already downloaded.
+``VOSK_LID_CONFIDENCE``
+    Minimum Whisper LID probability (0–1, default ``0.5``) required to
+    accept the detected language.  Below this, the fallback kicks in.
 
 Audio conversion
 ----------------
@@ -33,21 +47,115 @@ being fed to KaldiRecognizer.  ``ffmpeg`` must be available in PATH.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import subprocess
 import tempfile
+import threading
 import wave
 from pathlib import Path
 from typing import Any
 
 from core.auris_registry import register_auris_engine
-from core.logging_utils import log_error, log_info, log_warning
+from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.model_manager import MODEL_MANAGER, ModelSpec
 from plugins.auris_base import AurisEngineBase
 
 _MODEL_CACHE: dict[str, Any] = {}  # path → vosk.Model singleton
+
+# ---------------------------------------------------------------------------
+# Whisper-tiny Language-ID cache (optional faster-whisper dependency)
+# ---------------------------------------------------------------------------
+_WHISPER_LID_MODEL: Any = None
+_WHISPER_LID_LOCK = threading.Lock()
+
+
+def _get_whisper_lid_model() -> Any:
+    """Load (and cache) a faster-whisper tiny model for language detection.
+
+    Downloads ~75 MB to the HuggingFace cache on first use.  Returns *None*
+    if ``faster-whisper`` is not installed.
+    """
+    global _WHISPER_LID_MODEL
+    if _WHISPER_LID_MODEL is not None:
+        return _WHISPER_LID_MODEL
+    with _WHISPER_LID_LOCK:
+        if _WHISPER_LID_MODEL is not None:  # double-checked locking
+            return _WHISPER_LID_MODEL
+        try:
+            from faster_whisper import WhisperModel  # type: ignore[import]
+
+            log_info(
+                "[auris/vosk] Loading Whisper-tiny for language detection "
+                "(~75 MB, downloaded once to HuggingFace cache)…"
+            )
+            _WHISPER_LID_MODEL = WhisperModel("tiny", device="cpu", compute_type="int8")
+            log_info("[auris/vosk] Whisper-tiny LID model ready")
+        except ImportError:
+            log_warning(
+                "[auris/vosk] faster-whisper not available — acoustic language "
+                "detection unavailable; falling back to first downloaded Vosk model."
+            )
+            return None
+        except Exception as exc:
+            log_warning(f"[auris/vosk] Failed to load Whisper-tiny: {exc}")
+            return None
+    return _WHISPER_LID_MODEL
+
+
+def _detect_language_with_whisper(audio_path: str) -> str | None:
+    """Detect the spoken language in *audio_path* using Whisper-tiny.
+
+    Returns a language code (e.g. ``'it'``, ``'en'``, ``'fr'``) or *None*
+    if detection fails or the confidence is below the configured threshold.
+    Only the very beginning of the file is evaluated; Whisper processes at
+    most the first 30 s for language probing.
+    """
+    model = _get_whisper_lid_model()
+    if model is None:
+        return None
+    try:
+        min_prob: float = 0.5
+        try:
+            from core.config_manager import config_registry  # type: ignore[import]
+
+            min_prob = float(
+                config_registry.get_value(
+                    "VOSK_LID_CONFIDENCE",
+                    0.5,
+                    label="Whisper LID min confidence",
+                    description=(
+                        "Minimum confidence (0–1) required to trust the Whisper "
+                        "language-detection result.  Below this threshold the "
+                        "detection is discarded and the fallback kicks in."
+                    ),
+                    value_type=float,
+                )
+            )
+        except Exception:
+            pass
+
+        _, info = model.transcribe(
+            audio_path,
+            beam_size=1,
+            language=None,
+            without_timestamps=True,
+            max_new_tokens=1,
+        )
+        lang: str = info.language  # e.g. "it"
+        prob: float = info.language_probability
+        log_info(f"[auris/vosk] Whisper LID: '{lang}' (confidence {prob:.0%})")
+        if prob < min_prob:
+            log_warning(
+                f"[auris/vosk] LID confidence {prob:.0%} below threshold "
+                f"{min_prob:.0%}; discarding detection"
+            )
+            return None
+        return lang
+    except Exception as exc:
+        log_warning(f"[auris/vosk] Whisper LID failed: {exc}")
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Vosk model catalog — registered with MODEL_MANAGER at import time.
@@ -230,22 +338,9 @@ def _load_model(model_path: Path) -> Any:
                     log_info(
                         f"[auris/vosk] Auto-download enabled; downloading model '{model_id}'"
                     )
-                    # ``MODEL_MANAGER.download`` is asynchronous; depending on the
-                    # caller we may already be running inside an event loop.  Use
-                    # a helper that will drive the coroutine in either case.
-                    def _run(coro):
-                        try:
-                            loop = asyncio.get_event_loop()
-                            if loop.is_running():
-                                fut = asyncio.run_coroutine_threadsafe(coro, loop)
-                                return fut.result()
-                            return loop.run_until_complete(coro)
-                        except RuntimeError:
-                            # no running loop available
-                            return asyncio.run(coro)
-
+                    # Download synchronously to avoid event loop complications.
                     try:
-                        ok = _run(MODEL_MANAGER.download(model_id))
+                        ok = MODEL_MANAGER._download_sync(model_id, None)
                     except Exception as exc:  # pragma: no cover - defensive
                         log_warning(f"[auris/vosk] Auto-download exception: {exc}")
                         ok = False
@@ -264,6 +359,16 @@ def _load_model(model_path: Path) -> Any:
                     "Download the model via WebUI → Components → Manage Models."
                 )
                 return None
+
+            # path exists - create the model instance and cache it
+            try:
+                model = vosk.Model(str(model_path))
+                _MODEL_CACHE[key] = model
+                log_info(f"[auris/vosk] Model loaded from {model_path}")
+                return model
+            except Exception as exc:  # pragma: no cover - defensive
+                log_error(f"[auris/vosk] Failed to instantiate model: {exc}")
+                return None
     except ImportError:
         log_error("[auris/vosk] 'vosk' package is not installed. Run: uv add vosk")
         return None
@@ -272,15 +377,79 @@ def _load_model(model_path: Path) -> Any:
         return None
 
 
-def _get_default_language() -> str:
-    """Return configured VOSK_LANGUAGE (default 'en-us')."""
+def _resolve_auto_language(audio_path: str | None = None) -> str:
+    """Resolve the ``'auto'`` language setting to an actual language code.
+
+    Resolution order:
+
+    1. **Whisper LID** — if *audio_path* is given and ``faster-whisper`` is
+       installed, the spoken language is detected acoustically from the
+       first ~30 s of the file using the Whisper-tiny model.
+    2. **First downloaded Vosk model** — falls back to the ``language``
+       field of whichever Vosk model was downloaded first.
+    3. **``'en-us'``** — last resort.
+    """
+    if audio_path is not None:
+        detected = _detect_language_with_whisper(audio_path)
+        if detected:
+            return detected
+
+    # Fallback: use the first downloaded Vosk model
+    try:
+        downloaded = MODEL_MANAGER.downloaded_models()
+        vosk_models = [m for m in downloaded if m.get("plugin_id") == "auris_vosk"]
+        if vosk_models:
+            lang = str(vosk_models[0].get("language") or "en-us")
+            log_info(
+                f"[auris/vosk] auto-language fallback: using '{lang}' "
+                f"(model: {vosk_models[0]['model_id']})"
+            )
+            return lang
+    except Exception:
+        pass
+    log_warning(
+        "[auris/vosk] auto-language: no downloaded Vosk model found, "
+        "falling back to 'en-us'"
+    )
+    return "en-us"
+
+
+def _get_configured_language() -> str:
+    """Return the raw ``VOSK_LANGUAGE`` setting (may be ``'auto'``)."""
     try:
         from core.config_manager import config_registry  # type: ignore[import]
 
-        lang = config_registry.get_value("VOSK_LANGUAGE", "en-us") or "en-us"
-        return str(lang)
+        lang = (
+            config_registry.get_value(
+                "VOSK_LANGUAGE",
+                "en-us",
+                label="Vosk language",
+                description=(
+                    "Language code for Vosk STT (e.g. 'en-us', 'it', 'fr'). "
+                    "Set to 'auto' to detect the spoken language automatically "
+                    "via Whisper-tiny (requires faster-whisper; falls back to "
+                    "the first downloaded Vosk model when unavailable)."
+                ),
+            )
+            or "en-us"
+        )
+        return str(lang).strip().lower()
     except Exception:
         return "en-us"
+
+
+def _get_default_language() -> str:
+    """Return an effective language code without an audio file.
+
+    When ``VOSK_LANGUAGE`` is ``'auto'`` this falls back to the first
+    downloaded Vosk model (no Whisper LID, since there is no audio).
+    For audio-aware resolution use :func:`_resolve_auto_language` directly.
+    """
+    lang = _get_configured_language()
+    if lang == "auto":
+        return _resolve_auto_language(audio_path=None)
+    log_debug(f"[auris/vosk] language: '{lang}'")
+    return lang
 
 
 def _default_model_path() -> Path:
@@ -372,8 +541,20 @@ class VoskAurisEngine(AurisEngineBase):
     # ------------------------------------------------------------------
 
     def transcribe(self, file_path: str, mime_type: str | None = None) -> str | None:
-        """Transcribe *file_path* using a local Vosk model."""
-        model = _load_model(self._model_path())
+        """Transcribe *file_path* using a local Vosk model.
+
+        When ``VOSK_LANGUAGE=auto``, the spoken language is first detected
+        acoustically by Whisper-tiny (if ``faster-whisper`` is installed),
+        and the matching Vosk model is selected accordingly.
+        """
+        configured_lang = _get_configured_language()
+        if configured_lang == "auto":
+            effective_lang = _resolve_auto_language(audio_path=file_path)
+            model_path = _model_path_from_language(effective_lang)
+        else:
+            model_path = self._model_path()
+
+        model = _load_model(model_path)
         if model is None:
             return None
 
