@@ -179,13 +179,19 @@ async def build_json_prompt(
             resolve_tone,
         )
 
-        recon_contributions = await gather_recon_contributions(
-            message=message,
-            context_memory=context_memory,
-            text=text,
-            tags=expanded_tags,
-            keywords=None,
-        )
+        if is_grillo_internal:
+            # Grillo internal beats have fixed language/tone defaults —
+            # skip the LLM recon call to avoid wasting API tokens.
+            log_debug("[json_prompt] Skipping recon LLM call for Grillo internal beat")
+            recon_contributions = []
+        else:
+            recon_contributions = await gather_recon_contributions(
+                message=message,
+                context_memory=context_memory,
+                text=text,
+                tags=expanded_tags,
+                keywords=None,
+            )
 
         for c in recon_contributions:
             ctype = c.get("type")
