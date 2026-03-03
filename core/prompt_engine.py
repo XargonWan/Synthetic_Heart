@@ -336,8 +336,16 @@ async def build_json_prompt(
             f"[json_prompt] Retrieved interface_path from context dict: {interface_path}"
         )
 
+    # Determine message input source for the LLM ("voice" | "text").
+    # Only mark as voice for the *current* message; never stored in chat_history,
+    # so the model cannot mistakenly infer that past messages were also voice.
+    _is_voice_input: bool = bool(
+        isinstance(context_memory, dict) and context_memory.get("is_voice_input")
+    )
+
     input_payload = {
         "text": text,
+        "input_source": "voice" if _is_voice_input else "text",
         "source": {
             "interface_path": interface_path,
             "message_id": message.message_id,
@@ -879,6 +887,10 @@ def load_json_instructions() -> str:
         "NEVER use 'target' — always use 'interface_path' in message actions.\n"
         "Include reply_message_id when replying to specific messages. Use thread_id from input.payload.source.thread_id when present (omit if missing).\n"
         "CLARIFICATION POLICY: If the user's intent, referent, or the subject of a follow-up is ambiguous or missing, DO NOT GUESS — ask one concise clarifying question before asserting facts or taking action. When the user asks whether you 'understood' but there is no clear context, request clarification rather than assuming.\n"
+        'VOICE INPUT STYLE: When input.payload.input_source is "voice", the user spoke their message aloud. '
+        "Respond in a natural, conversational spoken style: avoid markdown, bullet points, headers, and code blocks. "
+        "Keep the reply concise and suitable for text-to-speech synthesis. "
+        "This rule applies ONLY to the current message — do NOT assume past messages in chat_history were also voice.\n"
         'RESPONSE FORMAT: {"actions": [{"type": "action_name", "payload": { ... }}] }\n'
         "Key rules: ALWAYS use 'type' and 'payload', one action object per array entry. Do NOT add any text outside the JSON."
         "Do NOT embed emotion tags, annotations, or bracketed markers inside message text (e.g., '{happy 6.0}')."
