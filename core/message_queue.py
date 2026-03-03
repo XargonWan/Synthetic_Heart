@@ -686,9 +686,13 @@ async def _consumer_loop() -> None:
             )
             llm_name = plugin.__class__.__module__.split(".")[-1]
 
-            # Check if user is trainer for this interface
+            # Check if user is trainer for this interface.
+            # NOTE: interface_id lives on the queue item (final["interface"]),
+            # NOT on the message object itself.
             registry = get_interface_registry()
-            interface_id = getattr(user_msg, "interface_id", "unknown")
+            interface_id = final.get("interface") or getattr(
+                user_msg, "interface_id", "unknown"
+            )
             is_trainer = registry.is_trainer(interface_id, user_id)
 
             if not is_trainer and not rate_limit.is_allowed(
@@ -779,6 +783,11 @@ async def _consumer_loop() -> None:
                         # Propagate explicit request_tts flag (e.g. from handle_media_live wrap)
                         if getattr(_queued_msg, "request_tts", False):
                             context["request_tts"] = True
+                        # Propagate trainer flag so plugin_instance can route
+                        # to TRAINER_CORTEX when a scope override is configured.
+                        if is_trainer:
+                            context["is_trainer"] = True
+
                         # Propagate per-message history_scope when present so prompt_engine/history_engine can honour it
                         hs = final.get("history_scope")
                         if hs is not None:
