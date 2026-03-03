@@ -287,6 +287,14 @@ LLM action ``tts_speak``:
      }
    }
 
+When ``tts_speak`` is delivered alongside a standard message action (for
+example the LLM returns both a ``message_telegram_bot`` and a ``tts_speak``),
+message_chain will automatically merge the text payload into the TTS action as
+``__merged_text``.  This ensures that users receive a single audio message with
+a caption and prevents the duplicate text reply that would otherwise occur.
+The ``merged_text`` field is also used as a fallback caption when the TTS
+engine fails.
+
 ``VoxEngineBase`` contract
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

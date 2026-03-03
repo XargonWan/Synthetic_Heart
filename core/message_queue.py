@@ -776,6 +776,9 @@ async def _consumer_loop() -> None:
                         _queued_msg = final.get("message")
                         if getattr(_queued_msg, "is_voice_input", False):
                             context["is_voice_input"] = True
+                        # Propagate explicit request_tts flag (e.g. from handle_media_live wrap)
+                        if getattr(_queued_msg, "request_tts", False):
+                            context["request_tts"] = True
                         # Propagate per-message history_scope when present so prompt_engine/history_engine can honour it
                         hs = final.get("history_scope")
                         if hs is not None:

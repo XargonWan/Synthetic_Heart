@@ -702,7 +702,13 @@ async def handle_media_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # `is_voice_input=True` propagates through message_queue → context dict
                 # so that message_chain can auto-inject `tts_speak` and prompt_engine
                 # can expose `input_source: \"voice\"` to the LLM.
-                wrapped = MessageWrapper(message, text=transcribed, is_voice_input=True)
+                # include request_tts to ensure voice replies are generated
+                wrapped = MessageWrapper(
+                    message,
+                    text=transcribed,
+                    is_voice_input=True,
+                    request_tts=True,
+                )
                 await message_queue.enqueue(
                     context.bot,
                     wrapped,
@@ -790,7 +796,12 @@ async def handle_media_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if text:
                 log_info(f"[telegram_bot] local transcription result: {text[:120]}")
                 # enqueue exactly like Auris path rather than replying
-                wrapped = MessageWrapper(message, text=text, is_voice_input=True)
+                wrapped = MessageWrapper(
+                    message,
+                    text=text,
+                    is_voice_input=True,
+                    request_tts=True,
+                )
                 await message_queue.enqueue(
                     context.bot,
                     wrapped,
@@ -802,7 +813,9 @@ async def handle_media_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 log_debug("[telegram_bot] local transcription produced empty text")
         except ImportError:
-            log_warning("[telegram_bot] faster-whisper not available for local fallback")
+            log_warning(
+                "[telegram_bot] faster-whisper not available for local fallback"
+            )
         except Exception as e:
             log_debug(f"[telegram_bot] local transcription failed: {e}")
 
@@ -864,12 +877,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # check for reply-to-media first, since the incoming message may not
     # itself contain media
-    if (
-        getattr(message, "reply_to_message", None)
-        and any(
-            getattr(message.reply_to_message, attr, None)
-            for attr in ("voice", "video", "video_note", "video", "photo")
-        )
+    if getattr(message, "reply_to_message", None) and any(
+        getattr(message.reply_to_message, attr, None)
+        for attr in ("voice", "video", "video_note", "video", "photo")
     ):
         # only take this path if the user explicitly directed the bot
         directed, _ = await is_message_for_bot(message, context.bot)

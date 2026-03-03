@@ -99,6 +99,7 @@ async def test_handle_media_live_transcribes(tmp_path, monkeypatch):
         wrapped, iface, orig_msg, skip = recorded[0]
         assert wrapped.text == "hello world"
         assert getattr(wrapped, "is_voice_input", False)
+        assert getattr(wrapped, "request_tts", False), "request_tts flag should be set"
         assert iface == "telegram_bot"
         assert orig_msg is msg
         assert skip is True
@@ -228,6 +229,7 @@ async def test_handle_media_live_auris_empty_no_handler(monkeypatch):
 
     # ensure no live handler is present
     import core.plugin_instance as plugin_instance
+
     orig_plugin = plugin_instance.plugin
     plugin_instance.plugin = None
 
@@ -235,12 +237,17 @@ async def test_handle_media_live_auris_empty_no_handler(monkeypatch):
     class DummyWhisper2:
         def transcribe(self, path, **kwargs):
             return ([SimpleNamespace(text="local text")], None)
+
     monkeypatch.setattr("faster_whisper.WhisperModel", lambda *a, **k: DummyWhisper2())
 
     # capture enqueue
     recorded = []
-    async def fake_enqueue(bot_arg, wrapped, interface_id=None, original_message=None, **kw):
+
+    async def fake_enqueue(
+        bot_arg, wrapped, interface_id=None, original_message=None, **kw
+    ):
         recorded.append((wrapped, original_message))
+
     monkeypatch.setattr(telegram_bot.message_queue, "enqueue", fake_enqueue)
 
     try:
@@ -248,6 +255,7 @@ async def test_handle_media_live_auris_empty_no_handler(monkeypatch):
         assert recorded
         wrapped, orig_msg = recorded[0]
         assert wrapped.text == "local text"
+        assert getattr(wrapped, "request_tts", False), "wrapper should request tts"
         assert orig_msg is msg
     finally:
         if orig_auris is None:
@@ -301,18 +309,27 @@ async def test_reply_to_media_with_alias_triggers_transcription(monkeypatch):
     ctx = SimpleNamespace(bot=bot)
 
     # force mention util to treat message as directed
-    monkeypatch.setattr("core.mention_utils.is_message_for_bot", AsyncMock(return_value=(True, None)))
+    monkeypatch.setattr(
+        "core.mention_utils.is_message_for_bot", AsyncMock(return_value=(True, None))
+    )
     # prevent plugin loading logic from running (not needed for this test)
-    monkeypatch.setattr(telegram_bot, "ensure_plugin_loaded", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        telegram_bot, "ensure_plugin_loaded", AsyncMock(return_value=True)
+    )
 
     orig_auris = PLUGIN_REGISTRY.get("auris_plugin")
     PLUGIN_REGISTRY["auris_plugin"] = FakeAuris("replied transcription")
     # intercept message_queue.enqueue to capture wrapped message
     from core import message_queue
+
     recorded = []
-    async def fake_enqueue(bot_arg, wrapped, interface_id=None, original_message=None, **kwargs):
+
+    async def fake_enqueue(
+        bot_arg, wrapped, interface_id=None, original_message=None, **kwargs
+    ):
         recorded.append((wrapped, original_message))
         return None
+
     monkeypatch.setattr(message_queue, "enqueue", fake_enqueue)
 
     try:
@@ -327,6 +344,7 @@ async def test_reply_to_media_with_alias_triggers_transcription(monkeypatch):
             PLUGIN_REGISTRY.pop("auris_plugin", None)
         else:
             PLUGIN_REGISTRY["auris_plugin"] = orig_auris
+
 
 @pytest.mark.asyncio
 async def test_handle_media_live_auris_disabled_no_handler(monkeypatch):
@@ -378,8 +396,12 @@ async def test_handle_media_live_auris_disabled_no_handler(monkeypatch):
 
     # capture enqueue
     recorded = []
-    async def fake_enqueue(bot_arg, wrapped, interface_id=None, original_message=None, **kw):
+
+    async def fake_enqueue(
+        bot_arg, wrapped, interface_id=None, original_message=None, **kw
+    ):
         recorded.append((wrapped, original_message))
+
     monkeypatch.setattr(telegram_bot.message_queue, "enqueue", fake_enqueue)
 
     try:
@@ -387,6 +409,7 @@ async def test_handle_media_live_auris_disabled_no_handler(monkeypatch):
         assert recorded, "transcription should be enqueued"
         wrapped, orig_msg = recorded[0]
         assert wrapped.text == "local text"
+        assert getattr(wrapped, "request_tts", False), "wrapper should request tts"
         assert orig_msg is msg
     finally:
         if orig_auris is None:

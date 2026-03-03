@@ -505,15 +505,23 @@ class VoxPlugin(AIPluginBase):
                     )
 
             else:
-                # Generic fallback: try send_message
+                # Generic fallback: send audio first, then text as a separate
+                # message immediately after (for interfaces that don't support
+                # native audio+caption in a single call).
                 if hasattr(target_iface, "send_message"):
                     await target_iface.send_message(
                         {
                             "interface_path": interface_path,
                             "audio": str(audio_path),
-                            "text": caption,
                         }
                     )
+                    if caption:
+                        await target_iface.send_message(
+                            {
+                                "interface_path": interface_path,
+                                "text": caption,
+                            }
+                        )
 
         except Exception as exc:
             log_error(f"[vox_plugin] Dispatch error: {exc}")

@@ -455,6 +455,201 @@ class TestMessageChainIntegration(unittest.TestCase):
     @patch("core.config_manager.config_registry.get_value")
     @patch("core.transport_layer.run_corrector_middleware")
     @patch("core.action_parser.run_actions")
+    async def test_voice_response_replaces_text_with_audio_caption(
+        self, mock_run_actions, mock_corrector, mock_get_value
+    ):
+        """For voice inputs: message_* action must be REMOVED and replaced by
+        tts_speak with __merged_text set (audio + caption pattern).
+        __auto_injected must NOT be set so fallback text is sent if TTS fails."""
+        from core import message_chain
+
+        def fake_get_value(key, default=None, **kwargs):
+            if key == "VOX_ENABLED":
+                return True
+            return default
+
+        mock_get_value.side_effect = fake_get_value
+
+        class FakeVar:
+            def __init__(self, value):
+                self.value = value
+
+        def fake_get_var(name, default=None, **kwargs):
+            if name == "MESSAGE_ACTION_TYPES":
+                return FakeVar(["message_telegram_bot"])
+            return default
+
+        from unittest.mock import patch
+
+        get_var_patcher = patch(
+            "core.config_manager.config_registry.get_var", new=fake_get_var
+        )
+        get_var_patcher.start()
+
+        json_text = '{"actions": [{"type": "message_telegram_bot", "payload": {"text": "Ciao!","interface_path": "telegram_bot/9"}}]}'
+        msg = SimpleNamespace(
+            chat_id=9,
+            text=json_text,
+            from_cortex=True,
+            interface_path="telegram_bot/9",
+        )
+
+        # Voice input: request_tts=True + is_voice_input=True
+        result = await message_chain.handle_incoming_message(
+            bot=MagicMock(),
+            message=msg,
+            text=json_text,
+            source="llm",
+            interface_path="telegram_bot/9",
+            context={"request_tts": True, "is_voice_input": True},
+        )
+
+        self.assertEqual(result, message_chain.ACTIONS_EXECUTED)
+        mock_run_actions.assert_called_once()
+        get_var_patcher.stop()
+
+        called_actions = mock_run_actions.call_args[0][0]
+        types = [a.get("type") for a in called_actions if isinstance(a, dict)]
+
+        # message_telegram_bot must be GONE — no separate text message
+        self.assertNotIn(
+            "message_telegram_bot",
+            types,
+            "message_* action must be removed for voice responses (audio+caption only)",
+        )
+        # tts_speak must be present
+        self.assertIn("tts_speak", types)
+
+        tts_payload = next(
+            a["payload"] for a in called_actions if a.get("type") == "tts_speak"
+        )
+        # __merged_text must be set (becomes caption on Telegram)
+        self.assertEqual(
+            tts_payload.get("__merged_text"),
+            "Ciao!",
+            "__merged_text must carry the reply text as audio caption",
+        )
+        # __auto_injected must NOT be set: fallback text needed if TTS fails
+        self.assertFalse(
+            tts_payload.get("__auto_injected", False),
+            "__auto_injected must be False so fallback text is sent on TTS failure",
+        )
+
+    # merge tests: ensure duplicate text actions are consolidated into tts_speak replies
+    # Note: subsequent decorators rely on indentation
+    @patch("core.transport_layer.run_corrector_middleware")
+    @patch("core.action_parser.run_actions")
+    async def test_merge_text_into_tts_actions(self, mock_run_actions, mock_corrector):
+        """Standalone message actions should be bundled into tts_speak replies, avoiding duplicate text output."""
+        from core import message_chain
+
+        # ensure telegram message type is known to config
+        class FakeVar:
+            def __init__(self, value):
+                self.value = value
+
+        def fake_get_var(name, default=None, **kwargs):
+            if name == "MESSAGE_ACTION_TYPES":
+                return FakeVar(["message_telegram_bot"])
+            return default
+
+        from unittest.mock import patch
+
+        get_var_patcher = patch(
+            "core.config_manager.config_registry.get_var",
+            new=fake_get_var,
+        )
+        get_var_patcher.start()
+
+        # case 1: normal interface_path payload
+        base = (
+            '{"actions": ['
+            '{"type": "message_telegram_bot", "payload": {"text": "foo", "interface_path": "telegram_bot/1"}},'
+            '{"type": "tts_speak", "payload": {"text": "foo"}}'
+            "]}"
+        )
+        msg = SimpleNamespace(
+            chat_id=1,
+            text=base,
+            from_cortex=True,
+            interface_path="telegram_bot/1",
+        )
+
+        result = await message_chain.handle_incoming_message(
+            bot=MagicMock(),
+            message=msg,
+            text=base,
+            source="llm",
+            interface_path="telegram_bot/1",
+            context={"is_voice_input": True},
+        )
+        self.assertEqual(result, message_chain.ACTIONS_EXECUTED)
+        called = mock_run_actions.call_args[0][0]
+        types = [a.get("type") for a in called if isinstance(a, dict)]
+        self.assertEqual(types.count("message_telegram_bot"), 0)
+        self.assertEqual(types.count("tts_speak"), 1)
+        payload = next(a["payload"] for a in called if a.get("type") == "tts_speak")
+        self.assertEqual(payload.get("__merged_text"), "foo")
+
+        # case 2: chat_name only
+        base2 = (
+            '{"actions": ['
+            '{"type": "message_telegram_bot", "payload": {"text": "bar", "chat_name": "Test"}},'
+            '{"type": "tts_speak", "payload": {"text": "bar"}}'
+            "]}"
+        )
+        msg2 = SimpleNamespace(
+            chat_id=1,
+            text=base2,
+            from_cortex=True,
+            interface_path="telegram_bot/1",
+        )
+        mock_run_actions.reset_mock()
+        result = await message_chain.handle_incoming_message(
+            bot=MagicMock(),
+            message=msg2,
+            text=base2,
+            source="llm",
+            interface_path="telegram_bot/1",
+            context={"is_voice_input": True},
+        )
+        self.assertEqual(result, message_chain.ACTIONS_EXECUTED)
+        called = mock_run_actions.call_args[0][0]
+        types = [a.get("type") for a in called if isinstance(a, dict)]
+        self.assertEqual(types.count("message_telegram_bot"), 0)
+        self.assertEqual(types.count("tts_speak"), 1)
+        payload = next(a["payload"] for a in called if a.get("type") == "tts_speak")
+        self.assertEqual(payload.get("__merged_text"), "bar")
+
+        # case 3: plain text output should still trigger injection when request_tts
+        plain = "Just some reply text"
+        msg3 = SimpleNamespace(
+            chat_id=1,
+            text=plain,
+            from_cortex=True,
+            interface_path="telegram_bot/1",
+        )
+        mock_run_actions.reset_mock()
+        result = await message_chain.handle_incoming_message(
+            bot=MagicMock(),
+            message=msg3,
+            text=plain,
+            source="llm",
+            interface_path="telegram_bot/1",
+            context={"is_voice_input": True, "request_tts": True},
+        )
+        self.assertEqual(result, message_chain.ACTIONS_EXECUTED)
+        called = mock_run_actions.call_args[0][0]
+        types = [a.get("type") for a in called if isinstance(a, dict)]
+        self.assertEqual(types.count("tts_speak"), 1)
+        payload = next(a["payload"] for a in called if a.get("type") == "tts_speak")
+        self.assertEqual(payload.get("text"), plain)
+
+        get_var_patcher.stop()
+
+    @patch("core.config_manager.config_registry.get_value")
+    @patch("core.transport_layer.run_corrector_middleware")
+    @patch("core.action_parser.run_actions")
     async def test_request_tts_respects_vox_flag(
         self, mock_run_actions, mock_corrector, mock_get_value
     ):
