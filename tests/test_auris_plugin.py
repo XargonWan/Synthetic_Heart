@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import sys
+from types import SimpleNamespace
+
 import pytest
 
 
@@ -138,6 +141,129 @@ async def test_auris_plugin_transcribe_calls_engine() -> None:
     ):
         result = await plugin.transcribe_audio("/tmp/fake.wav")
     assert result == "transcribed text"
+
+
+# ---------------------------------------------------------------------------
+# Auto-download behaviour tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_vosk_autodownload_flag(monkeypatch, tmp_path):
+    """When MODEL_AUTO_DOWNLOAD is true the vosk engine should fetch missing models.
+
+    We register a dummy model with MODEL_MANAGER, patch the download function to
+    create the directory, and monkeypatch the vosk package to avoid import errors.
+    """
+    from core.config_manager import config_registry as cfg
+    from core.model_manager import MODEL_MANAGER, ModelSpec
+    from plugins.auris_engines import vosk_engine
+
+    model_id = "vosk-test"
+    if MODEL_MANAGER.get_spec(model_id) is None:
+        MODEL_MANAGER.register(
+            ModelSpec(
+                model_id=model_id,
+                plugin_id="auris_vosk",
+                display_name="dummy",
+                description="",
+                tags=[],
+                size_mb=1,
+            )
+        )
+    # ensure directory does not exist
+    dest = MODEL_MANAGER.model_dir(model_id)
+    if dest.exists():
+        for child in dest.rglob("*"):
+            if child.is_file():
+                child.unlink()
+        dest.rmdir()
+
+    # patch config to enable auto download
+    orig_get = cfg.get_value
+
+    def fake_get(key, default=None, **kwargs):
+        if key == "MODEL_AUTO_DOWNLOAD":
+            return True
+        return orig_get(key, default, **kwargs)
+
+    monkeypatch.setattr(cfg, "get_value", fake_get)
+
+    called = []
+
+    async def fake_download(mid, on_progress=None):
+        called.append(mid)
+        MODEL_MANAGER.model_dir(mid).mkdir(parents=True, exist_ok=True)
+        return True
+
+    monkeypatch.setattr(MODEL_MANAGER, "download", fake_download)
+
+    class DummyModel:
+        def __init__(self, path):
+            self.path = path
+
+    dummy = SimpleNamespace(Model=DummyModel, SetLogLevel=lambda lvl: None)
+    monkeypatch.setitem(sys.modules, "vosk", dummy)
+
+    result = vosk_engine._load_model(dest)
+    assert isinstance(result, DummyModel)
+    assert called == [model_id]
+
+
+@pytest.mark.asyncio
+async def test_vosk_autodownload_skipped(monkeypatch, tmp_path, caplog):
+    """With auto-download disabled the engine should log a warning and not attempt."""
+    from core.config_manager import config_registry as cfg
+    from core.model_manager import MODEL_MANAGER, ModelSpec
+    from plugins.auris_engines import vosk_engine
+
+    model_id = "vosk-other"
+    if MODEL_MANAGER.get_spec(model_id) is None:
+        MODEL_MANAGER.register(
+            ModelSpec(
+                model_id=model_id,
+                plugin_id="auris_vosk",
+                display_name="dummy2",
+                description="",
+                tags=[],
+                size_mb=1,
+            )
+        )
+    dest = MODEL_MANAGER.model_dir(model_id)
+    if dest.exists():
+        for child in dest.rglob("*"):
+            if child.is_file():
+                child.unlink()
+        dest.rmdir()
+
+    orig_get = cfg.get_value
+
+    def fake_get(key, default=None, **kwargs):
+        if key == "MODEL_AUTO_DOWNLOAD":
+            return False
+        return orig_get(key, default, **kwargs)
+
+    monkeypatch.setattr(cfg, "get_value", fake_get)
+
+    called = []
+
+    async def fake_download(mid, on_progress=None):
+        called.append(mid)
+        MODEL_MANAGER.model_dir(mid).mkdir(parents=True, exist_ok=True)
+        return True
+
+    monkeypatch.setattr(MODEL_MANAGER, "download", fake_download)
+
+    class DummyModel2:
+        def __init__(self, path):
+            pass
+
+    dummy2 = SimpleNamespace(Model=DummyModel2, SetLogLevel=lambda lvl: None)
+    monkeypatch.setitem(sys.modules, "vosk", dummy2)
+
+    result = vosk_engine._load_model(dest)
+    assert result is None
+    assert called == []
 
 
 # ---------------------------------------------------------------------------

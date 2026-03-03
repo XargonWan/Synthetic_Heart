@@ -167,6 +167,117 @@ async def test_vox_plugin_fallback_on_engine_failure() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Additional dispatch tests to confirm interfaces are passive
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_vox_plugin_dispatch_to_various_interfaces(monkeypatch, tmp_path):
+    """The Vox core plugin should *dispatch* generated audio to interfaces without
+    performing any additional synthesis logic.  Interfaces merely receive the
+    path/bytes and handle delivery.
+
+    This test exercises ``VoxPlugin._dispatch`` directly by installing fake
+    interface objects that capture calls.  We assert that each supported branch
+    is reached and that the payload passed through contains only the audio path
+    and caption supplied by the core plugin.
+    """
+    from core.core_initializer import INTERFACE_REGISTRY
+
+    # Build a minimal plugin instance so we can call _dispatch.
+    from plugins.vox_plugin import VoxPlugin
+
+    plugin = VoxPlugin.__new__(VoxPlugin)
+    # we don't need a real config here; _dispatch doesn't inspect plugin state
+
+    calls: dict[str, dict] = {}
+
+    class DummyUI:
+        async def send_tts_audio(self, session_id, audio_path, text, lipsync_data=None):
+            calls["synth_webui"] = {
+                "session_id": session_id,
+                "audio_path": audio_path,
+                "text": text,
+                "lipsync": lipsync_data,
+            }
+
+    class DummyDiscord:
+        async def send_message(self, payload):
+            calls["discord_bot"] = payload
+
+    class DummyTelegram:
+        async def execute_action(self, action, context, bot, original_message):
+            calls["telegram_bot"] = action
+
+    # Generic interface for fallback case
+    class DummyGeneric:
+        async def send_message(self, payload):
+            calls["generic"] = payload
+
+    # Populate the registry with our fakes (monkeypatch dict for ease)
+    monkeypatch.setitem(INTERFACE_REGISTRY, "synth_webui", DummyUI())
+    monkeypatch.setitem(INTERFACE_REGISTRY, "discord_bot", DummyDiscord())
+    monkeypatch.setitem(INTERFACE_REGISTRY, "telegram_bot", DummyTelegram())
+    monkeypatch.setitem(INTERFACE_REGISTRY, "mystery_bot", DummyGeneric())
+
+    audio_file = tmp_path / "test.wav"
+    audio_file.write_bytes(b"RIFF" + b"\x00" * 36)
+
+    # synth_webui branch
+    await plugin._dispatch(
+        audio_path=audio_file,
+        interface_path="synth_webui/session42",
+        caption="hello",
+        lipsync_data={"foo": "bar"},
+        context=None,
+        original_message=None,
+    )
+    assert "synth_webui" in calls
+    assert calls["synth_webui"]["session_id"] == "session42"
+    assert str(audio_file) in calls["synth_webui"]["audio_path"]
+    assert calls["synth_webui"]["text"] == "hello"
+
+    # discord_bot branch
+    await plugin._dispatch(
+        audio_path=audio_file,
+        interface_path="discord_bot/1/2",
+        caption="yo",
+        lipsync_data=None,
+        context=None,
+        original_message=None,
+    )
+    assert "discord_bot" in calls
+    assert calls["discord_bot"]["interface_path"] == "discord_bot/1/2"
+    assert calls["discord_bot"]["audio"].endswith("test.wav")
+
+    # telegram_bot branch
+    await plugin._dispatch(
+        audio_path=audio_file,
+        interface_path="telegram_bot/12345",
+        caption="sup",
+        lipsync_data=None,
+        context=None,
+        original_message=None,
+    )
+    assert "telegram_bot" in calls
+    assert calls["telegram_bot"]["type"] == "audio_telegram_bot"
+    assert calls["telegram_bot"]["payload"]["audio"].endswith("test.wav")
+
+    # generic fallback branch (mystery_bot)
+    await plugin._dispatch(
+        audio_path=audio_file,
+        interface_path="mystery_bot/foo",
+        caption="hey there",
+        lipsync_data=None,
+        context=None,
+        original_message=None,
+    )
+    assert "generic" in calls
+    assert calls["generic"]["audio"].endswith("test.wav")
+    assert calls["generic"]["text"] == "hey there"
+
+
+# ---------------------------------------------------------------------------
 # VoxEngineBase contract tests
 # ---------------------------------------------------------------------------
 

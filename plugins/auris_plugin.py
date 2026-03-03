@@ -95,6 +95,22 @@ register_exposed_var(
     advanced=True,
 )
 
+register_exposed_var(
+    "MODEL_AUTO_DOWNLOAD",
+    label="Auto‑download models",
+    default=True,
+    value_type=bool,
+    ui_type="boolean",
+    description=(
+        "When enabled, Auris will automatically fetch missing models from the "
+        "Model Manager when they are needed (e.g. a Vosk STT model). "
+        "If disabled, you must manually download models via the WebUI."
+    ),
+    scope="plugins",
+    component="auris_plugin",
+    advanced=True,
+)
+
 
 # ---------------------------------------------------------------------------
 # Plugin class
@@ -266,6 +282,17 @@ class AurisPlugin(AIPluginBase):
                 self._engine_settings = json.loads(raw_settings or "{}")
             except Exception:
                 self._engine_settings = {}
+
+            # Auto model download flag (advanced)
+            self._auto_download = bool(
+                config_registry.get_value(
+                    "MODEL_AUTO_DOWNLOAD",
+                    True,
+                    value_type=bool,
+                    group="plugins",
+                    component="auris_plugin",
+                )
+            )
         except Exception as exc:
             log_warning(f"[auris_plugin] refresh_config failed: {exc}")
 

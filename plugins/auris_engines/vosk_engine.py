@@ -33,6 +33,7 @@ being fed to KaldiRecognizer.  ``ffmpeg`` must be available in PATH.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -205,16 +206,64 @@ def _load_model(model_path: Path) -> Any:
 
         vosk.SetLogLevel(-1)  # suppress verbose Kaldi output
         if not model_path.exists():
-            log_warning(
-                f"[auris/vosk] Model directory not found: {model_path}. "
-                "Download the model via WebUI → Components → Manage Models."
-            )
-            return None
+            # model directory missing; maybe we can auto-download it
+            try:
+                from core.config_manager import config_registry  # type: ignore[import]
 
-        model = vosk.Model(str(model_path))
-        _MODEL_CACHE[key] = model
-        log_info(f"[auris/vosk] Model loaded from {model_path}")
-        return model
+                auto = bool(
+                    config_registry.get_value(
+                        "MODEL_AUTO_DOWNLOAD",
+                        True,
+                        value_type=bool,
+                        group="plugins",
+                        component="auris_plugin",
+                    )
+                )
+            except Exception:
+                auto = True
+
+            if auto:
+                # derive model_id from path name if the Model Manager knows it
+                model_id = model_path.name
+                spec = MODEL_MANAGER.get_spec(model_id)
+                if spec and not MODEL_MANAGER.is_downloaded(model_id):
+                    log_info(
+                        f"[auris/vosk] Auto-download enabled; downloading model '{model_id}'"
+                    )
+                    # ``MODEL_MANAGER.download`` is asynchronous; depending on the
+                    # caller we may already be running inside an event loop.  Use
+                    # a helper that will drive the coroutine in either case.
+                    def _run(coro):
+                        try:
+                            loop = asyncio.get_event_loop()
+                            if loop.is_running():
+                                fut = asyncio.run_coroutine_threadsafe(coro, loop)
+                                return fut.result()
+                            return loop.run_until_complete(coro)
+                        except RuntimeError:
+                            # no running loop available
+                            return asyncio.run(coro)
+
+                    try:
+                        ok = _run(MODEL_MANAGER.download(model_id))
+                    except Exception as exc:  # pragma: no cover - defensive
+                        log_warning(f"[auris/vosk] Auto-download exception: {exc}")
+                        ok = False
+                    if ok and model_path.exists():
+                        log_info(
+                            f"[auris/vosk] Auto-download complete for '{model_id}'"
+                        )
+                    else:
+                        log_warning(
+                            f"[auris/vosk] Auto-download did not produce directory {model_path}"
+                        )
+            # after attempting download (or if auto disabled) still no path
+            if not model_path.exists():
+                log_warning(
+                    f"[auris/vosk] Model directory not found: {model_path}. "
+                    "Download the model via WebUI → Components → Manage Models."
+                )
+                return None
     except ImportError:
         log_error("[auris/vosk] 'vosk' package is not installed. Run: uv add vosk")
         return None
