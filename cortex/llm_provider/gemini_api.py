@@ -914,11 +914,17 @@ class GeminiAPIPlugin(AIPluginBase):
         is_grillo = interface == "grillo" or (
             isinstance(prompt_dict, dict) and prompt_dict.get("grillo_beat")
         )
+        # Outreach beats are grillo-initiated but MUST produce message_*
+        # actions to reach the target interface (e.g. telegram_bot).
+        is_grillo_internal = is_grillo and (
+            not isinstance(prompt_dict, dict)
+            or prompt_dict.get("beat_type", "internal") != "outreach"
+        )
 
         # Minimal system instruction - the prompt itself contains full action schemas
         # We just need to remind the model to output valid JSON
-        if is_grillo:
-            # Grillo internal beats should NEVER produce message_* actions
+        if is_grillo_internal:
+            # Internal beats (tag_elaboration, self_reflection, etc.)
             interface_hint = (
                 "CURRENT INTERFACE: grillo (INTERNAL)\n"
                 "This is an internal introspection beat. Do NOT output any message_* actions.\n"

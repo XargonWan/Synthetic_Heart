@@ -1119,8 +1119,14 @@ class OpenRouterPlugin(AIPluginBase):
         is_grillo = interface == "grillo" or (
             isinstance(prompt_dict, dict) and prompt_dict.get("grillo_beat")
         )
+        # Outreach beats are grillo-initiated but MUST produce message_*
+        # actions to reach the target interface (e.g. telegram_bot).
+        is_grillo_internal = is_grillo and (
+            not isinstance(prompt_dict, dict)
+            or prompt_dict.get("beat_type", "internal") != "outreach"
+        )
 
-        if is_grillo:
+        if is_grillo_internal:
             interface_hint = (
                 "CURRENT INTERFACE: grillo (INTERNAL)\n"
                 "This is an internal introspection beat. Do NOT output any message_* actions.\n"
