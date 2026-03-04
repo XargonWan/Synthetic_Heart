@@ -1508,7 +1508,7 @@ import * as THREE from 'three';
                         } catch (e) { /* ignore */ }
 
                         // Apply smoothing/interpolation towards desired values
-                        const speed = (persona && persona.emotion_speed && persona.emotion_speed.default) ? persona.emotion_speed.default : 6.0; // units/sec
+                        const speed = (effectivePersona && effectivePersona.emotion_speed && effectivePersona.emotion_speed.default) ? effectivePersona.emotion_speed.default : 6.0; // units/sec
                         Object.keys(desired).forEach(k => {
                             const cur = this._expressionState[k] || 0;
                             const tgt = desired[k];
@@ -1531,7 +1531,7 @@ import * as THREE from 'three';
                         Object.keys(this._expressionState).forEach(k => {
                             if (desired[k] === undefined) {
                                 const cur = this._expressionState[k] || 0;
-                                const next = Math.max(0, cur - Math.min(1, ((persona && persona.emotion_speed && persona.emotion_speed.decay) ? persona.emotion_speed.decay : 4.0) * dt));
+                                const next = Math.max(0, cur - Math.min(1, ((effectivePersona && effectivePersona.emotion_speed && effectivePersona.emotion_speed.decay) ? effectivePersona.emotion_speed.decay : 4.0) * dt));
                                 if (Math.abs(next - cur) > 1e-4) {
                                     this._expressionState[k] = next;
                                     const ok = this._setFaceValue(k, next);
@@ -3058,6 +3058,7 @@ import * as THREE from 'three';
                         this.currentActionName = 'idle';
                         this.currentActionPhase = null;
                         this.currentStructuredAction = null;
+                        this._currentAnimationFile = null;
                         return;
                     }
 
@@ -3112,12 +3113,14 @@ import * as THREE from 'three';
                         return;
                     }
 
-                    // Guard: if the requested logical action is already active and
-                    // no explicit file override is provided, avoid restarting it to
-                    // prevent rapid transitions / T-pose gaps.
+                    // Guard: if the requested logical action is already active with the same (or any)
+                    // animation file, avoid restarting it to prevent rapid transitions / T-pose gaps.
+                    // The debug-window resyncs every 2 s and would otherwise call reset().play() on an
+                    // already-running action, preventing it from ever reaching its natural end.
                     try {
-                        if (!animationFile && this.currentActionName === actionName && this.currentActionPhase && this.currentActionPhase !== 'outro') {
-                            console.log(`[AnimationHandler] startAction: ${actionName} already active (phase=${this.currentActionPhase}) - no-op`);
+                        if (this.currentActionName === actionName && this.currentActionPhase && this.currentActionPhase !== 'outro' &&
+                                (!animationFile || animationFile === this._currentAnimationFile)) {
+                            console.log(`[AnimationHandler] startAction: ${actionName} (${animationFile || 'any'}) already active (phase=${this.currentActionPhase}) - no-op`);
                             return;
                         }
                     } catch (e) { /* ignore */ }
@@ -3369,6 +3372,22 @@ import * as THREE from 'three';
                             if (action && action.intro && action.outro) {
                                 base = action.loop || action.intro;
                             }
+                            // Guard: if the exact same THREE.js action is already running as base idle,
+                            // skip the restart entirely. Periodic re-syncs (e.g. debug-window every 2 s
+                            // calls startAction via resyncFromBackend) would otherwise reset the
+                            // animation to t=0 with no visible benefit, causing the "resets every second"
+                            // artefact the user sees.
+                            try {
+                                if (base && prevBaseIdle === base) {
+                                    const running = typeof base.isRunning === 'function'
+                                        ? base.isRunning()
+                                        : (base.enabled && !base.paused);
+                                    if (running) {
+                                        console.log(`[AnimationHandler] startAction: IDLE '${animationFile}' already running as base idle - no-op`);
+                                        return;
+                                    }
+                                }
+                            } catch (e) { /* ignore */ }
                             this._baseIdleAction = base;
                             this._baseIdleKey = `idle:${animationFile}`;
                             try {
@@ -3564,6 +3583,7 @@ import * as THREE from 'three';
                             this.currentActionName = actionName;
                             this.currentActionPhase = 'intro';
                             this.currentStructuredAction = structured;
+                            this._currentAnimationFile = animationFile || null;
                             console.log(`[AnimationHandler] Structured action started (intro playing)`);
                         } catch (e) {
                             console.warn('[AnimationHandler] Failed to start structured intro immediately:', e);
@@ -3603,6 +3623,9 @@ import * as THREE from 'three';
                                                 if (candidate._playOnceOnly || !candidate.loop) {
                                                     console.log(`[AnimationHandler] intro finished for play_once animation ${key} -> starting outro`);
                                                     candidate.outro.reset().fadeIn(0.15).play();
+                                                    // Fade out intro so it doesn't keep driving bones at its
+                                                    // clamped last-frame pose while outro plays.
+                                                    try { this._safeFadeStop(candidate.intro, 0.15); } catch (e) {}
                                                     this.currentAction = candidate.outro;
                                                     this.currentActionName = logicalName;
                                                     this.currentActionKey = key;
@@ -3615,6 +3638,8 @@ import * as THREE from 'three';
                                                     try { candidate.loop.setLoop(THREE.LoopRepeat); } catch (e) {}
                                                     try { candidate.loop.clampWhenFinished = false; } catch (e) {}
                                                     try { candidate.loop.reset().fadeIn(0.15).play(); } catch (e) {}
+                                                    // Fade out intro so it doesn't keep clamping at its last frame.
+                                                    try { this._safeFadeStop(candidate.intro, 0.15); } catch (e) {}
                                                     this.currentAction = candidate.loop;
                                                     this.currentActionName = logicalName;
                                                     this.currentActionKey = key;
@@ -3634,7 +3659,26 @@ import * as THREE from 'three';
 
                                         if (finishedClipName === outroName) {
                                             console.log(`[AnimationHandler] outro finished for ${key} -> advancing to next animation`);
-                                            // Hard cleanup to avoid pose residue (hands floating / stuck bones).
+
+                                            // ── CRITICAL: boost base-idle to full weight FIRST ──────────────────
+                                            // When outro ends with clampWhenFinished=false, Three.js sets its
+                                            // weight to 0 automatically *before* this handler fires.  At that
+                                            // moment the base-idle is still at 0.12 (set when think/write began)
+                                            // → skeleton has only 12% weight driven → T-pose for several frames.
+                                            // Setting weight=1.0 here, before any other cleanup, closes the gap.
+                                            try {
+                                                if (this._baseIdleAction) {
+                                                    this._baseIdleAction.enabled = true;
+                                                    this._baseIdleAction.setLoop(THREE.LoopRepeat);
+                                                    this._baseIdleAction.clampWhenFinished = false;
+                                                    if (typeof this._baseIdleAction.setEffectiveWeight === 'function') {
+                                                        this._baseIdleAction.setEffectiveWeight(1.0);
+                                                    }
+                                                    this._baseIdleAction.play();
+                                                }
+                                            } catch (e) { /* ignore */ }
+
+                                            // Now clean up the finished structured clips (outro already at w=0).
                                             try {
                                                 this._safeFadeStop(candidate.intro, 0.05);
                                                 this._safeFadeStop(candidate.loop, 0.05);
@@ -3645,9 +3689,7 @@ import * as THREE from 'three';
                                             this.currentActionName = null;
                                             this.currentActionKey = null;
                                             this.currentStructuredAction = null;
-
-                                            // Ensure base idle exists after finishing an outro.
-                                            try { this._ensureBaseIdle(1.0, true); } catch (e) { /* ignore */ }
+                                            this._currentAnimationFile = null;
 
                                             // Fallback: if no new action arrives immediately after a structured outro,
                                             // force a return to idle to avoid a visible T-pose window.
@@ -3715,18 +3757,17 @@ import * as THREE from 'three';
                             });
                         }
 
-                        // Start with intro, then the mixer event will switch to loop (if exists) or outro
+                        // Log only — intro was already started in the cross-fade block above.
+                        // Do NOT call reset() again here: that was the cause of the visible
+                        // "jerk" (the animation restarted from t=0 a few ms after beginning).
                         if (isPlayOnceOnly) {
                             console.log(`[AnimationHandler] Starting play_once structured action (intro -> outro)`);
                         } else {
                             console.log(`[AnimationHandler] Starting structured action (intro -> loop -> outro)`);
                         }
-                        structured.intro.reset().fadeIn(0.15).play();
-                        this.currentAction = structured.intro;
-                        this.currentActionName = actionName;
-                        this.currentActionPhase = 'intro';
-                        this.currentStructuredAction = structured;
-                        console.log(`[AnimationHandler] Structured action started`);
+                        // Ensure _currentAnimationFile is set even if the cross-fade block threw.
+                        if (!this._currentAnimationFile) this._currentAnimationFile = animationFile || null;
+                        console.log(`[AnimationHandler] Structured action confirmed started (no double-reset)`);
                         
                         // If playOnce requested for structured action (or if it's a play_once only animation),
                         // schedule a safety fallback after the total duration
@@ -3913,6 +3954,8 @@ import * as THREE from 'three';
                             action.enabled = true;
                             action.reset().fadeIn(0.5).play();
                             this.currentAction = action;
+                            this.currentActionName = actionName;
+                            this._currentAnimationFile = animationFile || null;
                             console.log(`[AnimationHandler] New action started (cross-fade in)`);
                         } catch (e) {
                             console.warn('[AnimationHandler] Failed to start new action for cross-fade:', e);
@@ -3937,6 +3980,8 @@ import * as THREE from 'three';
                         try {
                             action.reset().fadeIn(0.5).play();
                             this.currentAction = action;
+                            this.currentActionName = actionName;
+                            this._currentAnimationFile = animationFile || null;
                             console.log(`[AnimationHandler] Action started successfully`);
                         } catch (e) {
                             console.warn('[AnimationHandler] Failed to start action:', e);

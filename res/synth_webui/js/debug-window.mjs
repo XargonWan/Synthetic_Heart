@@ -265,6 +265,13 @@ export function createDebugWindow() {
                     if (resp && resp.ok) {
                         const summary = await resp.json();
                         if (summary && summary.state) {
+                            // Skip startAction if the animation_id hasn't changed.
+                            // This prevents restarting an already-running animation on
+                            // every polling cycle (every 2 s when debug-window is open).
+                            const serverId = summary.animation_id || null;
+                            if (serverId && window.__synth_current_animation_id && serverId === window.__synth_current_animation_id) {
+                                return;
+                            }
                             const playOnce = !!(summary.descriptor && summary.descriptor.play_once);
                             await window.animationHandler.startAction(summary.state, summary.animation || null, playOnce, null, summary.descriptor || null);
                             return;

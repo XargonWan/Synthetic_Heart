@@ -309,6 +309,7 @@ export function initChatUI() {
         try { bindArchiveButton(); } catch (e) { /* ignore */ }
 
         let ws = null;
+        let _typingAnimActive = false; // true when user is typing; reset after submit
 
         function updateSendState() {
             if (!sendBtn || !input) return;
@@ -378,18 +379,29 @@ export function initChatUI() {
                             // Canonical animation command from VRMStateServer.
                             // Legacy type 'animation' is also accepted for backward compat.
                             const animFile = data.file || data.animation || null;
-                            console.log('[chat-window] vrm_animation received:', data.state, animFile);
-                            try {
-                                if (window.VRMAnimations && typeof window.VRMAnimations.play === 'function') {
-                                    window.VRMAnimations.play(data.state, {
-                                        animation: animFile,
-                                        playOnce: data.loop === false,
-                                        playSection: data.play_section,
-                                        descriptor: data.descriptor
-                                    });
-                                }
-                            } catch (e) { /* ignore */ }
+                            const animId = data.animation_id || null;
+                            // If this is a state-restore on reconnect and the same animation is already
+                            // running (same animation_id), skip play() to avoid restarting from frame 0.
+                            // Any interface connecting after the animation started must see the same
+                            // logical state without triggering a visible restart.
+                            const isRestoreSkip = !!(data.restore && animId && window.__synth_current_animation_id === animId);
+                            console.log('[chat-window] vrm_animation received:', data.state, animFile, isRestoreSkip ? '(restore-skip)' : '');
+                            if (!isRestoreSkip) {
+                                try {
+                                    if (window.VRMAnimations && typeof window.VRMAnimations.play === 'function') {
+                                        window.VRMAnimations.play(data.state, {
+                                            animation: animFile,
+                                            playOnce: data.loop === false,
+                                            playSection: data.play_section,
+                                            descriptor: data.descriptor
+                                        });
+                                    }
+                                } catch (e) { /* ignore */ }
+                                // Track the animation_id so future restores can be deduplicated
+                                try { if (animId) window.__synth_current_animation_id = animId; } catch (e) { /* ignore */ }
+                            }
                             // Apply rich animation_state payload (blink, expressions, lipsync, eye_movement)
+                            // even on restore, so blend-shapes are always up-to-date.
                             try {
                                 if (data.animation_state && window.animationHandler && typeof window.animationHandler.applyAnimationState === 'function') {
                                     window.animationHandler.applyAnimationState(data.animation_state);
@@ -446,6 +458,27 @@ export function initChatUI() {
 
         if (input) {
             input.addEventListener('input', updateSendState);
+
+            // Trigger 'think' animation when user starts typing, so Synth looks
+            // attentive before the message is even sent.
+            input.addEventListener('input', () => {
+                try {
+                    const hasText = input.value.trim().length > 0;
+                    if (hasText && !_typingAnimActive) {
+                        _typingAnimActive = true;
+                        try {
+                            fetch('/api/animation_state', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ state: 'think' })
+                            }).catch(() => { /* ignore network errors */ });
+                        } catch (e) { /* ignore */ }
+                    } else if (!hasText) {
+                        _typingAnimActive = false;
+                    }
+                } catch (e) { /* ignore */ }
+            });
+
             // Send on Enter (Shift+Enter for newline)
             input.addEventListener('keydown', (ev) => {
                 try {
@@ -474,6 +507,7 @@ export function initChatUI() {
                     ws.send(JSON.stringify({ text }));
                     appendMessage(messages, 'user', text, Date.now());
                     input.value = '';
+                    _typingAnimActive = false; // backend takes over think→write→idle from here
                     updateSendState();
                     // keep focus on input
                     try { input.focus(); } catch (e) { /* ignore */ }

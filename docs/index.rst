@@ -31,6 +31,7 @@ getting started.
    interfaces
    plugins
    vrm_animations
+   animation_system
    webui_controls
    gemini/synth-live-voice-integration
    faq

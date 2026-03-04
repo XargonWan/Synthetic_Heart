@@ -5,23 +5,28 @@ Animation System
 Overview
 ========
 
-The SyntH Animation System provides a centralized mechanism for managing VRM avatar animations
-throughout the application lifecycle. The system coordinates between backend logic and frontend
-rendering to create a cohesive and responsive avatar experience.
+The SyntH Animation System is powered by **KaradaStateServer** — the single source of
+truth for three independent streams: the active VRM model, the animation state, and
+face blend-shape values.  Clients receive push-updates via WebSocket; only real state
+changes are broadcast.
+
+The system coordinates between backend logic and frontend rendering to create a
+coherent and responsive avatar experience across any number of simultaneously-connected
+WebUI windows.
 
 Architecture
 ============
 
 The animation system consists of three main components:
 
-Backend Animation Handler
---------------------------
+Backend: KaradaStateServer
+---------------------------
 
-Located in ``core/animation_handler.py``, this component:
+Located in ``core/animation_handler.py``, this component is the canonical VRM state service:
 
 - Maps logical animation states to FBX animation files
-- Tracks the current animation state
-- Sends animation commands to the WebUI via WebSocket
+- Tracks and broadcasts the current animation state to **all** connected clients
+- Manages VRM model state and pushes it on connect/change
 - Manages animation contexts and automatic fallback to Idle
 
 Frontend Animation Handler
@@ -39,7 +44,7 @@ WebUI Integration
 
 The ``SynthWebUIInterface`` (``core/webui.py``) coordinates between the backend and frontend:
 
-- Initializes the animation handler on startup
+- Initializes ``KaradaStateServer`` on startup
 - Triggers animations at appropriate lifecycle points
 - Sends animation commands via WebSocket
 
@@ -94,14 +99,14 @@ Usage
 Backend Usage
 -------------
 
-Components can trigger animations using the global animation handler:
+Components access the global ``KaradaStateServer`` instance:
 
 .. code-block:: python
 
-    from core.animation_handler import get_animation_handler, AnimationState
+    from core.animation_handler import get_karada_state_server, AnimationState
     
-    # Get the handler
-    handler = get_animation_handler()
+    # Get the server instance
+    handler = get_karada_state_server()
     
     # Trigger an animation
     await handler.transition_to(
@@ -144,7 +149,7 @@ distinct WebSocket message types.  All messages are JSON objects.
 ``vrm_animation`` — Play an animation
 --------------------------------------
 
-Emitted by ``AnimationHandler._send_animation_command()`` whenever the active
+Emitted by ``KaradaStateServer._send_animation_command()`` whenever the active
 animation changes.  This is the primary playback command.
 
 .. code-block:: json
@@ -154,11 +159,27 @@ animation changes.  This is the primary playback command.
         "file": "/skins/Rei/animations/think/Thinking.fbx",
         "state": "think",
         "loop": true,
+        "reset_eyes": true,
         "descriptor": {
             "intro":  {"start_frame": 0,  "end_frame": 15},
             "loop":   {"start_frame": 16, "end_frame": 60},
             "outro":  {"start_frame": 61, "end_frame": 90},
             "fps": 30
+        },
+        "animation_state": {
+            "action": "think",
+            "phase": "loop",
+            "animation": "/skins/Rei/animations/think/Thinking.fbx",
+            "descriptor": { "..." : "..." },
+            "clip": {"name": "Thinking", "duration": 1.47, "fps": 30.0},
+            "timing": {"started_at": "2026-03-04T12:00:00Z", "time_in_clip": 0.0, "current_frame": 0},
+            "expressions": [],
+            "blink": {"auto": true},
+            "eye_movement": {"auto": true},
+            "emotions": {"dominant": "happy", "values": {"happy": 7.5}},
+            "lipsync": false,
+            "priority": 10,
+            "source": "core"
         }
     }
 
@@ -168,10 +189,17 @@ animation changes.  This is the primary playback command.
     spelling is still accepted by ``chat-window.mjs`` for backwards compatibility,
     but the backend always emits ``"vrm_animation"``.
 
+    ``reset_eyes`` is emitted only for **targeted** session plays (not broadcast), so
+    each client can perform a smooth eyes-reset when the animation changes.  It is
+    **not** included in global broadcasts (``session_id=None``).
+
+    ``animation_state`` is populated only when a descriptor and/or emotions are
+    available.  Clients should treat it as optional.
+
 ``vrm_model`` — Set active VRM model
 --------------------------------------
 
-Emitted by ``AnimationHandler.set_vrm_model()`` when the persona's VRM changes.
+Emitted by ``KaradaStateServer.set_vrm_model()`` when the persona's VRM changes.
 
 .. code-block:: json
 
@@ -196,18 +224,27 @@ Emitted to update the avatar's facial expression sliders.
         "values": {"happy": 0.8, "neutral": 0.1}
     }
 
-``vrm_preload`` — Preload an animation file
---------------------------------------------
+``preload_animation`` — Preload an animation file
+---------------------------------------------------
 
 Asks the frontend to preload an FBX file in the background so it is ready when
-``vrm_animation`` requests it.
+``vrm_animation`` requests it.  Up to 3 IDLE variants are pre-warmed before any
+non-IDLE animation plays (see ``ensure_idle_preloaded()``).
 
 .. code-block:: json
 
     {
-        "type": "vrm_preload",
-        "file": "/skins/Rei/animations/idle/Idle.fbx"
+        "type": "preload_animation",
+        "animation": "/skins/Rei/animations/idle/Idle.fbx",
+        "descriptor": {
+            "loop": {"start_frame": 0, "end_frame": 120},
+            "fps": 30
+        }
     }
+
+.. note::
+
+    The message type is ``"preload_animation"`` and the URL key is ``"animation"``.
 
 ``animation_state`` — Informational state summary
 ---------------------------------------------------
@@ -254,7 +291,7 @@ avatar simultaneously (through different WebUI windows), they all see the **exac
 
 **How It Works**
 
-1. **Single Source of Truth**: ``AnimationHandler`` maintains the current animation state
+1. **Single Source of Truth**: ``KaradaStateServer`` maintains the current animation state
    - Current state (IDLE, THINK, WRITE, TALK)
    - Current animation file being played
    - Animation descriptor (frame info for intro/loop/outro)
@@ -278,7 +315,7 @@ avatar simultaneously (through different WebUI windows), they all see the **exac
     
     User 1 (Telegram)  → sends message
                        ↓
-    Backend (AnimationHandler) 
+    Backend (KaradaStateServer)
                    ↓ triggers THINK animation
                    ↓ updates _current_animation_file, _current_animation_descriptor
                    ↓ calls _notify_animation_state_changed()
@@ -298,8 +335,10 @@ No special configuration required. The synchronization is automatic:
 2. WebUI broadcasts to all connected clients when animation changes
 3. New clients receive current state on connection
 
-New Methods Added to AnimationHandler
----------------------------------------
+KaradaStateServer API
+----------------------
+
+The following public methods are available for plugins and interfaces.
 
 ``get_full_state() → dict``
     Returns the complete VRM state in a single dict with three keys:
@@ -325,6 +364,43 @@ New Methods Added to AnimationHandler
     Given a list of asset URLs that the client already has cached, returns
     the subset of server-known assets (currently the active VRM) the client
     is missing.  Used during the hello/has_assets handshake.
+
+``register_state_animations(state, animations: dict[str, list[str]], sequential=False) → None``
+    Override plugin animations for a logical state.  ``animations`` is a dict
+    with optional keys ``loop``, ``post``, ``other``, each mapping to a list of
+    FBX file names.
+
+    .. code-block:: python
+
+        handler.register_state_animations(
+            "think",
+            {"loop": ["DeepThought.fbx"], "post": ["PostThink.fbx"]},
+            sequential=True,
+        )
+
+``add_temporary_search_path(path: Path) → None``
+    Prepend a high-priority search path (used by animation uploads).  Temporary
+    paths are tracked separately and can be removed via
+    ``remove_temporary_search_path()``.
+
+``remove_temporary_search_path(path: Path) → None``
+    Remove a previously-added temporary search path.
+
+``get_animation_variants(state: str) → dict``
+    Returns discovered animation variants for a state, classified into three
+    buckets:
+
+    .. code-block:: python
+
+        {
+            "loop":  ["Thinking.fbx"],          # descriptor has loop section (or play_once=False)
+            "post":  ["ThinkPost.fbx"],          # descriptor has play_once=True
+            "other": ["Unclassified.fbx"],       # no descriptor at all
+        }
+
+``async ensure_idle_preloaded(session_id=None) → None``
+    Pre-warms up to 3 IDLE animation variants.  Called automatically before
+    any non-IDLE animation plays so that returning to IDLE is instant.
 
 Adding New Animations
 =====================
@@ -372,7 +448,7 @@ the active persona skin until explicitly promoted. Uploaded files are stored und
 
 1. Client uploads an FBX/VRMA to ``POST /api/animations/upload``.
 2. The server writes the file to ``skins/temp/<upload_id>/animations/<state>/``.
-3. The ``AnimationHandler`` adds the upload root as a **temporary search path** so
+3. The ``KaradaStateServer`` adds the upload root as a **temporary search path** so
    the animation can be discovered without touching the active skin.
 
 **Promotion flow**
@@ -419,17 +495,17 @@ Direct control (advanced)
 ------------------------
 
 If an interface explicitly opts out of the core queue animation broadcast (and takes
-full responsibility for animation state), it may call the animation handler directly.
+full responsibility for animation state), it may call the server directly.
 
 Example for an interface that wants to show the avatar is "thinking":
 
 .. code-block:: python
 
-    from core.animation_handler import get_animation_handler, AnimationState
+    from core.animation_handler import get_karada_state_server, AnimationState
     
     class MyInterface:
         async def handle_message(self, message):
-            handler = get_animation_handler()
+            handler = get_karada_state_server()
             
             # Get the session_id from WebUI if available
             # Note: This only works if the user has a WebUI session
@@ -495,6 +571,70 @@ All combinations work correctly:
 
 See :doc:`animation_flow_flexible` for detailed documentation.
 
+``effective_loop`` Determination
+==================================
+
+``play_animation()`` computes the effective loop behaviour from the descriptor and the
+requested ``loop`` parameter according to the following hierarchy:
+
+.. list-table:: effective_loop decision table
+   :header-rows: 1
+
+   * - Condition
+     - ``effective_loop``
+   * - State is IDLE
+     - ``True`` (always)
+   * - Descriptor has ``intro`` **or** ``outro`` **and** ``loop`` section
+     - ``True``
+   * - Descriptor has ``intro`` / ``outro`` but **no** ``loop`` section
+     - ``False`` (play once)
+   * - Descriptor has ``loop`` only + ``play_once: true``
+     - ``False`` (loop plays once)
+   * - Descriptor has ``loop`` only, no flags
+     - ``True``
+   * - Descriptor present, ``play_once: true``, no sections
+     - ``False``
+   * - No descriptor
+     - Respects the ``loop`` parameter passed to ``play_animation()``
+
+When ``effective_loop`` is ``False`` and the state is not IDLE, a background task
+(``_non_loop_fallback``) schedules a return to IDLE after the clip completes,
+acting as a safety net in case the client does not send a completion event.
+
+IDLE Rotation Loop
+==================
+
+When IDLE has multiple FBX variants, the ``_rotation_loop()`` background task
+switches to the next variant every 30–60 seconds (random interval).  The default
+mode is **sequential** (all IDLE animations are listed alphabetically in order);
+other states use random selection by default.
+
+.. code-block:: python
+
+    # Register a state as sequential (cycles in order, no repeat)
+    handler.register_state_animations(
+        "idle",
+        {"loop": ["Idle.fbx", "Idle2.fbx", "Happy Idle.fbx"]},
+        sequential=True,
+    )
+
+The rotation task is cancelled automatically when a higher-priority context
+starts and restarted when returning to IDLE.
+
+Smart Eye Behaviour
+===================
+
+The frontend automatically suspends blink and saccade loops when the avatar's
+``eyes_closed`` blend-shape exceeds ``0.5`` (e.g. during a blinking animation).
+They resume once the value drops below the threshold.
+
+Additionally, the ``eyes_closed`` value is **clamped to 0.85** to prevent
+visual artefacts (eyelash/cheek clipping).
+
+The backend emits ``"reset_eyes": true`` in every **targeted** (non-broadcast)
+``vrm_animation`` command so that the client can smoothly reset eye state when
+a new animation starts.
+
 Known Issues Fixed
 ==================
 
@@ -502,7 +642,7 @@ Stale ``window.animationHandler`` (idle-only animation)
 ---------------------------------------------------------
 
 **Symptom:** Only the Idle animation played; Think/Write state changes were logged by
-``chat-window.mjs`` (``vrm_animation received: think``) but ``[AnimationHandler] startAction``
+``chat-window.mjs`` (``vrm_animation received: think``) but ``[KaradaStateServer] startAction``
 never appeared in the console.
 
 **Root cause:** ``window.animationHandler`` was set at module-load time (when
@@ -541,7 +681,18 @@ Enable debug logging to see animation state changes:
 
     export LOGGING_LEVEL=debug
 
-Animation handler logs will appear with the prefix ``[AnimationHandler]``.
+Animation state server logs appear with the prefix ``[KaradaStateServer]``.
+
+HTTP fallback
+--------------
+
+If a WebSocket client cannot receive the state via push, it can poll:
+
+.. code-block:: bash
+
+    GET /api/animation_state
+
+The frontend (``vrm-viewer.mjs``) uses this as a safety net on reconnect.
 
 Limitations
 ===========

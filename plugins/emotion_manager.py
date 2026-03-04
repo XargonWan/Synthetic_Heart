@@ -518,9 +518,9 @@ class EmotionManager(PluginBase):
 
             # Push updated face value to all VRM clients
             try:
-                from core.animation_handler import get_animation_handler
+                from core.animation_handler import get_karada_state_server
 
-                handler = get_animation_handler()
+                handler = get_karada_state_server()
                 if handler:
                     await handler.set_face_values({emotion: intensity / 10.0})
             except Exception:
@@ -582,9 +582,9 @@ class EmotionManager(PluginBase):
         state = await self.get_emotion_state()
         # Push full face-values update to all VRM clients
         try:
-            from core.animation_handler import get_animation_handler
+            from core.animation_handler import get_karada_state_server
 
-            handler = get_animation_handler()
+            handler = get_karada_state_server()
             if handler and state:
                 await handler.set_face_values({k: v / 10.0 for k, v in state.items()})
         except Exception:

@@ -7,10 +7,10 @@ and coordinate with the WebUI.
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from core.animation_handler import (
-    AnimationHandler,
+    KaradaStateServer,
     AnimationState,
-    get_animation_handler,
-    set_animation_handler,
+    get_karada_state_server,
+    set_karada_state_server,
 )
 
 
@@ -24,15 +24,15 @@ def mock_webui():
 
 @pytest.fixture
 def animation_handler(mock_webui):
-    """Create an animation handler with mock WebUI."""
-    handler = AnimationHandler(mock_webui)
+    """Create a KaradaStateServer instance with mock WebUI."""
+    handler = KaradaStateServer(mock_webui)
     return handler
 
 
 @pytest.mark.asyncio
 async def test_initialization():
-    """Test animation handler initialization."""
-    handler = AnimationHandler()
+    """Test KaradaStateServer initialization."""
+    handler = KaradaStateServer()
     assert handler.current_state == AnimationState.IDLE
     assert handler.current_animation is None
     assert len(handler._active_tasks) == 0
@@ -158,8 +158,8 @@ async def test_transition_to(animation_handler, mock_webui):
 
 @pytest.mark.asyncio
 async def test_animation_without_webui():
-    """Test animation handler without WebUI reference."""
-    handler = AnimationHandler()
+    """Test KaradaStateServer without WebUI reference."""
+    handler = KaradaStateServer()
 
     # Should not raise exception, just log warning
     await handler.play_animation(AnimationState.THINK, session_id="test", loop=True)
@@ -200,7 +200,7 @@ async def test_get_current_animation(animation_handler, mock_webui):
     assert animation_handler.get_current_animation() is None
 
     def test_incomplete_intro_outro_warns():
-        ah = AnimationHandler()
+        ah = KaradaStateServer()
         # intro without start_frame, outro without end_frame
         desc = {
             "intro": {"end_frame": 10},
@@ -213,9 +213,9 @@ async def test_get_current_animation(animation_handler, mock_webui):
         assert res["has_outro"] is False
 
     def test_thinking_descriptor_classified_as_loop():
-        from core.animation_handler import AnimationHandler
+        from core.animation_handler import KaradaStateServer
 
-        ah = AnimationHandler()
+        ah = KaradaStateServer()
         # Ensure search paths include the skins/Rei animations directory
         ah.set_animation_search_paths([str(ah.SKIN_DEFAULT_ANIMATIONS_DIR)])
         variants = ah.get_animation_variants("think")
@@ -227,8 +227,8 @@ async def test_get_current_animation(animation_handler, mock_webui):
 @pytest.mark.asyncio
 async def test_vrm_animation_broadcast_on_play():
     """Ensure that play_animation broadcasts a vrm_animation message to all
-    connected WebSocket clients (new VRMStateServer architecture)."""
-    handler = AnimationHandler()
+    connected WebSocket clients (KaradaStateServer architecture)."""
+    handler = KaradaStateServer()
 
     sent_messages: list = []
 
@@ -255,17 +255,17 @@ async def test_vrm_animation_broadcast_on_play():
 
 @pytest.mark.asyncio
 async def test_global_handler():
-    """Test global animation handler singleton."""
-    handler1 = get_animation_handler()
-    handler2 = get_animation_handler()
+    """Test global KaradaStateServer singleton."""
+    handler1 = get_karada_state_server()
+    handler2 = get_karada_state_server()
 
     assert handler1 is handler2
 
     # Test setting global handler
-    new_handler = AnimationHandler()
-    set_animation_handler(new_handler)
+    new_handler = KaradaStateServer()
+    set_karada_state_server(new_handler)
 
-    handler3 = get_animation_handler()
+    handler3 = get_karada_state_server()
     assert handler3 is new_handler
 
 

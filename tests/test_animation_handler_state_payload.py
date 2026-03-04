@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from core.animation_handler import get_animation_handler, AnimationState
+from core.animation_handler import get_karada_state_server, AnimationState
 
 
 class FakeWebSocket:
@@ -44,7 +44,7 @@ async def test_animation_state_included_and_lipsync_default(
     }
     (base / "think" / "think_short.fbx.json").write_text(json.dumps(desc))
 
-    handler = get_animation_handler()
+    handler = get_karada_state_server()
     handler.set_animation_search_paths([base])
     handler.register_state_animations("think", {"loop": ["think_short.fbx"]})
 

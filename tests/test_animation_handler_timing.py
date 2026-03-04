@@ -1,10 +1,10 @@
 from datetime import datetime, timezone, timedelta
 
-from core.animation_handler import get_animation_handler
+from core.animation_handler import get_karada_state_server
 
 
 def test_get_current_animation_state_timing_computed():
-    ah = get_animation_handler()
+    ah = get_karada_state_server()
     ah._current_animation_file = "Thinking.fbx"
     ah._current_animation_descriptor = {
         "fps": 24,

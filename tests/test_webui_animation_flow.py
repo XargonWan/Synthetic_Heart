@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from core.animation_handler import get_animation_handler
+from core.animation_handler import get_karada_state_server
 from core.animation_handler import AnimationState
 
 
@@ -36,7 +36,7 @@ async def test_play_and_stop_with_outro(tmp_path: Path):
         )
     )
 
-    handler = get_animation_handler()
+    handler = get_karada_state_server()
     handler.set_animation_search_paths([base])
     # Force selection of our test animation regardless of active persona/skin content
     handler.register_state_animations("think", {"loop": ["think_long.fbx"]})
