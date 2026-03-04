@@ -700,6 +700,60 @@
             display: flex;
             gap: 0.5rem;
             margin-top: auto;
+            flex-wrap: wrap;
+        }
+        .skin-actions-editor {
+            margin-top: 0.25rem;
+        }
+        .skin-actions-editor .btn-ghost {
+            font-size: 0.78rem;
+            padding: 0.3rem 0.6rem;
+        }
+        .btn-danger {
+            color: var(--error) !important;
+            border-color: var(--error) !important;
+        }
+        .btn-danger:hover {
+            background: rgba(255, 123, 147, 0.12) !important;
+        }
+        .skin-editor-form {
+            background: var(--surface-alt);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 1.2rem;
+            margin-bottom: 1rem;
+        }
+        .skin-editor-form h3 {
+            margin: 0 0 0.75rem 0;
+            font-size: 1rem;
+        }
+        .skin-form-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            gap: 0.75rem;
+        }
+        .skin-form-field label {
+            display: block;
+            font-size: 0.82rem;
+            color: var(--text-soft);
+            margin-bottom: 0.25rem;
+        }
+        .skin-form-field input,
+        .skin-form-field textarea {
+            width: 100%;
+            background: rgba(255,255,255,0.05);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text);
+            padding: 0.45rem 0.65rem;
+            font-family: inherit;
+            font-size: 0.88rem;
+            resize: vertical;
+        }
+        .skin-form-field input:focus,
+        .skin-form-field textarea:focus {
+            outline: none;
+            border-color: var(--accent);
         }
         .btn-primary {
             background: var(--accent);

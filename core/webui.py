@@ -513,6 +513,13 @@ class SynthWebUIInterface:
         self.app.get("/api/skins")(self.list_skins)
         self.app.post("/api/skins/{skin_name}/activate")(self.activate_skin)
         self.app.post("/api/skins/uploaded/clear")(self.clear_uploaded_vrm)
+        # Skin editor endpoints
+        self.app.post("/api/skins")(self.create_skin)
+        self.app.post("/api/skins/upload")(self.upload_skin_zip)
+        self.app.post("/api/skins/{skin_name}/vrm")(self.upload_skin_vrm)
+        self.app.post("/api/skins/{skin_name}/preview")(self.upload_skin_preview)
+        self.app.get("/api/skins/{skin_name}/download")(self.download_skin)
+        self.app.delete("/api/skins/{skin_name}")(self.delete_skin)
         self.app.get("/api/components")(self.components_summary)
         self.app.post("/api/components/reload")(self.reload_component)
         self.app.post("/api/components/dev/toggle")(self.toggle_dev_components)
@@ -8442,6 +8449,285 @@ class SynthWebUIInterface:
             raise HTTPException(status_code=500, detail="Failed to activate skin")
 
         return JSONResponse({"status": "ok", "name": target.name}, status_code=201)
+
+    # ------------------------------------------------------------------
+    # Skin editor endpoints
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _sanitize_skin_folder_name(name: str) -> str:
+        """Sanitize a skin name into a safe folder name."""
+        safe = "".join(
+            ch for ch in name if ch.isalnum() or ch in ("-", "_", " ")
+        ).strip()
+        # Replace spaces with underscores
+        safe = safe.replace(" ", "_")
+        if not safe:
+            safe = f"skin_{uuid.uuid4().hex[:8]}"
+        return safe
+
+    async def create_skin(self, request: Request) -> JSONResponse:
+        """Create a new skin folder with a persona.json.
+
+        Expects JSON body: {name, author?, version?, appearance?}
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+        name = (body.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Skin name is required")
+
+        author = (body.get("author") or "").strip()
+        version = (body.get("version") or "1.0").strip()
+        appearance = (body.get("appearance") or "").strip()
+
+        folder_name = self._sanitize_skin_folder_name(name)
+        skins_dir = Path(__file__).resolve().parent.parent / "skins"
+        skin_path = skins_dir / folder_name
+
+        if skin_path.exists():
+            raise HTTPException(
+                status_code=409,
+                detail=f"A skin folder '{folder_name}' already exists",
+            )
+
+        try:
+            skin_path.mkdir(parents=True, exist_ok=False)
+            persona = {
+                "name": name,
+                "description": f"Custom skin: {name}",
+                "version": version,
+                "author": author,
+                "attributes": {"appearance": appearance} if appearance else {},
+            }
+            persona_path = skin_path / "persona.json"
+            persona_path.write_text(json.dumps(persona, indent=4), encoding="utf-8")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to create skin '{name}': {exc}")
+            raise HTTPException(status_code=500, detail="Failed to create skin")
+
+        log_info(f"{LOG_PREFIX} Created new skin '{name}' at {skin_path}")
+        return JSONResponse(
+            {"status": "ok", "folder": folder_name, "name": name}, status_code=201
+        )
+
+    async def upload_skin_vrm(
+        self, skin_name: str, file: UploadFile = File(...)
+    ) -> JSONResponse:
+        """Upload a VRM file into an existing skin folder."""
+        if not file.filename or not file.filename.lower().endswith(".vrm"):
+            raise HTTPException(status_code=400, detail="Only .vrm files are accepted")
+
+        skins_dir = Path(__file__).resolve().parent.parent / "skins"
+        skin_path = skins_dir / Path(skin_name).name
+        if not skin_path.exists() or not skin_path.is_dir():
+            raise HTTPException(status_code=404, detail="Skin not found")
+
+        # Remove any existing VRM files in the skin folder
+        for existing_vrm in skin_path.glob("*.vrm"):
+            try:
+                existing_vrm.unlink()
+            except Exception:
+                pass
+
+        target = skin_path / "model.vrm"
+        try:
+            with target.open("wb") as f:
+                while True:
+                    chunk = await file.read(1 << 20)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+        finally:
+            await file.close()
+
+        log_info(f"{LOG_PREFIX} Uploaded VRM to skin '{skin_name}'")
+        return JSONResponse({"status": "ok", "skin": skin_name}, status_code=201)
+
+    async def upload_skin_preview(
+        self, skin_name: str, file: UploadFile = File(...)
+    ) -> JSONResponse:
+        """Upload a preview image into an existing skin folder."""
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="No file provided")
+
+        lower = file.filename.lower()
+        if not any(lower.endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".webp")):
+            raise HTTPException(
+                status_code=400,
+                detail="Only image files (.png, .jpg, .jpeg, .webp) are accepted",
+            )
+
+        skins_dir = Path(__file__).resolve().parent.parent / "skins"
+        skin_path = skins_dir / Path(skin_name).name
+        if not skin_path.exists() or not skin_path.is_dir():
+            raise HTTPException(status_code=404, detail="Skin not found")
+
+        target = skin_path / "preview.png"
+        try:
+            with target.open("wb") as f:
+                while True:
+                    chunk = await file.read(1 << 20)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+        finally:
+            await file.close()
+
+        log_info(f"{LOG_PREFIX} Uploaded preview to skin '{skin_name}'")
+        return JSONResponse({"status": "ok", "skin": skin_name}, status_code=201)
+
+    async def download_skin(self, skin_name: str) -> FileResponse:
+        """Download a skin folder as a .zip archive."""
+        import shutil
+        import tempfile
+
+        skins_dir = Path(__file__).resolve().parent.parent / "skins"
+        skin_path = skins_dir / Path(skin_name).name
+        if not skin_path.exists() or not skin_path.is_dir():
+            raise HTTPException(status_code=404, detail="Skin not found")
+
+        try:
+            tmp_dir = tempfile.mkdtemp()
+            archive_base = Path(tmp_dir) / skin_path.name
+            archive_path = shutil.make_archive(
+                str(archive_base),
+                "zip",
+                root_dir=str(skins_dir),
+                base_dir=skin_path.name,
+            )
+            return FileResponse(
+                path=archive_path,
+                filename=f"{skin_path.name}.zip",
+                media_type="application/zip",
+            )
+        except Exception as exc:
+            log_error(
+                f"{LOG_PREFIX} Failed to create skin archive for '{skin_name}': {exc}"
+            )
+            raise HTTPException(status_code=500, detail="Failed to create skin archive")
+
+    async def upload_skin_zip(self, file: UploadFile = File(...)) -> JSONResponse:
+        """Upload a .zip skin pack and extract it into skins/."""
+        import shutil
+        import tempfile
+        import zipfile
+
+        if not file.filename or not file.filename.lower().endswith(".zip"):
+            raise HTTPException(status_code=400, detail="Only .zip files are accepted")
+
+        skins_dir = Path(__file__).resolve().parent.parent / "skins"
+        skins_dir.mkdir(parents=True, exist_ok=True)
+
+        # Save to temp file
+        tmp_dir = tempfile.mkdtemp()
+        temp_path = Path(tmp_dir) / "upload.zip"
+        try:
+            with temp_path.open("wb") as f:
+                while True:
+                    chunk = await file.read(1 << 20)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+        finally:
+            await file.close()
+
+        try:
+            with zipfile.ZipFile(temp_path, "r") as zf:
+                # Determine root folder from archive
+                names = zf.namelist()
+                if not names:
+                    raise HTTPException(status_code=400, detail="Empty zip file")
+
+                # Find root folder(s)
+                root_candidates = {n.split("/")[0] for n in names if "/" in n}
+                if len(root_candidates) == 1:
+                    root = root_candidates.pop()
+                else:
+                    root = Path(file.filename).stem
+
+                dest = skins_dir / root
+                if dest.exists():
+                    # Overwrite existing skin (except Rei)
+                    if root == "Rei":
+                        raise HTTPException(
+                            status_code=403,
+                            detail="Cannot overwrite the default Rei skin",
+                        )
+                    shutil.rmtree(dest)
+
+                zf.extractall(skins_dir)
+
+                # Validate: must have at least a persona.json or .vrm
+                has_persona = (dest / "persona.json").exists()
+                has_vrm = any(dest.glob("*.vrm"))
+                if not has_persona and not has_vrm:
+                    # Check one level deeper (zip might have nested structure)
+                    nested = list(dest.iterdir())
+                    if len(nested) == 1 and nested[0].is_dir():
+                        inner = nested[0]
+                        has_persona = (inner / "persona.json").exists()
+                        has_vrm = any(inner.glob("*.vrm"))
+                        if has_persona or has_vrm:
+                            # Move inner contents up
+                            for item in inner.iterdir():
+                                shutil.move(str(item), str(dest / item.name))
+                            inner.rmdir()
+
+                if not (dest / "persona.json").exists() and not any(dest.glob("*.vrm")):
+                    shutil.rmtree(dest, ignore_errors=True)
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Invalid skin pack: must contain persona.json or a .vrm file",
+                    )
+
+        except zipfile.BadZipFile:
+            raise HTTPException(status_code=400, detail="Invalid zip file")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to extract skin zip: {exc}")
+            raise HTTPException(status_code=500, detail="Failed to extract skin pack")
+        finally:
+            # Clean up temp file
+            try:
+                temp_path.unlink(missing_ok=True)
+                Path(tmp_dir).rmdir()
+            except Exception:
+                pass
+
+        log_info(f"{LOG_PREFIX} Uploaded skin pack '{root}'")
+        return JSONResponse({"status": "ok", "folder": root}, status_code=201)
+
+    async def delete_skin(self, skin_name: str) -> JSONResponse:
+        """Delete a skin folder. Rei is protected and cannot be deleted."""
+        import shutil
+
+        safe_name = Path(skin_name).name
+        if safe_name == "Rei":
+            raise HTTPException(
+                status_code=403,
+                detail="The default skin 'Rei' cannot be deleted",
+            )
+
+        skins_dir = Path(__file__).resolve().parent.parent / "skins"
+        skin_path = skins_dir / safe_name
+        if not skin_path.exists() or not skin_path.is_dir():
+            raise HTTPException(status_code=404, detail="Skin not found")
+
+        try:
+            shutil.rmtree(skin_path)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to delete skin '{safe_name}': {exc}")
+            raise HTTPException(status_code=500, detail="Failed to delete skin")
+
+        log_info(f"{LOG_PREFIX} Deleted skin '{safe_name}'")
+        return JSONResponse({"status": "ok", "deleted": safe_name})
 
     # ------------------------------------------------------------------
     # WebSocket logic
