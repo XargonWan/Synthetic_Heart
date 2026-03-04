@@ -109,6 +109,11 @@ class AnimationHandler:
         # Temporary search paths managed via uploads/helpers
         self._temporary_search_paths: List[Path] = []
 
+        # VRM model state: set via set_vrm_model() and read by get_full_state()
+        self._vrm_model_url: Optional[str] = None
+        self._vrm_model_name: Optional[str] = None
+        self._vrm_model_hash: Optional[str] = None
+
     def set_webui(self, webui: SynthWebUIInterface) -> None:
         """Set or update the WebUI reference.
 
@@ -361,6 +366,141 @@ class AnimationHandler:
         }
 
         return state
+
+    def get_full_state(self) -> Dict[str, Any]:
+        """Return the complete VRM state suitable for push-to-client on WebSocket connect.
+
+        Returns a dict with three keys:
+          - ``vrm_model``: {name, url, hash} — the currently active VRM model
+          - ``animation``: {file, url, state, loop, descriptor} — the current animation
+          - ``face_values``: {} — current face/emotion blend-shape values (best-effort)
+        """
+        # VRM model: prefer explicitly stored state, fall back to reading from webui
+        vrm_model: Dict[str, Any] = {}
+        if self._vrm_model_url:
+            vrm_model = {
+                "name": self._vrm_model_name,
+                "url": self._vrm_model_url,
+                "hash": self._vrm_model_hash,
+            }
+        else:
+            try:
+                if self.webui and getattr(self.webui, "active_vrm", None):
+                    active_vrm: str = self.webui.active_vrm  # type: ignore[attr-defined]
+                    if active_vrm.startswith("/"):
+                        url = active_vrm
+                        name = active_vrm.split("/")[-1]
+                    else:
+                        vrm_dir = getattr(self.webui, "vrm_dir", None)
+                        if vrm_dir:
+                            vrm_path = Path(vrm_dir) / active_vrm
+                            try:
+                                root = Path(__file__).resolve().parent.parent
+                                url = f"/{vrm_path.relative_to(root).as_posix()}"
+                            except Exception:
+                                url = f"/avatars/{active_vrm}"
+                        else:
+                            url = f"/avatars/{active_vrm}"
+                        name = active_vrm
+                    vrm_model = {"name": name, "url": url, "hash": None}
+            except Exception:
+                vrm_model = {}
+
+        # Animation: current file, resolved URL, state name, loop flag, descriptor
+        animation: Dict[str, Any] = {}
+        anim_file = self._current_animation_file
+        if anim_file:
+            try:
+                resolved, desc = self._resolve_animation_descriptor(anim_file)
+            except Exception:
+                resolved = anim_file
+                desc = self._current_animation_descriptor
+            animation = {
+                "file": anim_file,
+                "url": resolved,
+                "state": self.current_state.value,
+                "loop": True,
+                "descriptor": desc or self._current_animation_descriptor,
+            }
+
+        # Face values: best-effort from EmotionManager plugin
+        face_values: Dict[str, Any] = {}
+        try:
+            from core.core_initializer import PLUGIN_REGISTRY  # type: ignore[import]
+
+            mgr = (
+                PLUGIN_REGISTRY.get("emotion_manager")
+                if isinstance(PLUGIN_REGISTRY, dict)
+                else None
+            )
+            if mgr is not None and hasattr(mgr, "get_emotion_state"):
+                import asyncio as _asyncio
+
+                raw = mgr.get_emotion_state()
+                if _asyncio.iscoroutine(raw):
+                    pass  # cannot await here; skip
+                elif isinstance(raw, dict):
+                    face_values = raw
+        except Exception:
+            face_values = {}
+
+        return {
+            "vrm_model": vrm_model,
+            "animation": animation,
+            "face_values": face_values,
+        }
+
+    async def set_vrm_model(
+        self,
+        url: str,
+        name: str,
+        hash_: Optional[str] = None,
+    ) -> None:
+        """Store the active VRM model info and broadcast a ``vrm_model`` message to all clients.
+
+        Args:
+            url: Web-accessible URL for the VRM file (e.g. ``/avatars/SyntH.vrm``).
+            name: Human-readable model name / filename.
+            hash_: Optional content hash for client-cache validation.
+        """
+        self._vrm_model_url = url
+        self._vrm_model_name = name
+        self._vrm_model_hash = hash_
+        log_debug(f"[AnimationHandler] VRM model state updated: {name} -> {url}")
+
+        if not self.webui:
+            return
+
+        payload: Dict[str, Any] = {"type": "vrm_model", "name": name, "url": url}
+        if hash_ is not None:
+            payload["hash"] = hash_
+
+        for sid, websocket in list(self.webui.connections.items()):  # type: ignore[attr-defined]
+            try:
+                await websocket.send_json(payload)
+                log_debug(f"[AnimationHandler] Broadcast vrm_model to session {sid}")
+            except Exception as exc:
+                log_warning(
+                    f"[AnimationHandler] Failed to broadcast vrm_model to {sid}: {exc}"
+                )
+
+    def get_missing_assets(
+        self,
+        has_assets: List[str],
+    ) -> List[str]:
+        """Return server-known asset URLs that the client reports it does not already have.
+
+        Args:
+            has_assets: List of asset URLs/identifiers the client already has cached.
+
+        Returns:
+            List of asset URLs the client is missing.
+        """
+        missing: List[str] = []
+        # Check the active VRM model
+        if self._vrm_model_url and self._vrm_model_url not in has_assets:
+            missing.append(self._vrm_model_url)
+        return missing
 
     def get_animations_for_state(self, state: AnimationState) -> List[str]:
         """Get list of animation files for a given state by scanning skin folders.
@@ -1136,9 +1276,6 @@ class AnimationHandler:
                     _, prev_descriptor = self._resolve_animation_descriptor(
                         self.current_animation
                     )
-                    prev_structure = self._analyze_animation_structure(
-                        prev_descriptor, self.current_animation
-                    )
 
                     # Send outro command
                     await self._send_animation_command(
@@ -1557,8 +1694,8 @@ class AnimationHandler:
                 for sid, websocket in list(self.webui.connections.items()):
                     try:
                         payload = {
-                            "type": "animation",
-                            "animation": resolved_path,
+                            "type": "vrm_animation",
+                            "file": resolved_path,
                             "loop": loop,
                             "state": state,
                         }
@@ -1590,8 +1727,8 @@ class AnimationHandler:
                 return
 
             payload = {
-                "type": "animation",
-                "animation": resolved_path,
+                "type": "vrm_animation",
+                "file": resolved_path,
                 "loop": loop,
                 "state": state,
             }

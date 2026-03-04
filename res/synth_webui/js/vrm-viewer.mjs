@@ -2230,13 +2230,22 @@ import * as THREE from 'three';
                     const skin = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
                     const cacheKey = `${skin}:${actionName}`;
 
+                    const resolveCurrentList = () => {
+                        try {
+                            const reg = window.VRMAnimationMappings || {};
+                            const perSkin = (reg && typeof reg[skin] === 'object' && reg[skin] !== null) ? reg[skin] : null;
+                            const list = (perSkin && Array.isArray(perSkin[actionName])) ? perSkin[actionName]
+                                         : (Array.isArray(reg[actionName]) ? reg[actionName] : null);
+                            return Array.isArray(list) ? list : [];
+                        } catch (e) {
+                            return [];
+                        }
+                    };
+
                     // 1) Prefer global registry overrides (skin-aware).
                     try {
-                        const reg = window.VRMAnimationMappings || {};
-                        const perSkin = (reg && typeof reg[skin] === 'object' && reg[skin] !== null) ? reg[skin] : null;
-                        const list = (perSkin && Array.isArray(perSkin[actionName])) ? perSkin[actionName]
-                                     : (Array.isArray(reg[actionName]) ? reg[actionName] : null);
-                        if (Array.isArray(list)) {
+                        const list = resolveCurrentList();
+                        if (Array.isArray(list) && list.length > 0) {
                             animationMappingsLoaded.set(cacheKey, true);
                             return list;
                         }
@@ -2246,7 +2255,7 @@ import * as THREE from 'three';
                     
                     // Return cached mappings if available
                     if (animationMappingsLoaded.has(cacheKey)) {
-                        return animationMappings[actionName] || [];
+                        return resolveCurrentList();
                     }
                     
                     try {
@@ -2266,18 +2275,35 @@ import * as THREE from 'three';
                                 animationMappings[actionName] = data.animations || [];
                             }
                             animationMappingsLoaded.set(cacheKey, true);
-                            const arr = (window.VRMAnimationMappings?.[skin]?.[actionName]) || animationMappings[actionName] || [];
+                            const arr = resolveCurrentList();
                             console.log(`[AnimationHandler] Loaded ${arr.length} animations for ${actionName}:`, arr);
+                            return arr;
                         } else {
                             console.warn(`[AnimationHandler] Failed to load animations: HTTP ${response.status}`);
-                            animationMappings[actionName] = [];
+                            try {
+                                window.VRMAnimationMappings = window.VRMAnimationMappings || {};
+                                if (!window.VRMAnimationMappings[skin] || typeof window.VRMAnimationMappings[skin] !== 'object') {
+                                    window.VRMAnimationMappings[skin] = {};
+                                }
+                                window.VRMAnimationMappings[skin][actionName] = [];
+                            } catch (e) {
+                                animationMappings[actionName] = [];
+                            }
                         }
                     } catch (error) {
                         console.error(`[AnimationHandler] Error fetching animations:`, error);
-                        animationMappings[actionName] = [];
+                        try {
+                            window.VRMAnimationMappings = window.VRMAnimationMappings || {};
+                            if (!window.VRMAnimationMappings[skin] || typeof window.VRMAnimationMappings[skin] !== 'object') {
+                                window.VRMAnimationMappings[skin] = {};
+                            }
+                            window.VRMAnimationMappings[skin][actionName] = [];
+                        } catch (e) {
+                            animationMappings[actionName] = [];
+                        }
                     }
                     
-                    return animationMappings[actionName] || [];
+                    return resolveCurrentList();
                 }
 
                 async loadAnimation(actionName, animationFile) {
@@ -2386,7 +2412,34 @@ import * as THREE from 'three';
                 }
 
                 async loadAction(actionName) {
-                    const files = await this.getAnimationsForType(actionName);
+                    let files = await this.getAnimationsForType(actionName);
+                    if (!files || files.length === 0) {
+                        // Safety net: if mapping/cache is stale or a race cleared entries,
+                        // force-refresh from API and repopulate mappings before giving up.
+                        try {
+                            const primarySkin = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
+                            const candidateSkins = Array.from(new Set([primarySkin, 'Rei'].filter(Boolean)));
+                            for (const skinName of candidateSkins) {
+                                try {
+                                    const resp = await fetch(`/api/animations/${encodeURIComponent(skinName)}/${encodeURIComponent(actionName)}`);
+                                    if (!resp.ok) continue;
+                                    const payload = await resp.json();
+                                    const forced = (payload && Array.isArray(payload.animations)) ? payload.animations : [];
+                                    if (forced.length > 0) {
+                                        window.VRMAnimationMappings = window.VRMAnimationMappings || {};
+                                        if (!window.VRMAnimationMappings[skinName] || typeof window.VRMAnimationMappings[skinName] !== 'object') {
+                                            window.VRMAnimationMappings[skinName] = {};
+                                        }
+                                        window.VRMAnimationMappings[skinName][actionName] = forced;
+                                        files = forced;
+                                        console.log(`[AnimationHandler] Forced refresh recovered ${forced.length} animations for ${actionName} from ${skinName}`);
+                                        break;
+                                    }
+                                } catch (e) { /* ignore */ }
+                            }
+                        } catch (e) { /* ignore */ }
+                    }
+
                     if (!files || files.length === 0) {
                         console.log(`[AnimationHandler] No animations found for ${actionName}`);
                         return null;
@@ -4456,6 +4509,10 @@ import * as THREE from 'three';
                 try {
                     console.log('[synth_webui] Initializing AnimationHandler...');
                     animationHandler = new AnimationHandler(currentMixer, vrm);
+                    // Immediately expose the real instance globally so WS message handlers
+                    // (e.g. in chat-window.mjs) that check window.VRMAnimations / window.animationHandler
+                    // always resolve to the live object, not the null stub set at module-load time.
+                    window.animationHandler = animationHandler;
 
                     // Flush queued preloads captured before the handler existed.
                     try {
@@ -4541,13 +4598,7 @@ import * as THREE from 'three';
                         console.error('[synth_webui] ✗ Idle action load failed:', e);
                     }
 
-                    console.log('[synth_webui] Loading think action...');
-                    try {
-                        await animationHandler.loadAction('think');
-                        console.log('[synth_webui] ✓ Think action loaded');
-                    } catch (e) {
-                        console.error('[synth_webui] ✗ Think action failed:', e);
-                    }
+                    console.log('[synth_webui] Server-driven mode: skipping eager THINK preload');
 
                     // Debug helper for manual testing of face expressions/blink
                     try {
@@ -4573,21 +4624,7 @@ import * as THREE from 'three';
                         console.debug('[synth_webui] DEBUG_ANIM_HELPERS.triggerThink available');
                     } catch (e) { /* ignore */ }
                     
-                    console.log('[synth_webui] Loading write action...');
-                    try {
-                        await animationHandler.loadAction('write');
-                        console.log('[synth_webui] ✓ Write action loaded');
-                    } catch (e) {
-                        console.error('[synth_webui] ✗ Write action failed:', e);
-                    }
-
-                    console.log('[synth_webui] Loading talk action...');
-                    try {
-                        await animationHandler.loadAction('talk');
-                        console.log('[synth_webui] ✓ Talk action loaded');
-                    } catch (e) {
-                        console.error('[synth_webui] ✗ Talk action failed:', e);
-                    }
+                    console.log('[synth_webui] Server-driven mode: skipping eager WRITE/TALK preload');
                     
                     // Process any pending animation commands that arrived while loading
                     // Attempt to sync with backend animation state so page reloads pick
@@ -4967,27 +5004,55 @@ import * as THREE from 'three';
             // Expose animation functions globally for message chain integration
             window.VRMAnimations = {
                 // Generic: allows arbitrary states (e.g. GAMING) without hardcoded additions.
+                // NOTE: use the closure variable `animationHandler` as primary reference so
+                // that VRM-load-time assignment (window.animationHandler = animationHandler
+                // inside loadDefaultAnimations) is always reflected here, regardless of
+                // the initial null stub set at module-load time.
                 play: (state, opts = {}) => {
                     try {
                         const s = String(state || '').toLowerCase();
-                        if (!s || !window.animationHandler) return;
+                        const handler = animationHandler || window.animationHandler;
+                        if (!s || !handler) return;
                         const animation = opts.animation || null;
                         const playOnce = !!opts.playOnce;
                         const playSection = opts.playSection || null;
                         const descriptor = opts.descriptor || null;
-                        window.animationHandler.startAction(s, animation, playOnce, playSection, descriptor);
+                        handler.startAction(s, animation, playOnce, playSection, descriptor);
                     } catch (e) {
                         console.warn('[synth_webui] VRMAnimations.play failed:', e);
+                    }
+                },
+                // Preload an animation file into the cache for instant playback later.
+                preload: (state, file, descriptor) => {
+                    try {
+                        const handler = animationHandler || window.animationHandler;
+                        if (!handler || !file) return;
+                        handler.preloadAnimation(file, descriptor || null);
+                    } catch (e) {
+                        console.warn('[synth_webui] VRMAnimations.preload failed:', e);
+                    }
+                },
+                // Push VRM blend-shape / face values (emotions, expressions).
+                // values: { [name: string]: number (0-1) }
+                setFaceValues: (values) => {
+                    try {
+                        const handler = animationHandler || window.animationHandler;
+                        if (!handler || !values) return;
+                        for (const [key, val] of Object.entries(values)) {
+                            if (typeof handler._setFaceValue === 'function') {
+                                handler._setFaceValue(key, val);
+                            }
+                        }
+                    } catch (e) {
+                        console.warn('[synth_webui] VRMAnimations.setFaceValues failed:', e);
                     }
                 },
                 // Registry accessors for plugins/interfaces.
                 getMappings: () => (window.VRMAnimationMappings || {}),
                 setMappings: (m) => { window.VRMAnimationMappings = m || {}; },
-                // Backward-compatible wrappers (kept because they existed before).
-                startThinking,
-                stopThinking,
-                startTalking,
-                stopTalking,
+                // NOTE: startThinking/startTalking are intentionally NOT exposed here.
+                // Animations are now server-driven via vrm_animation WS messages.
+                // The frontend plays whichever file the server selects; it never picks animations independently.
             };
             window.animationHandler = animationHandler;
             console.log('[synth_webui] Animation functions exposed globally via window.VRMAnimations');

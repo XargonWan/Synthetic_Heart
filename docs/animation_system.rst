@@ -138,23 +138,112 @@ Example:
 Frontend WebSocket Protocol
 ============================
 
-The backend sends animation commands via WebSocket with the following format:
+The backend communicates animation state to connected WebUI clients through five
+distinct WebSocket message types.  All messages are JSON objects.
+
+``vrm_animation`` — Play an animation
+--------------------------------------
+
+Emitted by ``AnimationHandler._send_animation_command()`` whenever the active
+animation changes.  This is the primary playback command.
 
 .. code-block:: json
 
     {
-        "type": "animation",
-        "animation": "animations/Thinking.fbx",
-        "loop": true,
+        "type": "vrm_animation",
+        "file": "/skins/Rei/animations/think/Thinking.fbx",
         "state": "think",
+        "loop": true,
         "descriptor": {
-            "intro": {"end_frame": 35},
-            "loop": {"start_frame": 36, "end_frame": 77},
-            "outro": {"start_frame": 78}
+            "intro":  {"start_frame": 0,  "end_frame": 15},
+            "loop":   {"start_frame": 16, "end_frame": 60},
+            "outro":  {"start_frame": 61, "end_frame": 90},
+            "fps": 30
         }
     }
 
-The frontend listens for these messages and triggers the appropriate animation.
+.. note::
+
+    The key is ``"file"`` (not ``"animation"``).  The legacy ``"type": "animation"``
+    spelling is still accepted by ``chat-window.mjs`` for backwards compatibility,
+    but the backend always emits ``"vrm_animation"``.
+
+``vrm_model`` — Set active VRM model
+--------------------------------------
+
+Emitted by ``AnimationHandler.set_vrm_model()`` when the persona's VRM changes.
+
+.. code-block:: json
+
+    {
+        "type": "vrm_model",
+        "name": "SyntH.vrm",
+        "url": "/avatars/SyntH.vrm",
+        "hash": "sha256:abc123"
+    }
+
+The optional ``hash`` field allows clients to skip reloading an already-cached model.
+
+``vrm_face`` — Blend-shape / emotion values
+---------------------------------------------
+
+Emitted to update the avatar's facial expression sliders.
+
+.. code-block:: json
+
+    {
+        "type": "vrm_face",
+        "values": {"happy": 0.8, "neutral": 0.1}
+    }
+
+``vrm_preload`` — Preload an animation file
+--------------------------------------------
+
+Asks the frontend to preload an FBX file in the background so it is ready when
+``vrm_animation`` requests it.
+
+.. code-block:: json
+
+    {
+        "type": "vrm_preload",
+        "file": "/skins/Rei/animations/idle/Idle.fbx"
+    }
+
+``animation_state`` — Informational state summary
+---------------------------------------------------
+
+A lightweight broadcast that communicates *what* is playing without necessarily
+triggering a re-play.  Used by clients that arrived after the original
+``vrm_animation`` command was sent and need to know the current state.
+
+.. code-block:: json
+
+    {
+        "type": "animation_state",
+        "state": "think",
+        "animation_file": "Thinking.fbx"
+    }
+
+New-client handshake (hello / has_assets)
+------------------------------------------
+
+When a new client establishes a WebSocket connection it may send a ``hello``
+message listing assets it already has cached:
+
+.. code-block:: json
+
+    { "type": "hello", "has_assets": ["/avatars/SyntH.vrm"] }
+
+The backend calls ``get_missing_assets(has_assets)`` and pushes only the missing
+assets to the client, avoiding redundant transfers.  Immediately after, the full
+current state (VRM model + active animation + face values) is pushed via
+``get_full_state()``.
+
+.. note::
+
+    All ``vrm_animation`` commands are broadcast to **all connected sessions**
+    (``session_id=None``), ensuring that every open WebUI window shows the
+    same animation simultaneously.
 
 Centralized Animation State
 =============================
@@ -208,6 +297,34 @@ No special configuration required. The synchronization is automatic:
 1. Backend calls ``register_animation_state_changed_callback()`` during initialization
 2. WebUI broadcasts to all connected clients when animation changes
 3. New clients receive current state on connection
+
+New Methods Added to AnimationHandler
+---------------------------------------
+
+``get_full_state() → dict``
+    Returns the complete VRM state in a single dict with three keys:
+
+    .. code-block:: python
+
+        {
+            "vrm_model":   {"name": "...", "url": "...", "hash": "..."},
+            "animation":   {"file": "...", "url": "...", "state": "idle",
+                            "loop": True, "descriptor": {...}},
+            "face_values": {"happy": 0.0, ...}
+        }
+
+    Called on every new WebSocket connection to push the current state to
+    the newly-connected client.
+
+``async set_vrm_model(url, name, hash_=None) → None``
+    Stores the active VRM model info internally and broadcasts a
+    ``vrm_model`` message to all connected WebSocket clients.  Should be
+    called by the persona manager or WebUI when the active VRM file changes.
+
+``get_missing_assets(has_assets: list[str]) → list[str]``
+    Given a list of asset URLs that the client already has cached, returns
+    the subset of server-known assets (currently the active VRM) the client
+    is missing.  Used during the hello/has_assets handshake.
 
 Adding New Animations
 =====================
@@ -378,6 +495,43 @@ All combinations work correctly:
 
 See :doc:`animation_flow_flexible` for detailed documentation.
 
+Known Issues Fixed
+==================
+
+Stale ``window.animationHandler`` (idle-only animation)
+---------------------------------------------------------
+
+**Symptom:** Only the Idle animation played; Think/Write state changes were logged by
+``chat-window.mjs`` (``vrm_animation received: think``) but ``[AnimationHandler] startAction``
+never appeared in the console.
+
+**Root cause:** ``window.animationHandler`` was set at module-load time (when
+``vrm-viewer.mjs`` was parsed), at which point the closure variable ``animationHandler``
+was still ``null``.  The real ``AnimationHandler`` instance was created inside
+``loadDefaultAnimations()`` (called after a VRM file is loaded) and assigned only to
+the *module-scoped closure variable*, never back to ``window.animationHandler``.
+Every subsequent call to ``VRMAnimations.play()`` hit the guard
+``if (!window.animationHandler) return`` and silently exited.
+
+**Fix (vrm-viewer.mjs, 2026-03-03):**
+
+1. ``loadDefaultAnimations()`` now updates ``window.animationHandler`` immediately
+   after creating the real instance:
+
+   .. code-block:: javascript
+
+       animationHandler = new AnimationHandler(currentMixer, vrm);
+       window.animationHandler = animationHandler; // ← added
+
+2. ``VRMAnimations.play / preload / setFaceValues`` use the closure variable first,
+   falling back to the global only as a safety net:
+
+   .. code-block:: javascript
+
+       const handler = animationHandler || window.animationHandler;
+       if (!handler) return;
+       handler.startAction(state, animation, playOnce, playSection, descriptor);
+
 Debugging
 =========
 
@@ -402,12 +556,10 @@ Future Enhancements
 
 Potential improvements to the animation system:
 
-- Emotion-based animation selection (happy, sad, surprised, etc.)
 - Dynamic animation blending based on response content
 - Configurable animation mappings via config system
-- Animation priority system for handling conflicts
-- Support for custom animation sequences
 - Integration with TTS for lip-sync animations
+- Binary (non-URL) file transfer for embedded VRM assets
 
 See Also
 ========

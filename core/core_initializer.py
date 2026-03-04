@@ -295,6 +295,7 @@ class CoreInitializer:
                 # Apply trainer IDs from DB and keep registry in sync with updates.
                 self._configure_trainer_ids()
                 if not self._trainer_listener_registered:
+
                     def _refresh_trainer_ids(_value):
                         try:
                             self._configure_trainer_ids()
@@ -304,7 +305,9 @@ class CoreInitializer:
                             )
 
                     try:
-                        config_registry.add_listener("TRAINER_IDS", _refresh_trainer_ids)
+                        config_registry.add_listener(
+                            "TRAINER_IDS", _refresh_trainer_ids
+                        )
                         self._trainer_listener_registered = True
                     except Exception as exc:
                         log_warning(

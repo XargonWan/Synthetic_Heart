@@ -225,21 +225,20 @@ async def test_get_current_animation(animation_handler, mock_webui):
 
 
 @pytest.mark.asyncio
-async def test_state_summary_callback_registered_and_called():
-    """Ensure that when a WebUI with a summary callback is set, it is registered
-    and called when the animation state changes."""
+async def test_vrm_animation_broadcast_on_play():
+    """Ensure that play_animation broadcasts a vrm_animation message to all
+    connected WebSocket clients (new VRMStateServer architecture)."""
     handler = AnimationHandler()
 
-    # Create a mock webui with an async summary callback
+    sent_messages: list = []
+
+    class FakeWs:
+        async def send_json(self, data):
+            sent_messages.append(data)
+
     class FakeWebUI:
         def __init__(self):
-            self.connections = {}
-            self._called = False
-
-        async def _broadcast_animation_state_summary(
-            self, state, animation_file, descriptor
-        ):
-            self._called = True
+            self.connections = {"sess-1": FakeWs()}
 
     fake = FakeWebUI()
     handler.set_webui(fake)
@@ -248,7 +247,10 @@ async def test_state_summary_callback_registered_and_called():
     await handler.play_animation(
         AnimationState.THINK, session_id=None, loop=True, context_id="ctx"
     )
-    assert fake._called is True
+
+    # At least one vrm_animation message must have been sent
+    anim_msgs = [m for m in sent_messages if m.get("type") == "vrm_animation"]
+    assert anim_msgs, f"Expected vrm_animation message, got: {sent_messages}"
 
 
 @pytest.mark.asyncio
@@ -290,7 +292,7 @@ async def test_idle_animation_rotation_task_created(animation_handler, mock_webu
 
 @pytest.mark.asyncio
 async def test_websocket_message_format(animation_handler, mock_webui):
-    """Test WebSocket message format."""
+    """Test WebSocket message format for vrm_animation broadcast."""
     session_id = "test_session"
     mock_ws = AsyncMock()
     mock_webui.connections[session_id] = mock_ws
@@ -299,13 +301,19 @@ async def test_websocket_message_format(animation_handler, mock_webui):
         AnimationState.THINK, session_id=session_id, loop=True
     )
 
-    # Check that send_json was called with correct format
-    mock_ws.send_json.assert_called_once()
-    call_args = mock_ws.send_json.call_args[0][0]
+    # send_json may be called multiple times (preloads + animation command)
+    assert mock_ws.send_json.called, "Expected send_json to be called at least once"
 
-    assert call_args["type"] == "animation"
-    assert isinstance(call_args["animation"], str)
-    assert call_args["animation"].endswith("Thinking.fbx")
-    assert "animations/" in call_args["animation"]
-    assert call_args["loop"] is True
-    assert call_args["state"] == "think"
+    # Find the vrm_animation command among all calls
+    sent = [c[0][0] for c in mock_ws.send_json.call_args_list]
+    anim_msgs = [m for m in sent if m.get("type") == "vrm_animation"]
+    assert anim_msgs, (
+        f"Expected a vrm_animation message, got types: {[m.get('type') for m in sent]}"
+    )
+
+    msg = anim_msgs[-1]  # Last vrm_animation is the final play command
+    assert isinstance(msg["file"], str)
+    assert msg["file"].endswith("Thinking.fbx")
+    assert "animations/" in msg["file"]
+    assert msg["loop"] is True
+    assert msg["state"] == "think"
