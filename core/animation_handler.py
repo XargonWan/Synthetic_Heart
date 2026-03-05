@@ -1336,38 +1336,56 @@ class KaradaStateServer:
                 )
                 # If animation is not looping and is not idle, schedule a fallback transition
                 # to Idle after the clip duration in case the client doesn't trigger a transition.
+                # The backend fallback is ONLY a safety net — the frontend already handles the
+                # outro→idle pipeline via the mixer 'finished' event.  The key requirement is
+                # that this fires AFTER the full clip (intro + loop + outro) has had time to
+                # finish on the client, plus a generous buffer.  Using a single section's
+                # duration (old behaviour) caused the fallback to fire while the outro was
+                # still playing, interrupting it and producing a T-Pose.
+                #
+                # Fallback duration is calculated by summing the lengths of all descriptor
+                # sections (intro, loop, outro) converted from frames to seconds and then
+                # adding 1.5 s of extra slack.  If there is no descriptor or no frame info,
+                # a conservative default of 3 s is used before the buffer.  This avoids
+                # premature transitions when metadata is missing.
                 try:
                     if not effective_loop and state != AnimationState.IDLE:
-                        # Determine duration from descriptor if available, otherwise default to 1.0s
-                        duration = None
+                        # Sum durations of ALL descriptor sections so we never fire mid-animation.
+                        fallback_duration: float = 0.0
                         if descriptor and isinstance(descriptor, dict):
-                            # Prefer loop section duration if present, otherwise clip duration
-                            sec = (
-                                descriptor.get("loop")
-                                or descriptor.get("intro")
-                                or descriptor.get("outro")
-                            )
-                            if (
-                                sec
-                                and isinstance(sec, dict)
-                                and "start_frame" in sec
-                                and "end_frame" in sec
-                            ):
-                                fps = descriptor.get("fps", 30) or 30
-                                frames = max(
-                                    0.0,
-                                    float(sec.get("end_frame", 0))
-                                    - float(sec.get("start_frame", 0)),
-                                )
-                                duration = max(0.2, frames / float(fps))
-                        if duration is None:
-                            duration = 1.0
+                            fps_val = float(descriptor.get("fps") or 30)
+                            for sec_key in ("intro", "loop", "outro"):
+                                sec = descriptor.get(sec_key)
+                                if (
+                                    isinstance(sec, dict)
+                                    and isinstance(sec.get("start_frame"), (int, float))
+                                    and isinstance(sec.get("end_frame"), (int, float))
+                                ):
+                                    fallback_duration += (
+                                        max(
+                                            0.0,
+                                            float(sec["end_frame"])
+                                            - float(sec["start_frame"]),
+                                        )
+                                        / fps_val
+                                    )
+                        if fallback_duration <= 0.0:
+                            # No descriptor or no frame info — use a conservative default so
+                            # the frontend's own transition has time to complete.
+                            fallback_duration = 3.0
+                        # Add a buffer so the frontend mixer 'finished' + 140 ms timer
+                        # always fires before the backend safety-net does.
+                        fallback_duration += 1.5
 
                         # Schedule background task to return to Idle after duration if nothing else changed
-                        loop = asyncio.get_running_loop()
-                        loop.create_task(
+                        running_loop = asyncio.get_running_loop()
+                        running_loop.create_task(
                             self._non_loop_fallback(
-                                session_id, state, selected_animation, duration
+                                session_id,
+                                state,
+                                selected_animation,
+                                fallback_duration,
+                                context_id,
                             )
                         )
                 except Exception:
@@ -1934,7 +1952,13 @@ class KaradaStateServer:
         animation_file: str,
         duration: float,
     ):
-        """Wait for duration and revert to Idle if the animation completed and no other contexts are active."""
+        """Wait for duration and revert to Idle if the animation completed and no other contexts are active.
+
+        The ``duration`` parameter is computed by ``play_animation()`` and normally
+        represents the total clip length (intro+loop+outro) plus a 1.5‑second safety
+        buffer.  When descriptor data is unavailable the caller will supply a default
+        of 3 s (which also gets the 1.5 s buffer added).
+        """
         try:
             await asyncio.sleep(duration + 0.05)
             async with self._lock:

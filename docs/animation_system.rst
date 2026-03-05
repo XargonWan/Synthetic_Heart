@@ -601,6 +601,20 @@ When ``effective_loop`` is ``False`` and the state is not IDLE, a background tas
 (``_non_loop_fallback``) schedules a return to IDLE after the clip completes,
 acting as a safety net in case the client does not send a completion event.
 
+The duration passed to ``_non_loop_fallback`` is calculated as follows:
+
+* If a descriptor is available, all defined sections (``intro``, ``loop``,
+  ``outro``) are measured in frames, converted to seconds using the descriptor's
+  ``fps`` value (default 30), and summed together.  A safety buffer of 1.5&nbsp;seconds
+  is then added to accommodate network latency and the front end's own "finished"
+  event handling.
+* If no descriptor or usable frame information exists, a conservative default of
+  3&nbsp;seconds is used before adding the 1.5&nbsp;second buffer.
+
+This scheme prevents the backend fallback from firing partway through an
+animation's outro – a problem that used to manifest as the VRM dropping into
+T‑pose mid‑transition when playing non‑looping clips such as ``write``.
+
 IDLE Rotation Loop
 ==================
 
