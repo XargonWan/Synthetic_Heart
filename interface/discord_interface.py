@@ -1922,6 +1922,36 @@ class DiscordInterface:
                         live_mgr = None
                     if live_mgr and live_mgr.is_session_active(guild_id):
                         text = content
+
+                        # --- inject text-based file attachments as context ---
+                        _TEXT_MIME_PREFIXES = (
+                            "text/",
+                            "application/json",
+                            "application/xml",
+                        )
+                        for att in getattr(message, "attachments", []):
+                            mime = getattr(att, "content_type", "") or ""
+                            if not any(mime.startswith(p) for p in _TEXT_MIME_PREFIXES):
+                                continue
+                            try:
+                                raw = await att.read()
+                                doc_text = raw.decode("utf-8", errors="replace")
+                                fname = getattr(att, "filename", "document")
+                                await live_mgr.send_context_update(
+                                    guild_id,
+                                    f"[Document: {fname}]\n{doc_text}",
+                                )
+                                log_info(
+                                    f"[discord_interface] Injected attachment "
+                                    f"'{fname}' ({len(doc_text)} chars) into "
+                                    f"live session for guild {guild_id}"
+                                )
+                            except Exception as _att_err:
+                                log_warning(
+                                    f"[discord_interface] Failed to inject "
+                                    f"attachment into live session: {_att_err}"
+                                )
+
                         # forward into live model
                         await live_mgr.send_text(guild_id, text)
                         # replicate in history cache

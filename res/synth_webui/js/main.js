@@ -1387,26 +1387,106 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             swatchWrap.appendChild(reset);
                             inputEl = swatchWrap;
 
-                        // --- Combobox: free-text input with datalist suggestions ---
+                        // --- Combobox: free-text input with searchable dropdown ---
                         } else if (item.ui_type === 'combobox') {
-                            const input = document.createElement('input');
-                            input.type = 'text';
-                            input.value = typeof value === 'string' ? value : '';
-                            input.disabled = !isEditable;
-                            if (Array.isArray(item.options) && item.options.length) {
-                                const dlId = `datalist-${item.key}`;
-                                const dl = document.createElement('datalist');
-                                dl.id = dlId;
-                                item.options.forEach((opt) => {
-                                    const o = document.createElement('option');
-                                    o.value = opt;
-                                    dl.appendChild(o);
+                            const opts = Array.isArray(item.options) ? item.options : [];
+                            // Large option sets get a custom searchable dropdown
+                            if (opts.length > 20) {
+                                const wrap = document.createElement('div');
+                                wrap.className = 'searchable-combo';
+                                wrap.style.position = 'relative';
+                                wrap.style.flex = '1';
+                                skipAutoSave = true;
+
+                                const input = document.createElement('input');
+                                input.type = 'text';
+                                input.value = typeof value === 'string' ? value : '';
+                                input.disabled = !isEditable;
+                                input.placeholder = `Search ${opts.length} options...`;
+                                input.autocomplete = 'off';
+
+                                const panel = document.createElement('div');
+                                panel.className = 'combo-dropdown';
+                                panel.style.cssText = 'display:none;position:absolute;top:100%;left:0;right:0;max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;background:var(--bg-card,#1a1a2e);z-index:999;margin-top:2px;';
+
+                                const MAX_VISIBLE = 80;
+                                const renderList = (filter) => {
+                                    panel.innerHTML = '';
+                                    const q = (filter || '').toLowerCase();
+                                    let count = 0;
+                                    for (const opt of opts) {
+                                        if (q && !opt.toLowerCase().includes(q)) continue;
+                                        if (++count > MAX_VISIBLE) {
+                                            const more = document.createElement('div');
+                                            more.style.cssText = 'padding:0.35rem 0.6rem;color:var(--text-soft);font-size:0.8rem;';
+                                            more.textContent = `${opts.length - MAX_VISIBLE}+ more — refine your search`;
+                                            panel.appendChild(more);
+                                            break;
+                                        }
+                                        const row = document.createElement('div');
+                                        row.textContent = opt;
+                                        row.style.cssText = 'padding:0.35rem 0.6rem;cursor:pointer;font-size:0.9rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+                                        row.addEventListener('mouseenter', () => { row.style.background = 'var(--accent-dim, rgba(107,254,254,0.12))'; });
+                                        row.addEventListener('mouseleave', () => { row.style.background = ''; });
+                                        row.addEventListener('mousedown', (ev) => {
+                                            ev.preventDefault(); // prevent blur before click
+                                            input.value = opt;
+                                            panel.style.display = 'none';
+                                            persistValue(opt, [input]);
+                                        });
+                                        panel.appendChild(row);
+                                    }
+                                    if (count === 0) {
+                                        const empty = document.createElement('div');
+                                        empty.style.cssText = 'padding:0.5rem 0.6rem;color:var(--text-soft);font-size:0.85rem;';
+                                        empty.textContent = 'No matching models';
+                                        panel.appendChild(empty);
+                                    }
+                                };
+
+                                input.addEventListener('focus', () => {
+                                    renderList(input.value);
+                                    panel.style.display = '';
                                 });
-                                // Ensure unique id by attaching to document.body
-                                document.body.appendChild(dl);
-                                input.setAttribute('list', dlId);
+                                input.addEventListener('input', () => { renderList(input.value); });
+                                input.addEventListener('blur', () => {
+                                    // Delay to allow mousedown on options
+                                    setTimeout(() => { panel.style.display = 'none'; }, 180);
+                                });
+                                input.addEventListener('keydown', (ev) => {
+                                    if (ev.key === 'Enter') {
+                                        ev.preventDefault();
+                                        panel.style.display = 'none';
+                                        persistValue(input.value, [input]);
+                                    } else if (ev.key === 'Escape') {
+                                        panel.style.display = 'none';
+                                        input.blur();
+                                    }
+                                });
+
+                                wrap.appendChild(input);
+                                wrap.appendChild(panel);
+                                inputEl = wrap;
+                            } else {
+                                // Small option sets: use native datalist
+                                const input = document.createElement('input');
+                                input.type = 'text';
+                                input.value = typeof value === 'string' ? value : '';
+                                input.disabled = !isEditable;
+                                if (opts.length) {
+                                    const dlId = `datalist-${item.key}`;
+                                    const dl = document.createElement('datalist');
+                                    dl.id = dlId;
+                                    opts.forEach((opt) => {
+                                        const o = document.createElement('option');
+                                        o.value = opt;
+                                        dl.appendChild(o);
+                                    });
+                                    document.body.appendChild(dl);
+                                    input.setAttribute('list', dlId);
+                                }
+                                inputEl = input;
                             }
-                            inputEl = input;
 
                         // --- Action list: dropdown rows with add/remove ---
                         } else if (item.ui_type === 'action-list') {
@@ -2172,10 +2252,101 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
                         // Update info field with active engine for this cortex
                         const active = engines.find(e => e.active) || engines.find(e => e.name === (data.cortex && data.cortex.active_engine)) || engines[0] || null;
-                        if (engineModelLabel) engineModelLabel.textContent = `model: ${active ? (active.display_name || active.name || '—') : '—'}`;
+                        if (engineModelLabel) engineModelLabel.textContent = `model: ${active ? (active.current_model || active.display_name || active.name || '—') : '—'}`;
                         if (engineLabel) engineLabel.textContent = active ? (active.label || active.description || '') : '';
                         const loginState = active ? (active.login_state || (active.logged_in ? 'logged' : 'unlogged')) : '—';
                         if (engineLoginStateLabel) engineLoginStateLabel.textContent = `state: ${loginState}`;
+
+                        // --- Searchable model picker for engines with supported_models ---
+                        const modelPicker = document.getElementById('cortex-model-picker');
+                        const modelSearch = document.getElementById('cortex-model-search');
+                        const modelDropdown = document.getElementById('cortex-model-dropdown');
+                        if (modelPicker && modelSearch && modelDropdown) {
+                            const models = (active && Array.isArray(active.supported_models)) ? active.supported_models : [];
+                            if (models.length > 1) {
+                                modelPicker.style.display = '';
+                                modelSearch.value = active.current_model || '';
+                                modelSearch.placeholder = `Search ${models.length} models…`;
+                                const MAX_VIS = 80;
+                                const renderModelList = (filter) => {
+                                    modelDropdown.innerHTML = '';
+                                    const q = (filter || '').toLowerCase();
+                                    let count = 0;
+                                    for (const m of models) {
+                                        if (q && !m.toLowerCase().includes(q)) continue;
+                                        if (++count > MAX_VIS) {
+                                            const more = document.createElement('div');
+                                            more.style.cssText = 'padding:0.35rem 0.6rem;color:var(--text-soft,#aaa);font-size:0.8rem;';
+                                            more.textContent = `${models.length - MAX_VIS}+ more — refine your search`;
+                                            modelDropdown.appendChild(more);
+                                            break;
+                                        }
+                                        const row = document.createElement('div');
+                                        row.textContent = m;
+                                        row.style.cssText = 'padding:0.4rem 0.7rem;cursor:pointer;font-size:0.9rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+                                        if (m === active.current_model) row.style.fontWeight = '700';
+                                        row.addEventListener('mouseenter', () => { row.style.background = 'var(--accent-dim, rgba(107,254,254,0.12))'; });
+                                        row.addEventListener('mouseleave', () => { row.style.background = ''; });
+                                        row.addEventListener('mousedown', (ev) => {
+                                            ev.preventDefault();
+                                            modelSearch.value = m;
+                                            modelDropdown.style.display = 'none';
+                                            // Persist model selection via API
+                                            fetch('/api/components/cortex/model', {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({ engine: active.name, model: m })
+                                            }).then((res) => {
+                                                if (!res.ok) throw new Error('HTTP ' + res.status);
+                                                if (engineModelLabel) engineModelLabel.textContent = `model: ${m}`;
+                                            }).catch((err) => {
+                                                console.error('[synth_webui] Failed to set model', err);
+                                                alert('Failed to set model: ' + err.message);
+                                            });
+                                        });
+                                        modelDropdown.appendChild(row);
+                                    }
+                                    if (count === 0) {
+                                        const empty = document.createElement('div');
+                                        empty.style.cssText = 'padding:0.5rem 0.7rem;color:var(--text-soft,#aaa);font-size:0.85rem;';
+                                        empty.textContent = 'No matching models';
+                                        modelDropdown.appendChild(empty);
+                                    }
+                                };
+
+                                // Wire events only once
+                                if (!modelSearch.dataset.bound) {
+                                    modelSearch.addEventListener('focus', () => { renderModelList(modelSearch.value); modelDropdown.style.display = ''; });
+                                    modelSearch.addEventListener('input', () => { renderModelList(modelSearch.value); });
+                                    modelSearch.addEventListener('blur', () => { setTimeout(() => { modelDropdown.style.display = 'none'; }, 180); });
+                                    modelSearch.addEventListener('keydown', (ev) => {
+                                        if (ev.key === 'Enter') {
+                                            ev.preventDefault();
+                                            modelDropdown.style.display = 'none';
+                                            const val = modelSearch.value.trim();
+                                            if (val && active) {
+                                                fetch('/api/components/cortex/model', {
+                                                    method: 'POST',
+                                                    headers: { 'Content-Type': 'application/json' },
+                                                    body: JSON.stringify({ engine: active.name, model: val })
+                                                }).then((res) => {
+                                                    if (!res.ok) throw new Error('HTTP ' + res.status);
+                                                    if (engineModelLabel) engineModelLabel.textContent = `model: ${val}`;
+                                                }).catch((err) => {
+                                                    console.error('[synth_webui] Failed to set model', err);
+                                                });
+                                            }
+                                        } else if (ev.key === 'Escape') {
+                                            modelDropdown.style.display = 'none';
+                                            modelSearch.blur();
+                                        }
+                                    });
+                                    modelSearch.dataset.bound = '1';
+                                }
+                            } else {
+                                modelPicker.style.display = 'none';
+                            }
+                        }
                         const isSeleniumKind = String(kind || '').toLowerCase().includes('selenium');
                         if (engineLoginBtn) {
                             engineLoginBtn.style.display = isSeleniumKind ? '' : 'none';

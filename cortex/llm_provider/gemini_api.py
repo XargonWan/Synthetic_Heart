@@ -17,9 +17,11 @@ from __future__ import annotations
 
 from core.ai_plugin_base import AIPluginBase
 from core.config_manager import config_registry
+from core.cortex_api_logger import log_cortex_request, log_cortex_response
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 import json
 import asyncio
+import time as _time
 import requests
 import base64
 import mimetypes
@@ -437,12 +439,12 @@ class GeminiAPIPlugin(AIPluginBase):
             # Correction: gemini-3-flash-preview supports audio/video in generate_content
             # If it fails, we can fallback, but it should work.
 
-            prompt = "You are listening/watching a message from the user. Respond naturally and concisely in text."
+            prompt = (
+                "Transcribe the following audio/video message exactly as spoken. "
+                "Output ONLY the transcribed text — no commentary, no timestamps, "
+                "no formatting. If the audio is unclear or empty, output an empty string."
+            )
 
-            # Using raw API via google-genai
-            # content = [text, media]
-
-            # We must use proper Part objects
             from google.genai import types
 
             response = await self.client.aio.models.generate_content(
@@ -460,7 +462,11 @@ class GeminiAPIPlugin(AIPluginBase):
                     )
                 ],
                 config=types.GenerateContentConfig(
-                    system_instruction="You are a helpful AI assistant. Respond strictly with the text of your reply. Do not output JSON.",
+                    system_instruction=(
+                        "You are a speech-to-text transcription system. "
+                        "Output ONLY the exact words spoken. Do not add any "
+                        "interpretation, response, or JSON."
+                    ),
                     response_mime_type="text/plain",
                 ),
             )
@@ -905,8 +911,31 @@ class GeminiAPIPlugin(AIPluginBase):
         }
         message_action = interface_to_action.get(interface, f"message_{interface}")
 
+        is_grillo = interface == "grillo" or (
+            isinstance(prompt_dict, dict) and prompt_dict.get("grillo_beat")
+        )
+        # Outreach beats are grillo-initiated but MUST produce message_*
+        # actions to reach the target interface (e.g. telegram_bot).
+        is_grillo_internal = is_grillo and (
+            not isinstance(prompt_dict, dict)
+            or prompt_dict.get("beat_type", "internal") != "outreach"
+        )
+
         # Minimal system instruction - the prompt itself contains full action schemas
         # We just need to remind the model to output valid JSON
+        if is_grillo_internal:
+            # Internal beats (tag_elaboration, self_reflection, etc.)
+            interface_hint = (
+                "CURRENT INTERFACE: grillo (INTERNAL)\n"
+                "This is an internal introspection beat. Do NOT output any message_* actions.\n"
+                "Use ONLY internal actions like 'create_personal_diary_entry', 'set_emotion', etc."
+            )
+        else:
+            interface_hint = (
+                f"CURRENT INTERFACE: {interface}\n"
+                f"TO SEND A MESSAGE TO THE USER: Use action type '{message_action}'"
+            )
+
         system_instruction = (
             "You are part of the 'Synthetic Heart' AI system.\n"
             "\n"
@@ -916,8 +945,7 @@ class GeminiAPIPlugin(AIPluginBase):
             '3. Use this structure: {"actions": [{"type": "action_name", "payload": {...}}]}\n'
             "4. NO markdown code blocks, NO explanations outside JSON\n"
             "\n"
-            f"CURRENT INTERFACE: {interface}\n"
-            f"TO SEND A MESSAGE TO THE USER: Use action type '{message_action}'\n"
+            f"{interface_hint}\n"
             "\n"
             "The prompt contains a complete action schema with available actions.\n"
             "Follow those instructions precisely.\n"
@@ -993,6 +1021,15 @@ class GeminiAPIPlugin(AIPluginBase):
                 },
             ],
         }
+
+        # ── Log the outgoing request ──────────────────────────────────
+        log_cortex_request(
+            "gemini_api",
+            model=self._current_model,
+            url=url,
+            payload=payload,
+        )
+        _req_start = _time.monotonic()
 
         def _do_request():
             return requests.post(
@@ -1093,6 +1130,21 @@ class GeminiAPIPlugin(AIPluginBase):
                 }
             )
 
+        # Log error responses from the API
+        if "error" in data:
+            _elapsed = (_time.monotonic() - _req_start) * 1000
+            err = data["error"]
+            err_msg = (
+                err.get("message", str(err)) if isinstance(err, dict) else str(err)
+            )
+            log_cortex_response(
+                "gemini_api",
+                model=self._current_model,
+                status=response.status_code if response else None,
+                error=err_msg,
+                elapsed_ms=_elapsed,
+            )
+
         candidates = data.get("candidates") or []
         if not candidates:
             log_error(f"[gemini_api] HTTP response missing candidates: {data}")
@@ -1129,6 +1181,23 @@ class GeminiAPIPlugin(AIPluginBase):
                     ]
                 }
             )
+
+        # ── Log the response ────────────────────────────────────────────
+        _elapsed = (_time.monotonic() - _req_start) * 1000
+        usage_meta = data.get("usageMetadata") or {}
+        log_cortex_response(
+            "gemini_api",
+            model=self._current_model,
+            status=response.status_code if response else None,
+            body=response_text,
+            usage={
+                "prompt_tokens": usage_meta.get("promptTokenCount"),
+                "completion_tokens": usage_meta.get("candidatesTokenCount"),
+            }
+            if usage_meta
+            else None,
+            elapsed_ms=_elapsed,
+        )
 
         return response_text
 

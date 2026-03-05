@@ -736,27 +736,23 @@ async def handle_media_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if auris_handled:
             return
 
+        # FALLBACK PATH: Enqueue voice/video through the normal message
+        # pipeline as a multimodal attachment so scope routing, persona
+        # context, and the correct engine (e.g. OpenRouter/Grok) are used.
         # ------------------------------------------------------------------
-        # FALLBACK PATH: core media_dispatcher (Auris disabled or returned None)
-        # dispatch_media escalates: Auris → Live engine fallback (transcribe_file)
-        # The result is enqueued into the message chain so the LLM responds normally
-        # and memory is recorded through the standard pipeline.
-        # ------------------------------------------------------------------
-        from core.media_dispatcher import dispatch_media
+        # We do NOT call handle_live_processing here — that bypasses scope
+        # routing and sends audio to the base engine with a generic prompt.
+        # Instead, the multimodal extraction in plugin_instance picks up the
+        # voice/video attachment and the scope-routed engine handles it with
+        # full bidirectional context (persona, chat history, emotions, etc.).
 
-        transcribed = await dispatch_media(
-            input_path, media_type_hint, context_hint="telegram_voice_fallback"
+        log_info(
+            "[telegram_bot] Auris unavailable — enqueuing voice as multimodal "
+            "attachment through normal message chain"
         )
-        if transcribed:
-            fallback_text = transcribed
-        elif media_type_hint and media_type_hint.startswith("audio"):
-            fallback_text = "[User sent a voice message — transcription unavailable]"
-        else:
-            fallback_text = "[User sent a media message]"
-
         wrapped = MessageWrapper(
             message,
-            text=fallback_text,
+            text=message.caption or "",
             is_voice_input=True,
             request_tts=True,
         )

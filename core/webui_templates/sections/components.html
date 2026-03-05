@@ -16,6 +16,13 @@
                     <select id="cortex-engine-select" style="padding:10px 14px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; min-width:360px; font-size:1rem;">
                     </select>
 
+                    <!-- Model selector (populated dynamically from engine's supported_models) -->
+                    <div id="cortex-model-picker" style="position:relative; display:none;">
+                        <input id="cortex-model-search" type="text" placeholder="Search models…" autocomplete="off"
+                            style="padding:10px 14px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; font-size:1rem; min-width:320px;">
+                        <div id="cortex-model-dropdown" style="display:none; position:absolute; top:100%; left:0; right:0; max-height:300px; overflow-y:auto; border:1px solid var(--border); border-radius:8px; background:var(--bg-card,#1a1a2e); z-index:999; margin-top:2px;"></div>
+                    </div>
+
                     <div id="cortex-engine-info" class="meta" style="min-width:260px;">
                         <div style="font-weight:600;" id="cortex-engine-model">model: –</div>
                         <div style="font-size:0.9rem; color:var(--muted);" id="cortex-engine-label">—</div>

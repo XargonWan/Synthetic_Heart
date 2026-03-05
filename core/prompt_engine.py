@@ -169,11 +169,19 @@ async def build_json_prompt(
     resolved_message_tone = None
     resolved_conversation_tone = None
 
-    is_grillo_internal = bool(
+    _is_grillo_beat = bool(
         getattr(message, "grillo_beat", False)
         or (isinstance(context_memory, dict) and context_memory.get("grillo_beat"))
         or (interface_path and str(interface_path).startswith("grillo"))
     )
+    # Outreach beats target an external interface (e.g. telegram_bot) —
+    # they need recon (memory search) and should NOT be treated as internal.
+    _beat_type = (
+        (isinstance(context_memory, dict) and context_memory.get("beat_type"))
+        or getattr(message, "beat_type", None)
+        or ""
+    )
+    is_grillo_internal = _is_grillo_beat and _beat_type != "outreach"
 
     try:
         from core.recon import (
@@ -182,13 +190,19 @@ async def build_json_prompt(
             resolve_tone,
         )
 
-        recon_contributions = await gather_recon_contributions(
-            message=message,
-            context_memory=context_memory,
-            text=text,
-            tags=expanded_tags,
-            keywords=None,
-        )
+        if is_grillo_internal:
+            # Grillo internal beats have fixed language/tone defaults —
+            # skip the LLM recon call to avoid wasting API tokens.
+            log_debug("[json_prompt] Skipping recon LLM call for Grillo internal beat")
+            recon_contributions = []
+        else:
+            recon_contributions = await gather_recon_contributions(
+                message=message,
+                context_memory=context_memory,
+                text=text,
+                tags=expanded_tags,
+                keywords=None,
+            )
 
         for c in recon_contributions:
             ctype = c.get("type")

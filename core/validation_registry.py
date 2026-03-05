@@ -58,7 +58,14 @@ class ValidationRegistry:
     def __init__(self):
         self._rules: Dict[str, List[ValidationRule]] = {}
         self._registered_components: Set[str] = set()
-        self._response_metadata_keys: Set[str] = set()
+        # Common LLM response metadata keys that should be silently
+        # ignored rather than treated as actions (e.g. "meta", "message").
+        self._response_metadata_keys: Set[str] = {
+            "meta",
+            "metadata",
+            "rationale",
+            "thoughtSignature",
+        }
         self._response_metadata_by_component: Dict[str, Set[str]] = {}
         # Alias mapping: alias_name -> resolver(payload) -> Optional[canonical_action_type]
         # Resolvers are callables that receive the action payload and return a
