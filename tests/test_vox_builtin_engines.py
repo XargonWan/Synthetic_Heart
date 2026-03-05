@@ -1,4 +1,3 @@
-
 from plugins.vox_plugin import VoxPlugin
 from core.vox_registry import VOX_REGISTRY
 

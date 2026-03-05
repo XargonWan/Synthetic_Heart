@@ -689,15 +689,18 @@ async def handle_media_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
             auris = PLUGIN_REGISTRY.get("auris_plugin")
             if auris is None:
                 log_warning(
-                    "[telegram_bot] Auris plugin not available, cannot transcribe voice."
+                    "[telegram_bot] Auris plugin not available; will attempt generic dispatch fallback."
                 )
-                # interface is a passthrough; do not inform user here
-                return
+                transcribed = None
+            else:
+                log_debug(
+                    "[telegram_bot] Auris plugin found — attempting transcription."
+                )
+                # Auris itself logs any successful transcription; the interface should
+                # remain a dumb carrier and avoid duplicating that message.
+                transcribed = await auris.transcribe_audio(input_path, media_type_hint)
 
-            log_debug("[telegram_bot] Auris plugin found — attempting transcription.")
-            transcribed = await auris.transcribe_audio(input_path, media_type_hint)
             if transcribed:
-                log_info(f"[telegram_bot] Auris transcription: {transcribed[:120]}")
                 # Wrap the Telegram message so the queue sees `text = transcribed`.
                 # `is_voice_input=True` propagates through message_queue → context dict
                 # so that message_chain can auto-inject `tts_speak` and prompt_engine
@@ -736,24 +739,48 @@ async def handle_media_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if auris_handled:
             return
 
-        # FALLBACK PATH: Enqueue voice/video through the normal message
-        # pipeline as a multimodal attachment so scope routing, persona
-        # context, and the correct engine (e.g. OpenRouter/Grok) are used.
-        # ------------------------------------------------------------------
+        # If Auris produced nothing (empty string or None) or raised an error,
+        # try the general-purpose media dispatcher which will attempt a live
+        # transcription before giving up.  This avoids sending raw binary to
+        # the LLM when the engine could have turned it into text.
+        try:
+            from core.media_dispatcher import dispatch_media
 
-        # We do NOT call handle_live_processing here — that bypasses scope
-        # routing and sends audio to the base engine with a generic prompt.
-        # Instead, the multimodal extraction in plugin_instance picks up the
-        # voice/video attachment and the scope-routed engine handles it with
-        # full bidirectional context (persona, chat history, emotions, etc.).
+            fallback = await dispatch_media(input_path, media_type_hint)
+        except Exception as e:
+            log_warning(
+                f"[telegram_bot] dispatch_media failed: {e}, moving to multimodal fallback"
+            )
+            fallback = None
 
+        if fallback:
+            # we received a transcription from dispatch_media; enqueue it like a
+            # normal Auris result and stop.
+            wrapped = MessageWrapper(
+                message,
+                text=fallback,
+                is_voice_input=True,
+                request_tts=True,
+            )
+            await message_queue.enqueue(
+                context.bot,
+                wrapped,
+                interface_id="telegram_bot",
+                original_message=message,
+                skip_mention_check=True,
+            )
+            return
+
+        # FALLBACK PATH: no transcription available, hand off the media as a
+        # multimodal attachment.  Scope routing / persona context will still
+        # apply later when the attachment is processed by plugin_instance.
         log_info(
             "[telegram_bot] Auris unavailable — enqueuing voice as multimodal "
             "attachment through normal message chain"
         )
         wrapped = MessageWrapper(
             message,
-            text=message.caption or "",
+            text=getattr(message, "caption", "") or "",
             is_voice_input=True,
             request_tts=True,
         )
@@ -852,7 +879,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id
     username = user.full_name
     usertag = f"@{user.username}" if user.username else "(no tag)"
-    text = message.text or message.caption or ""
+    text = getattr(message, "text", "") or getattr(message, "caption", "") or ""
     # Diagnostic: log raw repr and check for mojibake (double-decoding) patterns
     try:
         from core.text_utils import looks_like_mojibake, try_recover_mojibake

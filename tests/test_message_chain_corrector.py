@@ -284,9 +284,10 @@ async def test_corrector_forces_message_to_ollama_serve(monkeypatch):
     assert parsed is not None
     assert parsed["actions"][0]["type"] == "message_ollama_serve"
     assert parsed["actions"][0]["payload"]["interface_path"].startswith("ollama_serve/")
+
+
 @pytest.mark.asyncio
 async def test_no_fallback_if_partial_success(monkeypatch):
-
     """If at least one action has already run we should not send a generic
     LLM-failure message when correction retries are exhausted.
     """

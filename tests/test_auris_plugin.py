@@ -99,9 +99,9 @@ async def test_auris_plugin_transcribe_disabled() -> None:
                 "core.config_manager", fromlist=["config_registry"]
             ).config_registry,
             "get_value",
-            side_effect=lambda key, default=None, **kwargs: "disabled"
-            if key == "ACTIVE_AURIS_ENGINE"
-            else default,
+            side_effect=lambda key, default=None, **kwargs: (
+                "disabled" if key == "ACTIVE_AURIS_ENGINE" else default
+            ),
         ),
     ):
         from plugins.auris_plugin import AurisPlugin

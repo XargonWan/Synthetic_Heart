@@ -51,21 +51,23 @@ def test_upload_vrm_endpoint_http(tmp_path):
 
 def test_skins_ui_contains_upload_logic():
     # ensure the shipped JS file has the listener we expect
-    path = Path('res') / 'synth_webui' / 'js' / 'skins-ui.js'
-    text = path.read_text(encoding='utf-8')
+    path = Path("res") / "synth_webui" / "js" / "skins-ui.js"
+    text = path.read_text(encoding="utf-8")
     assert "[skins-ui] upload input change event" in text
     assert "skin-vrm-upload" in text
 
     # also verify skins.js has the listener since that one executes on tab activation
-    sk_text = Path('res') / 'synth_webui' / 'js' / 'skins.js'
-    sk_contents = sk_text.read_text(encoding='utf-8')
+    sk_text = Path("res") / "synth_webui" / "js" / "skins.js"
+    sk_contents = sk_text.read_text(encoding="utf-8")
     assert "[skins] upload input change event" in sk_contents
 
 
 def test_render_index_replaces_static_version():
     ui = SynthWebUIInterface(autostart=False)
     html = ui._render_index()
-    assert "%%STATIC_VERSION%%" not in html, "static version placeholder should be replaced"
+    assert "%%STATIC_VERSION%%" not in html, (
+        "static version placeholder should be replaced"
+    )
 
 
 def test_js_assets_no_cache_header(tmp_path):

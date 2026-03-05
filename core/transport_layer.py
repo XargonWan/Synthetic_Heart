@@ -7,7 +7,6 @@ import asyncio
 from typing import Any, Dict, Optional
 from types import SimpleNamespace
 from core.logging_utils import log_debug, log_warning, log_error, log_info
-from plugins.grillo.grillo_impl import GrilloPlugin
 
 # Interface-specific utilities are loaded dynamically by interfaces.
 # The transport layer provides generic messaging functionality only.
@@ -1215,9 +1214,7 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
                 )
 
                 # After processing actions, check if there's text outside the JSON that should be sent
-                if json_data and (
-                    json_data.get("prefix") or json_data.get("suffix")
-                ):
+                if json_data and (json_data.get("prefix") or json_data.get("suffix")):
                     companion_text = ""
 
                     # Combine prefix and suffix, removing duplicate content

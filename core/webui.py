@@ -338,7 +338,11 @@ class SynthWebUIInterface:
                 async def dispatch(inner_self, request, call_next):
                     response = await call_next(request)
                     path = request.url.path
-                    if path.startswith("/js/") or path.startswith("/static/") or path.startswith("/skins"):
+                    if (
+                        path.startswith("/js/")
+                        or path.startswith("/static/")
+                        or path.startswith("/skins")
+                    ):
                         # No store ensures proxies and browsers always revalidate.
                         response.headers["Cache-Control"] = "no-cache"
                     return response
@@ -1097,6 +1101,7 @@ class SynthWebUIInterface:
             # always include a cache‑busting token for static assets
             # use a timestamp so the value changes on each render
             import time
+
             replacements["%%STATIC_VERSION%%"] = str(int(time.time()))
 
             for placeholder, value in replacements.items():
@@ -6035,7 +6040,9 @@ class SynthWebUIInterface:
                         other.unlink()
                 log_debug(f"{LOG_PREFIX} VRM cache cleaned, only model.vrm remains")
             except Exception as cleanup_exc:
-                log_warning(f"{LOG_PREFIX} Failed to clean up old VRM files: {cleanup_exc}")
+                log_warning(
+                    f"{LOG_PREFIX} Failed to clean up old VRM files: {cleanup_exc}"
+                )
 
             # make the newly uploaded model the active one automatically
             try:
@@ -6043,14 +6050,16 @@ class SynthWebUIInterface:
                 self._set_active_vrm("model.vrm")
                 # broadcast to clients if possible (reuse same logic as set_active_vrm_endpoint)
                 if self.animation_handler:
-                    vrm_url = f"/avatars/model.vrm"
+                    vrm_url = "/avatars/model.vrm"
                     await self.animation_handler.set_vrm_model(vrm_url, "model.vrm")
                     log_debug(f"{LOG_PREFIX} Broadcast vrm_model: model.vrm")
                 if self.persona_manager:
                     await self.persona_manager.set_animation_state("idle")
                     log_debug(f"{LOG_PREFIX} Started idle animation after VRM upload")
             except Exception as br_exc:
-                log_warning(f"{LOG_PREFIX} Failed to broadcast/upload-change events: {br_exc}")
+                log_warning(
+                    f"{LOG_PREFIX} Failed to broadcast/upload-change events: {br_exc}"
+                )
 
         except Exception as exc:
             log_error(f"{LOG_PREFIX} ⚠️ Failed to store VRM upload: {exc}")

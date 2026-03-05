@@ -167,9 +167,14 @@ class AurisPlugin(AIPluginBase):
             return None
 
         try:
-            result: str | None = await asyncio.to_thread(
-                engine.transcribe, file_path, mime_type
-            )
+            import inspect
+
+            if inspect.iscoroutinefunction(engine.transcribe):
+                result: str | None = await engine.transcribe(file_path, mime_type)
+            else:
+                result: str | None = await asyncio.to_thread(
+                    engine.transcribe, file_path, mime_type
+                )
             if result:
                 log_info(f"[auris_plugin] Transcription via '{name}': {result[:80]}")
             return result

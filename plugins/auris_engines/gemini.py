@@ -10,7 +10,6 @@ Registration is performed at import time so loading this module is enough.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 from core.auris_registry import register_auris_engine
@@ -50,7 +49,9 @@ class GeminiAurisEngine(AurisEngineBase):
     # AurisEngineBase implementation
     # ------------------------------------------------------------------
 
-    def transcribe(self, file_path: str, mime_type: str | None = None) -> str | None:
+    async def transcribe(
+        self, file_path: str, mime_type: str | None = None
+    ) -> str | None:
         """Transcribe *file_path* by calling ``handle_live_processing`` on the Gemini engine."""
         engine = self._get_gemini_engine()
         if engine is None:
@@ -63,22 +64,7 @@ class GeminiAurisEngine(AurisEngineBase):
             return None
 
         try:
-            # handle_live_processing is a coroutine; run it synchronously here
-            # because the Auris plugin calls transcribe from an async context
-            # and wraps it in asyncio.to_thread when needed.
-            result: str | None = asyncio.get_event_loop().run_until_complete(
-                handler(file_path, mime_type_hint=mime_type)
-            )
-            return result
-        except RuntimeError:
-            # Already running inside an event loop — use a thread
-            import concurrent.futures
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(
-                    asyncio.run, handler(file_path, mime_type_hint=mime_type)
-                )
-                return future.result(timeout=120)
+            return await handler(file_path, mime_type_hint=mime_type)
         except Exception as exc:
             log_error(f"[auris/gemini] Transcription failed: {exc}")
             return None

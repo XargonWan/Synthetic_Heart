@@ -12,6 +12,7 @@ from core.db import get_conn_ctx
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.config_manager import config_registry
 from core.animation_handler import get_animation_handler, AnimationState
+
 """
 Persona Manager - Digital Identity Management for SyntH
 
@@ -27,8 +28,6 @@ a synthetic being with its own identity, personality, and emotional framework.
 """
 
 print("[persona_manager] DEBUG: Module import started", flush=True)
-
-
 
 
 def _build_trainer_bio_section() -> str:

@@ -299,9 +299,9 @@ async def test_live_sync_forwarding(monkeypatch):
     # force sync enabled
     monkeypatch.setattr(
         "core.config_manager.config_registry.get_value",
-        lambda key, default, value_type=None, **kw: True
-        if key == "LIVE_SYNC_CHAT_HISTORY"
-        else default,
+        lambda key, default, value_type=None, **kw: (
+            True if key == "LIVE_SYNC_CHAT_HISTORY" else default
+        ),
     )
 
     repl = []

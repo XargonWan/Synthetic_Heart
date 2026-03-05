@@ -360,15 +360,15 @@ def _load_model(model_path: Path) -> Any:
                 )
                 return None
 
-            # path exists - create the model instance and cache it
-            try:
-                model = vosk.Model(str(model_path))
-                _MODEL_CACHE[key] = model
-                log_info(f"[auris/vosk] Model loaded from {model_path}")
-                return model
-            except Exception as exc:  # pragma: no cover - defensive
-                log_error(f"[auris/vosk] Failed to instantiate model: {exc}")
-                return None
+        # path exists - create the model instance and cache it
+        try:
+            model = vosk.Model(str(model_path))
+            _MODEL_CACHE[key] = model
+            log_info(f"[auris/vosk] Model loaded from {model_path}")
+            return model
+        except Exception as exc:  # pragma: no cover - defensive
+            log_error(f"[auris/vosk] Failed to instantiate model: {exc}")
+            return None
     except ImportError:
         log_error("[auris/vosk] 'vosk' package is not installed. Run: uv add vosk")
         return None

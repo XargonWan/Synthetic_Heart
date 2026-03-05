@@ -670,7 +670,6 @@ def _plugins_for(action_type: str) -> List[Any]:
 
     for plugin in loaded_plugins:
         try:
-
             if hasattr(plugin, "get_supported_action_types"):
                 action_types = plugin.get_supported_action_types()
                 log_debug(
@@ -1115,7 +1114,6 @@ async def _request_selective_correction(
     failed_actions, successful_actions, bot, context, original_message
 ):
     """Request LLM to fix only the failed actions, while preserving successful ones."""
-    
 
     # Build clear correction prompt
     successful_count = len(successful_actions)
@@ -1205,9 +1203,13 @@ FAILED ACTIONS REQUIRING CORRECTION:
 
         # Add schema information
         if detail["required_fields"]:
-            instruction += f"   REQUIRED FIELDS: {', '.join(detail['required_fields'])}\n"
+            instruction += (
+                f"   REQUIRED FIELDS: {', '.join(detail['required_fields'])}\n"
+            )
         if detail["optional_fields"]:
-            instruction += f"   OPTIONAL FIELDS: {', '.join(detail['optional_fields'])}\n"
+            instruction += (
+                f"   OPTIONAL FIELDS: {', '.join(detail['optional_fields'])}\n"
+            )
 
         # Add verbose instructions if available (include description, payload schema, examples, and important notes)
         if "verbose_instructions" in detail:

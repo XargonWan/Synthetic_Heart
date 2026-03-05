@@ -46,8 +46,7 @@ register_exposed_var(
     value_type=str,
     ui_type="string",
     description=(
-        "Name of the active Vox TTS engine "
-        "(e.g. 'http', 'chatterbox', 'kitten')."
+        "Name of the active Vox TTS engine (e.g. 'http', 'chatterbox', 'kitten')."
     ),
     scope="plugins",
     component="vox_plugin",
