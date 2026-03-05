@@ -604,19 +604,42 @@ async def handle_media_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     log_info(f"[telegram_bot] Handling live media message from {message.from_user.id}")
 
-    # react based on config if the message is directed (media is always treated as directed)
+    # First thing: decide whether this media message is *actually* meant for
+    # the bot.  Prior to 2026-03 the interface treated every piece of media as
+    # directed which meant voice notes would be transcribed even if nobody had
+    # mentioned Rekku/aliases and we were in a group chat.  That behaviour
+    # caused excessive churn and confused users when non‑directed audio popped
+    # up in the queue.
+    #
+    # All of the usual text rules apply (aliases, @mentions, replies, private
+    # chats, etc).  If the message is **not** for the bot, bail out *before*
+    # doing any heavy work (download/transcribe/dispatch).  The calling
+    # handler may still forward us an update for routing convenience; checking
+    # again here makes the function self‑contained and safe.
     try:
         from core.mention_utils import is_message_for_bot
         from core.reaction_handler import get_reaction_emoji, react_when_mentioned
         from core.core_initializer import INTERFACE_REGISTRY
 
         directed, _reason = await is_message_for_bot(message, context.bot)
-        if directed:
-            emoji = get_reaction_emoji()
-            if emoji:
-                interface = INTERFACE_REGISTRY.get("telegram_bot")
-                if interface:
-                    await react_when_mentioned(interface, message, emoji)
+    except Exception as e:
+        log_debug(f"[telegram_bot] mention check failed: {e}")
+        directed = False
+
+    # if the bot isn't targeted, drop the update now without touching the file
+    if not directed:
+        log_debug("[telegram_bot] media message not directed to bot; skipping")
+        return
+
+    # the caller has already confirmed the message is for us, so we can add
+    # the reaction safely.  (we compute the emoji separately so that failures
+    # during the mention check above don’t prevent the reaction from occurring.)
+    try:
+        emoji = get_reaction_emoji()
+        if emoji:
+            interface = INTERFACE_REGISTRY.get("telegram_bot")
+            if interface:
+                await react_when_mentioned(interface, message, emoji)
     except Exception as e:
         log_debug(f"[telegram_bot] config reaction skipped/failed: {e}")
 
@@ -831,6 +854,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_debug("Message ignored (empty or no sender)")
         return
 
+    # utility used in several places below; import once to avoid scoping issues
+    from core.mention_utils import is_message_for_bot
+
     # LIVE MEDIA HANDLING (Voice, Video, Video Note)
     # Earlier we disabled this and treated media as generic attachments,
     # but the attachment path never transcribes audio.  To ensure voice
@@ -866,6 +892,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     if message.voice or message.video_note or message.video:
+        # before we turn the attachment into a file and start transcribing,
+        # ensure the message is actually intended for us.  handle_media_live
+        # performs the same check internally, but doing it here avoids the
+        # overhead of constructing temp files and may keep large downloads from
+        # occurring in group chats where the bot is not addressed.
+        try:
+            directed, _ = await is_message_for_bot(message, context.bot)
+        except Exception as e:
+            log_debug(f"[telegram_bot] mention check failed on media routing: {e}")
+            directed = False
+
+        if not directed:
+            log_debug(
+                "[telegram_bot] Media message not directed; skipping live handler"
+            )
+            return
+
         log_debug(
             "[telegram_bot] Detected media message; routing to live media handler"
         )

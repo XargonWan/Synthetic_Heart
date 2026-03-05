@@ -242,6 +242,8 @@ async def send_llm_fallback_message(
         if bot and hasattr(bot, "send_message"):
             try:
                 # First attempt: prefer interface-friendly args (message_thread_id is commonly used)
+                # skip_history=True: fallback messages must NOT be stored in chat history — they
+                # would pollute the LLM context and make future responses progressively slower.
                 await universal_send(
                     bot.send_message,
                     chat_id,
@@ -249,6 +251,7 @@ async def send_llm_fallback_message(
                     interface_path=interface_path,
                     thread_id=thread_id,
                     is_llm_response=True,  # Mark as LLM response so interface handles normally
+                    skip_history=True,  # Do NOT store fallback in chat history
                 )
             except TypeError as te:
                 # Some bots (or test fakes) don't accept 'message_thread_id'.
@@ -263,6 +266,7 @@ async def send_llm_fallback_message(
                         text=fallback_text,
                         interface_path=interface_path,
                         is_llm_response=True,
+                        skip_history=True,  # Do NOT store fallback in chat history
                     )
                 except Exception as e:
                     # If retry fails, surface the error but continue gracefully
@@ -662,6 +666,25 @@ async def handle_incoming_message(
                                     payload = {"text": value}
                                 else:
                                     payload = {"value": value}
+                                # Skip synthetic message actions when the same text is
+                                # already present in an explicit message action — the LLM
+                                # commonly echoes the reply in a top-level "message" key in
+                                # addition to the proper actions list, which creates a
+                                # duplicate that fails validation (no interface_path) and
+                                # triggers an unnecessary correction loop.
+                                if key in ("message", "text", "reply", "response") and isinstance(value, str):
+                                    already_present = any(
+                                        isinstance(a, dict)
+                                        and (a.get("type") or "").startswith("message_")
+                                        and isinstance(a.get("payload"), dict)
+                                        and a["payload"].get("text") == value
+                                        for a in actions
+                                    )
+                                    if already_present:
+                                        log_debug(
+                                            f"[message_chain] Skipping synthetic '{key}' action — text already present in explicit message action"
+                                        )
+                                        continue
                                 synthetic_actions.append(
                                     {"type": key, "payload": payload}
                                 )

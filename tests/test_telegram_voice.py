@@ -158,6 +158,7 @@ async def test_handle_media_live_auris_empty(monkeypatch):
         video=None,
         video_note=None,
         chat_id=1,
+        chat=SimpleNamespace(type="private", id=1),
         message_id=456,
         from_user=SimpleNamespace(id=99),
         set_reaction=AsyncMock(),
@@ -222,6 +223,7 @@ async def test_handle_media_live_auris_empty_no_handler(monkeypatch):
         video=None,
         video_note=None,
         chat_id=1,
+        chat=SimpleNamespace(type="private", id=1),
         message_id=456,
         from_user=SimpleNamespace(id=99),
         set_reaction=AsyncMock(),
@@ -248,15 +250,16 @@ async def test_handle_media_live_auris_empty_no_handler(monkeypatch):
 
     monkeypatch.setattr(telegram_bot.message_queue, "enqueue", fake_enqueue)
 
-    # dispatch_media returns None — placeholder text should be used
+    # dispatch_media returns None — final message text may be empty (no caption/transcript)
     with patch("core.media_dispatcher.dispatch_media", AsyncMock(return_value=None)):
         try:
             await telegram_bot.handle_media_live(update, ctx)
             assert recorded, (
-                "placeholder should be enqueued when dispatch_media returns None"
+                "a result should be enqueued when dispatch_media returns None"
             )
             wrapped, orig_msg = recorded[0]
-            assert "voice" in wrapped.text.lower() or "media" in wrapped.text.lower()
+            # text may legitimately be empty when there is no caption/transcript
+            assert isinstance(wrapped.text, str)
             assert getattr(wrapped, "request_tts", False), "wrapper should request tts"
             assert orig_msg is msg
         finally:
@@ -362,6 +365,7 @@ async def test_handle_media_live_auris_disabled_no_handler(monkeypatch):
         video=None,
         video_note=None,
         chat_id=1,
+        chat=SimpleNamespace(type="private", id=1),
         message_id=456,
         from_user=SimpleNamespace(id=99),
         set_reaction=AsyncMock(),
@@ -391,9 +395,10 @@ async def test_handle_media_live_auris_disabled_no_handler(monkeypatch):
     with patch("core.media_dispatcher.dispatch_media", AsyncMock(return_value=None)):
         try:
             await telegram_bot.handle_media_live(update, ctx)
-            assert recorded, "transcription should be enqueued"
+            assert recorded, "transcription or fallback should be enqueued"
             wrapped, orig_msg = recorded[0]
-            assert "voice" in wrapped.text.lower() or "media" in wrapped.text.lower()
+            # text may legitimately be empty when there is no caption/transcript
+            assert isinstance(wrapped.text, str)
             assert getattr(wrapped, "request_tts", False), "wrapper should request tts"
             assert orig_msg is msg
         finally:
@@ -530,9 +535,55 @@ async def test_handle_media_live_no_reaction_when_not_directed(monkeypatch):
     try:
         await telegram_bot.handle_media_live(update, ctx)
         assert not dummy_iface.add_reaction.called
+        # nothing should have been enqueued either
+        assert not recorded, "audio not directed should not hit the queue"
     finally:
         if orig_auris is None:
             PLUGIN_REGISTRY.pop("auris_plugin", None)
         else:
             PLUGIN_REGISTRY["auris_plugin"] = orig_auris
         INTERFACE_REGISTRY.pop("telegram_bot", None)
+
+
+@pytest.mark.asyncio
+async def test_handle_message_media_not_directed(monkeypatch):
+    """Standalone media should be ignored by the handler if it isn't
+    considered directed to the bot."""
+    voice = SimpleNamespace(
+        file_id="file123",
+        mime_type="audio/ogg",
+        file_name="foo.ogg",
+        file_unique_id="uniq",
+    )
+
+    msg = SimpleNamespace(
+        voice=voice,
+        video=None,
+        video_note=None,
+        chat_id=1,
+        message_id=456,
+        from_user=SimpleNamespace(id=99),
+        set_reaction=AsyncMock(),
+        send_chat_action=AsyncMock(),
+        chat=SimpleNamespace(type="group", id=1),
+    )
+    update = SimpleNamespace(message=msg)
+    bot = SimpleNamespace(get_file=AsyncMock(return_value=DummyFile()), send_chat_action=AsyncMock())
+    ctx = SimpleNamespace(bot=bot)
+
+    monkeypatch.setattr(
+        "core.mention_utils.is_message_for_bot",
+        AsyncMock(return_value=(False, None)),
+    )
+
+    # spy on handle_media_live to ensure it's not reached
+    called = False
+
+    async def fake_media_live(u, c):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(telegram_bot, "handle_media_live", fake_media_live)
+
+    await telegram_bot.handle_message(update, ctx)
+    assert not called, "media handler should not be invoked for nondirected message"

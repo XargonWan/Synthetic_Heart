@@ -1004,9 +1004,13 @@ async def _consumer_loop() -> None:
                             _resolve_generation_animation_state("start")
                         )
 
-                        # Run message processing in a Task so we can avoid hard-cancelling long-running
-                        # flows (e.g. Selenium-based LLMs). On timeout we keep the task running and
-                        # clear the session 'processing' flag when it eventually finishes.
+                        # Selenium-based LLMs manage browser state and cannot be safely
+                        # cancelled mid-flight. All other engines (HTTP-based Gemini, OpenAI, …)
+                        # support asyncio cancellation and should be stopped on timeout so they
+                        # don't deliver a "ghost" reply after the fallback has already been sent.
+                        task_is_cancellable = getattr(plugin_instance, "task_cancellable", True)
+
+                        # Run message processing in a Task so we can apply a per-element timeout.
                         processing_task = asyncio.create_task(
                             plugin_instance.handle_incoming_message(
                                 final["bot"],
@@ -1016,7 +1020,7 @@ async def _consumer_loop() -> None:
                             )
                         )
                         log_debug(
-                            f"[QUEUE] Dispatched handle_incoming_message task for interface_path={interface_path}, interface={final.get('interface')}"
+                            f"[QUEUE] Dispatched handle_incoming_message task for interface_path={interface_path}, interface={final.get('interface')} cancellable={task_is_cancellable}"
                         )
 
                         # If this is a low-priority item, do not await it - run in background
@@ -1088,74 +1092,92 @@ async def _consumer_loop() -> None:
                                     f"[QUEUE] Failed to send fallback message on timeout for chat {chat_id}: {send_exc}"
                                 )
 
-                            async def _clear_processing_when_done() -> None:
+                            if task_is_cancellable:
+                                # Cancel the task immediately so no delayed "ghost" response
+                                # arrives after the fallback has already been sent to the user.
+                                processing_task.cancel()
                                 try:
-                                    # Log exceptions from the background task, if any
-                                    try:
-                                        exc = processing_task.exception()
-                                        if exc is not None:
-                                            log_warning(
-                                                f"[QUEUE] Background processing task error for chat {chat_id}: {exc}"
-                                            )
-                                    except asyncio.CancelledError:
-                                        return
-                                    except Exception:
-                                        pass
-
-                                    # Notify optional hook that generation ended (even after a timeout).
-                                    try:
-                                        await _call_bot_generation_end(processing_task)
-                                    except Exception:
-                                        pass
-
-                                    # Only clear 'processing' if no other messages are pending for this chat
-                                    still_pending = False
-                                    for prio, _, queued_item in list(_queue._queue):
-                                        item_chat = (
-                                            queued_item.get("chat_id")
-                                            if isinstance(queued_item, dict)
-                                            else getattr(queued_item, "chat_id", None)
-                                        )
-                                        if item_chat == chat_id:
-                                            still_pending = True
-                                            break
-                                    if not still_pending:
-                                        try:
-                                            existing_meta = (
-                                                await get_session_meta_fn(
-                                                    interface_path
-                                                )
-                                                or {}
-                                            )
-                                            existing_meta["processing"] = False
-                                            await set_session_meta_fn(
-                                                interface_path, existing_meta
-                                            )
-                                        except Exception as set_e:
-                                            log_debug(
-                                                f"[QUEUE] Failed to clear processing session meta (background): {set_e}"
-                                            )
-
-                                        # Only return to IDLE when no other messages are pending for this chat.
-                                        await _broadcast_global_animation_state(
-                                            _resolve_generation_animation_state("end")
-                                        )
-                                except Exception as e:
-                                    log_debug(
-                                        f"[QUEUE] Error in background completion handler for chat {chat_id}: {e}"
+                                    await asyncio.wait_for(
+                                        asyncio.shield(processing_task), timeout=2
                                     )
-
-                            # Keep processing in background; clear meta when done.
-                            try:
-                                processing_task.add_done_callback(
-                                    lambda _t: asyncio.create_task(
-                                        _clear_processing_when_done()
-                                    )
-                                )
-                            except Exception as cb_e:
+                                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                                    pass
+                                try:
+                                    await _call_bot_generation_end(processing_task)
+                                except Exception:
+                                    pass
                                 log_debug(
-                                    f"[QUEUE] Failed to attach background completion callback: {cb_e}"
+                                    f"[QUEUE] Processing task cancelled after timeout for chat {chat_id}"
                                 )
+                            else:
+                                # Non-cancellable engine (e.g. Selenium) — let task finish in
+                                # background and clean up when it eventually completes.
+                                log_debug(
+                                    f"[QUEUE] Processing task kept alive (non-cancellable engine) for chat {chat_id}"
+                                )
+
+                                async def _clear_processing_when_done() -> None:
+                                    try:
+                                        try:
+                                            exc = processing_task.exception()
+                                            if exc is not None:
+                                                log_warning(
+                                                    f"[QUEUE] Background processing task error for chat {chat_id}: {exc}"
+                                                )
+                                        except asyncio.CancelledError:
+                                            return
+                                        except Exception:
+                                            pass
+
+                                        try:
+                                            await _call_bot_generation_end(processing_task)
+                                        except Exception:
+                                            pass
+
+                                        still_pending = False
+                                        for prio, _, queued_item in list(_queue._queue):
+                                            item_chat = (
+                                                queued_item.get("chat_id")
+                                                if isinstance(queued_item, dict)
+                                                else getattr(queued_item, "chat_id", None)
+                                            )
+                                            if item_chat == chat_id:
+                                                still_pending = True
+                                                break
+                                        if not still_pending:
+                                            try:
+                                                existing_meta = (
+                                                    await get_session_meta_fn(
+                                                        interface_path
+                                                    )
+                                                    or {}
+                                                )
+                                                existing_meta["processing"] = False
+                                                await set_session_meta_fn(
+                                                    interface_path, existing_meta
+                                                )
+                                            except Exception as set_e:
+                                                log_debug(
+                                                    f"[QUEUE] Failed to clear processing session meta (background): {set_e}"
+                                                )
+                                            await _broadcast_global_animation_state(
+                                                _resolve_generation_animation_state("end")
+                                            )
+                                    except Exception as e:
+                                        log_debug(
+                                            f"[QUEUE] Error in background completion handler for chat {chat_id}: {e}"
+                                        )
+
+                                try:
+                                    processing_task.add_done_callback(
+                                        lambda _t: asyncio.create_task(
+                                            _clear_processing_when_done()
+                                        )
+                                    )
+                                except Exception as cb_e:
+                                    log_debug(
+                                        f"[QUEUE] Failed to attach background completion callback: {cb_e}"
+                                    )
                         finally:
                             # If we completed within the timeout (success or error), notify generation end now.
                             if not timed_out:
