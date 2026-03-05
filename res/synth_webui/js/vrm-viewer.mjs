@@ -1988,6 +1988,9 @@ class AnimationHandler {
         // Serialize animation switches to avoid concurrent startAction() calls
         // which can momentarily stop the current action and cause a visible T-pose.
         this._startActionChain = Promise.resolve();
+        // All overlay (non-idle) actions currently running (or fading out).
+        // Used by _stopAllOverlays() to guarantee no orphaned clips remain.
+        this._activeActions = new Set();
         // Blink state tracking to prevent overlapping blinks and control timings
         this._blinkInProgress = false;
         this._blinkState = 'open'; // open|closing|closed|opening
@@ -2069,12 +2072,10 @@ class AnimationHandler {
                     }
                 } catch (e) { /* ignore */ }
 
-                p.finally(() => {
-                    try {
-                        if (this._preloadPromises && this._preloadPromises[normalizedKey] === p) delete this._preloadPromises[normalizedKey];
-                        if (this._preloadPromises && animationFile && this._preloadPromises[animationFile] === p) delete this._preloadPromises[animationFile];
-                    } catch (e) { /* ignore */ }
-                });
+                // Do NOT delete the promise from _preloadPromises after it resolves.
+                // _preloadPromises stores in-flight AND completed promises so that
+                // _awaitAnimationReady never re-triggers a redundant fetch.
+                // The clip itself is persisted in this.loadedAnimations (the real cache).
             } catch (e) {
                 console.warn('[AnimationHandler] Error preloading animation:', normalizedKey, e);
             }
@@ -2099,7 +2100,7 @@ class AnimationHandler {
         }
     }
 
-    async _awaitAnimationReady(actionName, animationFile, timeoutMs = 15000) {
+    async _awaitAnimationReady(actionName, animationFile, timeoutMs = 30000) {
         // HARD RULE: never start playback unless the animation is loaded.
         // Keep the current animation playing while we load; do not "fail open".
         try {
@@ -2107,6 +2108,13 @@ class AnimationHandler {
             if (!this.vrm || !this.mixer) return null;
             if (!this._preloadPromises) this._preloadPromises = {};
             const normalizedKey = this._normalizeAnimationKey(animationFile);
+
+            // Fast path: clip already in the persistent cache — no need to wait for anything.
+            const cachedClip = (this.loadedAnimations && (this.loadedAnimations[normalizedKey] || this.loadedAnimations[animationFile])) || null;
+            if (cachedClip) {
+                console.log(`[AnimationHandler] _awaitAnimationReady fast-path (already cached): ${normalizedKey}`);
+                return cachedClip;
+            }
 
             let p = this._preloadPromises[normalizedKey] || this._preloadPromises[animationFile] || null;
             if (!p) {
@@ -2118,16 +2126,25 @@ class AnimationHandler {
                 } catch (e) { /* ignore */ }
             }
 
-            // Soft watchdog log (doesn't abort): we just don't switch until loaded.
-            const warnMs = Math.max(500, Math.min(15000, Number(timeoutMs) || 5000));
+            // Hard timeout: abort the wait (not the download) if the clip takes too long.
+            // The download continues in the background via _preloadPromises, so the next
+            // call will resolve immediately once it completes.
+            const hardMs = Math.max(500, Math.min(60000, Number(timeoutMs) || 30000));
+            const softWarnMs = Math.round(hardMs * 0.5);
             let warnTimer = null;
+            const timeoutP = new Promise((resolve) => {
+                setTimeout(() => {
+                    try { console.warn('[AnimationHandler] Animation preload timed out after', hardMs, 'ms:', actionName, animationFile); } catch (e) { /* ignore */ }
+                    resolve(null);
+                }, hardMs);
+            });
             try {
                 warnTimer = setTimeout(() => {
                     try { console.warn('[AnimationHandler] Still preloading (holding previous animation):', actionName, animationFile); } catch (e) { /* ignore */ }
-                }, warnMs);
+                }, softWarnMs);
             } catch (e) { /* ignore */ }
 
-            const clip = await p;
+            const clip = await Promise.race([p, timeoutP]);
             try { if (warnTimer) clearTimeout(warnTimer); } catch (e) { /* ignore */ }
             return clip || null;
         } catch (e) {
@@ -2138,6 +2155,7 @@ class AnimationHandler {
     _safeFadeStop(action, fadeSec = 0.2) {
         try {
             if (!action) return;
+            try { this._activeActions && this._activeActions.delete(action); } catch (e) { /* ignore */ }
             try { action.enabled = true; } catch (e) { /* ignore */ }
             try { action.fadeOut(fadeSec); } catch (e) { /* ignore */ }
             setTimeout(() => {
@@ -2150,6 +2168,41 @@ class AnimationHandler {
         } catch (e) {
             /* ignore */
         }
+    }
+
+    /**
+     * Stop every overlay action (everything except _baseIdleAction) with a smooth
+     * fade-out.  Uses the mixer's internal _actions array to catch orphaned clips
+     * that are no longer referenced by this.currentAction / currentStructuredAction.
+     * Call this right before starting a new animation so no old pose can bleed through.
+     */
+    _stopAllOverlays(fadeSec = 0.3) {
+        try {
+            const baseIdle = this._baseIdleAction;
+            const seen = new Set();
+
+            // 1) Iterate mixer's own internal action list — catches orphaned clips.
+            const mixerActions = (this.mixer && Array.isArray(this.mixer._actions))
+                ? this.mixer._actions : [];
+            for (const a of mixerActions) {
+                try {
+                    if (!a || a === baseIdle) continue;
+                    seen.add(a);
+                    this._safeFadeStop(a, fadeSec);
+                } catch (e) { /* ignore */ }
+            }
+
+            // 2) Also flush the _activeActions Set (may include actions already fading).
+            if (this._activeActions) {
+                for (const a of this._activeActions) {
+                    try {
+                        if (!a || a === baseIdle || seen.has(a)) continue;
+                        this._safeFadeStop(a, fadeSec);
+                    } catch (e) { /* ignore */ }
+                }
+                this._activeActions.clear();
+            }
+        } catch (e) { /* ignore */ }
     }
 
     async _ensureBaseIdle(minWeight = 0.15, forceReload = false) {
@@ -2379,10 +2432,11 @@ class AnimationHandler {
             console.log(`[AnimationHandler] Fetching descriptor from ${descriptorPath}`);
             const response = await fetch(descriptorPath);
             if (!response.ok) {
-                // Missing descriptor is valid: treat as a sensible implicit descriptor
-                const implicit = { play_once: (String(actionName || '').toLowerCase() === 'idle') ? false : true };
-                this.loadedDescriptors[descriptorPath] = implicit;
-                return implicit;
+                // Missing descriptor: return null so the caller's playOnce/loop parameter is
+                // the sole authority. An implicit play_once:true would override the server's
+                // loop:true for write/talk and cause unwanted clamping.
+                this.loadedDescriptors[descriptorPath] = null;
+                return null;
             }
 
             try {
@@ -2391,22 +2445,15 @@ class AnimationHandler {
                 console.log(`[AnimationHandler] Loaded descriptor for ${animationFile}:`, descriptor);
                 return descriptor;
             } catch (err) {
-                // Malformed JSON: log, cache an implicit descriptor and continue
+                // Malformed JSON: log, cache null and continue
                 console.warn(`[AnimationHandler] Descriptor JSON malformed for ${animationFile}:`, err);
-                const implicit = { play_once: (String(actionName || '').toLowerCase() === 'idle') ? false : true };
-                this.loadedDescriptors[descriptorPath] = implicit;
-                return implicit;
+                this.loadedDescriptors[descriptorPath] = null;
+                return null;
             }
         } catch (error) {
             console.warn(`[AnimationHandler] Failed to load descriptor for ${animationFile}:`, error);
-            // On network or other failures fall back to implicit descriptor to avoid blocking playback.
-            try {
-                const implicit = { play_once: (String(actionName || '').toLowerCase() === 'idle') ? false : true };
-                if (descriptorPath) this.loadedDescriptors[descriptorPath] = implicit;
-                return implicit;
-            } catch (e) {
-                return null;
-            }
+            // On network errors, do not cache so the next request retries.
+            return null;
         }
     }
 
@@ -2479,7 +2526,7 @@ class AnimationHandler {
                 // Preload NEXT in background (clip + descriptor) so the next swap is instant.
                 try {
                     if (nextFile) {
-                        this._awaitAnimationReady('idle', nextFile, 2000);
+                        this._awaitAnimationReady('idle', nextFile, 20000);
                         // Descriptor fetch is also prewarmed; never awaited here.
                         this.loadDescriptor('idle', nextFile).catch(() => null);
                     }
@@ -2574,7 +2621,7 @@ class AnimationHandler {
                                 if (!descriptor || !descriptor.loop) return;
                                 if (!__idle_clip || !__idle_clip.duration || !THREE.AnimationUtils || typeof THREE.AnimationUtils.subclip !== 'function') return;
 
-                                const fps = 30;
+                                const fps = (d && typeof d.fps === 'number' && d.fps > 0) ? d.fps : 30;
                                 const totalFrames = Math.max(2, Math.round(__idle_clip.duration * fps));
                                 const clampInt = (v, lo, hi) => {
                                     const n = Math.floor(Number(v));
@@ -2707,7 +2754,7 @@ class AnimationHandler {
                             if (!descriptor || !descriptor.loop) return;
                             if (!clip || !clip.duration || !THREE.AnimationUtils || typeof THREE.AnimationUtils.subclip !== 'function') return;
 
-                            const fps = 30;
+                            const fps = (descriptor && typeof descriptor.fps === 'number' && descriptor.fps > 0) ? descriptor.fps : 30;
                             const totalFrames = Math.max(2, Math.round(clip.duration * fps));
                             const clampInt = (v, lo, hi) => {
                                 const n = Math.floor(Number(v));
@@ -2759,13 +2806,20 @@ class AnimationHandler {
             return idleAction;
         }
 
+        // For non-idle states, await the descriptor now (FBX is already loaded so this is fast).
+        // Without this, descriptor is always null at the hasStructuredDescriptor check below,
+        // meaning write/talk/etc with intro/loop/outro descriptors never get their structure built.
+        if (descriptorPromise) {
+            try { descriptor = await descriptorPromise; } catch (e) { descriptor = null; }
+        }
+
         // Check if we should create structured animations (intro/loop/outro)
         // This can be for 'think' state or for any animation with intro/outro in descriptor
         const hasStructuredDescriptor = descriptor && descriptor.intro && descriptor.outro;
         console.log(`[AnimationHandler] For ${actionName}/${selectedFile}: hasStructuredDescriptor=${hasStructuredDescriptor}, actionName==='think' is ${actionName === 'think'}, descriptor=${descriptor ? JSON.stringify(descriptor) : 'null'}`);
         if ((actionName === 'think' || hasStructuredDescriptor) && clip && clip.duration && THREE.AnimationUtils && typeof THREE.AnimationUtils.subclip === 'function') {
             try {
-                const fps = 30; // assumption for subclip frame math
+                const fps = (descriptor && typeof descriptor.fps === 'number' && descriptor.fps > 0) ? descriptor.fps : 30;
                 const totalFrames = Math.max(2, Math.round(clip.duration * fps));
 
                 const clampInt = (v, lo, hi) => {
@@ -3043,16 +3097,8 @@ class AnimationHandler {
                 this._lastAnimationState = { action: 'idle', phase: 'loop', expressions: [] };
             } catch (e) { /* ignore */ }
             await this._ensureBaseIdle(1.0, true);
-            // Fade out any overlay actions to return naturally to idle.
-            // Use longer fade time (0.35s) to ensure smooth, non-popping transition.
-            try {
-                if (this.currentStructuredAction) {
-                    this._safeFadeStop(this.currentStructuredAction.intro, 0.35);
-                    this._safeFadeStop(this.currentStructuredAction.loop, 0.35);
-                    this._safeFadeStop(this.currentStructuredAction.outro, 0.35);
-                }
-                this._safeFadeStop(this.currentAction, 0.35);
-            } catch (e) { /* ignore */ }
+            // Stop ALL overlay actions (including any orphaned clips) with a smooth fade.
+            this._stopAllOverlays(0.35);
             this.currentAction = null;
             this.currentActionName = 'idle';
             this.currentActionPhase = null;
@@ -3084,9 +3130,37 @@ class AnimationHandler {
         // "no clip driving bones" gaps and reduces skipped WRITE.
         try {
             if (animationFile) {
-                const clipReady = await this._awaitAnimationReady(actionName, animationFile, 5000);
+                const clipReady = await this._awaitAnimationReady(actionName, animationFile, 30000);
                 if (!clipReady) {
                     console.warn('[AnimationHandler] Cannot play (preload failed). Falling back to minimal animation state:', actionName, animationFile);
+                    // Boost base idle to full weight so the skeleton is fully driven and T-pose is avoided.
+                    try {
+                        if (this._baseIdleAction) {
+                            this._baseIdleAction.enabled = true;
+                            this._baseIdleAction.setLoop(THREE.LoopRepeat);
+                            this._baseIdleAction.clampWhenFinished = false;
+                            if (typeof this._baseIdleAction.setEffectiveWeight === 'function') {
+                                this._baseIdleAction.setEffectiveWeight(1.0);
+                            }
+                            this._baseIdleAction.fadeIn(0.2);
+                            this._baseIdleAction.play();
+                        }
+                    } catch (_e) { /* ignore */ }
+                    // Stop whatever action was playing since the new clip never arrived.
+                    try {
+                        if (this.currentAction) {
+                            this._safeFadeStop(this.currentAction, 0.2);
+                        }
+                        if (this.currentStructuredAction) {
+                            this._safeFadeStop(this.currentStructuredAction.intro, 0.2);
+                            this._safeFadeStop(this.currentStructuredAction.loop, 0.2);
+                            this._safeFadeStop(this.currentStructuredAction.outro, 0.2);
+                        }
+                        this.currentAction = null;
+                        this.currentActionName = null;
+                        this.currentActionPhase = null;
+                        this.currentStructuredAction = null;
+                    } catch (e) { /* ignore */ }
                     // Apply a minimal animation state so UI can reflect the requested action even if the clip failed to preload.
                     try {
                         this.currentActionName = actionName;
@@ -3109,6 +3183,19 @@ class AnimationHandler {
             }
         } catch (e) {
             console.warn('[AnimationHandler] Cannot play (preload error). Keeping previous animation:', actionName, animationFile, e);
+            // Boost base idle so skeleton is fully driven even when the clip errored out (prevents T-pose).
+            try {
+                if (this._baseIdleAction) {
+                    this._baseIdleAction.enabled = true;
+                    this._baseIdleAction.setLoop(THREE.LoopRepeat);
+                    this._baseIdleAction.clampWhenFinished = false;
+                    if (typeof this._baseIdleAction.setEffectiveWeight === 'function') {
+                        this._baseIdleAction.setEffectiveWeight(1.0);
+                    }
+                    this._baseIdleAction.fadeIn(0.2);
+                    this._baseIdleAction.play();
+                }
+            } catch (_e) { /* ignore */ }
             return;
         }
 
@@ -3123,6 +3210,14 @@ class AnimationHandler {
                 return;
             }
         } catch (e) { /* ignore */ }
+
+        // ── KEY FIX: stop ALL active overlays before starting the new action. ──────────
+        // Any orphaned intro/loop/outro from a previous state that didn't get cleaned up
+        // will be faded out here, preventing residual poses from mixing with the new clip
+        // (which is what causes the "T-pose idle" appearance).
+        // _baseIdleAction is deliberately skipped so the skeleton stays covered during the
+        // transition (it will be faded back to 0.12 by _ensureBaseIdle below).
+        this._stopAllOverlays(0.3);
 
         let action = this.actions[actionName];
 
@@ -3181,7 +3276,7 @@ class AnimationHandler {
                     if (hasStructuredDescriptor && clip && clip.duration && THREE.AnimationUtils && typeof THREE.AnimationUtils.subclip === 'function') {
                         // Create structured animation (intro/loop/outro)
                         try {
-                            const fps = 30;
+                            const fps = (descriptor && typeof descriptor.fps === 'number' && descriptor.fps > 0) ? descriptor.fps : 30;
                             const totalFrames = Math.max(2, Math.round(clip.duration * fps));
                             const hasLoopSection = descriptor && descriptor.loop;
 
@@ -3288,7 +3383,7 @@ class AnimationHandler {
                         // For IDLE, if a loop section is provided, subclip to that range and loop it.
                         if (actionName === 'idle' && descriptor && descriptor.loop && clip && clip.duration && THREE.AnimationUtils && typeof THREE.AnimationUtils.subclip === 'function') {
                             try {
-                                const fps = 30;
+                                const fps = (descriptor && typeof descriptor.fps === 'number' && descriptor.fps > 0) ? descriptor.fps : 30;
                                 const totalFrames = Math.max(2, Math.round(clip.duration * fps));
 
                                 const clampInt = (v, lo, hi) => {
@@ -3846,8 +3941,14 @@ class AnimationHandler {
 
                         // For non-idle playOnce actions, recover to idle immediately.
                         if (keyActionName !== 'idle') {
-                            if (this.currentAction !== finishedAction) return;
+                            // Guard: only act if this action is still the active one,
+                            // OR if currentAction is already null (cleared by a prior transition)
+                            // and no structured action is running — both indicate we need idle.
+                            const isStillActive = (this.currentAction === finishedAction);
+                            const isAbandoned = (!this.currentAction && !this.currentStructuredAction);
+                            if (!isStillActive && !isAbandoned) return;
                             // Boost base idle to full weight FIRST, to cover any gap while transitioning.
+                            const hasBaseIdle = !!this._baseIdleAction;
                             try {
                                 if (this._baseIdleAction) {
                                     this._baseIdleAction.enabled = true;
@@ -3858,7 +3959,7 @@ class AnimationHandler {
                                     }
                                     this._baseIdleAction.play();
                                 }
-                                this._safeFadeStop(finishedAction, 0.12);
+                                if (isStillActive) this._safeFadeStop(finishedAction, 0.12);
                             } catch (e) { /* ignore */ }
                             // Before handing back to idle, ensure eyes are opened and blinking resumes
                             try {
@@ -3869,8 +3970,11 @@ class AnimationHandler {
                                 try { if (this._eyeAutoEnabled && !this._eyeLoopRunning) this._startEyeMovement(); } catch (e) { }
                                 try { this._minActionVisibleUntil = 0; } catch (e) { }
                             } catch (e) { }
-                            setTimeout(() => { try { this.startAction('idle'); } catch (e) { /* ignore */ } }, 140);
-                            return;
+                            // If no base idle is available, start idle immediately (no safe gap to wait).
+                            // Otherwise wait 140ms so the base idle at weight=1.0 fully covers bones
+                            // before the new idle clip fades in.
+                            const idleDelay = hasBaseIdle ? 140 : 0;
+                            setTimeout(() => { try { this.startAction('idle'); } catch (e) { /* ignore */ } }, idleDelay);
                         }
 
                         // Clear any playOnce timers for this action
@@ -3987,18 +4091,12 @@ class AnimationHandler {
                 try { action.reset().fadeIn(0.5).play(); this.currentAction = action; } catch (ee) { /* ignore */ }
             }
 
-            // Fade out previous action shortly after new action started to ensure transforms are applied
-            const fadeMs = 500;
-            try { prevAction.fadeOut(fadeMs / 1000); } catch (e) { /* ignore */ }
-            setTimeout(() => {
-                try {
-                    if (prevAction && typeof prevAction.stop === 'function') {
-                        try { prevAction.stop(); } catch (e) { /* ignore */ }
-                    }
-                    try { prevAction.enabled = false; } catch (e) { }
-                    console.log('[AnimationHandler] Previous action stopped and disabled after fade');
-                } catch (err) { console.warn('[AnimationHandler] Error stopping previous action after fade:', err); }
-            }, fadeMs + 60);
+            // Fade out previous action using safe helper which resets and disables
+            // after the fade completes.  This ensures no residual pose remains and
+            // weight is cleanly removed (the old manual stop sometimes left traces).
+            try {
+                this._safeFadeStop(prevAction, 0.5);
+            } catch (e) { /* ignore */ }
         } else {
             // No previous action, start normally
             try {
@@ -4672,10 +4770,15 @@ async function loadDefaultAnimations(vrm) {
 
         console.log('[synth_webui] Loading base actions...');
         try {
-            await animationHandler.loadAction('idle');
-            console.log('[synth_webui] ✓ Idle action loaded');
+            // Bootstrap the base idle immediately so _baseIdleAction is always
+            // non-null before any other startAction runs. Using weight=1.0 means
+            // the skeleton is fully driven from this point forward. Any animation
+            // that follows will either succeed (fading idle to 0.12) or fail and
+            // boost idle back to 1.0 — but T-pose is never reachable.
+            await animationHandler._ensureBaseIdle(1.0, true);
+            console.log('[synth_webui] ✓ Base idle bootstrapped (weight=1.0, _baseIdleAction set)');
         } catch (e) {
-            console.error('[synth_webui] ✗ Idle action load failed:', e);
+            console.error('[synth_webui] ✗ Base idle bootstrap failed:', e);
         }
 
         console.log('[synth_webui] Server-driven mode: skipping eager THINK preload');
