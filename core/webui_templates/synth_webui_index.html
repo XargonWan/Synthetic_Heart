@@ -77,6 +77,11 @@
                 </article>
                 <article class="card" id="config-general-card">
                     <h2>Configuration</h2>
+                    <div class="config-search-row">
+                        <input id="config-search" type="search" placeholder="Search settings (name, label, description, group)" />
+                        <button id="config-search-clear" class="btn-ghost" type="button">Clear</button>
+                    </div>
+                    <div class="meta" id="config-search-status"></div>
                     <div class="config-list" id="config-general-list">
                         <div class="meta">Loading…</div>
                     </div>
@@ -202,6 +207,9 @@
         /* Card collapser styling (minimal, visual handled by JS/CSS elsewhere) */
         .card.collapsed .card-content { display: none; }
         .card-collapser { background: transparent; border: none; color: var(--text-soft); cursor: pointer; margin-right: 8px; }
+        .config-search-row { display: flex; gap: 0.6rem; align-items: center; margin: 0.6rem 0 0.2rem; }
+        .config-search-row input[type="search"] { flex: 1 1 auto; min-width: 200px; padding: 0.55rem 0.75rem; border-radius: 10px; border: 1px solid var(--border); background: var(--background); color: var(--text); }
+        .config-search-row input[type="search"]::placeholder { color: var(--text-soft); }
     </style>
 
     <script>
@@ -257,8 +265,8 @@
         function createChatResizeHandles() { /* stub - real implementation in /js/chat-window.mjs */ }
     </script>
 
-    <script src="/js/skins-ui.js"></script>
-    <script src="/js/skins-upload.js"></script>
+    <script src="/js/skins-ui.js?v=%%STATIC_VERSION%%"></script>
+    <script src="/js/skins-upload.js?v=%%STATIC_VERSION%%"></script>
     <script type="importmap">
         {
             "imports": {
@@ -274,7 +282,7 @@
             console.log('[synth_webui] VRM loader configured with resource path: /skins/temp/');
         }
     </script>
-    <script type="module" src="/js/vrm-viewer.mjs"></script>
+    <script type="module" src="/js/vrm-viewer.mjs?v=20260301-animfix"></script>
 <!-- VRM alias table / duplicate inline fragment removed — implementation lives in /js/vrm-viewer.mjs -->
 
 
@@ -305,7 +313,7 @@
                         try {
                             if (!this._lastExpressionLogTime) this._lastExpressionLogTime = 0;
                             <script src="/js/webui-bootstrap.js"></script>
-                            <script type="module" src="/js/vrm-viewer.mjs"></script>
+                            <script type="module" src="/js/vrm-viewer.mjs?v=20260301-animfix"></script>
                                             return (sf <= timeInClip);
                                         }
                                         return true;
@@ -1459,13 +1467,22 @@
                     const skin = window.activeSkinName ? window.activeSkinName.split('/').pop().replace('.vrm', '') : 'Rei';
                     const cacheKey = `${skin}:${actionName}`;
 
+                    const resolveCurrentList = () => {
+                        try {
+                            const reg = window.VRMAnimationMappings || {};
+                            const perSkin = (reg && typeof reg[skin] === 'object' && reg[skin] !== null) ? reg[skin] : null;
+                            const list = (perSkin && Array.isArray(perSkin[actionName])) ? perSkin[actionName]
+                                         : (Array.isArray(reg[actionName]) ? reg[actionName] : null);
+                            return Array.isArray(list) ? list : [];
+                        } catch (e) {
+                            return [];
+                        }
+                    };
+
                     // 1) Prefer global registry overrides (skin-aware).
                     try {
-                        const reg = window.VRMAnimationMappings || {};
-                        const perSkin = (reg && typeof reg[skin] === 'object' && reg[skin] !== null) ? reg[skin] : null;
-                        const list = (perSkin && Array.isArray(perSkin[actionName])) ? perSkin[actionName]
-                                     : (Array.isArray(reg[actionName]) ? reg[actionName] : null);
-                        if (Array.isArray(list)) {
+                        const list = resolveCurrentList();
+                        if (Array.isArray(list) && list.length > 0) {
                             animationMappingsLoaded.set(cacheKey, true);
                             return list;
                         }
@@ -1475,7 +1492,7 @@
                     
                     // Return cached mappings if available
                     if (animationMappingsLoaded.has(cacheKey)) {
-                        return animationMappings[actionName] || [];
+                        return resolveCurrentList();
                     }
                     
                     try {
@@ -1495,18 +1512,35 @@
                                 animationMappings[actionName] = data.animations || [];
                             }
                             animationMappingsLoaded.set(cacheKey, true);
-                            const arr = (window.VRMAnimationMappings?.[skin]?.[actionName]) || animationMappings[actionName] || [];
+                            const arr = resolveCurrentList();
                             console.log(`[AnimationHandler] Loaded ${arr.length} animations for ${actionName}:`, arr);
+                            return arr;
                         } else {
                             console.warn(`[AnimationHandler] Failed to load animations: HTTP ${response.status}`);
-                            animationMappings[actionName] = [];
+                            try {
+                                window.VRMAnimationMappings = window.VRMAnimationMappings || {};
+                                if (!window.VRMAnimationMappings[skin] || typeof window.VRMAnimationMappings[skin] !== 'object') {
+                                    window.VRMAnimationMappings[skin] = {};
+                                }
+                                window.VRMAnimationMappings[skin][actionName] = [];
+                            } catch (e) {
+                                animationMappings[actionName] = [];
+                            }
                         }
                     } catch (error) {
                         console.error(`[AnimationHandler] Error fetching animations:`, error);
-                        animationMappings[actionName] = [];
+                        try {
+                            window.VRMAnimationMappings = window.VRMAnimationMappings || {};
+                            if (!window.VRMAnimationMappings[skin] || typeof window.VRMAnimationMappings[skin] !== 'object') {
+                                window.VRMAnimationMappings[skin] = {};
+                            }
+                            window.VRMAnimationMappings[skin][actionName] = [];
+                        } catch (e) {
+                            animationMappings[actionName] = [];
+                        }
                     }
                     
-                    return animationMappings[actionName] || [];
+                    return resolveCurrentList();
                 }
 
                 async loadAnimation(actionName, animationFile) {
@@ -3713,13 +3747,7 @@
                         console.error('[synth_webui] ✗ Idle action load failed:', e);
                     }
 
-                    console.log('[synth_webui] Loading think action...');
-                    try {
-                        await animationHandler.loadAction('think');
-                        console.log('[synth_webui] ✓ Think action loaded');
-                    } catch (e) {
-                        console.error('[synth_webui] ✗ Think action failed:', e);
-                    }
+                    console.log('[synth_webui] Server-driven mode: skipping eager THINK preload');
 
                     // Debug helper for manual testing of face expressions/blink
                     try {
@@ -3745,21 +3773,7 @@
                         console.debug('[synth_webui] DEBUG_ANIM_HELPERS.triggerThink available');
                     } catch (e) { /* ignore */ }
                     
-                    console.log('[synth_webui] Loading write action...');
-                    try {
-                        await animationHandler.loadAction('write');
-                        console.log('[synth_webui] ✓ Write action loaded');
-                    } catch (e) {
-                        console.error('[synth_webui] ✗ Write action failed:', e);
-                    }
-
-                    console.log('[synth_webui] Loading talk action...');
-                    try {
-                        await animationHandler.loadAction('talk');
-                        console.log('[synth_webui] ✓ Talk action loaded');
-                    } catch (e) {
-                        console.error('[synth_webui] ✗ Talk action failed:', e);
-                    }
+                    console.log('[synth_webui] Server-driven mode: skipping eager WRITE/TALK preload');
                     
                     // Process any pending animation commands that arrived while loading
                     // Attempt to sync with backend animation state so page reloads pick
@@ -5566,6 +5580,7 @@
     <!-- Visible install button for PWA (shown only when install is available) -->
     <button id="synth-install-btn" title="Install Synthetic Heart" aria-label="Install Synthetic Heart">⬇️</button>
 <script src="/js/utils.js"></script>
+<script src="/js/settings.js?v=%%STATIC_VERSION%%"></script>
 <script src="/js/main.js?v=%%STATIC_VERSION%%"></script>
 
 <!-- Legacy tokens for unit tests (harmless): selk && selk.https_port ; tryOpen ; preferredProto ; otherPort ; details.appendChild(summary) ; host === '127.0.0.1' ; host === 'localhost' ; const st = last.animation_state || window.__synth_current_animation_state || null -->

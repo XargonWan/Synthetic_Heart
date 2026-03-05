@@ -265,6 +265,7 @@ async def enqueue(
             consume=False,
         )
     ):
+        delay = 300
         log_debug(
             f"[RATE LIMIT] Delaying user {user_id} by {delay} seconds (quota exceeded)"
         )
@@ -483,9 +484,6 @@ async def enqueue_low_priority(
     except Exception:
         pass
 
-    user_id = (
-        getattr(message.from_user, "id", "unknown") if message.from_user else "unknown"
-    )
     chat_id = getattr(message, "chat_id", "unknown")
     thread_id = getattr(message, "thread_id", None) or getattr(
         message, "message_thread_id", None
@@ -555,7 +553,6 @@ async def compact_similar_messages(first: dict, limit: int = 5) -> list:
             prio, counter, item = item_tuple
         else:
             prio, item = item_tuple
-            counter = None
         if (
             item["chat_id"] == chat_id
             and item.get("thread_id") == thread_id
@@ -688,7 +685,9 @@ async def _consumer_loop() -> None:
 
             # Check if user is trainer for this interface
             registry = get_interface_registry()
-            interface_id = getattr(user_msg, "interface_id", "unknown")
+            interface_id = final.get("interface") or getattr(
+                user_msg, "interface_id", "unknown"
+            )
             is_trainer = registry.is_trainer(interface_id, user_id)
 
             if not is_trainer and not rate_limit.is_allowed(
@@ -726,8 +725,11 @@ async def _consumer_loop() -> None:
                         # Set session meta 'processing' True for this chat
                         try:
                             # Ensure interface_path is defined for events so session meta can be set
+                            # derive interface_path from explicit field or bot class name
                             interface_path = final.get("interface") or (
-                                bot.__class__.__name__ if bot else "unknown"
+                                final.get("bot").__class__.__name__
+                                if final.get("bot")
+                                else "unknown"
                             )
                             existing_meta = (
                                 await get_session_meta_fn(interface_path) or {}
@@ -772,6 +774,9 @@ async def _consumer_loop() -> None:
                     if isinstance(context, dict):
                         context["interface_path"] = interface_path
                         context["thread_id"] = thread_id
+                        # Propagate trainer flag so plugin_instance can route
+                        # to TRAINER_CORTEX when a scope override is configured.
+                        context["is_trainer"] = is_trainer
                         # Propagate voice input flag from interface (used by message_chain TTS auto-inject)
                         _queued_msg = final.get("message")
                         if getattr(_queued_msg, "is_voice_input", False):

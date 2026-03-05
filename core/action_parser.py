@@ -9,10 +9,10 @@ from typing import Any, Dict, List, Tuple
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.validation_registry import get_validation_registry
 from core.config_manager import config_registry
-
-# Import RESTRICT_ACTIONS from image_processor (already registered there)
 from core.image_processor import RESTRICT_ACTIONS
 import json
+from core.transport_layer import run_corrector_middleware
+from core.core_initializer import INTERFACE_REGISTRY
 
 # Global dictionary to track retry attempts per chat/message thread for the corrector
 # Use a ConfigVar so consumers always see the latest value (set via WebUI/API)
@@ -514,7 +514,7 @@ def _validate_payload(action_type: str, payload: dict, errors: List[str]) -> Non
 
 
 def validate_action(
-    action: dict, context: dict = None, original_message=None
+    action: dict, context: dict | None = None, original_message=None
 ) -> Tuple[bool, List[str]]:
     """Validate an action dictionary.
 
@@ -569,7 +569,7 @@ def validate_action(
     # If action type is not supported, allow validation registry to attempt
     # resolving legacy/alias names (e.g., 'message_send'). This keeps the
     # resolution logic centralized and configurable.
-    if action_type not in supported_types:
+    if action_type and action_type not in supported_types:
         try:
             validation_registry = get_validation_registry()
             resolved = validation_registry.resolve_action_alias(
@@ -589,14 +589,17 @@ def validate_action(
 
     # Dynamic validation - delegate to plugins or interfaces that support this action type
     if (
-        isinstance(payload, dict) or action_type in actions_with_flexible_payload
-    ) and action_type in supported_types:
+        action_type
+        and (isinstance(payload, dict) or action_type in actions_with_flexible_payload)
+        and action_type in supported_types
+    ):
         # Normalize payload before validation (convert string numbers to int)
-        _normalize_payload(action_type, payload or {})
+        if payload:
+            _normalize_payload(action_type, payload)
         _validate_payload(action_type, payload or {}, errors)
 
         if _is_restricted_action(action_type):
-            mode = RESTRICT_ACTIONS.lower()
+            mode = str(RESTRICT_ACTIONS).lower()
             if mode in ("on", "deny_all"):
                 errors.append(f"Action '{action_type}' is restricted")
             elif mode == "trainer_only":
@@ -604,7 +607,9 @@ def validate_action(
                 try:
                     from core.abstract_context import AbstractContext, AbstractUser
 
-                    interface_name = context.get("interface_name", "unknown")
+                    interface_name = "unknown"
+                    if context:
+                        interface_name = context.get("interface_name", "unknown")
                     user_id = getattr(
                         getattr(original_message, "from_user", None), "id", None
                     )
@@ -665,6 +670,7 @@ def _plugins_for(action_type: str) -> List[Any]:
 
     for plugin in loaded_plugins:
         try:
+
             if hasattr(plugin, "get_supported_action_types"):
                 action_types = plugin.get_supported_action_types()
                 log_debug(
@@ -870,6 +876,9 @@ async def _handle_plugin_action(
     action: Dict[str, Any], context: Dict[str, Any], bot, original_message
 ):
     action_type = action.get("type")
+    if not action_type:
+        log_warning("[action_parser] Action is missing a 'type'")
+        return {"error": "Action is missing a 'type'"}
     iface_target = action.get("interface")
 
     log_info(
@@ -1106,9 +1115,7 @@ async def _request_selective_correction(
     failed_actions, successful_actions, bot, context, original_message
 ):
     """Request LLM to fix only the failed actions, while preserving successful ones."""
-    from core.transport_layer import run_corrector_middleware
-    from core.action_parser import _load_action_plugins
-    from core.core_initializer import INTERFACE_REGISTRY
+    
 
     # Build clear correction prompt
     successful_count = len(successful_actions)
@@ -1182,13 +1189,7 @@ async def _request_selective_correction(
         error_details.append(detail)
 
     # Create a specialized correction prompt that only asks for failed actions
-    correction_context = {
-        "previous_response_status": "partial_success",
-        "successful_actions": successful_count,
-        "successful_types": successful_types,
-        "failed_actions": failed_count,
-        "correction_needed": True,
-        "instruction": f"""
+    instruction = f"""
 Your previous response was partially successful:
 ✅ {successful_count} actions executed successfully: {", ".join(successful_types) if successful_types else "none"}
 ❌ {failed_count} actions failed and need correction
@@ -1196,57 +1197,42 @@ Your previous response was partially successful:
 Please provide ONLY the corrected versions of the failed actions. Do not repeat the {successful_count} successful actions.
 
 FAILED ACTIONS REQUIRING CORRECTION:
-""",
-    }
+"""
 
     for i, detail in enumerate(error_details, 1):
-        correction_context["instruction"] += (
-            f"\n{i}. ACTION: '{detail['action_type']}'\n"
-        )
-        correction_context["instruction"] += (
-            f"   DESCRIPTION: {detail['description']}\n"
-        )
+        instruction += f"\n{i}. ACTION: '{detail['action_type']}'\n"
+        instruction += f"   DESCRIPTION: {detail['description']}\n"
 
         # Add schema information
         if detail["required_fields"]:
-            correction_context["instruction"] += (
-                f"   REQUIRED FIELDS: {', '.join(detail['required_fields'])}\n"
-            )
+            instruction += f"   REQUIRED FIELDS: {', '.join(detail['required_fields'])}\n"
         if detail["optional_fields"]:
-            correction_context["instruction"] += (
-                f"   OPTIONAL FIELDS: {', '.join(detail['optional_fields'])}\n"
-            )
+            instruction += f"   OPTIONAL FIELDS: {', '.join(detail['optional_fields'])}\n"
 
         # Add verbose instructions if available (include description, payload schema, examples, and important notes)
         if "verbose_instructions" in detail:
             vi = detail["verbose_instructions"]
             if vi.get("description"):
-                correction_context["instruction"] += (
-                    f"   FULL DESCRIPTION: {vi.get('description')}\n"
-                )
+                instruction += f"   FULL DESCRIPTION: {vi.get('description')}\n"
             if vi.get("payload"):
-                correction_context["instruction"] += "   PAYLOAD FIELDS:\n"
+                instruction += "   PAYLOAD FIELDS:\n"
                 for k, v in vi.get("payload", {}).items():
                     desc = v.get("description", "") if isinstance(v, dict) else str(v)
                     ex = v.get("example", "") if isinstance(v, dict) else ""
-                    correction_context["instruction"] += (
-                        f"      - {k}: {desc} (example: {ex})\n"
-                    )
+                    instruction += f"      - {k}: {desc} (example: {ex})\n"
             if vi.get("examples"):
-                correction_context["instruction"] += (
-                    f"   EXAMPLES: {vi.get('examples')}\n"
-                )
+                instruction += f"   EXAMPLES: {vi.get('examples')}\n"
             if vi.get("important_notes"):
-                correction_context["instruction"] += "   IMPORTANT NOTES:\n"
+                instruction += "   IMPORTANT NOTES:\n"
                 for note in vi.get("important_notes"):
-                    correction_context["instruction"] += f"      - {note}\n"
+                    instruction += f"      - {note}\n"
 
         # Add specific errors
-        correction_context["instruction"] += "   ERRORS FOUND:\n"
+        instruction += "   ERRORS FOUND:\n"
         for error in detail["errors"]:
-            correction_context["instruction"] += f"      ❌ {error}\n"
+            instruction += f"      ❌ {error}\n"
 
-    correction_context["instruction"] += f"""
+    instruction += f"""
 Respond with JSON containing only the corrected actions (not the successful ones):
 {{
   "actions": [
@@ -1256,6 +1242,15 @@ Respond with JSON containing only the corrected actions (not the successful ones
 
 IMPORTANT: Do not include the {successful_count} actions that were already executed successfully ({", ".join(successful_types) if successful_types else "none"}).
 """
+
+    correction_context = {
+        "previous_response_status": "partial_success",
+        "successful_actions": successful_count,
+        "successful_types": successful_types,
+        "failed_actions": failed_count,
+        "correction_needed": True,
+        "instruction": instruction,
+    }
 
     log_info(
         f"[action_parser] Requesting selective correction for {failed_count} failed actions (preserving {successful_count} successful ones)"
@@ -1289,7 +1284,7 @@ IMPORTANT: Do not include the {successful_count} actions that were already execu
         }
 
         await run_corrector_middleware(
-            text=correction_context["instruction"],
+            text=str(correction_context["instruction"]),
             bot=bot,
             context=corrected_context,
             chat_id=getattr(original_message, "chat_id", None),
@@ -1637,7 +1632,7 @@ async def _create_diary_entry_for_actions(processed_actions, context, original_m
             action_type = action.get("type", "")
             payload = action.get("payload", {})
 
-            if _is_interface_message_action(action_type):
+            if action_type and _is_interface_message_action(action_type):
                 text = payload.get("text", "")
                 if text:
                     synth_response_parts.append(text)
@@ -1928,9 +1923,9 @@ async def initialize_core(notify_fn=None):
     return await core_initializer.initialize_all(notify_fn=notify_fn)
 
 
-def get_action_plugin_instructions() -> dict[str, dict]:
+def get_action_plugin_instructions() -> dict[str, Any]:
     """Gather prompt instructions from all action plugins."""
-    instructions: dict[str, str] = {}
+    instructions: dict[str, Any] = {}
     try:
         for plugin in _load_action_plugins():
             if hasattr(plugin, "get_supported_actions") and hasattr(
@@ -2104,7 +2099,7 @@ async def corrector_orchestrator(
     bot,
     message,
     max_retries: int | None = None,
-    completed_actions: list = None,
+    completed_actions: list | None = None,
     force_correction: bool = False,
 ):
     """Process model text: parse JSON actions or run the corrector loop.
