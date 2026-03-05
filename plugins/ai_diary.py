@@ -965,16 +965,16 @@ def cleanup_old_entries(days_to_keep: int = 30) -> int:
 
 def create_personal_diary_entry(
     synth_response: str,
-    user_message: str = None,
-    context_tags: List[str] = None,
-    involved_users: List[str] = None,
-    interface: str = None,
-    chat_id: str = None,
-    thread_id: str = None,
-    grillo_activity_log_id: int = None,
-    interaction_summary: str = None,
-    personal_thought: str = None,
-    emotions: List[Dict[str, Any]] = None,
+    user_message: str | None = None,
+    context_tags: List[str] | None = None,
+    involved_users: List[str] | None = None,
+    interface: str | None = None,
+    chat_id: str | None = None,
+    thread_id: str | None = None,
+    grillo_activity_log_id: int | None = None,
+    interaction_summary: str | None = None,
+    personal_thought: str | None = None,
+    emotions: List[Dict[str, Any]] | None = None,
 ) -> None:
     """Helper function to create a complete personal diary entry.
 

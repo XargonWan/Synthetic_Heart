@@ -1,4 +1,17 @@
 # core/persona_manager.py
+import json
+import asyncio
+import re
+import random
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, asdict, field
+
+from core.plugin_base import PluginBase
+from core.db import get_conn_ctx
+from core.logging_utils import log_debug, log_info, log_warning, log_error
+from core.config_manager import config_registry
+from core.animation_handler import get_animation_handler, AnimationState
 """
 Persona Manager - Digital Identity Management for SyntH
 
@@ -15,19 +28,7 @@ a synthetic being with its own identity, personality, and emotional framework.
 
 print("[persona_manager] DEBUG: Module import started", flush=True)
 
-import json
-import asyncio
-import re
-import random
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
-from dataclasses import dataclass, asdict, field
 
-from core.plugin_base import PluginBase
-from core.db import get_conn_ctx
-from core.logging_utils import log_debug, log_info, log_warning, log_error
-from core.config_manager import config_registry
-from core.animation_handler import get_animation_handler, AnimationState
 
 
 def _build_trainer_bio_section() -> str:
@@ -777,7 +778,6 @@ class PersonaManager(PluginBase):
             # Get fresh values from config registry
             name = config_registry.get_value("SYNTH_NAME", "SyntH")
             profile = config_registry.get_value("SYNTH_PROFILE", "")
-            aliases_raw = config_registry.get_value("SYNTH_ALIASES", [])
 
             # Check if values actually changed
             if self._current_persona:
