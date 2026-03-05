@@ -238,18 +238,21 @@ class TTSLipSyncPlugin(AIPluginBase):
         self.refresh_config()
 
         # Defer to VoxPlugin when the new Vox TTS subsystem is active.
-        # tts_lipsync is the legacy handler; VoxPlugin is canonical when VOX_ENABLED=True.
+        # tts_lipsync is the legacy handler; VoxPlugin is canonical when an
+        # active engine is configured (i.e. ACTIVE_VOX_ENGINE != "disabled").
         try:
-            vox_enabled = config_registry.get_value(
-                "VOX_ENABLED",
-                False,
-                value_type=bool,
-                group="plugins",
-                component="vox_plugin",
+            active = str(
+                config_registry.get_value(
+                    "ACTIVE_VOX_ENGINE",
+                    "",
+                    value_type=str,
+                    group="plugins",
+                    component="vox_plugin",
+                )
             )
-            if vox_enabled:
+            if active and active != "disabled":
                 log_info(
-                    "[tts_lipsync] VOX_ENABLED=True — deferring tts_speak to VoxPlugin"
+                    "[tts_lipsync] Active Vox engine present — deferring tts_speak to VoxPlugin"
                 )
                 return {"status": "skipped", "reason": "vox_active"}
         except Exception:

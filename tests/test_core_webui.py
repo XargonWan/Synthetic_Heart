@@ -42,3 +42,18 @@ async def test_components_summary_resilient(monkeypatch):
     assert "cortex" in payload
     assert "interfaces" in payload
     assert "plugins" in payload
+
+
+@pytest.mark.asyncio
+async def test_components_summary_includes_disabled_options(monkeypatch):
+    """Engine lists should always include a disabled entry at the front."""
+    # this test can use the default registries; just instantiate webui
+    webui = SynthWebUIInterface(autostart=False)
+    resp = await webui.components_summary()
+    assert resp.status_code == 200
+    payload = json.loads(resp.body)
+    for key in ("auris", "vox", "live"):
+        assert key in payload, f"{key} missing from summary"
+        names = [e.get("name") for e in payload[key]]
+        assert names, f"{key} list empty"
+        assert names[0] == "disabled", f"{key} disabled entry not first"

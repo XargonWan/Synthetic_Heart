@@ -9,7 +9,7 @@
 | `develop` | [![Develop CI Status](https://img.shields.io/github/actions/workflow/status/XargonWan/Synthetic_Heart/build-release.yml?branch=develop)](https://github.com/XargonWan/Synthetic_Heart/actions) | [![Docs Status](https://readthedocs.org/projects/synthetic-heart/badge/?version=latest)](https://synthetic-heart.readthedocs.io/en/latest/?badge=latest) |
 
 > **Audio engines notice:** the official Docker image ships with stub
-> packages for `harmony-speech-engine`, `chatterbox-tts` and `kittentts` so
+> packages for `chatterbox-tts` and `kittentts` so
 > that imports never fail.  The real versions can be pulled in later via Git or
 > wheel if needed (see the Dockerfile and docs/dev_components.rst for details).
 

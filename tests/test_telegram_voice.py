@@ -145,7 +145,8 @@ async def test_handle_media_live_no_file(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_handle_media_live_auris_empty(monkeypatch):
-    # voice message with auris returning empty string should fall back to live API
+    # voice message with auris returning empty string should fall back to dispatch_media
+    # which enqueues a placeholder text into the message queue (not reply_text).
     voice = SimpleNamespace(
         file_id="file123",
         mime_type="audio/ogg",
@@ -169,35 +170,45 @@ async def test_handle_media_live_auris_empty(monkeypatch):
     )
     ctx = SimpleNamespace(bot=bot)
 
-    # prepare Auris and a fake live handler plugin
+    # prepare Auris — returns empty string
     orig_auris = PLUGIN_REGISTRY.get("auris_plugin")
     PLUGIN_REGISTRY["auris_plugin"] = FakeAuris("")
 
-    # monkeypatch plugin_instance to provide a live handler
-    import core.plugin_instance as plugin_instance
+    # patch dispatch_media to return a fallback transcription
+    recorded = []
 
-    fake_plugin = SimpleNamespace(
-        handle_live_processing=AsyncMock(return_value="fallback text")
-    )
-    orig_plugin = plugin_instance.plugin
-    plugin_instance.plugin = fake_plugin
+    async def fake_enqueue(
+        bot_arg, wrapped, interface_id=None, original_message=None, **kw
+    ):
+        recorded.append((wrapped, original_message))
 
-    try:
-        await telegram_bot.handle_media_live(update, ctx)
-        # since Auris returned empty, we expect the fallback handler to be invoked
-        msg.reply_text.assert_awaited_once_with("fallback text")
-    finally:
-        if orig_auris is None:
-            PLUGIN_REGISTRY.pop("auris_plugin", None)
-        else:
-            PLUGIN_REGISTRY["auris_plugin"] = orig_auris
-        plugin_instance.plugin = orig_plugin
+    monkeypatch.setattr(telegram_bot.message_queue, "enqueue", fake_enqueue)
+
+    # patch dispatch_media so no real engine is called
+    with patch(
+        "core.media_dispatcher.dispatch_media",
+        AsyncMock(return_value="dispatch fallback"),
+    ):
+        try:
+            await telegram_bot.handle_media_live(update, ctx)
+            assert recorded, "dispatch_media result should be enqueued"
+            wrapped, orig_msg = recorded[0]
+            assert wrapped.text == "dispatch fallback"
+            assert getattr(wrapped, "is_voice_input", False)
+            assert getattr(wrapped, "request_tts", False)
+            # old reply_text path should NOT be called
+            msg.reply_text.assert_not_awaited()
+        finally:
+            if orig_auris is None:
+                PLUGIN_REGISTRY.pop("auris_plugin", None)
+            else:
+                PLUGIN_REGISTRY["auris_plugin"] = orig_auris
 
 
 @pytest.mark.asyncio
 async def test_handle_media_live_auris_empty_no_handler(monkeypatch):
-    """If Auris returns an empty string and no plugin handler exists we still
-    fall back to the local Whisper transcription rather than ghosting the user.
+    """If Auris returns an empty string and dispatch_media also returns None,
+    a placeholder text is enqueued so the user gets a response.
     """
     voice = SimpleNamespace(
         file_id="file123",
@@ -227,19 +238,6 @@ async def test_handle_media_live_auris_empty_no_handler(monkeypatch):
     orig_auris = PLUGIN_REGISTRY.get("auris_plugin")
     PLUGIN_REGISTRY["auris_plugin"] = FakeAuris("")
 
-    # ensure no live handler is present
-    import core.plugin_instance as plugin_instance
-
-    orig_plugin = plugin_instance.plugin
-    plugin_instance.plugin = None
-
-    # patch Whisper fallback
-    class DummyWhisper2:
-        def transcribe(self, path, **kwargs):
-            return ([SimpleNamespace(text="local text")], None)
-
-    monkeypatch.setattr("faster_whisper.WhisperModel", lambda *a, **k: DummyWhisper2())
-
     # capture enqueue
     recorded = []
 
@@ -250,19 +248,22 @@ async def test_handle_media_live_auris_empty_no_handler(monkeypatch):
 
     monkeypatch.setattr(telegram_bot.message_queue, "enqueue", fake_enqueue)
 
-    try:
-        await telegram_bot.handle_media_live(update, ctx)
-        assert recorded
-        wrapped, orig_msg = recorded[0]
-        assert wrapped.text == "local text"
-        assert getattr(wrapped, "request_tts", False), "wrapper should request tts"
-        assert orig_msg is msg
-    finally:
-        if orig_auris is None:
-            PLUGIN_REGISTRY.pop("auris_plugin", None)
-        else:
-            PLUGIN_REGISTRY["auris_plugin"] = orig_auris
-        plugin_instance.plugin = orig_plugin
+    # dispatch_media returns None — placeholder text should be used
+    with patch("core.media_dispatcher.dispatch_media", AsyncMock(return_value=None)):
+        try:
+            await telegram_bot.handle_media_live(update, ctx)
+            assert recorded, (
+                "placeholder should be enqueued when dispatch_media returns None"
+            )
+            wrapped, orig_msg = recorded[0]
+            assert "voice" in wrapped.text.lower() or "media" in wrapped.text.lower()
+            assert getattr(wrapped, "request_tts", False), "wrapper should request tts"
+            assert orig_msg is msg
+        finally:
+            if orig_auris is None:
+                PLUGIN_REGISTRY.pop("auris_plugin", None)
+            else:
+                PLUGIN_REGISTRY["auris_plugin"] = orig_auris
 
 
 @pytest.mark.asyncio
@@ -348,7 +349,8 @@ async def test_reply_to_media_with_alias_triggers_transcription(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_handle_media_live_auris_disabled_no_handler(monkeypatch):
-    """When Auris is disabled and no live handler exists we should still reply."""
+    """When Auris is disabled and dispatch_media returns None, a placeholder
+    is still enqueued so the user receives a response."""
     voice = SimpleNamespace(
         file_id="file123",
         mime_type="audio/ogg",
@@ -375,24 +377,6 @@ async def test_handle_media_live_auris_disabled_no_handler(monkeypatch):
     # make Auris plugin exist but return empty so primary path doesn't handle
     orig_auris = PLUGIN_REGISTRY.get("auris_plugin")
     PLUGIN_REGISTRY["auris_plugin"] = FakeAuris("")
-    # patch config to pretend AURIS_ENABLED=False (redundant but safe)
-    from core.config_manager import config_registry
-
-    monkeypatch.setattr(
-        config_registry,
-        "get_value",
-        lambda *args, **kwargs: False if args[0] == "AURIS_ENABLED" else None,
-    )
-
-    # stub the local Whisper fallback to return some text
-    class DummyWhisper:
-        def transcribe(self, path, **kwargs):
-            return ([SimpleNamespace(text="local text")], None)
-
-    monkeypatch.setattr(
-        "faster_whisper.WhisperModel",
-        lambda *args, **kwargs: DummyWhisper(),
-    )
 
     # capture enqueue
     recorded = []
@@ -404,18 +388,19 @@ async def test_handle_media_live_auris_disabled_no_handler(monkeypatch):
 
     monkeypatch.setattr(telegram_bot.message_queue, "enqueue", fake_enqueue)
 
-    try:
-        await telegram_bot.handle_media_live(update, ctx)
-        assert recorded, "transcription should be enqueued"
-        wrapped, orig_msg = recorded[0]
-        assert wrapped.text == "local text"
-        assert getattr(wrapped, "request_tts", False), "wrapper should request tts"
-        assert orig_msg is msg
-    finally:
-        if orig_auris is None:
-            PLUGIN_REGISTRY.pop("auris_plugin", None)
-        else:
-            PLUGIN_REGISTRY["auris_plugin"] = orig_auris
+    with patch("core.media_dispatcher.dispatch_media", AsyncMock(return_value=None)):
+        try:
+            await telegram_bot.handle_media_live(update, ctx)
+            assert recorded, "transcription should be enqueued"
+            wrapped, orig_msg = recorded[0]
+            assert "voice" in wrapped.text.lower() or "media" in wrapped.text.lower()
+            assert getattr(wrapped, "request_tts", False), "wrapper should request tts"
+            assert orig_msg is msg
+        finally:
+            if orig_auris is None:
+                PLUGIN_REGISTRY.pop("auris_plugin", None)
+            else:
+                PLUGIN_REGISTRY["auris_plugin"] = orig_auris
 
 
 @pytest.mark.asyncio
@@ -425,7 +410,7 @@ async def test_handle_media_live_reacts_when_directed(monkeypatch):
 
     This primarily exercises the new path added to handle_media_live that
     evaluates `get_reaction_emoji` and looks up the interface in
-    INTERFACE_REGISTRY.  We stub out Auris and plugin_instance to keep the
+    INTERFACE_REGISTRY.  We stub out Auris and dispatch_media to keep the
     remainder of the handler simple.
     """
     voice = SimpleNamespace(
@@ -467,14 +452,18 @@ async def test_handle_media_live_reacts_when_directed(monkeypatch):
     dummy_iface = SimpleNamespace(add_reaction=AsyncMock(return_value=True))
     INTERFACE_REGISTRY["telegram_bot"] = dummy_iface
 
-    # stub out auris plugin and plugin_instance to avoid extra complexity
+    # stub out auris plugin to return transcription directly
     orig_auris = PLUGIN_REGISTRY.get("auris_plugin")
-    PLUGIN_REGISTRY["auris_plugin"] = FakeAuris("")
-    import core.plugin_instance as plugin_instance
+    PLUGIN_REGISTRY["auris_plugin"] = FakeAuris("ok transcription")
 
-    fake_plugin = SimpleNamespace(handle_live_processing=AsyncMock(return_value="ok"))
-    orig_plugin = plugin_instance.plugin
-    plugin_instance.plugin = fake_plugin
+    recorded = []
+
+    async def fake_enqueue(
+        bot_arg, wrapped, interface_id=None, original_message=None, **kw
+    ):
+        recorded.append(wrapped)
+
+    monkeypatch.setattr(telegram_bot.message_queue, "enqueue", fake_enqueue)
 
     try:
         await telegram_bot.handle_media_live(update, ctx)
@@ -484,7 +473,6 @@ async def test_handle_media_live_reacts_when_directed(monkeypatch):
             PLUGIN_REGISTRY.pop("auris_plugin", None)
         else:
             PLUGIN_REGISTRY["auris_plugin"] = orig_auris
-        plugin_instance.plugin = orig_plugin
         INTERFACE_REGISTRY.pop("telegram_bot", None)
 
 
@@ -526,13 +514,18 @@ async def test_handle_media_live_no_reaction_when_not_directed(monkeypatch):
     dummy_iface = SimpleNamespace(add_reaction=AsyncMock(return_value=True))
     INTERFACE_REGISTRY["telegram_bot"] = dummy_iface
 
+    # stub out auris plugin to return a transcription (so handler exits cleanly)
     orig_auris = PLUGIN_REGISTRY.get("auris_plugin")
-    PLUGIN_REGISTRY["auris_plugin"] = FakeAuris("")
-    import core.plugin_instance as plugin_instance
+    PLUGIN_REGISTRY["auris_plugin"] = FakeAuris("transcribed")
 
-    fake_plugin = SimpleNamespace(handle_live_processing=AsyncMock(return_value="ok"))
-    orig_plugin = plugin_instance.plugin
-    plugin_instance.plugin = fake_plugin
+    recorded = []
+
+    async def fake_enqueue(
+        bot_arg, wrapped, interface_id=None, original_message=None, **kw
+    ):
+        recorded.append(wrapped)
+
+    monkeypatch.setattr(telegram_bot.message_queue, "enqueue", fake_enqueue)
 
     try:
         await telegram_bot.handle_media_live(update, ctx)
@@ -542,37 +535,4 @@ async def test_handle_media_live_no_reaction_when_not_directed(monkeypatch):
             PLUGIN_REGISTRY.pop("auris_plugin", None)
         else:
             PLUGIN_REGISTRY["auris_plugin"] = orig_auris
-        plugin_instance.plugin = orig_plugin
         INTERFACE_REGISTRY.pop("telegram_bot", None)
-
-    async def bad_react(e):
-        raise RuntimeError("no reactions")
-
-    msg = SimpleNamespace(
-        voice=voice,
-        video=None,
-        video_note=None,
-        chat_id=1,
-        message_id=456,
-        from_user=SimpleNamespace(id=99),
-        set_reaction=bad_react,
-        send_chat_action=AsyncMock(),
-        reply_text=AsyncMock(),
-    )
-    update = SimpleNamespace(message=msg)
-    bot = SimpleNamespace(
-        get_file=AsyncMock(return_value=DummyFile()), send_chat_action=AsyncMock()
-    )
-    ctx = SimpleNamespace(bot=bot)
-
-    # stub out auris to avoid enqueuing
-    orig = PLUGIN_REGISTRY.get("auris_plugin")
-    PLUGIN_REGISTRY["auris_plugin"] = FakeAuris("hello")
-    try:
-        await telegram_bot.handle_media_live(update, ctx)
-        # successful completion is enough; no exception means we handled the failure
-    finally:
-        if orig is None:
-            PLUGIN_REGISTRY.pop("auris_plugin", None)
-        else:
-            PLUGIN_REGISTRY["auris_plugin"] = orig

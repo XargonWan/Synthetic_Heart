@@ -1026,24 +1026,19 @@ class SynthWebUIInterface:
                 else "false",
             }
 
-            # Vox (TTS) flags exposed to the WebUI client
+            # Vox (TTS) flag exposed to the WebUI client is derived from
+            # which engine is active; a value of "disabled" means off.
             try:
-                _vox_enabled = bool(
+                active_vox = str(
                     config_registry.get_value(
-                        "VOX_ENABLED",
-                        False,
-                        value_type=bool,
+                        "ACTIVE_VOX_ENGINE",
+                        "",
+                        value_type=str,
                         group="plugins",
                         component="vox_plugin",
                     )
-                    or config_registry.get_value(
-                        "TTS_ENABLED",
-                        False,
-                        value_type=bool,
-                        group="plugins",
-                        component="tts_lipsync",
-                    )
                 )
+                _vox_enabled = bool(active_vox and active_vox != "disabled")
             except Exception:
                 _vox_enabled = False
             try:
@@ -1841,11 +1836,8 @@ class SynthWebUIInterface:
             if auris is None:
                 raise HTTPException(
                     status_code=503,
-                    detail="Auris STT subsystem is not loaded. Enable AURIS_ENABLED.",
+                    detail="Auris STT subsystem is not loaded. Select an Auris engine or disable via ACTIVE_AURIS_ENGINE.",
                 )
-
-            # Save to a temp file
-            tmp_dir = Path("tmp") / "auris_upload"
             tmp_dir.mkdir(parents=True, exist_ok=True)
             suffix = Path(file.filename).suffix or ".audio"
             tmp_path = tmp_dir / f"webui_{uuid.uuid4().hex}{suffix}"
@@ -6990,6 +6982,20 @@ class SynthWebUIInterface:
                 active_vox = config_registry.get_value("ACTIVE_VOX_ENGINE", None)
             except Exception:
                 pass
+            # disabled option always available
+            vox_data.append(
+                {
+                    "name": "disabled",
+                    "display_name": "Disabled",
+                    "label": "No TTS engine (disabled)",
+                    "capabilities": {},
+                    "description": "TTS disabled",
+                    "status": "success",
+                    "details": "Active" if active_vox == "disabled" else "",
+                    "error": None,
+                    "active": active_vox == "disabled",
+                }
+            )
             for _name in VOX_REGISTRY.get_available_engines():
                 _meta = VOX_REGISTRY.get_engine_meta(_name)
                 _caps = _meta.get("capabilities") or {}
@@ -7018,6 +7024,20 @@ class SynthWebUIInterface:
                 active_auris = config_registry.get_value("ACTIVE_AURIS_ENGINE", None)
             except Exception:
                 pass
+            # add disabled option first
+            auris_data.append(
+                {
+                    "name": "disabled",
+                    "display_name": "Disabled",
+                    "label": "No STT engine (disabled)",
+                    "capabilities": {},
+                    "description": "STT disabled",
+                    "status": "success",
+                    "details": "Active" if active_auris == "disabled" else "",
+                    "error": None,
+                    "active": active_auris == "disabled",
+                }
+            )
             for _name in AURIS_REGISTRY.get_available_engines():
                 _meta = AURIS_REGISTRY.get_engine_meta(_name)
                 _caps = _meta.get("capabilities") or {}
@@ -7039,6 +7059,21 @@ class SynthWebUIInterface:
 
         # Live section: cortex engines with kind='live' + LIVE_REGISTRY engines
         live_data: list[dict] = list(by_cortex.get("live", []))
+        # always offer disabled choice
+        live_data.insert(
+            0,
+            {
+                "name": "disabled",
+                "display_name": "Disabled",
+                "label": "No live engine (disabled)",
+                "capabilities": {},
+                "description": "Live subsystem turned off",
+                "status": "success",
+                "details": "",
+                "error": None,
+                "active": False,
+            },
+        )
         try:
             from core.live_registry import LIVE_REGISTRY
 

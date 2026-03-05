@@ -983,6 +983,10 @@ class DiscordInterface:
                 _cfg_r.get_value("LIVE_CORTEX", "") or ""
             ).strip()
             _all_engine_names = _creg.get_available_engines()
+            # When the configured value is explicitly "disabled" treat as no
+            # engine at all; we then leave _live_capable_engine = None below.
+            if _configured_live_engine.lower() == "disabled":
+                _configured_live_engine = ""
             # Prefer the configured LIVE_CORTEX; fall back to any already-loaded engine.
             _candidates = (
                 [_configured_live_engine]

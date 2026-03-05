@@ -127,12 +127,12 @@ class TestMessageChainIntegration(unittest.TestCase):
     async def test_auto_inject_tts_for_webui(
         self, mock_run_actions, mock_corrector, mock_get_value
     ):
-        """LLM JSON replies to WebUI should automatically gain a tts_speak when VOX_ENABLED."""
+        """LLM JSON replies to WebUI should automatically gain a tts_speak when a Vox engine is active."""
         from core import message_chain
 
         def fake_get_value(key, default=None, **kwargs):
-            if key == "VOX_ENABLED":
-                return True
+            if key == "ACTIVE_VOX_ENGINE":
+                return "http"
             return default
 
         mock_get_value.side_effect = fake_get_value
@@ -205,13 +205,14 @@ class TestMessageChainIntegration(unittest.TestCase):
     async def test_tts_not_injected_when_vox_disabled(
         self, mock_run_actions, mock_corrector, mock_get_value
     ):
-        """If VOX_ENABLED is false, no tts_speak should be added (legacy config irrelevant)."""
+        """If no Vox engine is active, no tts_speak should be added (legacy config irrelevant)."""
         from core import message_chain
 
         # Simulate VOX_DISABLED (and leave legacy values empty)
         def fake_get_value(key, default=None, **kwargs):
-            if key == "VOX_ENABLED":
-                return False
+            if key == "ACTIVE_VOX_ENGINE":
+                return "disabled"
+            # legacy values ignored
             if key == "TTS_ENDPOINTS":
                 return ""
             if key == "TTS_ENABLED":
@@ -266,15 +267,19 @@ class TestMessageChainIntegration(unittest.TestCase):
     @patch("core.transport_layer.run_corrector_middleware")
     @patch("core.action_parser.run_actions")
     async def test_tts_injected_when_vox_enabled(
-        self, mock_run_actions, mock_corrector, mock_get_value
+        # name kept for backwards compatibility but behavior uses engine
+        self,
+        mock_run_actions,
+        mock_corrector,
+        mock_get_value,
     ):
-        """When VOX_ENABLED is true, message TTS should be auto-injected regardless of legacy endpoints."""
+        """When a Vox engine is active, message TTS should be auto-injected regardless of legacy endpoints."""
         from core import message_chain
 
-        # Simulate VOX_ENABLED True; leave legacy values blank to emulate new setup
+        # Simulate active engine; leave legacy values blank to emulate new setup
         def fake_get_value(key, default=None, **kwargs):
-            if key == "VOX_ENABLED":
-                return True
+            if key == "ACTIVE_VOX_ENGINE":
+                return "http"
             if key == "TTS_ENDPOINTS":
                 return ""
             if key == "TTS_ENABLED":
@@ -333,10 +338,10 @@ class TestMessageChainIntegration(unittest.TestCase):
         """When TTS is explicitly disabled via WebUI (TTS_ENABLED=False) it should not be auto-injected even if endpoints are set."""
         from core import message_chain
 
-        # Simulate VOX_ENABLED False (new flag) and legacy endpoints set but TTS_ENABLED False
+        # Simulate disabled engine (and legacy endpoints set but TTS_ENABLED False)
         def fake_get_value(key, default=None, **kwargs):
-            if key == "VOX_ENABLED":
-                return False
+            if key == "ACTIVE_VOX_ENGINE":
+                return "disabled"
             if key == "TTS_ENDPOINTS":
                 return "http://example/endpoint"
             if key == "TTS_ENABLED":
@@ -401,10 +406,10 @@ class TestMessageChainIntegration(unittest.TestCase):
         """If context.request_tts=True we force a tts_speak injection regardless of interface."""
         from core import message_chain
 
-        # simulate vox enabled
+        # simulate vox enabled via active engine
         def fake_get_value(key, default=None, **kwargs):
-            if key == "VOX_ENABLED":
-                return True
+            if key == "ACTIVE_VOX_ENGINE":
+                return "http"
             return default
 
         mock_get_value.side_effect = fake_get_value
@@ -464,8 +469,8 @@ class TestMessageChainIntegration(unittest.TestCase):
         from core import message_chain
 
         def fake_get_value(key, default=None, **kwargs):
-            if key == "VOX_ENABLED":
-                return True
+            if key == "ACTIVE_VOX_ENGINE":
+                return "http"
             return default
 
         mock_get_value.side_effect = fake_get_value
@@ -653,12 +658,12 @@ class TestMessageChainIntegration(unittest.TestCase):
     async def test_request_tts_respects_vox_flag(
         self, mock_run_actions, mock_corrector, mock_get_value
     ):
-        """When VOX_ENABLED=False, request_tts should not cause audio injection."""
+        """When no Vox engine is active, request_tts should not cause audio injection."""
         from core import message_chain
 
         def fake_get_value(key, default=None, **kwargs):
-            if key == "VOX_ENABLED":
-                return False
+            if key == "ACTIVE_VOX_ENGINE":
+                return "disabled"
             return default
 
         mock_get_value.side_effect = fake_get_value

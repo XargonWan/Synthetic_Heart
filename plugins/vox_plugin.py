@@ -30,7 +30,7 @@ from typing import Any
 from core.ai_plugin_base import AIPluginBase
 from core.config_manager import config_registry
 from core.core_initializer import register_plugin, INTERFACE_REGISTRY
-from core.logging_utils import log_error, log_info, log_warning
+from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.variables_engine import register_exposed_var
 from core.vox_registry import VOX_REGISTRY
 
@@ -38,17 +38,6 @@ from core.vox_registry import VOX_REGISTRY
 # Exposed config variables
 # ---------------------------------------------------------------------------
 
-register_exposed_var(
-    "VOX_ENABLED",
-    label="Vox (TTS) Enabled",
-    default=False,
-    value_type=bool,
-    ui_type="boolean",
-    description="Enable or disable the Vox text-to-speech subsystem.",
-    scope="plugins",
-    component="vox_plugin",
-    advanced=False,
-)
 
 register_exposed_var(
     "ACTIVE_VOX_ENGINE",
@@ -58,7 +47,7 @@ register_exposed_var(
     ui_type="string",
     description=(
         "Name of the active Vox TTS engine "
-        "(e.g. 'http', 'harmony', 'chatterbox', 'qwen3tts', 'kitten')."
+        "(e.g. 'http', 'chatterbox', 'kitten')."
     ),
     scope="plugins",
     component="vox_plugin",
@@ -150,7 +139,7 @@ class VoxPlugin(AIPluginBase):
 
     def __init__(self) -> None:
         super().__init__()
-        self._enabled: bool = False
+        # explicit enabled flag removed; use engine name "disabled" instead
         self._active_engine_name: str = "http"
         self._engine_settings: dict[str, Any] = {}
         self._output_dir: Path = Path("res/synth_webui/static/audio/tts")
@@ -194,8 +183,23 @@ class VoxPlugin(AIPluginBase):
         """
         self.refresh_config()
 
-        if not self._enabled:
-            log_info("[vox_plugin] Disabled (VOX_ENABLED=False); skipping.")
+        # Determine which engine is actually being used for this call.
+        chosen = engine_name or self._active_engine_name
+        # A value of "disabled" means the subsystem is turned off.
+        if chosen == "disabled":
+            log_info("[vox_plugin] Engine disabled; skipping.")
+            if allow_fallback:
+                _ip = interface_path
+                if not _ip and context:
+                    _ip = str(context.get("interface_path") or "")
+                if not _ip and original_message:
+                    _ip = getattr(original_message, "interface_path", None)
+                _fallback_text = merged_text or text
+                if _ip and _fallback_text:
+                    log_debug(
+                        "[vox_plugin] Disabled but allow_fallback=True — sending text fallback."
+                    )
+                    return await self._send_fallback(_fallback_text, str(_ip))
             return {"status": "skipped", "reason": "vox_disabled"}
 
         # --- Resolve interface_path from context / message if not provided ---
@@ -360,24 +364,7 @@ class VoxPlugin(AIPluginBase):
         try:
             import json
 
-            # Support legacy TTS_ENABLED as fallback
-            vox_enabled = config_registry.get_value(
-                "VOX_ENABLED",
-                None,
-                value_type=bool,
-                group="plugins",
-                component="vox_plugin",
-            )
-            if vox_enabled is None:
-                vox_enabled = config_registry.get_value(
-                    "TTS_ENABLED",
-                    False,
-                    value_type=bool,
-                    group="plugins",
-                    component="tts_lipsync",
-                )
-            self._enabled = bool(vox_enabled)
-
+            # read active engine; "disabled" deactivates the subsystem
             self._active_engine_name = str(
                 config_registry.get_value(
                     "ACTIVE_VOX_ENGINE",
@@ -553,9 +540,7 @@ class VoxPlugin(AIPluginBase):
         """Import built-in Vox engine modules so they self-register."""
         builtins = [
             "plugins.vox_engines.http",
-            "plugins.vox_engines.harmony",
             "plugins.vox_engines.chatterbox",
-            "plugins.vox_engines.qwen3tts",
             "plugins.vox_engines.kitten",
         ]
         for mod in builtins:

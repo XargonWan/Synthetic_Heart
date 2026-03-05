@@ -26,27 +26,16 @@ from core.variables_engine import register_exposed_var
 # Exposed config variables
 # ---------------------------------------------------------------------------
 
-register_exposed_var(
-    "AURIS_ENABLED",
-    label="Auris (STT) Enabled",
-    default=False,
-    value_type=bool,
-    ui_type="boolean",
-    description="Enable or disable the Auris speech-to-text subsystem.",
-    scope="plugins",
-    component="auris_plugin",
-    advanced=False,
-)
 
 register_exposed_var(
     "ACTIVE_AURIS_ENGINE",
     label="Active Auris Engine",
-    default="gemini",
+    default="disabled",
     value_type=str,
     ui_type="string",
     description=(
         "Name of the active Auris STT engine (file-based only, e.g. 'gemini'). "
-        "For real-time streaming use the Live subsystem."
+        "Set to 'disabled' to turn off the Auris subsystem. For real-time streaming use the Live subsystem."
     ),
     scope="plugins",
     component="auris_plugin",
@@ -128,7 +117,7 @@ class AurisPlugin(AIPluginBase):
 
     def __init__(self) -> None:
         super().__init__()
-        self._enabled: bool = False
+        # no explicit enabled flag; engine name "disabled" turns it off
         self._active_engine_name: str = "gemini"
         self._engine_settings: dict[str, Any] = {}
 
@@ -161,8 +150,9 @@ class AurisPlugin(AIPluginBase):
         """
         self.refresh_config()
 
-        if not self._enabled:
-            log_info("[auris_plugin] Disabled (AURIS_ENABLED=False); skipping.")
+        # if the configured engine is explicitly disabled, behave identically
+        if self._active_engine_name == "disabled":
+            log_info("[auris_plugin] Engine disabled; skipping transcription.")
             return None
 
         if not os.path.exists(file_path):
@@ -251,15 +241,7 @@ class AurisPlugin(AIPluginBase):
     def refresh_config(self) -> None:
         """Re-read exposed variables (allows WebUI hot-changes)."""
         try:
-            self._enabled = bool(
-                config_registry.get_value(
-                    "AURIS_ENABLED",
-                    False,
-                    value_type=bool,
-                    group="plugins",
-                    component="auris_plugin",
-                )
-            )
+            # active engine may be "disabled" to deactivate the subsystem
             self._active_engine_name = str(
                 config_registry.get_value(
                     "ACTIVE_AURIS_ENGINE",

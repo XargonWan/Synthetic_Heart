@@ -46,8 +46,6 @@ dependencies = [
     "onnxruntime<1.24",               # faster-whisper dep: 1.24+ dropped Python 3.10 wheels
     "silero-vad>=5.1",                # real-time VAD service (core/vad_service)
     "torch>=2.0",                     # required by silero-vad & qwen3tts
-    "transformers>=4.40",             # required by qwen3tts Vox engine
-    "soundfile>=0.12",                # audio I/O for qwen3tts
     "omegaconf>=2.3",                 # required by Silero TTS (kitten engine)
     # chatterbox-tts: depends on pkuseg which has build issues – install manually
     # harmony-speech-engine: not on PyPI – install manually from GitHub
@@ -71,8 +69,6 @@ silero    = ["silero-vad>=5.1", "torch>=2.0"]   # SileroVAD (core/vad_service)
 audio     = ["silero-vad>=5.1", "torch>=2.0"]   # alias: same as silero
 
 # ── Vox TTS engines ───────────────────────────────────────────────────────────
-# qwen3tts: Qwen3-TTS via Hugging Face transformers pipeline
-qwen3tts  = ["transformers>=4.40", "soundfile>=0.12", "torch>=2.0"]
 
 # kitten: Silero TTS V3 via torch.hub (CPU-capable, ~55 MB model)
 kitten    = ["torch>=2.0", "soundfile>=0.12", "omegaconf>=2.3"]
@@ -101,7 +97,6 @@ all-audio  = [
     "faster-whisper>=1.0.0",
     "silero-vad>=5.1",
     "torch>=2.0",
-    "transformers>=4.40",
     "soundfile>=0.12",
 ]
 

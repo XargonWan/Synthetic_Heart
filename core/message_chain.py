@@ -994,58 +994,66 @@ async def handle_incoming_message(
                             or tts_already_executed
                         )
                         # honor explicit request flag passed via context or wrapped message
+                        _explicit_tts_request = bool(
+                            context
+                            and isinstance(context, dict)
+                            and context.get("request_tts")
+                        )
                         if context and isinstance(context, dict):
                             if context.get("request_tts") is False:
                                 should_skip_tts = True
 
-                        # If TTS disabled globally, skip regardless
+                        # Determine whether Vox/TTS is effectively enabled.  The new
+                        # canonical switch is the active engine name: if the selected
+                        # engine is non-empty and not "disabled", we consider TTS on.
+                        # For backwards compatibility we also honour the old boolean
+                        # flags/endpoints, but they no longer drive the feature state.
                         try:
                             from core.config_manager import config_registry
 
-                            vox_enabled = config_registry.get_value(
-                                "VOX_ENABLED",
-                                False,
-                                value_type=bool,
-                                group="plugins",
-                                component="vox_plugin",
+                            active = str(
+                                config_registry.get_value(
+                                    "ACTIVE_VOX_ENGINE",
+                                    "",
+                                    value_type=str,
+                                    group="plugins",
+                                    component="vox_plugin",
+                                )
                             )
-                            if not vox_enabled:
-                                should_skip_tts = True
-                        except Exception:
-                            pass
+                            vox_enabled = bool(active and active != "disabled")
 
-                        # Additional check: if Vox/TTS is disabled, skip auto-inject
-                        try:
-                            from core.config_manager import config_registry
-
-                            # Vox is the new canonical toggle; legacy TTS_ENABLED/TTS_ENDPOINTS
-                            # are only consulted for backward compatibility.  We deliberately
-                            # do *not* require the old TTS_ENDPOINTS string to be set when
-                            # VOX_ENABLED is true, since modern deployments use engines from
-                            # the Vox registry instead.
-                            vox_enabled = config_registry.get_value(
-                                "VOX_ENABLED",
-                                False,
-                                value_type=bool,
-                                group="plugins",
-                                component="vox_plugin",
-                            )
+                            # legacy fallback
                             if not vox_enabled:
-                                should_skip_tts = True
-                                log_debug(
-                                    "[message_chain] Skipping TTS auto-inject because VOX_ENABLED is False"
+                                vox_enabled = bool(
+                                    config_registry.get_value(
+                                        "TTS_ENABLED",
+                                        False,
+                                        value_type=bool,
+                                        group="plugins",
+                                        component="tts_lipsync",
+                                    )
+                                    or config_registry.get_value(
+                                        "TTS_ENDPOINTS",
+                                        "",
+                                        value_type=str,
+                                        group="plugins",
+                                        component="tts_lipsync",
+                                    )
                                 )
 
-                            # Legacy fallbacks (we keep them so existing installs with only
-                            # TTS_ENDPOINTS continue to behave as before).  These checks only
-                            # add additional skip reasons; they do not override vox_enabled.
-                            tts_raw = config_registry.get_value(
-                                "TTS_ENDPOINTS",
-                                "",
-                                value_type=str,
-                                group="plugins",
-                                component="tts_lipsync",
-                            )
+                            if not vox_enabled and not _explicit_tts_request:
+                                should_skip_tts = True
+                                log_debug(
+                                    "[message_chain] Skipping TTS auto-inject because Vox engine is disabled"
+                                )
+                            elif not vox_enabled and _explicit_tts_request:
+                                log_debug(
+                                    "[message_chain] Vox engine disabled but request_tts=True — "
+                                    "allowing TTS attempt (VoxPlugin will fall back to text if needed)"
+                                )
+
+                        except Exception:
+                            pass
                             tts_enabled = config_registry.get_value(
                                 "TTS_ENABLED",
                                 False,

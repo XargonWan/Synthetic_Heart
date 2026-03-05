@@ -91,7 +91,7 @@ def test_registry_load_engine_caches_instance() -> None:
 
 @pytest.mark.asyncio
 async def test_auris_plugin_transcribe_disabled() -> None:
-    """When AURIS_ENABLED=False the plugin returns None without calling engine."""
+    """When the active engine is 'disabled' the plugin returns None."""
     with (
         patch("core.core_initializer.register_plugin"),
         patch.object(
@@ -99,14 +99,15 @@ async def test_auris_plugin_transcribe_disabled() -> None:
                 "core.config_manager", fromlist=["config_registry"]
             ).config_registry,
             "get_value",
-            side_effect=_mock_auris_cfg(enabled=False),
+            side_effect=lambda key, default=None, **kwargs: "disabled"
+            if key == "ACTIVE_AURIS_ENGINE"
+            else default,
         ),
     ):
         from plugins.auris_plugin import AurisPlugin
 
         plugin = AurisPlugin.__new__(AurisPlugin)
-        plugin._enabled = False
-        plugin._active_engine_name = "gemini"
+        plugin._active_engine_name = "disabled"
         plugin._engine_settings = {}
 
         result = await plugin.transcribe_audio("/tmp/fake.wav")
@@ -130,7 +131,6 @@ async def test_auris_plugin_transcribe_calls_engine() -> None:
     from plugins.auris_plugin import AurisPlugin
 
     plugin = AurisPlugin.__new__(AurisPlugin)
-    plugin._enabled = True
     plugin._active_engine_name = "mock"
     plugin._engine_settings = {}
 
@@ -285,13 +285,12 @@ async def test_vosk_autodownload_skipped(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _mock_auris_cfg(enabled: bool):
+def _mock_auris_cfg(active_engine: str = "gemini"):
     """Return a side_effect for config_registry.get_value calls."""
 
     def _side_effect(key, default=None, **kwargs):
         mapping = {
-            "AURIS_ENABLED": enabled,
-            "ACTIVE_AURIS_ENGINE": "gemini",
+            "ACTIVE_AURIS_ENGINE": active_engine,
             "AURIS_ENGINE_SETTINGS": "{}",
         }
         return mapping.get(key, default)

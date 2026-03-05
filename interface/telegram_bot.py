@@ -737,91 +737,35 @@ async def handle_media_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # ------------------------------------------------------------------
-        # FALLBACK PATH: LLM live processing (e.g. Gemini Live API)
+        # FALLBACK PATH: core media_dispatcher (Auris disabled or returned None)
+        # dispatch_media escalates: Auris → Live engine fallback (transcribe_file)
+        # The result is enqueued into the message chain so the LLM responds normally
+        # and memory is recorded through the standard pipeline.
         # ------------------------------------------------------------------
-        if plugin_instance.plugin:
-            # Check for new method name first, fall back to old if needed (though we updated it)
-            handler_method = getattr(
-                plugin_instance.plugin, "handle_live_processing", None
-            )
+        from core.media_dispatcher import dispatch_media
 
-            if handler_method:
-                # Get TEXT response
-                text_response = await handler_method(
-                    input_path, mime_type_hint=media_type_hint
-                )
-
-                if text_response:
-                    log_info(f"[telegram_bot] Live API Response: {text_response}")
-                    # Send as text reply - this triggers user's local TTS (as per request)
-                    await message.reply_text(text_response)
-
-                    # 🧠 FIRE-AND-FORGET MEMORY INJECTION
-                    # We describe what happened based on the media type
-                    user_action_desc = "User sent a Live Audio message."
-                    if "video" in media_type_hint:
-                        user_action_desc = "User sent a Live Video stream."
-
-                    asyncio.create_task(
-                        _inject_memory_interaction(
-                            message.chat_id,
-                            f"[{user_action_desc}]",
-                            text_response,
-                            f"telegram_bot/{message.chat_id}",
-                        )
-                    )
-                else:
-                    log_warning("[telegram_bot] Live API returned no text.")
-                    await message.reply_text(
-                        "🤔 I listened/watched, but I'm not sure what to say."
-                    )
-
-                return
-
-        # no handler method found; try a small local transcription model
-        # as a last‑ditch attempt before giving up entirely.  This covers
-        # situations where the plugin is a ManualAIPlugin (which lacks
-        # handle_live_processing) or the active cortex engine failed to load.
-        log_warning(
-            "[telegram_bot] no live processing handler available for media; attempting local transcription fallback"
+        transcribed = await dispatch_media(
+            input_path, media_type_hint, context_hint="telegram_voice_fallback"
         )
-        try:
-            # import lazily so we don't incur cost when not needed
-            from faster_whisper import WhisperModel
+        if transcribed:
+            fallback_text = transcribed
+        elif media_type_hint and media_type_hint.startswith("audio"):
+            fallback_text = "[User sent a voice message — transcription unavailable]"
+        else:
+            fallback_text = "[User sent a media message]"
 
-            log_debug("[telegram_bot] loading Whisper tiny for local transcription")
-            model = WhisperModel("tiny", device="cpu")
-            segments, _info = model.transcribe(input_path)
-            text = " ".join(getattr(s, "text", "") for s in segments).strip()
-            if text:
-                log_info(f"[telegram_bot] local transcription result: {text[:120]}")
-                # enqueue exactly like Auris path rather than replying
-                wrapped = MessageWrapper(
-                    message,
-                    text=text,
-                    is_voice_input=True,
-                    request_tts=True,
-                )
-                await message_queue.enqueue(
-                    context.bot,
-                    wrapped,
-                    interface_id="telegram_bot",
-                    original_message=message,
-                    skip_mention_check=True,
-                )
-                return
-            else:
-                log_debug("[telegram_bot] local transcription produced empty text")
-        except ImportError:
-            log_warning(
-                "[telegram_bot] faster-whisper not available for local fallback"
-            )
-        except Exception as e:
-            log_debug(f"[telegram_bot] local transcription failed: {e}")
-
-        # still nothing? give the generic message so the user knows we heard
-        await message.reply_text(
-            "🤔 I received your media, but I couldn't process it right now."
+        wrapped = MessageWrapper(
+            message,
+            text=fallback_text,
+            is_voice_input=True,
+            request_tts=True,
+        )
+        await message_queue.enqueue(
+            context.bot,
+            wrapped,
+            interface_id="telegram_bot",
+            original_message=message,
+            skip_mention_check=True,
         )
 
     except Exception as e:

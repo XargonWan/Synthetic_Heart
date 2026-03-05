@@ -2509,7 +2509,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
                     setupRegistrySelect('vox-engine-select',  'vox-engine-info',  'vox-engine-label',  'vox-engine-description',  data.vox  || [], 'ACTIVE_VOX_ENGINE');
                     setupRegistrySelect('auris-engine-select','auris-engine-info','auris-engine-label','auris-engine-description', data.auris || [], 'ACTIVE_AURIS_ENGINE');
-                    setupRegistrySelect('live-engine-select', 'live-engine-info', 'live-engine-label', 'live-engine-description',  data.live || [], null);  // Live has no single active-engine config key
+                    setupRegistrySelect('live-engine-select', 'live-engine-info', 'live-engine-label', 'live-engine-description',  data.live || [], 'LIVE_CORTEX');  // persist selected live engine via LIVE_CORTEX config
 
                     // ── Kitten (Silero V3) speaker selector ────────────────────
                     const kittenSpeakerSelect = document.getElementById('kitten-speaker-select');

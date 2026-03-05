@@ -271,7 +271,7 @@ Component Import Errors
 
 1. Ensure the module is in the correct ``_dev`` directory
 2. Check for missing dependencies in ``pyproject.toml`` (use `uv sync` to install).
-   * Note: some engines (harmony, chatterbox, kitten) are not on PyPI and
+   * Note: some engines (chatterbox, kitten) are not on PyPI and
      are installed directly in the Docker image via `pip` commands.  If the
      build fails it means one of those repositories was unreachable or its
      dependencies could not be built (e.g. pkuseg for chatterbox).  Fixing the

@@ -36,7 +36,7 @@ Architecture
      │  gemini.py      │   │   http.py           │   │   silero.py (VAD)  │
      │                 │   │   harmony.py        │   │   gemini.py (stub) │
      └─────────────────┘   │   chatterbox.py     │   └────────────────────┘
-                           │   qwen3tts.py       │
+                           │                     │
                            │   kitten.py         │
                            └─────────────────────┘
 
@@ -114,12 +114,9 @@ Configuration (all WebUI-configurable):
    * - Variable
      - Default
      - Description
-   * - ``AURIS_ENABLED``
-     - ``false``
-     - Master on/off switch for the Auris subsystem.
    * - ``ACTIVE_AURIS_ENGINE``
-     - ``gemini``
-     - Dotted name or short alias of the active engine.
+     - ``disabled``
+     - Name of the active engine (e.g. ``gemini`` or ``vosk``).  Set to ``disabled`` to disable the Auris subsystem.
    * - ``AURIS_ENGINE_SETTINGS``
      - ``{}``
      - JSON string of engine-specific settings forwarded at load time.
@@ -215,12 +212,9 @@ Configuration (all WebUI-configurable):
    * - Variable
      - Default
      - Description
-   * - ``VOX_ENABLED``
-     - ``false``
-     - Master on/off.  Falls back to legacy ``TTS_ENABLED`` if absent.
    * - ``ACTIVE_VOX_ENGINE``
      - ``http``
-     - Short alias of the active TTS engine.
+     - Name of the active TTS engine.  Set to ``disabled`` to disable the Vox subsystem.
    * - ``VOX_ENGINE_SETTINGS``
      - ``{}``
      - JSON string forwarded to the engine at load time.
@@ -339,15 +333,9 @@ Available Vox engines
    * - ``http``
      - ``vox_engines/http.py``
      - Calls one or more external HTTP TTS servers.  Reads legacy ``TTS_ENDPOINTS`` config key.  Full failover support.
-   * - ``harmony``
-     - ``vox_engines/harmony.py``
-     - Harmony Speech V1 (stub — install ``harmony-speech-engine`` to activate).
    * - ``chatterbox``
      - ``vox_engines/chatterbox.py``
      - Chatterbox TTS (stub — install ``chatterbox-tts`` to activate).
-   * - ``qwen3tts``
-     - ``vox_engines/qwen3tts.py``
-     - Qwen3-TTS via HuggingFace ``transformers`` pipeline.  Requires ``transformers`` and ``soundfile``.
    * - ``kitten``
      - ``vox_engines/kitten.py``
      - KittenTTS (stub — install the library to activate).
@@ -373,7 +361,7 @@ Migration from ``tts_lipsync``
 
 The legacy ``tts_lipsync`` plugin is **still active** for backward-compatibility.  New deployments should switch to Vox:
 
-1. Set ``VOX_ENABLED = true`` in the WebUI or ``.env``.
+1. Select a non-``disabled`` engine for ``ACTIVE_VOX_ENGINE`` in the WebUI or ``.env``.
 2. Set ``ACTIVE_VOX_ENGINE = http`` (reads the same ``TTS_ENDPOINTS`` as before).
 3. Optionally disable ``TTS_ENABLED`` to stop the legacy plugin from also attempting TTS.
 
@@ -383,6 +371,9 @@ Live — Bidirectional Streaming
 -------------------------------
 
 The **Live** subsystem handles persistent sessions where audio and text flow in both directions simultaneously (e.g. a microphone feed producing transcripts while the system synthesises speech).
+
+Configuration: select the active engine via ``LIVE_CORTEX`` in the WebUI (the dropdown includes a ``disabled`` option to turn the subsystem off).
+
 
 ``LiveEngineBase`` contract
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~

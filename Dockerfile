@@ -122,7 +122,6 @@ COPY . /app
 # dependencies) and therefore cannot appear in pyproject.toml.  We install
 # vendored stub packages here via pip; the real engines can be swapped in by
 # installing the appropriate GitHub repo or wheel in a later step if desired.
-RUN pip install /app/vendor/harmony_speech_engine
 RUN pip install /app/vendor/chatterbox_tts
 RUN pip install /app/vendor/kittentts
 
