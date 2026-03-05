@@ -740,6 +740,7 @@ async def handle_media_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # pipeline as a multimodal attachment so scope routing, persona
         # context, and the correct engine (e.g. OpenRouter/Grok) are used.
         # ------------------------------------------------------------------
+
         # We do NOT call handle_live_processing here — that bypasses scope
         # routing and sends audio to the base engine with a generic prompt.
         # Instead, the multimodal extraction in plugin_instance picks up the

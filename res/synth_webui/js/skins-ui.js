@@ -221,7 +221,6 @@
             const navSkins = document.getElementById('nav-skins');
             if(navSkins) navSkins.addEventListener('click', function(){ fetchSkins(); });
 
-<<<<<<< HEAD
             // set up upload input handler once element exists
             const skinUpload = document.getElementById('skin-vrm-upload');
             if(skinUpload){
@@ -306,62 +305,6 @@
 
             // Initial load
             try { fetchSkins(); } catch(e) {}
-=======
-            // New Skin form toggle
-            const newBtn = document.getElementById('btn-new-skin');
-            const formEl = document.getElementById('skin-editor-form');
-            if(newBtn && formEl){
-                newBtn.addEventListener('click', ()=>{
-                    formEl.style.display = formEl.style.display === 'none' ? 'block' : 'none';
-                });
-            }
-
-            // Cancel button
-            const cancelBtn = document.getElementById('btn-skin-cancel');
-            if(cancelBtn && formEl){
-                cancelBtn.addEventListener('click', ()=>{
-                    formEl.style.display = 'none';
-                });
-            }
-
-            // Create button
-            const createBtn = document.getElementById('btn-skin-create');
-            if(createBtn){
-                createBtn.addEventListener('click', async ()=>{
-                    const name = (document.getElementById('skin-form-name') || {}).value || '';
-                    if(!name.trim()){ alert('Skin name is required'); return; }
-                    const data = {
-                        name: name.trim(),
-                        author: (document.getElementById('skin-form-author') || {}).value || '',
-                        version: (document.getElementById('skin-form-version') || {}).value || '1.0',
-                        appearance: (document.getElementById('skin-form-appearance') || {}).value || ''
-                    };
-                    const ok = await createSkin(data);
-                    if(ok && formEl){
-                        formEl.style.display = 'none';
-                        // Clear form
-                        const nameEl = document.getElementById('skin-form-name'); if(nameEl) nameEl.value='';
-                        const authorEl = document.getElementById('skin-form-author'); if(authorEl) authorEl.value='';
-                        const versionEl = document.getElementById('skin-form-version'); if(versionEl) versionEl.value='1.0';
-                        const appearanceEl = document.getElementById('skin-form-appearance'); if(appearanceEl) appearanceEl.value='';
-                    }
-                });
-            }
-
-            // Upload skin zip
-            const zipInput = document.getElementById('skin-zip-upload');
-            if(zipInput){
-                zipInput.addEventListener('change', (e)=>{
-                    if(e.target.files && e.target.files[0]){
-                        uploadSkinZip(e.target.files[0]);
-                        e.target.value = ''; // reset for re-upload
-                    }
-                });
-            }
-
-            // Initial load
-            try { fetchSkins(); } catch(e) {}
->>>>>>> 677ab5688435d521060529ff9ab879eabe29c8ce
         } catch (e){ console.warn('[synth_webui] skins-ui init failed', e); }
     }
 
