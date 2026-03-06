@@ -188,14 +188,15 @@ animation changes.  This is the primary playback command.
             "fps": 30
         },
 
-        .. note::
-            The descriptor object above comes directly from the companion
-            ``<animation>.fbx.json`` file located next to the FBX.  that file is
-            the *single source of truth* for loop/intro/outro timings, fps, and
-            related metadata; duplicating the same values elsewhere is a bug.
-            When no descriptor file exists, the handler synthesises sensible
-            defaults (idle animations loop, other states play once, and the
-            implicit loop section spans frames ``0``–``max``).
+.. note::
+   The descriptor object above comes directly from the companion
+   ``<animation>.fbx.json`` file located next to the FBX.  that file is
+   the *single source of truth* for loop/intro/outro timings, fps, and
+   related metadata; duplicating the same values elsewhere is a bug.
+   When no descriptor file exists, the handler synthesises sensible
+   defaults (idle animations loop, other states play once, and the
+   implicit loop section spans frames ``0``–``max``).
+
         "animation_state": {
             "action": "think",
             "phase": "loop",
