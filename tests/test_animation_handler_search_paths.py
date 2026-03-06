@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from core.animation_handler import get_animation_handler
+from core.animation_handler import get_karada_state_server
 
 
 def write_json(path: Path, obj: dict):
@@ -24,7 +24,7 @@ def test_search_path_precedence(tmp_path: Path):
         p2 / "think" / "b.fbx.json", {"loop": {"start_frame": 0, "end_frame": 10}}
     )
 
-    handler = get_animation_handler()
+    handler = get_karada_state_server()
     handler.set_animation_search_paths([p1, p2])
 
     variants = handler.get_animation_variants("think")

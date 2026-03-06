@@ -1,17 +1,18 @@
-"""Animation handler for VRM avatar in the SyntH Web UI.
+"""KaradaStateServer — centralized VRM state service for SyntH.
 
-This module provides a centralized system for managing VRM avatar animations.
-Components can trigger logical animation states (Think, Write, Talk, Idle) which
-are mapped to actual FBX animation files. The handler ensures smooth transitions
-and automatic fallback to Idle when no animations are active.
+This module manages the single source of truth for three independent streams:
+the active VRM model, the animation state, and face blend-shape values.
+Clients receive push-updates via WebSocket; only real state changes are broadcast.
 
-The animation system integrates with the WebUI to send animation commands via WebSocket.
+Components trigger logical animation states (Think, Write, Talk, Idle) which are
+mapped to actual FBX animation files with smooth intro/loop/outro transitions.
 """
 
 from __future__ import annotations
 
 import asyncio
 import random
+import uuid
 from enum import Enum
 from typing import Dict, List, Optional, TYPE_CHECKING, Any
 from datetime import datetime, timezone
@@ -43,13 +44,13 @@ ANIMATION_STATE_PRIORITIES = {
 }
 
 
-class AnimationHandler:
-    """Manages VRM avatar animations and their lifecycle.
+class KaradaStateServer:
+    """Centralized VRM state service — single source of truth for model, animations and face values.
 
-    This handler:
-    - Maps logical animation states to FBX files
-    - Tracks the current animation state
-    - Sends animation commands to the WebUI via WebSocket
+    This server:
+    - Maps logical animation states to FBX files with intro/loop/outro support
+    - Tracks and broadcasts the current animation state to all connected clients
+    - Manages VRM model state and pushes it to clients on connect/change
     - Handles automatic fallback to Idle state
     - Supports random selection or sequential rotation from multiple animation files
     """
@@ -97,6 +98,11 @@ class AnimationHandler:
         self._current_animation_started_at: Optional[datetime] = (
             None  # UTC timestamp for current animation start
         )
+        # Stable identifier for the currently playing animation; changes only when
+        # a genuinely new animation file starts (not during outro or re-send of the
+        # same file).  All interfaces use this to avoid restarting an already-running
+        # animation after a reconnect or periodic re-sync.
+        self._current_animation_id: str = ""
         self._animation_state_changed_callbacks: List[
             callable
         ] = []  # Callbacks when animation changes
@@ -109,6 +115,11 @@ class AnimationHandler:
         # Temporary search paths managed via uploads/helpers
         self._temporary_search_paths: List[Path] = []
 
+        # VRM model state: set via set_vrm_model() and read by get_full_state()
+        self._vrm_model_url: Optional[str] = None
+        self._vrm_model_name: Optional[str] = None
+        self._vrm_model_hash: Optional[str] = None
+
     def set_webui(self, webui: SynthWebUIInterface) -> None:
         """Set or update the WebUI reference.
 
@@ -116,7 +127,7 @@ class AnimationHandler:
             webui: The SynthWebUIInterface instance
         """
         self.webui = webui
-        log_debug("[AnimationHandler] WebUI reference set")
+        log_debug("[KaradaStateServer] WebUI reference set")
         # Register a lightweight summary callback so the WebUI can broadcast
         # the canonical animation state to all connected clients whenever it
         # changes. This is different from the full 'animation' command (which
@@ -127,7 +138,7 @@ class AnimationHandler:
             if cb and cb not in self._animation_state_changed_callbacks:
                 self.register_animation_state_changed_callback(cb)
                 log_debug(
-                    "[AnimationHandler] Registered WebUI animation state summary callback"
+                    "[KaradaStateServer] Registered WebUI animation state summary callback"
                 )
         except Exception:
             pass
@@ -141,7 +152,7 @@ class AnimationHandler:
             if cb2 and cb2 not in self._animation_state_changed_callbacks:
                 self.register_animation_state_changed_callback(cb2)
                 log_debug(
-                    "[AnimationHandler] Registered WebUI authoritative animation broadcast callback"
+                    "[KaradaStateServer] Registered WebUI authoritative animation broadcast callback"
                 )
         except Exception:
             pass
@@ -169,7 +180,7 @@ class AnimationHandler:
                 idle_animations = self.get_animations_for_state(AnimationState.IDLE)
 
             if not idle_animations:
-                log_debug("[AnimationHandler] No IDLE animations available to preload")
+                log_debug("[KaradaStateServer] No IDLE animations available to preload")
                 return
 
             # Pre-load IDLE variants using the *idle* folder, regardless of current_state.
@@ -182,10 +193,10 @@ class AnimationHandler:
                     )
                 except Exception as exc:
                     log_debug(
-                        f"[AnimationHandler] Failed to preload IDLE variant {anim}: {exc}"
+                        f"[KaradaStateServer] Failed to preload IDLE variant {anim}: {exc}"
                     )
         except Exception as exc:
-            log_warning(f"[AnimationHandler] ensure_idle_preloaded failed: {exc}")
+            log_warning(f"[KaradaStateServer] ensure_idle_preloaded failed: {exc}")
 
     def register_animation_state_changed_callback(self, callback: callable) -> None:
         """Register a callback to be called when animation state changes.
@@ -196,7 +207,7 @@ class AnimationHandler:
             callback: Async function to call when animation changes
         """
         self._animation_state_changed_callbacks.append(callback)
-        log_debug("[AnimationHandler] Registered animation state changed callback")
+        log_debug("[KaradaStateServer] Registered animation state changed callback")
 
     async def _notify_animation_state_changed(
         self, state: AnimationState, animation_file: str, descriptor: Optional[Dict]
@@ -209,12 +220,12 @@ class AnimationHandler:
             descriptor: The animation descriptor
         """
         log_debug(
-            f"[AnimationHandler] _notify_animation_state_changed CALLED: state={state.value}, animation={animation_file}, callbacks_count={len(self._animation_state_changed_callbacks)}"
+            f"[KaradaStateServer] _notify_animation_state_changed CALLED: state={state.value}, animation={animation_file}, callbacks_count={len(self._animation_state_changed_callbacks)}"
         )
         for callback in self._animation_state_changed_callbacks:
             try:
                 log_debug(
-                    f"[AnimationHandler] Calling callback: {callback.__name__ if hasattr(callback, '__name__') else 'unknown'}"
+                    f"[KaradaStateServer] Calling callback: {callback.__name__ if hasattr(callback, '__name__') else 'unknown'}"
                 )
                 if asyncio.iscoroutinefunction(callback):
                     await callback(state, animation_file, descriptor)
@@ -222,7 +233,7 @@ class AnimationHandler:
                     callback(state, animation_file, descriptor)
             except Exception as exc:
                 log_warning(
-                    f"[AnimationHandler] Error in animation state callback: {exc}"
+                    f"[KaradaStateServer] Error in animation state callback: {exc}"
                 )
 
     def get_current_animation_state(self) -> Dict[str, any]:
@@ -338,6 +349,7 @@ class AnimationHandler:
             "animation_file": anim,
             "animation": resolved,
             "descriptor": desc,
+            "animation_id": self._current_animation_id,
             "animation_state": {
                 "action": self.current_state.value,
                 "phase": "loop",
@@ -361,6 +373,142 @@ class AnimationHandler:
         }
 
         return state
+
+    def get_full_state(self) -> Dict[str, Any]:
+        """Return the complete VRM state suitable for push-to-client on WebSocket connect.
+
+        Returns a dict with three keys:
+          - ``vrm_model``: {name, url, hash} — the currently active VRM model
+          - ``animation``: {file, url, state, loop, descriptor} — the current animation
+          - ``face_values``: {} — current face/emotion blend-shape values (best-effort)
+        """
+        # VRM model: prefer explicitly stored state, fall back to reading from webui
+        vrm_model: Dict[str, Any] = {}
+        if self._vrm_model_url:
+            vrm_model = {
+                "name": self._vrm_model_name,
+                "url": self._vrm_model_url,
+                "hash": self._vrm_model_hash,
+            }
+        else:
+            try:
+                if self.webui and getattr(self.webui, "active_vrm", None):
+                    active_vrm: str = self.webui.active_vrm  # type: ignore[attr-defined]
+                    if active_vrm.startswith("/"):
+                        url = active_vrm
+                        name = active_vrm.split("/")[-1]
+                    else:
+                        vrm_dir = getattr(self.webui, "vrm_dir", None)
+                        if vrm_dir:
+                            vrm_path = Path(vrm_dir) / active_vrm
+                            try:
+                                root = Path(__file__).resolve().parent.parent
+                                url = f"/{vrm_path.relative_to(root).as_posix()}"
+                            except Exception:
+                                url = f"/avatars/{active_vrm}"
+                        else:
+                            url = f"/avatars/{active_vrm}"
+                        name = active_vrm
+                    vrm_model = {"name": name, "url": url, "hash": None}
+            except Exception:
+                vrm_model = {}
+
+        # Animation: current file, resolved URL, state name, loop flag, descriptor
+        animation: Dict[str, Any] = {}
+        anim_file = self._current_animation_file
+        if anim_file:
+            try:
+                resolved, desc = self._resolve_animation_descriptor(anim_file)
+            except Exception:
+                resolved = anim_file
+                desc = self._current_animation_descriptor
+            animation = {
+                "file": anim_file,
+                "url": resolved,
+                "state": self.current_state.value,
+                "loop": True,
+                "descriptor": desc or self._current_animation_descriptor,
+                "animation_id": self._current_animation_id,
+            }
+
+        # Face values: best-effort from EmotionManager plugin
+        face_values: Dict[str, Any] = {}
+        try:
+            from core.core_initializer import PLUGIN_REGISTRY  # type: ignore[import]
+
+            mgr = (
+                PLUGIN_REGISTRY.get("emotion_manager")
+                if isinstance(PLUGIN_REGISTRY, dict)
+                else None
+            )
+            if mgr is not None and hasattr(mgr, "get_emotion_state"):
+                import asyncio as _asyncio
+
+                raw = mgr.get_emotion_state()
+                if _asyncio.iscoroutine(raw):
+                    pass  # cannot await here; skip
+                elif isinstance(raw, dict):
+                    face_values = raw
+        except Exception:
+            face_values = {}
+
+        return {
+            "vrm_model": vrm_model,
+            "animation": animation,
+            "face_values": face_values,
+        }
+
+    async def set_vrm_model(
+        self,
+        url: str,
+        name: str,
+        hash_: Optional[str] = None,
+    ) -> None:
+        """Store the active VRM model info and broadcast a ``vrm_model`` message to all clients.
+
+        Args:
+            url: Web-accessible URL for the VRM file (e.g. ``/avatars/SyntH.vrm``).
+            name: Human-readable model name / filename.
+            hash_: Optional content hash for client-cache validation.
+        """
+        self._vrm_model_url = url
+        self._vrm_model_name = name
+        self._vrm_model_hash = hash_
+        log_debug(f"[KaradaStateServer] VRM model state updated: {name} -> {url}")
+
+        if not self.webui:
+            return
+
+        payload: Dict[str, Any] = {"type": "vrm_model", "name": name, "url": url}
+        if hash_ is not None:
+            payload["hash"] = hash_
+
+        for sid, websocket in list(self.webui.connections.items()):  # type: ignore[attr-defined]
+            try:
+                await websocket.send_json(payload)
+                log_debug(f"[KaradaStateServer] Broadcast vrm_model to session {sid}")
+            except Exception as exc:
+                log_warning(
+                    f"[KaradaStateServer] Failed to broadcast vrm_model to {sid}: {exc}"
+                )
+
+    def get_missing_assets(
+        self,
+        has_assets: List[str],
+    ) -> List[str]:
+        """Return server-known asset URLs that the client reports it does not already have.
+
+        Args:
+            has_assets: List of asset URLs/identifiers the client already has cached.
+
+        Returns:
+            List of asset URLs the client is missing.
+        """
+        missing: List[str] = []
+        # Check the active VRM model
+        if self._vrm_model_url and self._vrm_model_url not in has_assets:
+            missing.append(self._vrm_model_url)
+        return missing
 
     def get_animations_for_state(self, state: AnimationState) -> List[str]:
         """Get list of animation files for a given state by scanning skin folders.
@@ -411,7 +559,7 @@ class AnimationHandler:
                         animations.append(fbx_file.name)
                 except Exception as exc:
                     log_warning(
-                        f"[AnimationHandler] Error scanning animations in {skin_anim_dir}: {exc}"
+                        f"[KaradaStateServer] Error scanning animations in {skin_anim_dir}: {exc}"
                     )
 
         # Remove duplicates while preserving order
@@ -431,7 +579,7 @@ class AnimationHandler:
         """
         self._search_paths = list(paths)
         log_debug(
-            f"[AnimationHandler] Animation search paths set: {self._search_paths}"
+            f"[KaradaStateServer] Animation search paths set: {self._search_paths}"
         )
 
     def add_temporary_search_path(self, path: Path) -> None:
@@ -444,7 +592,7 @@ class AnimationHandler:
             self._search_paths.insert(0, p)
         if p not in self._temporary_search_paths:
             self._temporary_search_paths.append(p)
-        log_debug(f"[AnimationHandler] Added temporary search path: {p}")
+        log_debug(f"[KaradaStateServer] Added temporary search path: {p}")
 
     def remove_temporary_search_path(self, path: Path) -> None:
         """Remove a temporary search path if present."""
@@ -456,7 +604,7 @@ class AnimationHandler:
         self._temporary_search_paths = [
             sp for sp in self._temporary_search_paths if sp != p
         ]
-        log_debug(f"[AnimationHandler] Removed temporary search path: {p}")
+        log_debug(f"[KaradaStateServer] Removed temporary search path: {p}")
 
     def get_animation_search_paths(self) -> List[Path]:
         """Return a copy of the configured search paths."""
@@ -486,7 +634,7 @@ class AnimationHandler:
         if sequential:
             self._sequential_states.add(key)
         log_debug(
-            f"[AnimationHandler] Registered override animations for state {key}: {animations}"
+            f"[KaradaStateServer] Registered override animations for state {key}: {animations}"
         )
 
     def register_temporary_state_override(
@@ -505,14 +653,16 @@ class AnimationHandler:
         payload = {"loop": list(animations)}
         self.register_state_animations(state, payload, sequential=sequential)
         log_debug(
-            f"[AnimationHandler] Registered temporary override for upload={upload_id} state={state}: {animations}"
+            f"[KaradaStateServer] Registered temporary override for upload={upload_id} state={state}: {animations}"
         )
 
     def register_state_aliases(self, aliases: Dict[str, List[str]]) -> None:
         """Register alias names for canonical states (e.g. THINK -> ['thinking','ponder'])."""
         for k, v in aliases.items():
             self._state_aliases[k.lower()] = [a.lower() for a in v]
-        log_debug(f"[AnimationHandler] Registered state aliases: {self._state_aliases}")
+        log_debug(
+            f"[KaradaStateServer] Registered state aliases: {self._state_aliases}"
+        )
 
     def _build_search_paths_for_state(self, state_name: str) -> List[Path]:
         """Return ordered list of paths to search for animations for a state."""
@@ -787,7 +937,7 @@ class AnimationHandler:
                     return json.load(df)
             except Exception as e:
                 log_debug(
-                    f"[AnimationHandler] Failed to load descriptor for {fpath.name}: {e}"
+                    f"[KaradaStateServer] Failed to load descriptor for {fpath.name}: {e}"
                 )
                 return None
 
@@ -814,7 +964,7 @@ class AnimationHandler:
                 if resolved_rel_path:
                     break
             except Exception as e:
-                log_debug(f"[AnimationHandler] Error searching in {dir_path}: {e}")
+                log_debug(f"[KaradaStateServer] Error searching in {dir_path}: {e}")
                 continue
 
         # Fallback URL if not found (descriptor None)
@@ -864,7 +1014,7 @@ class AnimationHandler:
                 result["has_intro"] = True
             else:
                 log_warning(
-                    f"[AnimationHandler] Descriptor for '{animation_file}' has 'intro' but missing start_frame or end_frame - will treat as non-structured"
+                    f"[KaradaStateServer] Descriptor for '{animation_file}' has 'intro' but missing start_frame or end_frame - will treat as non-structured"
                 )
 
         if "loop" in descriptor and isinstance(descriptor["loop"], dict):
@@ -882,7 +1032,7 @@ class AnimationHandler:
                 result["has_outro"] = True
             else:
                 log_warning(
-                    f"[AnimationHandler] Descriptor for '{animation_file}' has 'outro' but missing start_frame or end_frame - will treat as non-structured"
+                    f"[KaradaStateServer] Descriptor for '{animation_file}' has 'outro' but missing start_frame or end_frame - will treat as non-structured"
                 )
 
         # Validate play_once flag: it conflicts with intro/outro structure
@@ -892,7 +1042,7 @@ class AnimationHandler:
             has_structured_sections = result["has_intro"] or result["has_outro"]
             if has_structured_sections:
                 log_warning(
-                    f"[AnimationHandler] Animation '{animation_file}' has both 'play_once' flag "
+                    f"[KaradaStateServer] Animation '{animation_file}' has both 'play_once' flag "
                     f"and structured sections (intro/outro). 'play_once' will be ignored because "
                     f"intro/outro structure takes precedence. "
                     f"Structure: intro={result['has_intro']}, loop={result['has_loop']}, outro={result['has_outro']}"
@@ -944,7 +1094,7 @@ class AnimationHandler:
                     This is informational and is forwarded to WebUI when provided.
         """
         log_info(
-            f"[AnimationHandler] ⭐ play_animation CALLED: state={state.value}, session={session_id}, loop={loop}, context={context_id}, priority={priority}, source={source}",
+            f"[KaradaStateServer] ⭐ play_animation CALLED: state={state.value}, session={session_id}, loop={loop}, context={context_id}, priority={priority}, source={source}",
             log_file="webui",
         )
 
@@ -966,12 +1116,12 @@ class AnimationHandler:
                 if current_structure["has_outro"]:
                     needs_outro_transition = True
                     log_debug(
-                        f"[AnimationHandler] Preparing transition from {self.current_state.value} "
+                        f"[KaradaStateServer] Preparing transition from {self.current_state.value} "
                         f"to {state.value}: playing outro for {self.current_animation}"
                     )
         except Exception as exc:
             log_warning(
-                f"[AnimationHandler] Error checking outro during transition: {exc}"
+                f"[KaradaStateServer] Error checking outro during transition: {exc}"
             )
 
         async with self._lock:
@@ -1000,7 +1150,7 @@ class AnimationHandler:
                 animations = self.get_animations_for_state(AnimationState.IDLE)
             if not animations:
                 log_warning(
-                    f"[AnimationHandler] No animations found for state {state.value}, skipping"
+                    f"[KaradaStateServer] No animations found for state {state.value}, skipping"
                 )
                 return
 
@@ -1020,7 +1170,7 @@ class AnimationHandler:
             self.current_animation = selected_animation
 
             log_debug(
-                f"[AnimationHandler] Playing {state.value} animation: {selected_animation} "
+                f"[KaradaStateServer] Playing {state.value} animation: {selected_animation} "
                 f"(loop={loop}, session={session_id}, context={context_id}, priority={priority})"
             )
 
@@ -1035,7 +1185,7 @@ class AnimationHandler:
                 )
 
                 log_debug(
-                    f"[AnimationHandler] Resolved animation {selected_animation}: "
+                    f"[KaradaStateServer] Resolved animation {selected_animation}: "
                     f"descriptor={'found' if descriptor else 'NOT FOUND'}, "
                     f"structure=(intro:{structure['has_intro']}, loop:{structure['has_loop']}, outro:{structure['has_outro']})"
                 )
@@ -1068,7 +1218,7 @@ class AnimationHandler:
                     # Only loop section (no intro/outro) with play_once flag
                     # Loop plays once only - don't really loop, don't rotate
                     log_debug(
-                        f"[AnimationHandler] Animation '{selected_animation}' has loop section "
+                        f"[KaradaStateServer] Animation '{selected_animation}' has loop section "
                         f"with play_once flag: loop will play once only (no looping)"
                     )
                     effective_loop = False
@@ -1087,7 +1237,7 @@ class AnimationHandler:
                     # loop parameter so core states (THINK/WRITE/TALK) can remain stable (loop=True)
                     # and avoid ending/clamping into T-pose.
                     log_debug(
-                        f"[AnimationHandler] Animation '{selected_animation}' has NO descriptor: "
+                        f"[KaradaStateServer] Animation '{selected_animation}' has NO descriptor: "
                         f"respecting requested loop={loop} for non-idle states"
                     )
                     effective_loop = bool(loop)
@@ -1099,7 +1249,7 @@ class AnimationHandler:
                     start_rotation = len(animations) > 1
 
                 log_debug(
-                    f"[AnimationHandler] Animation structure - intro: {structure['has_intro']}, "
+                    f"[KaradaStateServer] Animation structure - intro: {structure['has_intro']}, "
                     f"loop: {structure['has_loop']}, outro: {structure['has_outro']}, "
                     f"play_once: {descriptor.get('play_once') if descriptor else False}, "
                     f"effective_loop: {effective_loop}"
@@ -1123,19 +1273,20 @@ class AnimationHandler:
                         )
                 except Exception as exc:
                     log_warning(
-                        f"[AnimationHandler] Preload failed for {selected_animation}: {exc}"
+                        f"[KaradaStateServer] Preload failed for {selected_animation}: {exc}"
                     )
 
                 # If we need to play outro before transitioning, do it now (before releasing lock)
                 if needs_outro_transition and self.webui:
                     log_debug(
-                        f"[AnimationHandler] Sending outro command for {self.current_animation} "
+                        f"[KaradaStateServer] Sending outro command for {self.current_animation} "
                         f"before transitioning to {state.value}"
                     )
                     # Get the stored descriptor for the animation that will play outro
                     _, prev_descriptor = self._resolve_animation_descriptor(
                         self.current_animation
                     )
+                    # analyze descriptor structure for logging/conflict checks
                     self._analyze_animation_structure(
                         prev_descriptor, self.current_animation
                     )
@@ -1160,7 +1311,7 @@ class AnimationHandler:
                             0.3, (outro_end - outro_start) / 30.0
                         )  # Assume 30fps, min 0.3s
                         log_debug(
-                            f"[AnimationHandler] Outro duration: {outro_duration:.2f}s"
+                            f"[KaradaStateServer] Outro duration: {outro_duration:.2f}s"
                         )
 
                 await self._send_animation_command(
@@ -1189,45 +1340,63 @@ class AnimationHandler:
                 )
                 # If animation is not looping and is not idle, schedule a fallback transition
                 # to Idle after the clip duration in case the client doesn't trigger a transition.
+                # The backend fallback is ONLY a safety net — the frontend already handles the
+                # outro→idle pipeline via the mixer 'finished' event.  The key requirement is
+                # that this fires AFTER the full clip (intro + loop + outro) has had time to
+                # finish on the client, plus a generous buffer.  Using a single section's
+                # duration (old behaviour) caused the fallback to fire while the outro was
+                # still playing, interrupting it and producing a T-Pose.
+                #
+                # Fallback duration is calculated by summing the lengths of all descriptor
+                # sections (intro, loop, outro) converted from frames to seconds and then
+                # adding 1.5 s of extra slack.  If there is no descriptor or no frame info,
+                # a conservative default of 3 s is used before the buffer.  This avoids
+                # premature transitions when metadata is missing.
                 try:
                     if not effective_loop and state != AnimationState.IDLE:
-                        # Determine duration from descriptor if available, otherwise default to 1.0s
-                        duration = None
+                        # Sum durations of ALL descriptor sections so we never fire mid-animation.
+                        fallback_duration: float = 0.0
                         if descriptor and isinstance(descriptor, dict):
-                            # Prefer loop section duration if present, otherwise clip duration
-                            sec = (
-                                descriptor.get("loop")
-                                or descriptor.get("intro")
-                                or descriptor.get("outro")
-                            )
-                            if (
-                                sec
-                                and isinstance(sec, dict)
-                                and "start_frame" in sec
-                                and "end_frame" in sec
-                            ):
-                                fps = descriptor.get("fps", 30) or 30
-                                frames = max(
-                                    0.0,
-                                    float(sec.get("end_frame", 0))
-                                    - float(sec.get("start_frame", 0)),
-                                )
-                                duration = max(0.2, frames / float(fps))
-                        if duration is None:
-                            duration = 1.0
+                            fps_val = float(descriptor.get("fps") or 30)
+                            for sec_key in ("intro", "loop", "outro"):
+                                sec = descriptor.get(sec_key)
+                                if (
+                                    isinstance(sec, dict)
+                                    and isinstance(sec.get("start_frame"), (int, float))
+                                    and isinstance(sec.get("end_frame"), (int, float))
+                                ):
+                                    fallback_duration += (
+                                        max(
+                                            0.0,
+                                            float(sec["end_frame"])
+                                            - float(sec["start_frame"]),
+                                        )
+                                        / fps_val
+                                    )
+                        if fallback_duration <= 0.0:
+                            # No descriptor or no frame info — use a conservative default so
+                            # the frontend's own transition has time to complete.
+                            fallback_duration = 3.0
+                        # Add a buffer so the frontend mixer 'finished' + 140 ms timer
+                        # always fires before the backend safety-net does.
+                        fallback_duration += 1.5
 
                         # Schedule background task to return to Idle after duration if nothing else changed
-                        loop = asyncio.get_running_loop()
-                        loop.create_task(
+                        running_loop = asyncio.get_running_loop()
+                        running_loop.create_task(
                             self._non_loop_fallback(
-                                session_id, state, selected_animation, duration
+                                session_id,
+                                state,
+                                selected_animation,
+                                fallback_duration,
+                                context_id,
                             )
                         )
                 except Exception:
                     pass
             else:
                 log_warning(
-                    "[AnimationHandler] WebUI not set, cannot send animation command"
+                    "[KaradaStateServer] WebUI not set, cannot send animation command"
                 )
                 start_rotation = False
 
@@ -1242,7 +1411,7 @@ class AnimationHandler:
         # Wait for outro to complete outside the lock (so other operations can proceed)
         if needs_outro_transition and outro_duration > 0:
             log_debug(
-                f"[AnimationHandler] Waiting {outro_duration:.2f}s for outro to complete..."
+                f"[KaradaStateServer] Waiting {outro_duration:.2f}s for outro to complete..."
             )
             await asyncio.sleep(outro_duration)
 
@@ -1279,7 +1448,7 @@ class AnimationHandler:
             # If the animation has an outro, play it first
             if structure["has_outro"]:
                 log_debug(
-                    f"[AnimationHandler] Playing outro for {current_animation} "
+                    f"[KaradaStateServer] Playing outro for {current_animation} "
                     f"before stopping (context={context_id}, session={session_id})"
                 )
                 # Play outro with loop=False (play once), explicitly requesting 'outro' section
@@ -1300,7 +1469,7 @@ class AnimationHandler:
                     0.5, outro_frames / 30.0
                 )  # Minimum 0.5s, assume 30fps
                 log_debug(
-                    f"[AnimationHandler] Waiting {outro_duration:.1f}s for outro to complete"
+                    f"[KaradaStateServer] Waiting {outro_duration:.1f}s for outro to complete"
                 )
                 # Release lock during wait so other operations can proceed
                 # But mark that we're in outro playback
@@ -1308,7 +1477,7 @@ class AnimationHandler:
             else:
                 # No outro section - transition immediately
                 log_debug(
-                    f"[AnimationHandler] No outro section for {current_animation}, "
+                    f"[KaradaStateServer] No outro section for {current_animation}, "
                     f"stopping immediately (context={context_id})"
                 )
                 self._active_tasks.pop(context_id, None)
@@ -1333,7 +1502,7 @@ class AnimationHandler:
         # IMPORTANT: call play_animation outside the lock to avoid deadlocks.
         if should_return_idle:
             log_debug(
-                f"[AnimationHandler] No high-priority contexts, returning to Idle (session={session_id})"
+                f"[KaradaStateServer] No high-priority contexts, returning to Idle (session={session_id})"
             )
             await self.play_animation(
                 AnimationState.IDLE, session_id=session_id, loop=True, context_id=None
@@ -1349,7 +1518,7 @@ class AnimationHandler:
                 await self._stop_rotation_task(session_id, anim_state)
         else:
             log_debug(
-                f"[AnimationHandler] Context {context_id} stopped but other contexts still active"
+                f"[KaradaStateServer] Context {context_id} stopped but other contexts still active"
             )
 
     async def transition_to(
@@ -1365,7 +1534,7 @@ class AnimationHandler:
             context_id: Optional context identifier
         """
         log_debug(
-            f"[AnimationHandler] transition_to called: state={state.value}, session_id={session_id}, context_id={context_id}"
+            f"[KaradaStateServer] transition_to called: state={state.value}, session_id={session_id}, context_id={context_id}"
         )
         await self.play_animation(
             state=state,
@@ -1469,7 +1638,7 @@ class AnimationHandler:
                         )
                         emotions = {"dominant": dominant, "values": emotions_filtered}
                         log_debug(
-                            f"[AnimationHandler] Attached emotions to animation_state: dominant={dominant}, max={max_intensity}"
+                            f"[KaradaStateServer] Attached emotions to animation_state: dominant={dominant}, max={max_intensity}"
                         )
             except Exception:
                 emotions = None
@@ -1551,16 +1720,30 @@ class AnimationHandler:
         except Exception:
             pass
 
+        # Generate a new stable animation_id only when a genuinely new animation
+        # starts (different file, and not the outro section of the current one).
+        # The ID is kept unchanged for re-sends of the same animation so that
+        # any interface that already has the correct ID can skip the restart.
+        try:
+            if (
+                animation_file != self._current_animation_file
+                and play_section != "outro"
+            ):
+                self._current_animation_id = str(uuid.uuid4())
+        except Exception:
+            pass
+
         # If session_id is None, broadcast to all connected WebUI sessions
         try:
             if session_id is None:
                 for sid, websocket in list(self.webui.connections.items()):
                     try:
                         payload = {
-                            "type": "animation",
-                            "animation": resolved_path,
+                            "type": "vrm_animation",
+                            "file": resolved_path,
                             "loop": loop,
                             "state": state,
+                            "animation_id": self._current_animation_id,
                         }
                         if isinstance(priority, int):
                             payload["priority"] = int(priority)
@@ -1574,26 +1757,27 @@ class AnimationHandler:
                             payload["play_section"] = play_section
                         await websocket.send_json(payload)
                         log_debug(
-                            f"[AnimationHandler] Broadcast animation to session {sid}: {resolved_rel_path}"
+                            f"[KaradaStateServer] Broadcast animation to session {sid}: {resolved_rel_path}"
                         )
                     except Exception as exc:
                         log_warning(
-                            f"[AnimationHandler] Failed to send animation to session {sid}: {exc}"
+                            f"[KaradaStateServer] Failed to send animation to session {sid}: {exc}"
                         )
                 return
 
             websocket = self.webui.connections.get(session_id)
             if not websocket:
                 log_debug(
-                    f"[AnimationHandler] No active websocket for session {session_id} (may be disconnected)"
+                    f"[KaradaStateServer] No active websocket for session {session_id} (may be disconnected)"
                 )
                 return
 
             payload = {
-                "type": "animation",
-                "animation": resolved_path,
+                "type": "vrm_animation",
+                "file": resolved_path,
                 "loop": loop,
                 "state": state,
+                "animation_id": self._current_animation_id,
             }
             # Signal clients to perform a smooth eyes reset when animation changes
             try:
@@ -1612,10 +1796,10 @@ class AnimationHandler:
                 payload["play_section"] = play_section
             await websocket.send_json(payload)
             log_debug(
-                f"[AnimationHandler] Sent animation command to session {session_id}: {resolved_rel_path}"
+                f"[KaradaStateServer] Sent animation command to session {session_id}: {resolved_rel_path}"
             )
         except Exception as exc:
-            log_warning(f"[AnimationHandler] Failed to send animation command: {exc}")
+            log_warning(f"[KaradaStateServer] Failed to send animation command: {exc}")
 
     async def _preload_animation(
         self, session_id: str, animation_file: str, state_folder: Optional[str] = None
@@ -1631,7 +1815,7 @@ class AnimationHandler:
             animation_file: The animation file name (e.g. 'Thinking.fbx')
         """
         if not self.webui:
-            log_debug("[AnimationHandler] WebUI not set, skipping preload")
+            log_debug("[KaradaStateServer] WebUI not set, skipping preload")
             return
 
         try:
@@ -1663,28 +1847,28 @@ class AnimationHandler:
                     try:
                         await websocket.send_json(preload_payload)
                         log_debug(
-                            f"[AnimationHandler] Broadcast preload to session {sid}: {animation_file}"
+                            f"[KaradaStateServer] Broadcast preload to session {sid}: {animation_file}"
                         )
                     except Exception as exc:
                         log_warning(
-                            f"[AnimationHandler] Failed to preload animation to session {sid}: {exc}"
+                            f"[KaradaStateServer] Failed to preload animation to session {sid}: {exc}"
                         )
             else:
                 # Send to specific session
                 websocket = self.webui.connections.get(session_id)
                 if not websocket:
                     log_debug(
-                        f"[AnimationHandler] No websocket for session {session_id}, skipping preload"
+                        f"[KaradaStateServer] No websocket for session {session_id}, skipping preload"
                     )
                     return
 
                 await websocket.send_json(preload_payload)
                 log_debug(
-                    f"[AnimationHandler] Sent preload for {animation_file} to session {session_id}"
+                    f"[KaradaStateServer] Sent preload for {animation_file} to session {session_id}"
                 )
         except Exception as exc:
             log_warning(
-                f"[AnimationHandler] Preload failed for {animation_file}: {exc}"
+                f"[KaradaStateServer] Preload failed for {animation_file}: {exc}"
             )
 
     async def _rotation_loop(
@@ -1760,7 +1944,7 @@ class AnimationHandler:
             # Normal cancellation path
             pass
         except Exception as exc:
-            log_warning(f"[AnimationHandler] Rotation loop error for {key}: {exc}")
+            log_warning(f"[KaradaStateServer] Rotation loop error for {key}: {exc}")
         finally:
             # Clean up rotation task entry
             self._rotation_tasks.pop(key, None)
@@ -1772,7 +1956,13 @@ class AnimationHandler:
         animation_file: str,
         duration: float,
     ):
-        """Wait for duration and revert to Idle if the animation completed and no other contexts are active."""
+        """Wait for duration and revert to Idle if the animation completed and no other contexts are active.
+
+        The ``duration`` parameter is computed by ``play_animation()`` and normally
+        represents the total clip length (intro+loop+outro) plus a 1.5‑second safety
+        buffer.  When descriptor data is unavailable the caller will supply a default
+        of 3 s (which also gets the 1.5 s buffer added).
+        """
         try:
             await asyncio.sleep(duration + 0.05)
             async with self._lock:
@@ -1827,7 +2017,7 @@ class AnimationHandler:
                 pass
             except Exception as exc:
                 log_warning(
-                    f"[AnimationHandler] Error cancelling rotation task {key}: {exc}"
+                    f"[KaradaStateServer] Error cancelling rotation task {key}: {exc}"
                 )
             finally:
                 self._rotation_tasks.pop(key, None)
@@ -1850,26 +2040,38 @@ class AnimationHandler:
 
 
 # Global animation handler instance
-_animation_handler: Optional[AnimationHandler] = None
+_karada_state_server: Optional[KaradaStateServer] = None
 
 
-def get_animation_handler() -> AnimationHandler:
-    """Get the global animation handler instance.
+def get_karada_state_server() -> KaradaStateServer:
+    """Get the global KaradaStateServer instance.
 
     Returns:
-        The AnimationHandler instance
+        The KaradaStateServer instance
     """
-    global _animation_handler
-    if _animation_handler is None:
-        _animation_handler = AnimationHandler()
-    return _animation_handler
+    global _karada_state_server
+    if _karada_state_server is None:
+        _karada_state_server = KaradaStateServer()
+    return _karada_state_server
 
 
-def set_animation_handler(handler: AnimationHandler) -> None:
-    """Set the global animation handler instance.
+# Backward-compatible aliases (deprecated — use get_karada_state_server)
+def get_animation_handler() -> KaradaStateServer:
+    """Deprecated alias for get_karada_state_server()."""
+    return get_karada_state_server()
+
+
+def set_karada_state_server(handler: KaradaStateServer) -> None:
+    """Set the global KaradaStateServer instance.
 
     Args:
-        handler: The AnimationHandler instance to set
+        handler: The KaradaStateServer instance to set
     """
-    global _animation_handler
-    _animation_handler = handler
+    global _karada_state_server
+    _karada_state_server = handler
+
+
+# Backward-compatible alias (deprecated — use set_karada_state_server)
+def set_animation_handler(handler: KaradaStateServer) -> None:
+    """Deprecated alias for set_karada_state_server()."""
+    set_karada_state_server(handler)

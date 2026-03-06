@@ -4,7 +4,11 @@ import asyncio
 import time
 from typing import List, Tuple, Callable
 from core.logging_utils import log_debug, log_info, log_warning
-from core.config import get_log_chat_id_sync, get_log_chat_thread_id_sync, get_log_chat_interface_sync
+from core.config import (
+    get_log_chat_id_sync,
+    get_log_chat_thread_id_sync,
+    get_log_chat_interface_sync,
+)
 from collections import deque
 
 _in_notify = False

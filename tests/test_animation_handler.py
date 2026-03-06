@@ -7,10 +7,10 @@ and coordinate with the WebUI.
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from core.animation_handler import (
-    AnimationHandler,
+    KaradaStateServer,
     AnimationState,
-    get_animation_handler,
-    set_animation_handler,
+    get_karada_state_server,
+    set_karada_state_server,
 )
 
 
@@ -24,15 +24,15 @@ def mock_webui():
 
 @pytest.fixture
 def animation_handler(mock_webui):
-    """Create an animation handler with mock WebUI."""
-    handler = AnimationHandler(mock_webui)
+    """Create a KaradaStateServer instance with mock WebUI."""
+    handler = KaradaStateServer(mock_webui)
     return handler
 
 
 @pytest.mark.asyncio
 async def test_initialization():
-    """Test animation handler initialization."""
-    handler = AnimationHandler()
+    """Test KaradaStateServer initialization."""
+    handler = KaradaStateServer()
     assert handler.current_state == AnimationState.IDLE
     assert handler.current_animation is None
     assert len(handler._active_tasks) == 0
@@ -158,8 +158,8 @@ async def test_transition_to(animation_handler, mock_webui):
 
 @pytest.mark.asyncio
 async def test_animation_without_webui():
-    """Test animation handler without WebUI reference."""
-    handler = AnimationHandler()
+    """Test KaradaStateServer without WebUI reference."""
+    handler = KaradaStateServer()
 
     # Should not raise exception, just log warning
     await handler.play_animation(AnimationState.THINK, session_id="test", loop=True)
@@ -200,7 +200,7 @@ async def test_get_current_animation(animation_handler, mock_webui):
     assert animation_handler.get_current_animation() is None
 
     def test_incomplete_intro_outro_warns():
-        ah = AnimationHandler()
+        ah = KaradaStateServer()
         # intro without start_frame, outro without end_frame
         desc = {
             "intro": {"end_frame": 10},
@@ -213,9 +213,9 @@ async def test_get_current_animation(animation_handler, mock_webui):
         assert res["has_outro"] is False
 
     def test_thinking_descriptor_classified_as_loop():
-        from core.animation_handler import AnimationHandler
+        from core.animation_handler import KaradaStateServer
 
-        ah = AnimationHandler()
+        ah = KaradaStateServer()
         # Ensure search paths include the skins/Rei animations directory
         ah.set_animation_search_paths([str(ah.SKIN_DEFAULT_ANIMATIONS_DIR)])
         variants = ah.get_animation_variants("think")
@@ -225,21 +225,20 @@ async def test_get_current_animation(animation_handler, mock_webui):
 
 
 @pytest.mark.asyncio
-async def test_state_summary_callback_registered_and_called():
-    """Ensure that when a WebUI with a summary callback is set, it is registered
-    and called when the animation state changes."""
-    handler = AnimationHandler()
+async def test_vrm_animation_broadcast_on_play():
+    """Ensure that play_animation broadcasts a vrm_animation message to all
+    connected WebSocket clients (KaradaStateServer architecture)."""
+    handler = KaradaStateServer()
 
-    # Create a mock webui with an async summary callback
+    sent_messages: list = []
+
+    class FakeWs:
+        async def send_json(self, data):
+            sent_messages.append(data)
+
     class FakeWebUI:
         def __init__(self):
-            self.connections = {}
-            self._called = False
-
-        async def _broadcast_animation_state_summary(
-            self, state, animation_file, descriptor
-        ):
-            self._called = True
+            self.connections = {"sess-1": FakeWs()}
 
     fake = FakeWebUI()
     handler.set_webui(fake)
@@ -248,22 +247,25 @@ async def test_state_summary_callback_registered_and_called():
     await handler.play_animation(
         AnimationState.THINK, session_id=None, loop=True, context_id="ctx"
     )
-    assert fake._called is True
+
+    # At least one vrm_animation message must have been sent
+    anim_msgs = [m for m in sent_messages if m.get("type") == "vrm_animation"]
+    assert anim_msgs, f"Expected vrm_animation message, got: {sent_messages}"
 
 
 @pytest.mark.asyncio
 async def test_global_handler():
-    """Test global animation handler singleton."""
-    handler1 = get_animation_handler()
-    handler2 = get_animation_handler()
+    """Test global KaradaStateServer singleton."""
+    handler1 = get_karada_state_server()
+    handler2 = get_karada_state_server()
 
     assert handler1 is handler2
 
     # Test setting global handler
-    new_handler = AnimationHandler()
-    set_animation_handler(new_handler)
+    new_handler = KaradaStateServer()
+    set_karada_state_server(new_handler)
 
-    handler3 = get_animation_handler()
+    handler3 = get_karada_state_server()
     assert handler3 is new_handler
 
 
@@ -290,7 +292,7 @@ async def test_idle_animation_rotation_task_created(animation_handler, mock_webu
 
 @pytest.mark.asyncio
 async def test_websocket_message_format(animation_handler, mock_webui):
-    """Test WebSocket message format."""
+    """Test WebSocket message format for vrm_animation broadcast."""
     session_id = "test_session"
     mock_ws = AsyncMock()
     mock_webui.connections[session_id] = mock_ws
@@ -299,13 +301,19 @@ async def test_websocket_message_format(animation_handler, mock_webui):
         AnimationState.THINK, session_id=session_id, loop=True
     )
 
-    # Check that send_json was called with correct format
-    mock_ws.send_json.assert_called_once()
-    call_args = mock_ws.send_json.call_args[0][0]
+    # send_json may be called multiple times (preloads + animation command)
+    assert mock_ws.send_json.called, "Expected send_json to be called at least once"
 
-    assert call_args["type"] == "animation"
-    assert isinstance(call_args["animation"], str)
-    assert call_args["animation"].endswith("Thinking.fbx")
-    assert "animations/" in call_args["animation"]
-    assert call_args["loop"] is True
-    assert call_args["state"] == "think"
+    # Find the vrm_animation command among all calls
+    sent = [c[0][0] for c in mock_ws.send_json.call_args_list]
+    anim_msgs = [m for m in sent if m.get("type") == "vrm_animation"]
+    assert anim_msgs, (
+        f"Expected a vrm_animation message, got types: {[m.get('type') for m in sent]}"
+    )
+
+    msg = anim_msgs[-1]  # Last vrm_animation is the final play command
+    assert isinstance(msg["file"], str)
+    assert msg["file"].endswith("Thinking.fbx")
+    assert "animations/" in msg["file"]
+    assert msg["loop"] is True
+    assert msg["state"] == "think"

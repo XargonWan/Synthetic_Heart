@@ -45,7 +45,7 @@ from core.message_chain import (
 )
 from core import db as core_db
 from core.action_state_manager import get_action_state_manager, AnimationPhase
-from core.animation_handler import AnimationState, AnimationHandler
+from core.animation_handler import AnimationState, KaradaStateServer
 from core import animation_uploads
 import mimetypes
 
@@ -318,7 +318,11 @@ class SynthWebUIInterface:
                 async def dispatch(inner_self, request, call_next):
                     response = await call_next(request)
                     path = request.url.path
-                    if path.startswith("/js/") or path.startswith("/static/") or path.startswith("/skins"):
+                    if (
+                        path.startswith("/js/")
+                        or path.startswith("/static/")
+                        or path.startswith("/skins")
+                    ):
                         # No store ensures proxies and browsers always revalidate.
                         response.headers["Cache-Control"] = "no-cache"
                     return response
@@ -382,10 +386,10 @@ class SynthWebUIInterface:
                 )
         log_info(f"{LOG_PREFIX} ========== VRM DIRECTORY MOUNT END ==========")
 
-        # Initialize AnimationHandler so tests and runtime can access it
+        # Initialize KaradaStateServer so tests and runtime can access it
         try:
-            self.animation_handler = AnimationHandler(self)
-            # Register webui callbacks with the animation handler
+            self.animation_handler = KaradaStateServer(self)
+            # Register webui callbacks with the KaradaStateServer
             self.animation_handler.set_webui(self)
             # Preload idle animations in background (non-blocking)
             try:
@@ -393,8 +397,8 @@ class SynthWebUIInterface:
             except Exception:
                 pass
         except Exception as e:
-            # If animation handler fails to initialize, create a lightweight stub
-            log_warning(f"{LOG_PREFIX} AnimationHandler init failed: {e}")
+            # If KaradaStateServer fails to initialize, create a lightweight stub
+            log_warning(f"{LOG_PREFIX} KaradaStateServer init failed: {e}")
 
             class _AnimStub:
                 def __init__(self):
@@ -589,6 +593,7 @@ class SynthWebUIInterface:
                     "state": current.get("state"),
                     "animation": resolved,
                     "descriptor": current.get("descriptor"),
+                    "animation_id": current.get("animation_id"),
                 }
                 return JSONResponse(payload)
             except Exception as exc:
@@ -1013,6 +1018,7 @@ class SynthWebUIInterface:
             # always include a cache‑busting token for static assets
             # use a timestamp so the value changes on each render
             import time
+
             replacements["%%STATIC_VERSION%%"] = str(int(time.time()))
 
             for placeholder, value in replacements.items():
@@ -1592,6 +1598,8 @@ class SynthWebUIInterface:
                             "state": anim.get("state", "idle"),
                             "loop": anim.get("loop", True),
                             "descriptor": anim.get("descriptor"),
+                            "animation_id": anim.get("animation_id"),
+                            "restore": True,
                         }
                     )
 
@@ -1810,9 +1818,9 @@ class SynthWebUIInterface:
         )
 
         # Backend-authoritative animation playback:
-        # whenever the global action phase changes, trigger the AnimationHandler to
+        # whenever the global action phase changes, trigger the KaradaStateServer to
         # play the corresponding logical state. Plugins can override per-state
-        # animations via AnimationHandler registration, but the backend remains the
+        # animations via KaradaStateServer registration, but the backend remains the
         # source of truth for *when* a state starts/ends.
         try:
             phase = message.get("phase") or AnimationPhase.IDLE.value
@@ -1868,7 +1876,7 @@ class SynthWebUIInterface:
     ) -> None:
         """No-op stub kept for external plugin compatibility.
 
-        Broadcasting is now done directly by ``AnimationHandler`` via
+        Broadcasting is now done directly by ``KaradaStateServer`` via
         ``_send_animation_command`` which always iterates over all connections.
         Plugins that registered this as a callback will call it harmlessly.
         """
@@ -5284,7 +5292,9 @@ class SynthWebUIInterface:
                         other.unlink()
                 log_debug(f"{LOG_PREFIX} VRM cache cleaned, only model.vrm remains")
             except Exception as cleanup_exc:
-                log_warning(f"{LOG_PREFIX} Failed to clean up old VRM files: {cleanup_exc}")
+                log_warning(
+                    f"{LOG_PREFIX} Failed to clean up old VRM files: {cleanup_exc}"
+                )
 
             # make the newly uploaded model the active one automatically
             try:
@@ -5292,14 +5302,16 @@ class SynthWebUIInterface:
                 self._set_active_vrm("model.vrm")
                 # broadcast to clients if possible (reuse same logic as set_active_vrm_endpoint)
                 if self.animation_handler:
-                    vrm_url = f"/avatars/model.vrm"
+                    vrm_url = "/avatars/model.vrm"
                     await self.animation_handler.set_vrm_model(vrm_url, "model.vrm")
                     log_debug(f"{LOG_PREFIX} Broadcast vrm_model: model.vrm")
                 if self.persona_manager:
                     await self.persona_manager.set_animation_state("idle")
                     log_debug(f"{LOG_PREFIX} Started idle animation after VRM upload")
             except Exception as br_exc:
-                log_warning(f"{LOG_PREFIX} Failed to broadcast/upload-change events: {br_exc}")
+                log_warning(
+                    f"{LOG_PREFIX} Failed to broadcast/upload-change events: {br_exc}"
+                )
 
         except Exception as exc:
             log_error(f"{LOG_PREFIX} ⚠️ Failed to store VRM upload: {exc}")
