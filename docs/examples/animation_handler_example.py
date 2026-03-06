@@ -1,7 +1,10 @@
 """Example: Using KaradaStateServer from a Plugin
 
-This example demonstrates how to integrate the animation state server
-into a custom plugin or component.
+The server in ``core/animation_handler.py`` is now called KaradaStateServer
+("karada" means "body" in Japanese); it replaces the previous animation
+handler concept and provides a unified API for managing VRM and animation
+state.  This example demonstrates how to integrate the state server into a
+custom plugin or component.
 """
 
 import asyncio

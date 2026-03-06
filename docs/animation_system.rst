@@ -10,6 +10,17 @@ truth for three independent streams: the active VRM model, the animation state, 
 face blend-shape values.  Clients receive push-updates via WebSocket; only real state
 changes are broadcast.
 
+For a complete list of HTTP and WebSocket endpoints exposed by the WebUI (including
+those used by the animation subsystem) see :doc:`api_endpoints`.
+
+.. note::
+
+   “Karada” (からだ) is the Japanese word for **body**.  The KaradaStateServer is the
+   centralized *body state* manager for VRM animations and facial values.  In earlier
+   versions this module was casually referred to as the “animation handler”; the new
+   name emphasizes its broader role as a general state server and aligns with the
+   project’s move away from the legacy `AnimationHandler` concept.
+
 The system coordinates between backend logic and frontend rendering to create a
 coherent and responsive avatar experience across any number of simultaneously-connected
 WebUI windows.
@@ -29,15 +40,18 @@ Located in ``core/animation_handler.py``, this component is the canonical VRM st
 - Manages VRM model state and pushes it on connect/change
 - Manages animation contexts and automatic fallback to Idle
 
-Frontend Animation Handler
----------------------------
+Client‑side Animation Renderer
+-----------------------------
 
-Located in ``res/synth_webui/js/vrm-viewer.mjs``, this component:
+Located in ``res/synth_webui/js/vrm-viewer.mjs``, this frontend component:
 
 - Receives animation commands from the backend
 - Loads and manages FBX animation files
 - Controls the THREE.js AnimationMixer
 - Handles smooth transitions between animations
+
+(The previous “Frontend Animation Handler” terminology has been retired to avoid
+confusion with the server‑side KaradaStateServer.)
 
 WebUI Integration
 -----------------

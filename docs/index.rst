@@ -42,6 +42,7 @@ getting started.
 
    COMPONENT_DEVELOPMENT_GUIDE
    dev_components
+   api_endpoints
    component_pattern
    two_phase_init_implementation
    config_management
