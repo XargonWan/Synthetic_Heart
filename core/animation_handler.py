@@ -1286,6 +1286,10 @@ class KaradaStateServer:
                     _, prev_descriptor = self._resolve_animation_descriptor(
                         self.current_animation
                     )
+                    # analyze descriptor structure for logging/conflict checks
+                    self._analyze_animation_structure(
+                        prev_descriptor, self.current_animation
+                    )
 
                     # Send outro command
                     await self._send_animation_command(

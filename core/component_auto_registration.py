@@ -15,7 +15,7 @@ def auto_register_plugin_validation_rules():
         plugins = _load_action_plugins()
 
         validation_registry = get_validation_registry()
-        component_manager = get_component_registry_manager()
+        get_component_registry_manager()
 
         for plugin in plugins:
             plugin_name = getattr(plugin, "__class__", type(plugin)).__name__
