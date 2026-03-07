@@ -2149,7 +2149,25 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     const componentsAurisListEl = document.getElementById('components-auris-list');
                     const componentsLiveListEl = document.getElementById('components-live-list');
                     if (!componentsCortexListEl || !componentsInterfacesListEl || !componentsPluginsListEl) return;
-                    const res = await fetch('/api/components');
+                    const [res, cfgRes] = await Promise.all([
+                        fetch('/api/components'),
+                        fetch('/api/config').catch(() => null),
+                    ]);
+                    // Build a map of component name → config items for inline editing
+                    let _componentConfigMap = {};
+                    try {
+                        if (cfgRes && cfgRes.ok) {
+                            const cfgPayload = await cfgRes.json();
+                            const cfgItems = Array.isArray(cfgPayload.items) ? cfgPayload.items : [];
+                            cfgItems.forEach((ci) => {
+                                if (ci && ci.component) {
+                                    if (!_componentConfigMap[ci.component]) _componentConfigMap[ci.component] = [];
+                                    _componentConfigMap[ci.component].push(ci);
+                                }
+                            });
+                        }
+                    } catch (e) { console.debug('[synth_webui] Failed to load config for components', e); }
+
                     // Handle non-2xx responses gracefully and display server-provided
                     // error details in the UI without throwing. This avoids breaking
                     // the Components tab when the server returns 500 and does not
@@ -2631,6 +2649,239 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 actionsWrap.appendChild(list);
                                 details.appendChild(actionsWrap);
                             }
+                            // ── Inline config editing for cortex engines ──────────
+                            const compName = item.name || '';
+                            const cfgItems = _componentConfigMap[compName] || [];
+                            if (cfgItems.length) {
+                                const cfgSection = document.createElement('div');
+                                cfgSection.className = 'component-config-section';
+                                cfgSection.style.cssText = 'margin-top:12px; padding-top:10px; border-top:1px solid var(--border, #444);';
+
+                                const cfgHeader = document.createElement('div');
+                                cfgHeader.style.cssText = 'display:flex; align-items:center; gap:8px; margin-bottom:8px; cursor:pointer; user-select:none;';
+                                const cfgToggleIcon = document.createElement('span');
+                                cfgToggleIcon.textContent = '▶';
+                                cfgToggleIcon.style.cssText = 'font-size:0.7rem; transition:transform 0.2s;';
+                                const cfgTitle = document.createElement('span');
+                                cfgTitle.style.cssText = 'font-size:0.85rem; font-weight:600; color:var(--muted); text-transform:uppercase; letter-spacing:0.05em;';
+                                cfgTitle.textContent = 'Configuration';
+                                cfgHeader.appendChild(cfgToggleIcon);
+                                cfgHeader.appendChild(cfgTitle);
+
+                                const cfgBody = document.createElement('div');
+                                cfgBody.style.display = 'none';
+
+                                cfgHeader.addEventListener('click', () => {
+                                    const open = cfgBody.style.display !== 'none';
+                                    cfgBody.style.display = open ? 'none' : '';
+                                    cfgToggleIcon.style.transform = open ? '' : 'rotate(90deg)';
+                                });
+
+                                // Separate normal vs advanced items
+                                const normalCfg = cfgItems.filter(ci => !ci.advanced);
+                                const advancedCfg = cfgItems.filter(ci => ci.advanced);
+
+                                const buildCfgRow = (ci) => {
+                                    const row = document.createElement('div');
+                                    row.style.cssText = 'display:flex; flex-direction:column; gap:3px; margin-bottom:10px;';
+
+                                    const lbl = document.createElement('label');
+                                    lbl.style.cssText = 'font-size:0.88rem; font-weight:600; color:var(--text);';
+                                    lbl.textContent = ci.label || ci.key;
+                                    row.appendChild(lbl);
+
+                                    if (ci.description) {
+                                        const helpText = document.createElement('div');
+                                        helpText.style.cssText = 'font-size:0.78rem; color:var(--muted); margin-bottom:2px;';
+                                        helpText.textContent = ci.description;
+                                        row.appendChild(helpText);
+                                    }
+
+                                    const val = ci.value === null || ci.value === undefined ? '' : ci.value;
+                                    const editable = !!ci.editable && !ci.env_override;
+
+                                    const saveCfg = async (newVal, el) => {
+                                        try {
+                                            if (el) el.disabled = true;
+                                            const r = await fetch('/api/config', {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({ key: ci.key, value: newVal })
+                                            });
+                                            if (!r.ok) {
+                                                const t = await r.text();
+                                                window.showToast && window.showToast('Save failed: ' + t, true);
+                                            } else {
+                                                const out = await r.json();
+                                                window.showToast && window.showToast('Saved', false);
+                                                if (out && out.requires_reload) {
+                                                    window.showToast && window.showToast(out.message || 'Reload recommended', false);
+                                                }
+                                            }
+                                        } catch (e) {
+                                            window.showToast && window.showToast('Save failed', true);
+                                        } finally {
+                                            if (el) el.disabled = !editable;
+                                        }
+                                    };
+
+                                    let inputEl = null;
+
+                                    if (ci.ui_type === 'bool' || ci.value_type === 'bool') {
+                                        const wrap = document.createElement('div');
+                                        wrap.style.cssText = 'display:flex; align-items:center; gap:8px;';
+                                        const cb = document.createElement('input');
+                                        cb.type = 'checkbox';
+                                        cb.checked = val === true || val === 1 || val === '1' || val === 'true';
+                                        cb.disabled = !editable;
+                                        cb.id = `comp-cfg-${ci.key}`;
+                                        const toggleLbl = document.createElement('label');
+                                        toggleLbl.className = 'toggle-switch';
+                                        toggleLbl.setAttribute('for', cb.id);
+                                        const slider = document.createElement('span');
+                                        slider.className = 'toggle-slider';
+                                        toggleLbl.appendChild(slider);
+                                        cb.addEventListener('change', () => saveCfg(cb.checked, cb));
+                                        wrap.appendChild(cb);
+                                        wrap.appendChild(toggleLbl);
+                                        inputEl = wrap;
+                                    } else if (ci.ui_type === 'select' && Array.isArray(ci.options) && ci.options.length) {
+                                        const sel = document.createElement('select');
+                                        sel.style.cssText = 'padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:6px; font-size:0.88rem; max-width:400px;';
+                                        ci.options.forEach(opt => {
+                                            const o = document.createElement('option');
+                                            o.value = opt; o.textContent = opt;
+                                            if (String(val) === String(opt)) o.selected = true;
+                                            sel.appendChild(o);
+                                        });
+                                        sel.disabled = !editable;
+                                        sel.addEventListener('change', () => saveCfg(sel.value, sel));
+                                        inputEl = sel;
+                                    } else if (ci.ui_type === 'textarea' || (ci.value_type === 'json' && ci.ui_type !== 'tags')) {
+                                        const ta = document.createElement('textarea');
+                                        ta.rows = 3;
+                                        ta.style.cssText = 'width:100%; max-width:500px; padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:6px; font-family:monospace; font-size:0.85rem; resize:vertical;';
+                                        ta.value = typeof val === 'string' ? val : JSON.stringify(val, null, 2);
+                                        ta.disabled = !editable;
+                                        ta.addEventListener('keydown', (ev) => {
+                                            if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); saveCfg(ta.value, ta); }
+                                        });
+                                        ta.addEventListener('blur', () => saveCfg(ta.value, ta));
+                                        inputEl = ta;
+                                    } else if (ci.ui_type === 'combobox') {
+                                        // Searchable dropdown with free-text fallback
+                                        const models = (item && Array.isArray(item.supported_models)) ? item.supported_models : [];
+                                        const wrap = document.createElement('div');
+                                        wrap.style.cssText = 'position:relative; max-width:400px; width:100%;';
+                                        const inp = document.createElement('input');
+                                        inp.type = 'text';
+                                        inp.autocomplete = 'off';
+                                        inp.style.cssText = 'padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:6px; font-size:0.88rem; width:100%; box-sizing:border-box;';
+                                        inp.value = typeof val === 'string' ? val : JSON.stringify(val);
+                                        inp.disabled = !editable;
+                                        inp.placeholder = models.length ? `Search ${models.length} models…` : '';
+                                        wrap.appendChild(inp);
+
+                                        if (models.length) {
+                                            const dd = document.createElement('div');
+                                            dd.style.cssText = 'display:none; position:absolute; top:100%; left:0; right:0; max-height:220px; overflow-y:auto; border:1px solid var(--border,#444); border-radius:6px; background:var(--bg-card,#1a1a2e); z-index:999; margin-top:2px;';
+                                            const MAX_SHOW = 60;
+                                            const renderDd = (filter) => {
+                                                dd.innerHTML = '';
+                                                const q = (filter || '').toLowerCase();
+                                                let count = 0;
+                                                for (const m of models) {
+                                                    if (q && !m.toLowerCase().includes(q)) continue;
+                                                    if (++count > MAX_SHOW) {
+                                                        const more = document.createElement('div');
+                                                        more.style.cssText = 'padding:0.3rem 0.6rem; color:var(--muted); font-size:0.78rem;';
+                                                        more.textContent = `${models.length - MAX_SHOW}+ more — refine search`;
+                                                        dd.appendChild(more);
+                                                        break;
+                                                    }
+                                                    const row = document.createElement('div');
+                                                    row.textContent = m;
+                                                    row.style.cssText = 'padding:0.35rem 0.6rem; cursor:pointer; font-size:0.85rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;';
+                                                    if (m === val) row.style.fontWeight = '700';
+                                                    row.addEventListener('mouseenter', () => { row.style.background = 'var(--accent-dim, rgba(107,254,254,0.12))'; });
+                                                    row.addEventListener('mouseleave', () => { row.style.background = ''; });
+                                                    row.addEventListener('mousedown', (ev) => {
+                                                        ev.preventDefault();
+                                                        inp.value = m;
+                                                        dd.style.display = 'none';
+                                                        saveCfg(m, inp);
+                                                    });
+                                                    dd.appendChild(row);
+                                                }
+                                                if (count === 0) {
+                                                    const empty = document.createElement('div');
+                                                    empty.style.cssText = 'padding:0.4rem 0.6rem; color:var(--muted); font-size:0.82rem;';
+                                                    empty.textContent = 'No matching models';
+                                                    dd.appendChild(empty);
+                                                }
+                                            };
+                                            inp.addEventListener('focus', () => { renderDd(inp.value); dd.style.display = ''; });
+                                            inp.addEventListener('input', () => { renderDd(inp.value); });
+                                            inp.addEventListener('blur', () => { setTimeout(() => { dd.style.display = 'none'; }, 180); });
+                                            wrap.appendChild(dd);
+                                        }
+                                        inp.addEventListener('keydown', (ev) => {
+                                            if (ev.key === 'Enter') { ev.preventDefault(); saveCfg(inp.value, inp); }
+                                        });
+                                        inputEl = wrap;
+                                    } else {
+                                        // Default: text / password / number input
+                                        const inp = document.createElement('input');
+                                        inp.type = ci.ui_type === 'password' ? 'password'
+                                            : (ci.value_type === 'int' || ci.value_type === 'float' || ci.ui_type === 'number') ? 'number' : 'text';
+                                        inp.style.cssText = 'padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:6px; font-size:0.88rem; max-width:400px; width:100%;';
+                                        inp.value = typeof val === 'string' ? val : JSON.stringify(val);
+                                        inp.disabled = !editable;
+                                        inp.addEventListener('keydown', (ev) => {
+                                            if (ev.key === 'Enter') { ev.preventDefault(); saveCfg(inp.value, inp); }
+                                        });
+                                        inp.addEventListener('blur', () => saveCfg(inp.value, inp));
+                                        inputEl = inp;
+                                    }
+
+                                    if (inputEl) row.appendChild(inputEl);
+                                    return row;
+                                };
+
+                                normalCfg.forEach(ci => cfgBody.appendChild(buildCfgRow(ci)));
+
+                                if (advancedCfg.length) {
+                                    const advHeader = document.createElement('div');
+                                    advHeader.style.cssText = 'display:flex; align-items:center; gap:6px; margin-top:8px; margin-bottom:6px; cursor:pointer; user-select:none;';
+                                    const advIcon = document.createElement('span');
+                                    advIcon.textContent = '▶';
+                                    advIcon.style.cssText = 'font-size:0.65rem; transition:transform 0.2s;';
+                                    const advLabel = document.createElement('span');
+                                    advLabel.style.cssText = 'font-size:0.8rem; font-weight:600; color:var(--muted);';
+                                    advLabel.textContent = 'Advanced';
+                                    advHeader.appendChild(advIcon);
+                                    advHeader.appendChild(advLabel);
+
+                                    const advBody = document.createElement('div');
+                                    advBody.style.display = 'none';
+                                    advancedCfg.forEach(ci => advBody.appendChild(buildCfgRow(ci)));
+
+                                    advHeader.addEventListener('click', (ev) => {
+                                        ev.stopPropagation();
+                                        const open = advBody.style.display !== 'none';
+                                        advBody.style.display = open ? 'none' : '';
+                                        advIcon.style.transform = open ? '' : 'rotate(90deg)';
+                                    });
+
+                                    cfgBody.appendChild(advHeader);
+                                    cfgBody.appendChild(advBody);
+                                }
+
+                                cfgSection.appendChild(cfgHeader);
+                                cfgSection.appendChild(cfgBody);
+                                details.appendChild(cfgSection);
+                            }
+
                             container.appendChild(details);
                         });
                     };

@@ -2990,6 +2990,7 @@ class SynthWebUIInterface:
         text: Optional[str] = None,
         **kwargs,
     ) -> None:
+        skip_history = kwargs.pop("skip_history", False)
         if isinstance(payload_or_chat_id, dict):
             payload = payload_or_chat_id
             # Accept both "text" (standard) and "value" (legacy synthetic-action mapping)
@@ -2999,6 +3000,7 @@ class SynthWebUIInterface:
                 or payload.get("target")
                 or payload.get("chat_id")
             )
+            skip_history = payload.get("skip_history", skip_history)
         else:
             chat_id = payload_or_chat_id or kwargs.get("chat_id")
             if text is None:
@@ -3111,13 +3113,16 @@ class SynthWebUIInterface:
         await self._append_history(session_id, "synth", text)
 
         # Save SyntH's response via core chat_context_manager
-        try:
-            from core.chat_context_manager import save_response_message
+        if not skip_history:
+            try:
+                from core.chat_context_manager import save_response_message
 
-            msg_interface_path = f"{INTERFACE_NAME}/{chat_id}"
-            await save_response_message(msg_interface_path, text)
-        except Exception as e:
-            log_debug(f"{LOG_PREFIX} Failed to save response via context_manager: {e}")
+                msg_interface_path = f"{INTERFACE_NAME}/{chat_id}"
+                await save_response_message(msg_interface_path, text)
+            except Exception as e:
+                log_debug(
+                    f"{LOG_PREFIX} Failed to save response via context_manager: {e}"
+                )
 
         if websocket:
             log_info(
@@ -3863,10 +3868,11 @@ class SynthWebUIInterface:
             if entry.get("hidden"):
                 continue
 
-            # Hide Cortex-engine-specific variables unless their engine is loaded
+            # Hide Cortex-engine-specific variables unless their engine is registered
             if (
                 "cortex_engine" in entry.get("tags", [])
                 and entry.get("component") not in loaded_cortex_engines
+                and entry.get("component") not in available_cortex_engines
             ):
                 continue
             component_label = self._get_display_name(entry["component"], None)

@@ -48,10 +48,10 @@ try:
     register_exposed_var(
         "OPENAPI_BASE_URL",
         label="OpenAPI Base URL",
-        default="http://localhost:11434/v1",
+        default="http://localhost:8081/v1",
         value_type=str,
         ui_type="string",
-        description="Base URL for the OpenAI-compatible endpoint (e.g., http://localhost:11434/v1 for Ollama).",
+        description="Base URL for the OpenAI-compatible endpoint (e.g., http://localhost:8081/v1 for Ollama).",
         scope="llm",
         component="openapi",
         tags=["cortex_engine"],
@@ -229,7 +229,7 @@ except Exception:
 # ---------------------------------------------------------------------------
 OPENAPI_BASE_URL = config_registry.get_var(
     "OPENAPI_BASE_URL",
-    "http://localhost:11434/v1",
+    "http://localhost:8081/v1",
     label="OpenAPI Base URL",
     description="Base URL for the OpenAI-compatible endpoint.",
     group="llm",
@@ -621,6 +621,7 @@ class OpenAPIPlugin(AIPluginBase):
                 base = str(OPENAPI_BASE_URL).strip()
                 api_key = str(OPENAPI_API_KEY).strip()
                 loop.run_until_complete(_refresh_catalog(base, api_key))
+                self._auto_select_model()
         except Exception as exc:
             log_warning(f"[openapi] Catalog fetch on init failed: {exc}")
 
@@ -639,6 +640,9 @@ class OpenAPIPlugin(AIPluginBase):
             if manual_models:
                 _catalog.update(manual_models)
 
+        # Auto-select model if current model isn't in the catalog
+        self._auto_select_model()
+
         # Schedule periodic refresh
         if bool(OPENAPI_AUTO_DISCOVER):
             interval = int(OPENAPI_CATALOG_REFRESH) if OPENAPI_CATALOG_REFRESH else 60
@@ -648,6 +652,31 @@ class OpenAPIPlugin(AIPluginBase):
                 _catalog._refresh_task = asyncio.create_task(
                     _catalog_refresh_loop(base_url, api_key, interval)
                 )
+
+    def _auto_select_model(self) -> None:
+        """Auto-select model from catalog if current model is missing."""
+        ids = _catalog.list_ids()
+        if not ids:
+            return
+        # Current model already in catalog — nothing to do
+        if self._current_model in ids:
+            return
+        # Single model served (typical for llama.cpp) — auto-select it
+        if len(ids) == 1:
+            old = self._current_model
+            self.set_current_model(ids[0])
+            log_info(
+                f"[openapi] Auto-selected model '{ids[0]}' "
+                f"(previous '{old}' not found in catalog)"
+            )
+            return
+        # Multiple models but current not found — pick first and warn
+        old = self._current_model
+        self.set_current_model(ids[0])
+        log_warning(
+            f"[openapi] Model '{old}' not in catalog. "
+            f"Auto-selected '{ids[0]}'. Available: {ids}"
+        )
 
     # ------------------------------------------------------------------
     # AIPluginBase interface
@@ -659,7 +688,7 @@ class OpenAPIPlugin(AIPluginBase):
         if not base_url:
             return (
                 False,
-                "OPENAPI_BASE_URL not configured. Please set it to your endpoint URL (e.g., http://localhost:11434/v1 for Ollama).",
+                "OPENAPI_BASE_URL not configured. Please set it to your endpoint URL (e.g., http://localhost:8081/v1 for Ollama).",
             )
 
         # Quick connectivity check
