@@ -113,6 +113,10 @@ The WebUI interface provides a browser-based visual representation of synth usin
 
 **Avatar Management**
     - Upload custom VRM models via the WebUI
+    - The last-uploaded VRM automatically becomes the active model until you select a skin
+      or upload another model.
+    - Only a single user VRM is cached at any time; uploading a new file clears the previous
+      model from the temporary storage (skins/temp).
     - Activate/deactivate models on the fly
     - Automatic animation retargeting for compatible models
 

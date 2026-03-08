@@ -4,12 +4,12 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _reset_animation_handler_singleton():
-    """Ensure tests don't leak AnimationHandler singleton state across modules."""
+    """Ensure tests don't leak KaradaStateServer singleton state across modules."""
     import core.animation_handler as ah
 
-    ah._animation_handler = None
+    ah._karada_state_server = None
     yield
-    ah._animation_handler = None
+    ah._karada_state_server = None
 
 
 @pytest.fixture(scope="session", autouse=True)

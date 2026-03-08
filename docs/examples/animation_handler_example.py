@@ -1,11 +1,14 @@
-"""Example: Using the Animation Handler from a Plugin
+"""Example: Using KaradaStateServer from a Plugin
 
-This example demonstrates how to integrate the animation handler
-into a custom plugin or component.
+The server in ``core/animation_handler.py`` is now called KaradaStateServer
+("karada" means "body" in Japanese); it replaces the previous animation
+handler concept and provides a unified API for managing VRM and animation
+state.  This example demonstrates how to integrate the state server into a
+custom plugin or component.
 """
 
 import asyncio
-from core.animation_handler import get_animation_handler, AnimationState
+from core.animation_handler import get_karada_state_server, AnimationState
 from core.plugin_base import PluginBase
 
 
@@ -14,7 +17,7 @@ class ExampleAnimationPlugin(PluginBase):
 
     def __init__(self):
         super().__init__()
-        self.animation_handler = get_animation_handler()
+        self.animation_handler = get_karada_state_server()
         self.current_session = None
 
     async def process_with_animations(self, message, session_id):
@@ -70,7 +73,7 @@ class BackgroundTaskPlugin(PluginBase):
 
     def __init__(self):
         super().__init__()
-        self.animation_handler = get_animation_handler()
+        self.animation_handler = get_karada_state_server()
         self.background_tasks = {}
 
     async def start_background_task(self, task_id, session_id):
@@ -128,7 +131,7 @@ class ConditionalAnimationPlugin(PluginBase):
 
     def __init__(self):
         super().__init__()
-        self.animation_handler = get_animation_handler()
+        self.animation_handler = get_karada_state_server()
 
     async def process_with_conditional_animation(self, message, session_id):
         """Only trigger animations for certain message types."""
@@ -211,7 +214,7 @@ class ConditionalAnimationPlugin(PluginBase):
 
 async def example_basic_usage():
     """Basic animation usage."""
-    handler = get_animation_handler()
+    handler = get_karada_state_server()
     session_id = "example-session-123"
 
     # Start thinking
@@ -234,7 +237,7 @@ async def example_basic_usage():
 
 async def example_multiple_contexts():
     """Managing multiple animation contexts."""
-    handler = get_animation_handler()
+    handler = get_karada_state_server()
     session_id = "example-session-456"
 
     # Start first task
@@ -258,7 +261,7 @@ async def example_multiple_contexts():
 
 async def example_error_handling():
     """Animation with error handling."""
-    handler = get_animation_handler()
+    handler = get_karada_state_server()
     session_id = "example-session-789"
     context_id = "error_example"
 

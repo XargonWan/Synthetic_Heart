@@ -45,7 +45,7 @@ def test_update_emotion_triggers_animation_notify(monkeypatch):
     async def fake_get_handler():
         return dummy
 
-    monkeypatch.setattr("core.animation_handler.get_animation_handler", lambda: dummy)
+    monkeypatch.setattr("core.animation_handler.get_karada_state_server", lambda: dummy)
 
     # Patch DB context to avoid aiomysql dependency during the test
     class DummyConnCtx:

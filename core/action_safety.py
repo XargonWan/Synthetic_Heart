@@ -92,7 +92,7 @@ def is_action_allowed_for_execution(
             declared_level = _level_at_least(declared_level, "medium")
 
         # 4) Allow payload override if configured (human-origin actions only)
-        allow_safe_override = bool(
+        """ allow_safe_override = bool(
             config_registry.get_value(
                 "ALLOW_SAFE_FLAG_OVERRIDE",
                 False,
@@ -106,7 +106,7 @@ def is_action_allowed_for_execution(
                 component="action_safety",
                 advanced=True,
             )
-        )
+        ) """
 
         # 5) Origin and mode
         is_from_cortex = (

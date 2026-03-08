@@ -1,11 +1,14 @@
 # core/prompt_engine.py
 
+import random
+
+from core.db import get_conn_ctx
 from core.synth_tagging import extract_tags, expand_tags
 from core.logging_utils import log_debug, log_info, log_warning, log_error
 from core.json_utils import dumps as json_dumps
 from core.config_manager import config_registry
 from core.user_utils import get_user_display_name, get_user_usertag
-from datetime import datetime
+from datetime import datetime, time
 import os
 import asyncio
 

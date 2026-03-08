@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from core.animation_handler import get_animation_handler
+from core.animation_handler import get_karada_state_server
 from core.animation_handler import AnimationState
 
 
@@ -36,7 +36,7 @@ async def test_play_and_stop_with_outro(tmp_path: Path):
         )
     )
 
-    handler = get_animation_handler()
+    handler = get_karada_state_server()
     handler.set_animation_search_paths([base])
     # Force selection of our test animation regardless of active persona/skin content
     handler.register_state_animations("think", {"loop": ["think_long.fbx"]})
@@ -53,12 +53,12 @@ async def test_play_and_stop_with_outro(tmp_path: Path):
         context_id="ctx1",
         priority=5,
     )
-    # Ensure we sent an animation payload
+    # Ensure we sent an animation payload (new type: vrm_animation)
     sent = fake.connections[session].sent
-    assert any(p.get("type") == "animation" for p in sent)
+    assert any(p.get("type") == "vrm_animation" for p in sent)
 
     # Ensure rich animation_state is present when descriptor exists
-    anim_payloads = [p for p in sent if p.get("type") == "animation"]
+    anim_payloads = [p for p in sent if p.get("type") == "vrm_animation"]
     assert anim_payloads
     first = anim_payloads[0]
     assert first.get("descriptor") is not None

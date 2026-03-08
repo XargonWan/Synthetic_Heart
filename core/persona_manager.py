@@ -1,4 +1,17 @@
 # core/persona_manager.py
+import json
+import asyncio
+import re
+import random
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, asdict, field
+
+from core.plugin_base import PluginBase
+from core.db import get_conn_ctx
+from core.logging_utils import log_debug, log_info, log_warning, log_error
+from core.config_manager import config_registry
+from core.animation_handler import get_karada_state_server, AnimationState
 """
 Persona Manager - Digital Identity Management for SyntH
 
@@ -15,19 +28,6 @@ a synthetic being with its own identity, personality, and emotional framework.
 
 print("[persona_manager] DEBUG: Module import started", flush=True)
 
-import json
-import asyncio
-import re
-import random
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
-from dataclasses import dataclass, asdict, field
-
-from core.plugin_base import PluginBase
-from core.db import get_conn_ctx
-from core.logging_utils import log_debug, log_info, log_warning, log_error
-from core.config_manager import config_registry
-from core.animation_handler import get_animation_handler, AnimationState
 
 
 def _build_trainer_bio_section() -> str:
@@ -777,7 +777,6 @@ class PersonaManager(PluginBase):
             # Get fresh values from config registry
             name = config_registry.get_value("SYNTH_NAME", "SyntH")
             profile = config_registry.get_value("SYNTH_PROFILE", "")
-            aliases_raw = config_registry.get_value("SYNTH_ALIASES", [])
 
             # Check if values actually changed
             if self._current_persona:
@@ -1795,7 +1794,7 @@ Please resend your message with ONLY valid emotions from the list above."""
         self._current_persona.current_animation = animation_state
         await self.save_persona(self._current_persona)
 
-        handler = self._animation_handler or get_animation_handler()
+        handler = self._animation_handler or get_karada_state_server()
         if not self._animation_handler and handler:
             self._animation_handler = handler
 
@@ -1844,7 +1843,7 @@ Please resend your message with ONLY valid emotions from the list above."""
             priority = priority_map.get(animation_state, 0)
 
             try:
-                # All animations should loop by default. The AnimationHandler
+                # All animations should loop by default. The KaradaStateServer
                 # will respect the descriptor's intro/loop/outro structure and
                 # will NOT loop if the animation descriptor says play_once.
                 # This prevents T-pose when animations end.
@@ -1937,7 +1936,7 @@ Please resend your message with ONLY valid emotions from the list above."""
         Delegates to the animation handler so descriptor metadata (e.g. play_once)
         and skin-specific paths are respected.
         """
-        handler = self._animation_handler or get_animation_handler()
+        handler = self._animation_handler or get_karada_state_server()
         if not handler:
             log_warning("[persona_manager] Animation handler unavailable for update")
             return
@@ -2026,7 +2025,7 @@ Please resend your message with ONLY valid emotions from the list above."""
                     self._current_persona
                     and self._current_persona.current_animation == animation_state.value
                 ):
-                    handler = self._animation_handler or get_animation_handler()
+                    handler = self._animation_handler or get_karada_state_server()
                     animation_files: List[str] = []
                     if handler:
                         try:

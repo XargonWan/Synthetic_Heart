@@ -144,7 +144,7 @@ Then you might want to edit the following settings on the WebUI -> Settings:
 - Synth Name: The name of the Synth. To not be mistaken with the name of the skin, that is just a name given to the skin but itś not set as the synth name. A Symnth can be called Kotone and have the skin of Rei for example.
 - Synth Profile: A description of how your synth is, written in second person, check the default one.
 
-Moreover you can add more skins or just upload your vrm model.
+Moreover you can add more skins or just upload your vrm model.  Uploaded VRMs replace any previous upload and automatically become the active avatar; only one user file is kept in cache at a time.
 
 See the [documentation](https://synthetic-heart.readthedocs.io) for installation details, advanced features and contribution guidelines.
 

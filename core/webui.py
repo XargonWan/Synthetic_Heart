@@ -45,7 +45,7 @@ from core.message_chain import (
 )
 from core import db as core_db
 from core.action_state_manager import get_action_state_manager, AnimationPhase
-from core.animation_handler import AnimationState, AnimationHandler
+from core.animation_handler import AnimationState, KaradaStateServer
 from core import animation_uploads
 import mimetypes
 
@@ -123,6 +123,11 @@ class SynthWebUIInterface:
         # Track pending THINKING actions per session so we can deterministically
         # switch THINK -> WRITE -> IDLE when the async response is actually sent.
         self._pending_thinking_actions: Dict[str, Deque[str]] = {}
+        # Active skin tracker (folder name) – used by the new /api/skins/current_skin
+        # endpoint.  This is a hint for situations where the active VRM has lost
+        # its original path (e.g. after copying into avatars); for other cases the
+        # value is derived dynamically from `self.active_vrm`.
+        self._current_skin: Optional[str] = None
         # Track active WRITING actions per session so we can stop them immediately
         # after sending, and avoid starting WRITING too late.
         self._active_writing_actions: Dict[str, Deque[str]] = {}
@@ -253,6 +258,8 @@ class SynthWebUIInterface:
         self.active_vrm_marker = self.vrm_dir / ".active"
         # Load active VRM from marker or default
         self.active_vrm = self._load_active_vrm()
+        # initialise skin hint based on whatever active_vrm we found
+        self._current_skin = self._derive_skin_from_active_vrm()
 
         if static_dir.exists():
             self.app.mount(
@@ -306,6 +313,30 @@ class SynthWebUIInterface:
             log_warning(
                 f"{LOG_PREFIX} JS directory not found: {js_dir}", log_file=WEBUI_LOG
             )
+
+        # middleware to ensure static/js files are not aggressively cached; this
+        # makes curl or browsers always fetch the latest version even if query
+        # string doesn't change (useful during development or when clients are
+        # misbehaving with their cache).
+        try:
+            from starlette.middleware.base import BaseHTTPMiddleware
+
+            class _NoCacheMiddleware(BaseHTTPMiddleware):
+                async def dispatch(inner_self, request, call_next):
+                    response = await call_next(request)
+                    path = request.url.path
+                    if (
+                        path.startswith("/js/")
+                        or path.startswith("/static/")
+                        or path.startswith("/skins")
+                    ):
+                        # No store ensures proxies and browsers always revalidate.
+                        response.headers["Cache-Control"] = "no-cache"
+                    return response
+
+            self.app.add_middleware(_NoCacheMiddleware)
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} Failed to add no-cache middleware: {exc}")
 
         # Use the bundled static logo path. The image is expected to be present
         # in the image under /app/res/synth_webui/static/synth_logo_bg.png.
@@ -362,10 +393,10 @@ class SynthWebUIInterface:
                 )
         log_info(f"{LOG_PREFIX} ========== VRM DIRECTORY MOUNT END ==========")
 
-        # Initialize AnimationHandler so tests and runtime can access it
+        # Initialize KaradaStateServer so tests and runtime can access it
         try:
-            self.animation_handler = AnimationHandler(self)
-            # Register webui callbacks with the animation handler
+            self.animation_handler = KaradaStateServer(self)
+            # Register webui callbacks with the KaradaStateServer
             self.animation_handler.set_webui(self)
             # Preload idle animations in background (non-blocking)
             try:
@@ -373,8 +404,8 @@ class SynthWebUIInterface:
             except Exception:
                 pass
         except Exception as e:
-            # If animation handler fails to initialize, create a lightweight stub
-            log_warning(f"{LOG_PREFIX} AnimationHandler init failed: {e}")
+            # If KaradaStateServer fails to initialize, create a lightweight stub
+            log_warning(f"{LOG_PREFIX} KaradaStateServer init failed: {e}")
 
             class _AnimStub:
                 def __init__(self):
@@ -432,7 +463,6 @@ class SynthWebUIInterface:
 
         # Attempt to initialize the chat_archives DB table in background (best-effort)
         try:
-            import asyncio
             from core.chat_archives_db import init_chat_archives_table
 
             try:
@@ -469,6 +499,8 @@ class SynthWebUIInterface:
         self.app.post("/api/persona")(self.upload_persona_pack)
         # Skins management endpoints
         self.app.get("/api/skins")(self.list_skins)
+        # new helper: allow clients to query which skin is active
+        self.app.get("/api/skins/current_skin")(self.get_current_skin)
         self.app.post("/api/skins/{skin_name}/activate")(self.activate_skin)
         self.app.post("/api/skins/uploaded/clear")(self.clear_uploaded_vrm)
         self.app.get("/api/components")(self.components_summary)
@@ -570,6 +602,7 @@ class SynthWebUIInterface:
                     "state": current.get("state"),
                     "animation": resolved,
                     "descriptor": current.get("descriptor"),
+                    "animation_id": current.get("animation_id"),
                 }
                 return JSONResponse(payload)
             except Exception as exc:
@@ -991,7 +1024,12 @@ class SynthWebUIInterface:
             import json
 
             replacements["%%WEBUI_ACCENT_PRESETS%%"] = json.dumps(presets)
-            # Apply replacements
+            # always include a cache‑busting token for static assets
+            # use a timestamp so the value changes on each render
+            import time
+
+            replacements["%%STATIC_VERSION%%"] = str(int(time.time()))
+
             for placeholder, value in replacements.items():
                 template = template.replace(placeholder, value)
 
@@ -1059,7 +1097,7 @@ class SynthWebUIInterface:
                     ctx.check_hostname = False
                     ctx.verify_mode = ssl.CERT_NONE
                     with socket.create_connection((host, port), timeout=1) as sock:
-                        with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+                        with ctx.wrap_socket(sock, server_hostname=host):
                             return {
                                 "protocol": "https",
                                 "details": f"TLS handshake succeeded on port {port}",
@@ -1502,69 +1540,96 @@ class SynthWebUIInterface:
             )
         await self._replay_history(session_id)
 
-        # Send current centralized animation state to new client
+        # ------------------------------------------------------------------
+        # Hello handshake: wait briefly for the client to declare its
+        # capabilities and cached assets, then push the full VRM state.
+        # ------------------------------------------------------------------
+        client_type: str = "unknown"
+        client_capabilities: List[str] = ["url_fetch"]
+        missing_assets: List[str] = []
+
+        try:
+            raw_hello = await asyncio.wait_for(websocket.receive_text(), timeout=0.3)
+            try:
+                hello_payload = json.loads(raw_hello)
+            except json.JSONDecodeError:
+                hello_payload = {}
+
+            if hello_payload.get("type") == "hello":
+                client_type = hello_payload.get("client_type", "unknown")
+                client_capabilities = hello_payload.get("capabilities", ["url_fetch"])
+                has_assets = hello_payload.get("has_assets", [])
+                if self.animation_handler and has_assets:
+                    missing_assets = self.animation_handler.get_missing_assets(
+                        has_assets
+                    )
+                log_info(
+                    f"{LOG_PREFIX} Hello from {session_id}: type={client_type}, "
+                    f"caps={client_capabilities}, missing_assets={len(missing_assets)}"
+                )
+            elif hello_payload.get("text"):
+                # Client sent a chat message instead of hello — process normally
+                text = (hello_payload.get("text") or "").strip()
+                if text:
+                    await self._append_history(session_id, "user", text)
+                    asyncio.create_task(self._handle_user_message(session_id, text))
+        except asyncio.TimeoutError:
+            log_debug(
+                f"{LOG_PREFIX} No hello from {session_id} within timeout, proceeding"
+            )
+        except Exception as hello_exc:
+            log_debug(f"{LOG_PREFIX} Hello handling error (non-fatal): {hello_exc}")
+
+        # Push full VRM state to the newly connected client
         try:
             if self.animation_handler:
-                current_anim_state = (
-                    self.animation_handler.get_current_animation_state()
-                )
-                if current_anim_state["animation_file"]:
-                    # Resolve the animation path
-                    resolved_path, _ = (
-                        self.animation_handler._resolve_animation_descriptor(
-                            current_anim_state["animation_file"]
-                        )
-                    )
-                    message = {
-                        "type": "animation",
-                        "state": current_anim_state["state"],
-                        "animation": resolved_path,
-                        "loop": current_anim_state["descriptor"].get("play_once", False)
-                        is False
-                        if current_anim_state["descriptor"]
-                        else True,
-                        "descriptor": current_anim_state["descriptor"],
-                    }
-                    await websocket.send_json(message)
-                    log_debug(
-                        f"{LOG_PREFIX} Sent current animation state to new session {session_id}: {current_anim_state['state']}"
-                    )
-                    # Also send a lightweight 'animation_state' summary so clients can
-                    # deduce the current state without needing a full animation command.
-                    try:
-                        state_msg = {
-                            "type": "animation_state",
-                            "state": current_anim_state["state"],
-                            "animation": resolved_path,
-                            "descriptor": current_anim_state["descriptor"],
+                full_state = self.animation_handler.get_full_state()
+
+                # 1) VRM model
+                vrm = full_state.get("vrm_model", {})
+                if vrm.get("url"):
+                    await websocket.send_json(
+                        {
+                            "type": "vrm_model",
+                            "name": vrm.get("name"),
+                            "url": vrm.get("url"),
+                            "hash": vrm.get("hash"),
                         }
-                        await websocket.send_json(state_msg)
-                    except Exception:
-                        pass
-        except Exception as anim_exc:
+                    )
+
+                # 2) Current animation (if any)
+                anim = full_state.get("animation", {})
+                if anim.get("file"):
+                    await websocket.send_json(
+                        {
+                            "type": "vrm_animation",
+                            "file": anim.get("url") or anim.get("file"),
+                            "state": anim.get("state", "idle"),
+                            "loop": anim.get("loop", True),
+                            "descriptor": anim.get("descriptor"),
+                            "animation_id": anim.get("animation_id"),
+                            "restore": True,
+                        }
+                    )
+
+                # 3) Preload idle variants in background (non-blocking)
+                asyncio.create_task(self.animation_handler.ensure_idle_preloaded())
+
+                # 4) Face values (emotions)
+                face = full_state.get("face_values", {})
+                if face:
+                    await websocket.send_json({"type": "vrm_face", "values": face})
+
+                # 5) If no animation is set yet, start idle
+                if not anim.get("file") and self.persona_manager:
+                    await self.persona_manager.set_animation_state("idle")
+                    log_debug(f"{LOG_PREFIX} Started idle animation for first session")
+        except Exception as push_exc:
             log_warning(
-                f"{LOG_PREFIX} Failed to send animation state to new session {session_id}: {anim_exc}"
+                f"{LOG_PREFIX} Failed to push VRM state to session {session_id}: {push_exc}"
             )
 
-        # Set initial idle animation for new session
-        try:
-            if self.persona_manager:
-                await self.persona_manager.set_animation_state(
-                    "idle", session_id=session_id
-                )
-                log_debug(
-                    f"{LOG_PREFIX} Set initial idle animation for session {session_id}"
-                )
-            else:
-                log_debug(
-                    f"{LOG_PREFIX} Persona manager not available, skipping initial animation for session {session_id}"
-                )
-        except Exception as anim_exc:
-            log_warning(
-                f"{LOG_PREFIX} Failed to set initial idle animation for session {session_id}: {anim_exc}"
-            )
-
-        log_info(f"{LOG_PREFIX} Client connected: {session_id}")
+        log_info(f"{LOG_PREFIX} Client connected: {session_id} (type={client_type})")
 
         try:
             while True:
@@ -1573,6 +1638,12 @@ class SynthWebUIInterface:
                     payload = json.loads(data)
                 except json.JSONDecodeError:
                     payload = {"text": data}
+
+                # Ignore control messages that are not chat text
+                msg_type = payload.get("type")
+                if msg_type in ("hello",):
+                    continue
+
                 text = (payload.get("text") or "").strip()
                 if not text:
                     continue
@@ -1756,9 +1827,9 @@ class SynthWebUIInterface:
         )
 
         # Backend-authoritative animation playback:
-        # whenever the global action phase changes, trigger the AnimationHandler to
+        # whenever the global action phase changes, trigger the KaradaStateServer to
         # play the corresponding logical state. Plugins can override per-state
-        # animations via AnimationHandler registration, but the backend remains the
+        # animations via KaradaStateServer registration, but the backend remains the
         # source of truth for *when* a state starts/ends.
         try:
             phase = message.get("phase") or AnimationPhase.IDLE.value
@@ -1812,70 +1883,12 @@ class SynthWebUIInterface:
         animation_file: str,
         descriptor: Optional[Dict[str, Any]],
     ) -> None:
+        """No-op stub kept for external plugin compatibility.
+
+        Broadcasting is now done directly by ``KaradaStateServer`` via
+        ``_send_animation_command`` which always iterates over all connections.
+        Plugins that registered this as a callback will call it harmlessly.
         """
-        Broadcast the current animation state to all connected WebSocket clients.
-
-        Called whenever the animation changes (from AnimationHandler callback).
-        This ensures all clients see the same animation on the 3D model.
-
-        Args:
-            state: The animation state enum
-            animation_file: The animation file name
-            descriptor: The animation descriptor (may be None)
-        """
-        log_debug(
-            f"{LOG_PREFIX} [_broadcast_animation_state] CALLED: state={state}, animation={animation_file}, has_descriptor={descriptor is not None}"
-        )
-
-        # Resolve the animation path
-        if self.animation_handler:
-            resolved_path, _ = self.animation_handler._resolve_animation_descriptor(
-                animation_file
-            )
-        else:
-            resolved_path = f"animations/{animation_file}"
-
-        message = {
-            "type": "animation",
-            "state": state.value,
-            "animation": resolved_path,
-            "loop": descriptor.get("play_once", False) is False if descriptor else True,
-            "descriptor": descriptor,
-        }
-        # Attach rich animation_state when available from animation handler
-        try:
-            if self.animation_handler:
-                try:
-                    current = self.animation_handler.get_current_animation_state()
-                    anim_state = (
-                        current.get("animation_state")
-                        if isinstance(current, dict)
-                        else None
-                    )
-                    if anim_state:
-                        message["animation_state"] = anim_state
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-        client_count = len(self.connections)
-        log_info(
-            f"{LOG_PREFIX} Broadcasting animation state to {client_count} clients: {state.value}/{animation_file}",
-            log_file=WEBUI_LOG,
-        )
-
-        # Send to all connected clients
-        for session_id, websocket in self.connections.items():
-            try:
-                await websocket.send_json(message)
-                log_debug(
-                    f"{LOG_PREFIX} ✓ Sent animation state to session {session_id}: {state.value}"
-                )
-            except Exception as exc:
-                log_warning(
-                    f"{LOG_PREFIX} Failed to broadcast animation state to session {session_id}: {exc}"
-                )
 
     async def _broadcast_animation_state_summary(
         self,
@@ -1883,103 +1896,11 @@ class SynthWebUIInterface:
         animation_file: str,
         descriptor: Optional[Dict[str, Any]],
     ) -> None:
-        """Broadcast a lightweight animation state summary to all connected clients.
+        """No-op stub kept for external plugin compatibility.
 
-        This is intended for clients that want to observe the canonical animation
-        state without treating it as an authoritative playback command.
+        Lightweight state summaries are superseded by the ``vrm_face`` channel
+        for emotion data and ``vrm_animation`` for animation state.
         """
-        try:
-            resolved_path, _ = (None, None)
-            if self.animation_handler:
-                try:
-                    resolved_path, _ = (
-                        self.animation_handler._resolve_animation_descriptor(
-                            animation_file
-                        )
-                    )
-                except Exception:
-                    resolved_path = f"/{self.animation_handler.ANIMATIONS_BASE_PATH}/{animation_file}"
-
-            payload = {
-                "type": "animation_state",
-                "state": state.value,
-                "animation": resolved_path,
-                "descriptor": descriptor,
-            }
-
-            # Attach rich animation_state structure when possible (best-effort)
-            try:
-                current = None
-                if self.animation_handler:
-                    try:
-                        current = self.animation_handler.get_current_animation_state()
-                    except Exception:
-                        current = None
-
-                if (
-                    current
-                    and isinstance(current, dict)
-                    and current.get("animation_state")
-                ):
-                    payload["animation_state"] = current.get("animation_state")
-
-                    # If emotions are missing, attempt to fetch runtime emotions (best-effort)
-                    try:
-                        anim_state = payload.get("animation_state") or {}
-                        if anim_state.get("emotions") is None:
-                            mgr = None
-                            try:
-                                from core.core_initializer import PLUGIN_REGISTRY
-
-                                mgr = (
-                                    PLUGIN_REGISTRY.get("emotion_manager")
-                                    if isinstance(PLUGIN_REGISTRY, dict)
-                                    else None
-                                )
-                            except Exception:
-                                mgr = None
-
-                            # No fallback import of plugin; use the PLUGIN_REGISTRY-provided manager only
-                            if mgr is not None and hasattr(mgr, "get_emotion_state"):
-                                emotions_raw_maybe = mgr.get_emotion_state()
-                                emotions_raw = (
-                                    await emotions_raw_maybe
-                                    if asyncio.iscoroutine(emotions_raw_maybe)
-                                    else emotions_raw_maybe
-                                )
-                                if isinstance(emotions_raw, dict) and emotions_raw:
-                                    emotions_filtered = {
-                                        k: v
-                                        for k, v in emotions_raw.items()
-                                        if isinstance(v, (int, float)) and v >= 0.1
-                                    }
-                                    if emotions_filtered:
-                                        dominant = max(
-                                            emotions_filtered.items(),
-                                            key=lambda x: x[1],
-                                        )[0]
-                                        anim_state["emotions"] = {
-                                            "dominant": dominant,
-                                            "values": emotions_filtered,
-                                        }
-                    except Exception:
-                        # best-effort; don't break the summary broadcast
-                        pass
-
-            except Exception:
-                pass
-
-            for sid, websocket in list(self.connections.items()):
-                try:
-                    await websocket.send_json(payload)
-                except Exception as exc:
-                    log_warning(
-                        f"{LOG_PREFIX} Failed to send animation_state to {sid}: {exc}"
-                    )
-        except Exception as exc:
-            log_warning(
-                f"{LOG_PREFIX} _broadcast_animation_state_summary failed: {exc}"
-            )
 
     async def get_animation_state(self):
         """HTTP endpoint that returns a lightweight animation state summary.
@@ -2819,6 +2740,17 @@ class SynthWebUIInterface:
         log_debug(
             f"{LOG_PREFIX} Available VRM files in temp dir: {[v.name for v in available_vrms]}"
         )
+        # clean up any stale files from previous versions; keep only model.vrm
+        if len(available_vrms) > 1 and (self.vrm_dir / "model.vrm").exists():
+            log_debug(f"{LOG_PREFIX} Cleaning stale VRM files at startup")
+            for f in available_vrms:
+                if f.name != "model.vrm":
+                    try:
+                        f.unlink()
+                        log_debug(f"{LOG_PREFIX} removed stale VRM {f.name}")
+                    except Exception as _:
+                        log_warning(f"{LOG_PREFIX} failed to remove stale VRM {f}")
+            available_vrms = [self.vrm_dir / "model.vrm"]
 
         # Prefer SyntH.vrm as the default model
         synth_vrm = self.vrm_dir / "SyntH.vrm"
@@ -2972,6 +2904,45 @@ class SynthWebUIInterface:
         self.active_vrm = candidate.name
         log_info(f"{LOG_PREFIX} ✓ Active VRM set to: '{self.active_vrm}'")
         log_info(f"{LOG_PREFIX} ========== SET ACTIVE VRM END (success) ==========")
+
+    # ------------------------------------------------------------------
+    # skin/VRM helpers
+    # ------------------------------------------------------------------
+    def _derive_skin_from_active_vrm(self) -> Optional[str]:
+        """Return the skin folder implied by ``self.active_vrm``.
+
+        A string like ``"/skins/Rei/model.vrm"`` yields ``"Rei"``.  Otherwise we
+        fall back to ``self._current_skin`` which is explicitly set when a skin
+        is activated via the API.  ``None`` is returned for a custom/uploaded
+        VRM or when no skin information can be determined.
+        """
+        if self._current_skin:
+            return self._current_skin
+        av = getattr(self, "active_vrm", None)
+        if isinstance(av, str) and "/skins/" in av:
+            parts = av.split("/")
+            try:
+                idx = parts.index("skins")
+                if idx + 1 < len(parts):
+                    return parts[idx + 1]
+            except ValueError:
+                pass
+        return None
+
+    async def get_current_skin(self):
+        """Handler for **GET /api/skins/current_skin**.
+
+        Returns ``{"skin": <name>}`` where ``<name>`` is the active skin folder or
+        ``null`` if the currently selected VRM does not belong to any skin
+        (i.e. a custom/uploaded model).  For traditional setups with no custom
+        model, ``Rei`` is returned so clients have a sane default.
+        """
+        skin = self._derive_skin_from_active_vrm()
+        if skin is None:
+            rei = Path(__file__).parent.parent / "skins" / "Rei"
+            if rei.exists():
+                skin = "Rei"
+        return JSONResponse({"skin": skin})
 
     @staticmethod
     def _sanitize_vrm_filename(name: str) -> str:
@@ -5261,29 +5232,23 @@ class SynthWebUIInterface:
             raise HTTPException(status_code=404, detail="Model not found")
         self._set_active_vrm(candidate.name)
         log_info(f"{LOG_PREFIX} Active VRM set to: {candidate.name}")
-        # Preload the current idle animation to all connected clients so the newly-loaded
-        # VRM does not appear in a T-pose while the client initializes the model.
+
+        # Broadcast new VRM model to all connected clients
+        try:
+            if self.animation_handler:
+                vrm_url = f"/avatars/{candidate.name}"
+                await self.animation_handler.set_vrm_model(vrm_url, candidate.name)
+                log_debug(f"{LOG_PREFIX} Broadcast vrm_model: {candidate.name}")
+        except Exception as vrm_exc:
+            log_warning(f"{LOG_PREFIX} Failed to broadcast vrm_model: {vrm_exc}")
+
+        # Restart idle animation (broadcast to all sessions)
         try:
             if self.persona_manager:
-                for session in list(self.connections.keys()):
-                    try:
-                        # persona_manager.set_animation_state accepts the state name and session_id
-                        await self.persona_manager.set_animation_state(
-                            "idle", session_id=session
-                        )
-                        log_debug(
-                            f"{LOG_PREFIX} Preloaded idle animation for session {session}"
-                        )
-                    except Exception as anim_exc:
-                        log_warning(
-                            f"{LOG_PREFIX} Failed to preload idle for session {session}: {anim_exc}"
-                        )
-            else:
-                log_debug(
-                    f"{LOG_PREFIX} Persona manager not available - skipping idle preload for connected clients"
-                )
+                await self.persona_manager.set_animation_state("idle")
+                log_debug(f"{LOG_PREFIX} Started idle animation after VRM switch")
         except Exception as exc:
-            log_warning(f"{LOG_PREFIX} Error while preloading idle animations: {exc}")
+            log_warning(f"{LOG_PREFIX} Error while starting idle animations: {exc}")
         return JSONResponse(
             {
                 "status": "ok",
@@ -5294,6 +5259,8 @@ class SynthWebUIInterface:
 
     async def upload_vrm_model(self, file: UploadFile = File(...)):
         log_info(f"{LOG_PREFIX} ========== VRM UPLOAD START ==========")
+        # uploading a custom model means we're no longer using a named skin
+        self._current_skin = None
         log_info(
             f"{LOG_PREFIX} VRM upload started: {file.filename if file else 'no file'}"
         )
@@ -5336,6 +5303,7 @@ class SynthWebUIInterface:
         try:
             log_debug(f"{LOG_PREFIX} Opening destination file for writing...")
             # Per new behavior, always write to model.vrm inside the VRM dir (overwrite)
+            # and remove any other cached VRMs so only a single model is kept.
             destination = self.vrm_dir / "model.vrm"
             with destination.open("wb") as buffer:
                 log_debug(
@@ -5364,6 +5332,35 @@ class SynthWebUIInterface:
                 )
                 log_debug(
                     f"{LOG_PREFIX} File size on disk: {destination.stat().st_size if destination.exists() else 'N/A'}"
+                )
+
+            # cleanup any leftover vrms from previous uploads (only model.vrm should remain)
+            try:
+                for other in self.vrm_dir.glob("*.vrm"):
+                    if other.name != "model.vrm":
+                        log_debug(f"{LOG_PREFIX} Removing stale VRM file: {other}")
+                        other.unlink()
+                log_debug(f"{LOG_PREFIX} VRM cache cleaned, only model.vrm remains")
+            except Exception as cleanup_exc:
+                log_warning(
+                    f"{LOG_PREFIX} Failed to clean up old VRM files: {cleanup_exc}"
+                )
+
+            # make the newly uploaded model the active one automatically
+            try:
+                log_debug(f"{LOG_PREFIX} Setting uploaded VRM as active")
+                self._set_active_vrm("model.vrm")
+                # broadcast to clients if possible (reuse same logic as set_active_vrm_endpoint)
+                if self.animation_handler:
+                    vrm_url = "/avatars/model.vrm"
+                    await self.animation_handler.set_vrm_model(vrm_url, "model.vrm")
+                    log_debug(f"{LOG_PREFIX} Broadcast vrm_model: model.vrm")
+                if self.persona_manager:
+                    await self.persona_manager.set_animation_state("idle")
+                    log_debug(f"{LOG_PREFIX} Started idle animation after VRM upload")
+            except Exception as br_exc:
+                log_warning(
+                    f"{LOG_PREFIX} Failed to broadcast/upload-change events: {br_exc}"
                 )
 
         except Exception as exc:
@@ -6571,7 +6568,7 @@ class SynthWebUIInterface:
                 # Reload the engine
                 log_info(f"{LOG_PREFIX} Reloading engine '{component_name}'...")
                 try:
-                    new_instance = cortex_registry.load_engine(component_name)
+                    cortex_registry.load_engine(component_name)
                     log_info(
                         f"{LOG_PREFIX} Cortex engine '{component_name}' reloaded successfully"
                     )
@@ -7443,6 +7440,8 @@ class SynthWebUIInterface:
 
         try:
             self._set_active_vrm("model.vrm")
+            # after restoring Rei we want the skin hint to reflect that
+            self._current_skin = "Rei"
         except Exception:
             pass
 
@@ -7485,6 +7484,10 @@ class SynthWebUIInterface:
 
         try:
             self._set_active_vrm(target.name)
+            # remember which skin we just activated; the active_vrm itself is
+            # just a filename once copied into avatars/, so we wouldn't be able
+            # to infer it later.
+            self._current_skin = skin_name
         except Exception as exc:
             log_error(
                 f"{LOG_PREFIX} Failed to set active VRM after activating skin {skin_name}: {exc}"

@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-from typing import Any, Callable, Awaitable
+from typing import Any, Callable, Awaitable, ClassVar
 
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 

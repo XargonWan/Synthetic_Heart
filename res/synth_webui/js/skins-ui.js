@@ -80,6 +80,36 @@
             const navSkins = document.getElementById('nav-skins');
             if(navSkins) navSkins.addEventListener('click', function(){ fetchSkins(); });
 
+            // set up upload input handler once element exists
+            const skinUpload = document.getElementById('skin-vrm-upload');
+            if(skinUpload){
+                console.log('[skins-ui] attaching upload listener');
+                skinUpload.addEventListener('change', async (e)=>{
+                    console.log('[skins-ui] upload input change event');
+                    const file = e.target.files && e.target.files[0];
+                    if (file) {
+                        const form = new FormData();
+                        form.append('file', file, file.name);
+                        try {
+                            const res = await fetch('/api/vrm', { method: 'POST', body: form });
+                            if (!res.ok) {
+                                const txt = await res.text();
+                                throw new Error(`HTTP ${res.status}: ${txt}`);
+                            }
+                            console.log('[skins-ui] VRM upload successful');
+                            try{ alert('VRM uploaded successfully'); }catch(_){ }
+                        } catch (err) {
+                            console.error('[skins-ui] VRM upload failed', err);
+                            alert('Failed to upload VRM: ' + err.message);
+                        }
+                    }
+                    try{ e.target.value = ''; }catch(_){ }
+                    setTimeout(()=>{ if(window.postUploadRefresh) window.postUploadRefresh().catch(()=>{}); }, 1200);
+                });
+            } else {
+                console.log('[skins-ui] upload input not found during init');
+            }
+
             // Load skins on page initialization if fetchSkins isn't provided elsewhere
             try { if (typeof fetchSkins === 'function') fetchSkins(); } catch (e) {}
         } catch (e){ console.warn('[synth_webui] skins-ui init failed', e); }

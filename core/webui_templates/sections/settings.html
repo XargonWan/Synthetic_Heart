@@ -24,6 +24,11 @@
     </article>
     <article class="card" id="config-general-card">
       <h2>Configuration</h2>
+      <div class="config-search-row">
+        <input id="config-search" type="search" placeholder="Search settings (name, label, description, group)" />
+        <button id="config-search-clear" class="btn-ghost" type="button">Clear</button>
+      </div>
+      <div class="meta" id="config-search-status"></div>
       <div class="config-list" id="config-general-list">
         <div class="meta">Loading…</div>
       </div>
@@ -130,5 +135,26 @@
     border: 1px solid transparent;
     box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
     background: linear-gradient(90deg, var(--accent), var(--accent-dark));
+  }
+
+  .config-search-row {
+    display: flex;
+    gap: 0.6rem;
+    align-items: center;
+    margin: 0.6rem 0 0.2rem;
+  }
+
+  .config-search-row input[type="search"] {
+    flex: 1 1 auto;
+    min-width: 200px;
+    padding: 0.55rem 0.75rem;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--background);
+    color: var(--text);
+  }
+
+  .config-search-row input[type="search"]::placeholder {
+    color: var(--text-soft);
   }
 </style>

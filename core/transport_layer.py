@@ -7,6 +7,7 @@ import asyncio
 from typing import Any, Dict, Optional
 from types import SimpleNamespace
 from core.logging_utils import log_debug, log_warning, log_error, log_info
+from plugins.grillo.grillo_impl import GrilloPlugin
 
 # Interface-specific utilities are loaded dynamically by interfaces.
 # The transport layer provides generic messaging functionality only.
@@ -1214,17 +1215,17 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
                 )
 
                 # After processing actions, check if there's text outside the JSON that should be sent
-                if json_metadata and (
-                    json_metadata.get("prefix") or json_metadata.get("suffix")
+                if json_data and (
+                    json_data.get("prefix") or json_data.get("suffix")
                 ):
                     companion_text = ""
 
                     # Combine prefix and suffix, removing duplicate content
-                    if json_metadata.get("prefix"):
-                        companion_text = json_metadata.get("prefix", "").strip()
+                    if json_data.get("prefix"):
+                        companion_text = json_data.get("prefix", "").strip()
 
-                    if json_metadata.get("suffix"):
-                        suffix_text = json_metadata.get("suffix", "").strip()
+                    if json_data.get("suffix"):
+                        suffix_text = json_data.get("suffix", "").strip()
                         if companion_text:
                             companion_text += "\n" + suffix_text
                         else:
@@ -1531,7 +1532,6 @@ async def run_corrector_middleware(
                 # Selective correction: tell LLM what succeeded and what needs fixing
                 successful = correction_context.get("successful_actions", [])
                 failed = correction_context.get("failed_actions", [])
-                errors = correction_context.get("errors", [])
 
                 correction_message_text = (
                     f"PARTIAL SUCCESS - Some actions completed, others failed.\n\n"
@@ -1687,13 +1687,61 @@ async def run_corrector_middleware(
                 )
                 # If corrected contains valid JSON, return it (do not echo to chat)
                 try:
-                    if extract_json_from_text(corrected):
-                        log_info(
-                            "[corrector_middleware] Received corrected JSON from LLM"
-                        )
-                        return corrected
-                except Exception:
-                    pass
+                    parsed_json, _ = extract_json_from_text(
+                        corrected, return_metadata=True
+                    )
+                    if parsed_json:
+                        # Special-case enforcement for ollama_serve: if the original
+                        # interface was `ollama_serve`, make sure any `message_*`
+                        # actions are routed back to `message_ollama_serve` and
+                        # their payload.interface_path points to `ollama_serve/...`.
+                        if originating_interface == "ollama_serve" and isinstance(
+                            parsed_json, dict
+                        ):
+                            rewritten = False
+                            actions = parsed_json.get("actions", [])
+                            if isinstance(actions, list):
+                                for act in actions:
+                                    if not isinstance(act, dict):
+                                        continue
+                                    a_type = act.get("type", "")
+                                    # Rewrite any message_* target to message_ollama_serve
+                                    if (
+                                        a_type.startswith("message_")
+                                        and a_type != "message_ollama_serve"
+                                    ):
+                                        act["type"] = "message_ollama_serve"
+                                        rewritten = True
+
+                                    # Ensure payload.interface_path is an ollama_serve path
+                                    payload = act.get("payload") or {}
+                                    if isinstance(payload, dict):
+                                        iface_path = payload.get("interface_path", "")
+                                        if not iface_path.startswith("ollama_serve"):
+                                            id_for_iface = chat_id or (
+                                                context.get("chat_id")
+                                                if context
+                                                else None
+                                            )
+                                            payload["interface_path"] = (
+                                                f"ollama_serve/{id_for_iface or '<chat_id>'}"
+                                            )
+                                            act["payload"] = payload
+                                            rewritten = True
+                            if rewritten:
+                                # Serialize back to JSON string before returning
+                                corrected = json.dumps(parsed_json, ensure_ascii=False)
+                                log_info(
+                                    "[corrector_middleware] Rewrote corrected actions to 'message_ollama_serve' for originating interface 'ollama_serve'"
+                                )
+                                # Return rewritten JSON immediately for ollama_serve origin
+                                return corrected
+
+                except Exception as e:
+                    log_warning(
+                        f"[corrector_middleware] Exception while processing corrected JSON: {e}"
+                    )
+                    log_debug(getattr(e, "__traceback__", str(e)))
 
                 # Not valid JSON yet — DO NOT send LLM suggestion to chat (policy)
                 log_debug(
@@ -1846,7 +1894,7 @@ async def notify_corrector_of_system_message(
         log_debug(f"[transport] notify_corrector_of_system_message failed: {e}")
     return
 
-    # Normalize LLM text for mojibake / double-escaped sequences BEFORE parsing
+    """ # Normalize LLM text for mojibake / double-escaped sequences BEFORE parsing
     try:
         from core.text_utils import normalize_for_outbound
 
@@ -2193,4 +2241,4 @@ async def notify_corrector_of_system_message(
         return await universal_send(interface_send_func, *args, text=text, **kwargs)
     except Exception as e:
         log_warning(f"[transport] message_chain delegation failed: {e}")
-        return await universal_send(interface_send_func, *args, text=text, **kwargs)
+        return await universal_send(interface_send_func, *args, text=text, **kwargs) """

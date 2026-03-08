@@ -22,6 +22,7 @@ async def test_save_chat_message_triggers_live_context(monkeypatch):
 
     dummy_mgr = DummyMgr()
     import core.live_session_manager as lsm_mod
+
     monkeypatch.setattr(
         "core.live_session_manager.LiveSessionManager.get_instance",
         lambda: dummy_mgr,
@@ -88,6 +89,7 @@ async def test_save_chat_message_skips_live_path(monkeypatch):
         "core.live_session_manager.LiveSessionManager.get_instance",
         lambda: DummyMgr(),
     )
+
     # stub database context to avoid real DB operations
     class DummyCursor2:
         async def __aenter__(self):

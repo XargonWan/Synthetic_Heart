@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from core.animation_handler import get_animation_handler, AnimationState
+from core.animation_handler import get_karada_state_server, AnimationState
 
 
 class FakeWebSocket:
@@ -17,6 +17,13 @@ class FakeWebSocket:
 class FakeWebUI:
     def __init__(self, sid):
         self.connections = {sid: FakeWebSocket()}
+
+
+class FakeEmotionManager:
+    """Fake emotion manager that returns predictable emotions."""
+
+    def get_emotion_state(self, include_raw: bool = False):
+        return {"happy": 7.5, "calm": 5.2}
 
 
 @pytest.mark.asyncio
@@ -37,7 +44,7 @@ async def test_animation_state_included_and_lipsync_default(
     }
     (base / "think" / "think_short.fbx.json").write_text(json.dumps(desc))
 
-    handler = get_animation_handler()
+    handler = get_karada_state_server()
     handler.set_animation_search_paths([base])
     handler.register_state_animations("think", {"loop": ["think_short.fbx"]})
 
@@ -45,15 +52,12 @@ async def test_animation_state_included_and_lipsync_default(
     fake = FakeWebUI(session)
     handler.set_webui(fake)
 
-    # Monkeypatch EmotionManager to return predictable emotions
-    async def fake_get_emotion_state(self, include_raw: bool = False):
-        return {"happy": 7.5, "calm": 5.2}
+    # Inject a fake emotion manager into PLUGIN_REGISTRY so that
+    # _send_animation_command can fetch emotions without a full plugin stack.
+    import core.core_initializer as _ci  # noqa: PLC0415
 
-    monkeypatch.setattr(
-        "plugins.emotion_manager.EmotionManager.get_emotion_state",
-        fake_get_emotion_state,
-        raising=False,
-    )
+    fake_registry = {"emotion_manager": FakeEmotionManager()}
+    monkeypatch.setattr(_ci, "PLUGIN_REGISTRY", fake_registry)
 
     # Play animation
     await handler.play_animation(
@@ -66,12 +70,14 @@ async def test_animation_state_included_and_lipsync_default(
 
     # Ensure we sent an animation payload with animation_state
     sent = fake.connections[session].sent
-    assert any(p.get("type") == "animation" for p in sent)
+    assert any(p.get("type") == "vrm_animation" for p in sent)
 
     # Find last animation payload
-    anim_payloads = [p for p in sent if p.get("type") == "animation"]
+    anim_payloads = [p for p in sent if p.get("type") == "vrm_animation"]
     assert anim_payloads
     last = anim_payloads[-1]
+    # Confirm the animation path is under 'file' key (not legacy 'animation')
+    assert "file" in last
 
     assert "animation_state" in last
     st = last["animation_state"]

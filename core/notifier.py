@@ -4,14 +4,18 @@ import asyncio
 import time
 from typing import List, Tuple, Callable
 from core.logging_utils import log_debug, log_info, log_warning
-from core.config import get_log_chat_id_sync, get_log_chat_thread_id_sync
+from core.config import (
+    get_log_chat_id_sync,
+    get_log_chat_thread_id_sync,
+    get_log_chat_interface_sync,
+)
 from collections import deque
 
 _in_notify = False
 
 _pending: List[Tuple[int, str]] = []
 # Messages targeting interfaces that are not yet registered
-_pending_interface_msgs: List[Tuple[str, int, str]] = []
+_pending_interface_msgs: List[Tuple[str, int | str, str]] = []
 
 # Flood-control / de-duplication state (initialized once at module load)
 _last_notify_times = deque(maxlen=100)
@@ -307,18 +311,19 @@ def _fallback_to_trainer(message: str) -> None:
 def notify_trainer(message: str) -> None:
     """Notify the trainer via selected interfaces."""
     from core.config import (
-        TRAINER_IDS,
+        get_trainer_ids,
         get_log_chat_interface_sync,
     )
     from core.core_initializer import INTERFACE_REGISTRY
 
     log_info(f"[notifier] notify_trainer() called with message: {message}")
     log_info(f"[notifier] INTERFACE_REGISTRY keys: {list(INTERFACE_REGISTRY.keys())}")
-    log_info(f"[notifier] TRAINER_IDS: {TRAINER_IDS}")
+    trainer_ids = get_trainer_ids()
+    log_info(f"[notifier] TRAINER_IDS: {trainer_ids}")
 
     # If TRAINER_IDS is configured, use it
-    if TRAINER_IDS:
-        interface_configs = TRAINER_IDS.items()
+    if trainer_ids:
+        interface_configs = trainer_ids.items()
         log_info(f"[notifier] Using TRAINER_IDS: {interface_configs}")
     else:
         # Fallback: If LogChat is configured, use it
@@ -353,7 +358,7 @@ def notify_trainer(message: str) -> None:
                 _pending_interface_msgs.append(entry)
             continue
 
-        targets: list[int] = []
+        targets: list[int | str] = []
         # Use the trainer_id that was determined in the interface_configs logic above
         targets.append(trainer_id)
         log_info(f"[notifier] Using target: {trainer_id} interface: {interface_name}")
@@ -361,7 +366,7 @@ def notify_trainer(message: str) -> None:
         if not targets:
             continue
 
-        async def send(target: int):
+        async def send(target: int | str):
             try:
                 # Build message data with thread_id for LogChat if applicable
                 message_data = {"text": message, "target": target}
@@ -416,7 +421,7 @@ def flush_pending_for_interface(interface_name: str) -> None:
     if not iface:
         return
 
-    remaining: List[Tuple[str, int, str]] = []
+    remaining: List[Tuple[str, int | str, str]] = []
     for name, trainer_id, msg in _pending_interface_msgs:
         if name != interface_name:
             remaining.append((name, trainer_id, msg))

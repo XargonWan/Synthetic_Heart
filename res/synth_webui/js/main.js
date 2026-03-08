@@ -119,7 +119,7 @@
 
             // Initialize Chat window module (separate file) and attach header tools
             try {
-                import('./chat-window.mjs').then(async (mod) => {
+                import('./chat-window.mjs?v=20260305-tpose-fix').then(async (mod) => {
                     try {
                         if (mod && typeof mod.createChatWindow === 'function') {
                             // Ensure the Home section (and #chat mount) is available before creating the window
@@ -980,7 +980,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         return window.SynthWindowManager.ensureChatWindow();
                     }
                     // Fallback: lazy-create the chat window via module
-                    try { import('./chat-window.mjs').then((mod) => { try { if (mod && typeof mod.createChatWindow === 'function') mod.createChatWindow(); } catch (e) {} }).catch(() => {}); } catch (e) {}
+                    try { import('./chat-window.mjs?v=20260305-tpose-fix').then((mod) => { try { if (mod && typeof mod.createChatWindow === 'function') mod.createChatWindow(); } catch (e) {} }).catch(() => {}); } catch (e) {}
                     return null;
                 } catch (e) { return null; }
             }
@@ -1848,8 +1848,21 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
                 const general = items.filter((item) => !item.advanced && (!omitAccent || item.key !== 'WEBUI_ACCENT_COLOR'));
                 const advanced = items.filter((item) => item.advanced && (!omitAccent || item.key !== 'WEBUI_ACCENT_COLOR'));
-                renderGrouped(general, configGeneralListEl);
-                renderGrouped(advanced, configAdvancedListEl);
+
+                const settingsHelper = window.SynthSettings;
+                if (settingsHelper && typeof settingsHelper.bindConfigSearch === 'function') {
+                    settingsHelper.bindConfigSearch({
+                        general,
+                        advanced,
+                        renderGrouped,
+                        configGeneralListEl,
+                        configAdvancedListEl,
+                        statusEl: document.getElementById('config-search-status')
+                    });
+                } else {
+                    renderGrouped(general, configGeneralListEl);
+                    renderGrouped(advanced, configAdvancedListEl);
+                }
 
                 if (configExpandAll && !configExpandAll.dataset.bound) {
                     configExpandAll.dataset.bound = '1';
@@ -1859,6 +1872,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     configCollapseAll.dataset.bound = '1';
                     configCollapseAll.addEventListener('click', () => setConfigSectionsCollapsed(true));
                 }
+
 
                 // --- Render a prominent Accent control at the top of Settings (Appearance card)
                 try {
@@ -2803,7 +2817,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 } catch (e) { /* ignore */ }
                 // Delegate chat UI to the chat-window module
                 try {
-                    import('./chat-window.mjs').then((mod) => {
+                    import('./chat-window.mjs?v=20260305-tpose-fix').then((mod) => {
                         try { if (mod && typeof mod.createChatWindow === 'function') mod.createChatWindow(); } catch (e) { /* ignore */ }
                         try { if (mod && typeof mod.initChatUI === 'function') mod.initChatUI(); } catch (e) { /* ignore */ }
                     }).catch((e) => { console.debug('[synth_webui] chat-window import failed', e); });

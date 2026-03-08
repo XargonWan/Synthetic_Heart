@@ -109,12 +109,18 @@ async def test_send_context_update(monkeypatch):
     monkeypatch.setattr(live_session_manager, "_HAS_GENAI_SDK", True)
     mgr = live_session_manager.LiveSessionManager(api_key="x")
     logged = []
+
     # stub a session object
     class DummySession:
         async def send_client_content(self, turns=None, turn_complete=False):
             logged.append((turns, turn_complete))
 
-    state = SimpleNamespace(is_active=True, _session=DummySession(), generating=False, pending_context_updates=[])
+    state = SimpleNamespace(
+        is_active=True,
+        _session=DummySession(),
+        generating=False,
+        pending_context_updates=[],
+    )
     mgr._sessions[42] = state
 
     # immediate send when not generating
