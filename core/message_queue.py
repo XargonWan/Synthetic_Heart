@@ -34,6 +34,12 @@ _lock = asyncio.Lock()
 _consumer_task: asyncio.Task | None = None
 _counter = 0  # Monotonic counter to prevent dict comparison when priorities are equal
 
+# Track running LOW_PRIORITY background tasks by interface_path so they can be
+# cancelled when a higher-priority (user) message arrives for the same chat.
+# This prevents duplicate responses when a grillo outreach beat and a user
+# message target the same interface_path concurrently.
+_bg_tasks: dict[str, asyncio.Task] = {}
+
 
 class MessageQueue:
     """Minimal thread-safe queue for interfaces expecting blocking semantics."""
@@ -1004,11 +1010,28 @@ async def _consumer_loop() -> None:
                             _resolve_generation_animation_state("start")
                         )
 
+                        # Cancel any running LOW_PRIORITY background task for the
+                        # same interface_path.  This prevents duplicate responses
+                        # when a grillo outreach beat races against a user message
+                        # for the same chat — the outreach prompt includes chat
+                        # history and the LLM would otherwise respond to the user's
+                        # message, producing a duplicate alongside the trainer
+                        # engine's proper reply.
+                        _existing_bg = _bg_tasks.pop(interface_path, None)
+                        if _existing_bg is not None and not _existing_bg.done():
+                            _existing_bg.cancel()
+                            log_info(
+                                f"[QUEUE] Cancelled LOW_PRIORITY background task for {interface_path} "
+                                f"(superseded by incoming user message)"
+                            )
+
                         # Selenium-based LLMs manage browser state and cannot be safely
                         # cancelled mid-flight. All other engines (HTTP-based Gemini, OpenAI, …)
                         # support asyncio cancellation and should be stopped on timeout so they
                         # don't deliver a "ghost" reply after the fallback has already been sent.
-                        task_is_cancellable = getattr(plugin_instance, "task_cancellable", True)
+                        task_is_cancellable = getattr(
+                            plugin_instance, "task_cancellable", True
+                        )
 
                         # Run message processing in a Task so we can apply a per-element timeout.
                         processing_task = asyncio.create_task(
@@ -1031,6 +1054,10 @@ async def _consumer_loop() -> None:
                                 f"[QUEUE] Low-priority task scheduled as background for interface_path={interface_path}; not awaiting"
                             )
 
+                            # Track this background task so it can be cancelled if a
+                            # user message arrives for the same interface_path.
+                            _bg_tasks[interface_path] = processing_task
+
                             # Ensure generation_end hook is called when background task completes
                             processing_task.add_done_callback(
                                 lambda t: asyncio.create_task(
@@ -1038,16 +1065,25 @@ async def _consumer_loop() -> None:
                                 )
                             )
 
-                            # Log any exceptions when done
-                            def _bg_done_cb(t: asyncio.Task) -> None:
+                            # Clean up tracking and log exceptions when done
+                            _captured_ipath = interface_path  # capture for closure
+
+                            def _bg_done_cb(
+                                t: asyncio.Task,
+                                _ipath: str = _captured_ipath,
+                            ) -> None:
+                                # Remove from tracking dict
+                                _bg_tasks.pop(_ipath, None)
                                 try:
                                     exc = t.exception()
                                     if exc is not None:
                                         log_warning(
-                                            f"[QUEUE] Background task for {interface_path} raised: {exc}"
+                                            f"[QUEUE] Background task for {_ipath} raised: {exc}"
                                         )
                                 except asyncio.CancelledError:
-                                    pass
+                                    log_info(
+                                        f"[QUEUE] Background task for {_ipath} was cancelled (user message arrived)"
+                                    )
                                 except Exception:
                                     pass
 
@@ -1100,7 +1136,11 @@ async def _consumer_loop() -> None:
                                     await asyncio.wait_for(
                                         asyncio.shield(processing_task), timeout=2
                                     )
-                                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                                except (
+                                    asyncio.TimeoutError,
+                                    asyncio.CancelledError,
+                                    Exception,
+                                ):
                                     pass
                                 try:
                                     await _call_bot_generation_end(processing_task)
@@ -1130,7 +1170,9 @@ async def _consumer_loop() -> None:
                                             pass
 
                                         try:
-                                            await _call_bot_generation_end(processing_task)
+                                            await _call_bot_generation_end(
+                                                processing_task
+                                            )
                                         except Exception:
                                             pass
 
@@ -1139,7 +1181,9 @@ async def _consumer_loop() -> None:
                                             item_chat = (
                                                 queued_item.get("chat_id")
                                                 if isinstance(queued_item, dict)
-                                                else getattr(queued_item, "chat_id", None)
+                                                else getattr(
+                                                    queued_item, "chat_id", None
+                                                )
                                             )
                                             if item_chat == chat_id:
                                                 still_pending = True
@@ -1161,7 +1205,9 @@ async def _consumer_loop() -> None:
                                                     f"[QUEUE] Failed to clear processing session meta (background): {set_e}"
                                                 )
                                             await _broadcast_global_animation_state(
-                                                _resolve_generation_animation_state("end")
+                                                _resolve_generation_animation_state(
+                                                    "end"
+                                                )
                                             )
                                     except Exception as e:
                                         log_debug(

@@ -672,7 +672,12 @@ async def handle_incoming_message(
                                 # addition to the proper actions list, which creates a
                                 # duplicate that fails validation (no interface_path) and
                                 # triggers an unnecessary correction loop.
-                                if key in ("message", "text", "reply", "response") and isinstance(value, str):
+                                if key in (
+                                    "message",
+                                    "text",
+                                    "reply",
+                                    "response",
+                                ) and isinstance(value, str):
                                     already_present = any(
                                         isinstance(a, dict)
                                         and (a.get("type") or "").startswith("message_")
@@ -685,8 +690,28 @@ async def handle_incoming_message(
                                             f"[message_chain] Skipping synthetic '{key}' action — text already present in explicit message action"
                                         )
                                         continue
+                                # Resolve the correct action type and inject
+                                # interface_path for message-like synthetic actions
+                                # so they pass validation without a correction loop.
+                                synthetic_type = key
+                                ctx_ipath = ctx.get("interface_path") if ctx else None
+                                if key in (
+                                    "message",
+                                    "text",
+                                    "reply",
+                                    "response",
+                                ) and isinstance(value, str):
+                                    if ctx_ipath:
+                                        iface_prefix = str(ctx_ipath).split("/")[0]
+                                        resolved = _INTERFACE_TO_MESSAGE_ACTION.get(
+                                            iface_prefix
+                                        )
+                                        if resolved:
+                                            synthetic_type = resolved
+                                        if "interface_path" not in payload:
+                                            payload["interface_path"] = str(ctx_ipath)
                                 synthetic_actions.append(
-                                    {"type": key, "payload": payload}
+                                    {"type": synthetic_type, "payload": payload}
                                 )
 
                             actions.extend(synthetic_actions)
@@ -1035,6 +1060,7 @@ async def handle_incoming_message(
                         # engine is non-empty and not "disabled", we consider TTS on.
                         # For backwards compatibility we also honour the old boolean
                         # flags/endpoints, but they no longer drive the feature state.
+                        tts_raw = ""
                         try:
                             from core.config_manager import config_registry
 
@@ -1051,6 +1077,16 @@ async def handle_incoming_message(
 
                             # legacy fallback
                             if not vox_enabled:
+                                tts_raw = str(
+                                    config_registry.get_value(
+                                        "TTS_ENDPOINTS",
+                                        "",
+                                        value_type=str,
+                                        group="plugins",
+                                        component="tts_lipsync",
+                                    )
+                                    or ""
+                                )
                                 vox_enabled = bool(
                                     config_registry.get_value(
                                         "TTS_ENABLED",
@@ -1059,13 +1095,7 @@ async def handle_incoming_message(
                                         group="plugins",
                                         component="tts_lipsync",
                                     )
-                                    or config_registry.get_value(
-                                        "TTS_ENDPOINTS",
-                                        "",
-                                        value_type=str,
-                                        group="plugins",
-                                        component="tts_lipsync",
-                                    )
+                                    or tts_raw
                                 )
 
                             if not vox_enabled and not _explicit_tts_request:
@@ -1077,26 +1107,6 @@ async def handle_incoming_message(
                                 log_debug(
                                     "[message_chain] Vox engine disabled but request_tts=True — "
                                     "allowing TTS attempt (VoxPlugin will fall back to text if needed)"
-                                )
-
-                        except Exception:
-                            pass
-                            tts_enabled = config_registry.get_value(
-                                "TTS_ENABLED",
-                                False,
-                                value_type=bool,
-                                group="plugins",
-                                component="tts_lipsync",
-                            )
-
-                            if not tts_raw:
-                                log_debug(
-                                    "[message_chain] (legacy) TTS_ENDPOINTS not configured"
-                                )
-                                # note: we don't force skip here, because VOX_ENABLED \n                                # may already permit TTS without endpoints
-                            if not bool(tts_enabled):
-                                log_debug(
-                                    "[message_chain] (legacy) TTS_ENABLED is False"
                                 )
 
                         except Exception as e:

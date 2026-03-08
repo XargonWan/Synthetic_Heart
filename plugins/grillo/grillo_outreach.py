@@ -279,7 +279,7 @@ class GrilloOutreachPlugin:
 
         prompt = f"""[G.R.I.L.L.O. OUTREACH]
 
-You feel like reaching out. Based on your recent experiences and thoughts, 
+You feel like reaching out. Based on your recent experiences and thoughts,
 initiate a natural conversation with someone you care about.
 
 Recent context:
