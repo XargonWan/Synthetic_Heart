@@ -21,8 +21,12 @@ async def test_request_selective_correction_includes_message_in_context(monkeypa
         # Return a mock corrected JSON to simulate LLM reply (not necessary for test)
         return None
 
+    # patch both the transport layer and the action_parser import
     monkeypatch.setattr(
         "core.transport_layer.run_corrector_middleware", fake_run_corrector_middleware
+    )
+    monkeypatch.setattr(
+        "core.action_parser.run_corrector_middleware", fake_run_corrector_middleware
     )
 
     failed_actions = [
@@ -63,3 +67,6 @@ async def test_request_selective_correction_includes_message_in_context(monkeypa
     cc = ctx["correction_context"]
     assert "FAILED ACTIONS" or "failed_actions"  # just ensure we have the block
     assert any("message_send" in str(v) for v in cc["instruction"].split("\n")) or True
+    # The warning should mention the type is invalid but should not hardcode a
+    # full list; just check for the generic phrasing.
+    assert "not a valid action type" in cc["instruction"]

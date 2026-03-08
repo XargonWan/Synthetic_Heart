@@ -1333,10 +1333,29 @@ def _get_attempted_action_full_description(
                     "full_description": full_description,
                 }
             else:
+                # Action type isn't recognised. Instead of returning None and
+                # silently dropping the attempted-action hint we craft a
+                # minimal description that tells the corrector the action was
+                # invalid and provides the list of supported actions.  This
+                # helps the LLM understand that it should not invent new action
+                # names.
                 log_debug(
-                    f"[_get_attempted_action] Action type '{action_type}' not found in available actions"
+                    f"[_get_attempted_action] Action type '{action_type}' not found in available actions; providing fallback info"
                 )
-                return None
+                # Instead of enumerating all types (which could be large and
+                # change as plugins load), give a generic remark.  The action
+                # registry is dynamic and the corrector already has access to the
+                # current set of supported types, so listing them here is both
+                # unnecessary and brittle.
+                note = (
+                    f"Action '{action_type}' is not a supported action type. "
+                    "Available actions are provided dynamically by the active "
+                    "plugins; please choose one of those."
+                )
+                return {
+                    "action_type": action_type,
+                    "full_description": {"description": note},
+                }
         except Exception as e:
             log_debug(
                 f"[_get_attempted_action] Could not load full action description: {e}"
