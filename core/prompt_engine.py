@@ -573,6 +573,22 @@ async def build_json_prompt(
         from core.core_initializer import core_initializer
 
         full_actions = core_initializer.actions_block.get("available_actions", {})
+
+        # When audio attachments are present as multimodal content, remove
+        # stt_transcribe from the available actions so the LLM processes the
+        # audio directly instead of requesting a redundant transcription step.
+        has_audio_attachment = attachments and any(
+            (a.get("mime_type") or "").startswith("audio/") for a in attachments
+        )
+        if has_audio_attachment and "stt_transcribe" in full_actions:
+            full_actions = {
+                k: v for k, v in full_actions.items() if k != "stt_transcribe"
+            }
+            log_debug(
+                "[json_prompt] Removed stt_transcribe from actions "
+                "(audio sent as multimodal content)"
+            )
+
         # Minify to reduce token usage
         prompt_with_instructions["actions"] = minify_actions_block(full_actions)
         log_debug(
