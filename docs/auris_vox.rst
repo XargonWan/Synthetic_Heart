@@ -34,11 +34,8 @@ Architecture
      ┌────────┴────────┐   ┌─────────┴──────────┐   ┌─────────┴──────────┐
      │  Auris Engines  │   │   Vox Engines       │   │   Live Engines     │
      │  gemini.py      │   │   http.py           │   │   silero.py (VAD)  │
-     │                 │   │   harmony.py        │   │   gemini.py (stub) │
-     └─────────────────┘   │   chatterbox.py     │   └────────────────────┘
-                           │                     │
-                           │   kitten.py         │
-                           └─────────────────────┘
+     │                 │   │                     │   │  gemini.py (stub) │
+     └─────────────────┘   │   kitten.py         │   └────────────────────┘
 
 Registry Pattern
 ----------------
@@ -102,6 +99,25 @@ Auris — STT Subsystem
 
 Plugin: ``auris_plugin``
 ~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Vosk-specific configuration**
+
+When the ``auris_vosk`` engine is selected, two additional variables control
+language handling:
+
+* ``VOSK_LANGUAGE`` – language code for the Vosk model (``"en-us"``,
+  ``"it"``, ``"fr"`` etc).  Starting in version 2.?, this defaults to
+  ``"auto"`` instead of English; in ``auto`` mode the first few seconds of
+  audio are probed by a Whisper‑tiny model (via the optional ``faster-whisper``
+  package) to identify the spoken language.  If detection fails or the
+  dependency is missing, the first downloaded Vosk model is used as a fallback.
+  Explicitly setting ``VOSK_LANGUAGE`` overrides auto‑detection.
+
+* ``VOSK_LID_CONFIDENCE`` – when Whisper LID is used, the minimum probability
+  (0–1) required to accept the detected language.  Defaults to ``0.5``.  If
+  the confidence is below this threshold the fallback path is taken.
+
+
 
 The ``AurisPlugin`` is the single authoritative entry-point for all transcription.  Other plugins, interfaces, and cortex engines **must not** call STT backends directly — they should always call ``AurisPlugin.transcribe_audio()``.
 
@@ -191,6 +207,17 @@ Vox — TTS & Lip-sync Subsystem
 
 Plugin: ``vox_plugin``
 ~~~~~~~~~~~~~~~~~~~~~~
+
+*Text language detection*
+
+The core plugin performs language detection on the input text using
+``lingua-language-detector`` (a much more accurate replacement for the old
+``lingua-language-detector``).  The detected ISO-639-1 code (``"en"``, ``"it"`` etc)
+is logged and forwarded to the active Vox engine via a ``language`` keyword
+argument.  Engines can optionally use this hint to select an appropriate voice
+or model.  ``lingua`` is a required dependency; if detection confidence is below
+the internal threshold, no hint is supplied and the plugin continues as before.
+
 
 ``VoxPlugin`` owns the **entire** TTS pipeline:
 
@@ -333,13 +360,15 @@ Available Vox engines
    * - ``http``
      - ``vox_engines/http.py``
      - Calls one or more external HTTP TTS servers.  Reads legacy ``TTS_ENDPOINTS`` config key.  Full failover support.
-   * - ``chatterbox``
-     - ``vox_engines/chatterbox.py``
-     - Chatterbox TTS (stub — install ``chatterbox-tts`` to activate).
    * - ``kitten``
      - ``vox_engines/kitten.py``
-     - KittenTTS (stub — install the library to activate).
-
+     - Neural KittenTTS engine; requires the ``kittentts`` package or uses
+       the vendored shim (`vendor/kittentts`).  The shim is lightweight and
+       lazily imports ``gtts``/``pydub`` – those two libraries are declared as
+       normal project dependencies and **must be installed** (``uv add gtts
+       pydub``) for audio output to work.  Without them the engine will fall
+       back to text and log an informative error.  Produces higher-quality
+       audio than the legacy system-voice implementation.
 Lip-sync Integration
 ---------------------
 
@@ -372,7 +401,11 @@ Live — Bidirectional Streaming
 
 The **Live** subsystem handles persistent sessions where audio and text flow in both directions simultaneously (e.g. a microphone feed producing transcripts while the system synthesises speech).
 
-Configuration: select the active engine via ``LIVE_CORTEX`` in the WebUI (the dropdown includes a ``disabled`` option to turn the subsystem off).
+Configuration: select the active engine via ``LIVE_CORTEX`` in the WebUI. The components page dropdown is populated with both
+cortex engines of kind ``live`` and any engines registered with
+``LIVE_REGISTRY`` (e.g. ``gemini_live``). The currently-selected value
+is highlighted and persists across page reloads; choosing ``disabled``
+turns the subsystem off.
 
 
 ``LiveEngineBase`` contract

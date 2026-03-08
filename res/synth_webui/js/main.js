@@ -2696,7 +2696,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     setupRegistrySelect('auris-engine-select','auris-engine-info','auris-engine-label','auris-engine-description', data.auris || [], 'ACTIVE_AURIS_ENGINE');
                     setupRegistrySelect('live-engine-select', 'live-engine-info', 'live-engine-label', 'live-engine-description',  data.live || [], 'LIVE_CORTEX');  // persist selected live engine via LIVE_CORTEX config
 
-                    // ── Kitten (Silero V3) speaker selector ────────────────────
+                    // ── Kitten TTS speaker selector ───────────────────────────
                     const kittenSpeakerSelect = document.getElementById('kitten-speaker-select');
                     const kittenPlayBtn = document.getElementById('kitten-play-btn');
                     let kittenSpeakerList = [];
@@ -2739,7 +2739,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 if (r.ok) {
                                     const cfg = await r.json();
                                     const item = Array.isArray(cfg.items)
-                                        ? cfg.items.find(i => i.key === 'KITTEN_SPEAKER')
+                                        ? cfg.items.find(i => i.key === 'KITTEN_VOICE')
                                         : null;
                                     populateKittenSpeakers(item && item.value ? item.value : 'en_1');
                                 } else {
@@ -2760,11 +2760,11 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 await fetch('/api/config', {
                                     method: 'POST',
                                     headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ key: 'KITTEN_SPEAKER', value: speaker })
+                                    body: JSON.stringify({ key: 'KITTEN_VOICE', value: speaker })
                                 });
                                 window.showToast && window.showToast('Kitten speaker set to ' + speaker);
                             } catch (e) {
-                                console.error('[synth_webui] Failed to set KITTEN_SPEAKER', e);
+                                console.error('[synth_webui] Failed to set KITTEN_VOICE', e);
                                 window.showToast && window.showToast('Failed to save speaker', true);
                             }
                         });

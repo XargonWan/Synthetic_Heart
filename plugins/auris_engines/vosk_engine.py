@@ -392,7 +392,14 @@ def _resolve_auto_language(audio_path: str | None = None) -> str:
     if audio_path is not None:
         detected = _detect_language_with_whisper(audio_path)
         if detected:
+            log_info(
+                f"[auris/vosk] auto-language detected '{detected}' from {Path(audio_path).name}"
+            )
             return detected
+        else:
+            log_info(
+                "[auris/vosk] auto-language detection unavailable or confidence low; falling back to configured defaults"
+            )
 
     # Fallback: use the first downloaded Vosk model
     try:
@@ -419,10 +426,13 @@ def _get_configured_language() -> str:
     try:
         from core.config_manager import config_registry  # type: ignore[import]
 
+        # default is 'auto' so that callers which omit configuration
+        # (or when the registry is unreachable) end up in auto-detect
+        # mode instead of silently assuming English.
         lang = (
             config_registry.get_value(
                 "VOSK_LANGUAGE",
-                "en-us",
+                "auto",
                 label="Vosk language",
                 description=(
                     "Language code for Vosk STT (e.g. 'en-us', 'it', 'fr'). "
@@ -431,11 +441,11 @@ def _get_configured_language() -> str:
                     "the first downloaded Vosk model when unavailable)."
                 ),
             )
-            or "en-us"
+            or "auto"
         )
         return str(lang).strip().lower()
     except Exception:
-        return "en-us"
+        return "auto"
 
 
 def _get_default_language() -> str:

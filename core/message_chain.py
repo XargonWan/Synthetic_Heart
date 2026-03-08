@@ -672,7 +672,12 @@ async def handle_incoming_message(
                                 # addition to the proper actions list, which creates a
                                 # duplicate that fails validation (no interface_path) and
                                 # triggers an unnecessary correction loop.
-                                if key in ("message", "text", "reply", "response") and isinstance(value, str):
+                                if key in (
+                                    "message",
+                                    "text",
+                                    "reply",
+                                    "response",
+                                ) and isinstance(value, str):
                                     already_present = any(
                                         isinstance(a, dict)
                                         and (a.get("type") or "").startswith("message_")

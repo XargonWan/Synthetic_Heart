@@ -48,7 +48,7 @@ dependencies = [
     "pydub>=0.25.1",
     "huggingface-hub>=1.5.0",
     "gtts>=2.5.4",
-    "edge-tts>=7.2.7",
+    "lingua-language-detector>=2.0.2",
 ]
 
 [project.optional-dependencies]
@@ -58,6 +58,7 @@ dependencies = [
 # ── Auris STT engines ─────────────────────────────────────────────────────────
 vosk      = ["vosk>=0.3.45"]          # local CPU STT (Auris vosk engine)
                                        # ~50 MB model downloaded on first use
+whisper   = ["faster-whisper>=0.8.1"]   # optional language-detection helper
 
 [dependency-groups]
 dev = [
@@ -76,6 +77,7 @@ target-version = "py310"
 
 [tool.ruff.lint]
 fixable = ["ALL"]
+
 
 [tool.ty.environment]
 # "python-version" must be inside [environment], not at the top

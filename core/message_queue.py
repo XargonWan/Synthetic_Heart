@@ -1008,7 +1008,9 @@ async def _consumer_loop() -> None:
                         # cancelled mid-flight. All other engines (HTTP-based Gemini, OpenAI, …)
                         # support asyncio cancellation and should be stopped on timeout so they
                         # don't deliver a "ghost" reply after the fallback has already been sent.
-                        task_is_cancellable = getattr(plugin_instance, "task_cancellable", True)
+                        task_is_cancellable = getattr(
+                            plugin_instance, "task_cancellable", True
+                        )
 
                         # Run message processing in a Task so we can apply a per-element timeout.
                         processing_task = asyncio.create_task(
@@ -1100,7 +1102,11 @@ async def _consumer_loop() -> None:
                                     await asyncio.wait_for(
                                         asyncio.shield(processing_task), timeout=2
                                     )
-                                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                                except (
+                                    asyncio.TimeoutError,
+                                    asyncio.CancelledError,
+                                    Exception,
+                                ):
                                     pass
                                 try:
                                     await _call_bot_generation_end(processing_task)
@@ -1130,7 +1136,9 @@ async def _consumer_loop() -> None:
                                             pass
 
                                         try:
-                                            await _call_bot_generation_end(processing_task)
+                                            await _call_bot_generation_end(
+                                                processing_task
+                                            )
                                         except Exception:
                                             pass
 
@@ -1139,7 +1147,9 @@ async def _consumer_loop() -> None:
                                             item_chat = (
                                                 queued_item.get("chat_id")
                                                 if isinstance(queued_item, dict)
-                                                else getattr(queued_item, "chat_id", None)
+                                                else getattr(
+                                                    queued_item, "chat_id", None
+                                                )
                                             )
                                             if item_chat == chat_id:
                                                 still_pending = True
@@ -1161,7 +1171,9 @@ async def _consumer_loop() -> None:
                                                     f"[QUEUE] Failed to clear processing session meta (background): {set_e}"
                                                 )
                                             await _broadcast_global_animation_state(
-                                                _resolve_generation_animation_state("end")
+                                                _resolve_generation_animation_state(
+                                                    "end"
+                                                )
                                             )
                                     except Exception as e:
                                         log_debug(

@@ -202,7 +202,7 @@ The emotional state is exposed to the WebUI for real-time visualization and can 
   - Additional WebUI-configurable exposed variables:
     - ``TTS_ENABLED`` (boolean): enable/disable TTS plugin from the WebUI
     - ``TTS_FALLBACK_TO_TEXT`` (boolean): when true, sends a text-only fallback if TTS generation fails
-* ``vox_plugin`` – **Vox** TTS & lip-sync subsystem. Unified pipeline: text cleaning → engine generation → WAV/PCM file write → lip-sync extraction → cross-interface dispatch. Replaces ``tts_lipsync`` as the recommended TTS path. Supports pluggable engines (``http``, ``chatterbox``, ``kitten``). Select the active engine via ``ACTIVE_VOX_ENGINE`` (choose ``disabled`` to turn off). See :doc:`auris_vox`.
+* ``vox_plugin`` – **Vox** TTS & lip-sync subsystem. Unified pipeline: text cleaning → engine generation → WAV/PCM file write → lip-sync extraction → cross-interface dispatch. Replaces ``tts_lipsync`` as the recommended TTS path. Supports pluggable engines (``http``, ``kitten``); development-only stubs such as ``chatterbox`` live in ``plugins/_dev/vox_engines`` and are not imported by default. Select the active engine via ``ACTIVE_VOX_ENGINE`` (choose ``disabled`` to turn off). See :doc:`auris_vox`.
 * ``auris_plugin`` – **Auris** STT subsystem. Unified transcription entry-point for voice notes and audio files. Supports pluggable engines (``gemini``, ``silero``). Select the active engine via ``ACTIVE_AURIS_ENGINE`` (choose ``disabled`` to turn off). See :doc:`auris_vox`.
 
 

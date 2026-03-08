@@ -111,6 +111,9 @@ class HttpVoxEngine(VoxEngineBase):
                 "voice_wav": voice_wav,
                 "use_emo_text": False,
             }
+            # forward optional language hint to remote server
+            if "language" in kwargs and kwargs["language"]:
+                payload["language"] = kwargs["language"]
 
             # Fast timeout for the primary server so failover is prompt
             timeout = 2 if "192.168.1.6:" in endpoint else global_timeout

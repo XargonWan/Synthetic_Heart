@@ -787,8 +787,67 @@ async def cortex_response_send(
         try:
             from types import SimpleNamespace
 
-            # Handle different JSON formats
-            if isinstance(json_data, dict) and "actions" in json_data:
+            # If the JSON payload contains any unexpected top-level keys,
+            # escalate to the corrector so the LLM can resend proper actions.
+            if isinstance(json_data, dict):
+                try:
+                    from core.validation_registry import get_validation_registry
+
+                    allowed_metadata = (
+                        get_validation_registry().get_response_metadata_keys()
+                    )
+                except Exception:
+                    allowed_metadata = []
+                extra_keys = [
+                    k
+                    for k in json_data.keys()
+                    if k != "actions" and k not in allowed_metadata
+                ]
+                if extra_keys:
+                    log_warning(
+                        f"[cortex_response_send] JSON contains unexpected top-level keys {extra_keys}; invoking corrector"
+                    )
+                    # build a dummy message for the corrector call
+                    msg_obj = SimpleNamespace()
+                    msg_obj.chat_id = chat_id
+                    msg_obj.text = ""
+                    msg_obj.original_text = text
+                    msg_obj.thread_id = kwargs.get("thread_id")
+                    msg_obj.from_cortex = True
+
+                    corr_ctx = {
+                        "interface": "telegram",
+                        "original_chat_id": chat_id,
+                        "original_thread_id": kwargs.get("thread_id"),
+                        "original_text": text[:500] if text else "",
+                        "from_cortex": True,
+                    }
+                    from core import action_parser
+
+                    try:
+                        corr_res = await action_parser.corrector_orchestrator(
+                            text, corr_ctx, bot, msg_obj
+                        )
+                        if corr_res is True:
+                            log_debug(
+                                "[cortex_response_send] corrector handled extra keys; not forwarding text"
+                            )
+                            return
+                        elif corr_res is False:
+                            log_warning(
+                                "[cortex_response_send] corrector blocked message due to extra keys"
+                            )
+                            return None
+                        else:
+                            log_warning(
+                                "[cortex_response_send] corrector declined; blocking message"
+                            )
+                            return None
+                    except Exception as e:
+                        log_warning(
+                            f"[cortex_response_send] corrector invocation failed: {e}"
+                        )
+                        return None
                 actions = json_data["actions"]
                 if not isinstance(actions, list):
                     log_warning("[cortex_response_send] actions field must be a list")

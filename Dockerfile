@@ -90,7 +90,8 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       xfce4 xfce4-goodies xfce4-terminal thunar mousepad ristretto \
       adwaita-icon-theme util-linux dbus-x11 at-spi2-core \
-      pulseaudio pulseaudio-utils pavucontrol && \
+      pulseaudio pulseaudio-utils pavucontrol \
+      espeak-ng && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # --- [Python & UV Setup] ---
@@ -98,6 +99,7 @@ WORKDIR /app
 
 # 1. Copy dependency files FIRST (for caching)
 COPY pyproject.toml uv.lock ./
+# (no vendored packages needed any more)
 # (Optional fallback if you don't have lockfiles yet: COPY requirements.txt . )  # kept for backwards compatibility, not needed in normal builds
 
 # 2. Tell uv to create the venv at /app/venv (Matching your old structure)
@@ -118,12 +120,10 @@ RUN chmod +x /usr/local/bin/cleanup_chrome.sh /app/synth.sh
 # Copy application code (includes vendor packages)
 COPY . /app
 
-# Some audio engines are not published on PyPI (or have problematic build
-# dependencies) and therefore cannot appear in pyproject.toml.  We install
-# vendored stub packages here via pip; the real engines can be swapped in by
-# installing the appropriate GitHub repo or wheel in a later step if desired.
-RUN pip install /app/vendor/chatterbox_tts
-RUN pip install /app/vendor/kittentts
+# vendored packages are installed by `uv sync` earlier via path sources.
+# Historically we pip-installed them here, but that invoked the system pip
+# outside of the UV_PROJECT_ENVIRONMENT and caused modules to be missing at
+# runtime.  Keeping them solely under uv sync ensures they live in /app/venv.
 
 # Cleanup & Permissions
 RUN rm -rf /app/s6-services /app/automation_tools

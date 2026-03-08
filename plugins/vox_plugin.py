@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import threading
 import time
 import wave
 from pathlib import Path
@@ -35,6 +36,66 @@ from core.variables_engine import register_exposed_var
 from core.vox_registry import VOX_REGISTRY
 
 # ---------------------------------------------------------------------------
+# Language detection helper (lingua — replaces langdetect for better accuracy)
+# ---------------------------------------------------------------------------
+
+_lingua_detector: Any | None = None
+_lingua_detector_lock = threading.Lock()
+
+
+def _get_lingua_detector() -> Any | None:
+    """Return the singleton ``lingua`` detector, building it on first call.
+
+    Uses ``lingua-language-detector`` (much more accurate than ``langdetect``
+    for short texts and closely-related languages such as Italian / Spanish).
+    Returns ``None`` gracefully when the package is not installed.
+    """
+    global _lingua_detector
+    if _lingua_detector is not None:
+        return _lingua_detector
+    with _lingua_detector_lock:
+        if _lingua_detector is not None:  # double-checked
+            return _lingua_detector
+        try:
+            from lingua import LanguageDetectorBuilder
+
+            _lingua_detector = (
+                LanguageDetectorBuilder.from_all_languages()
+                .with_minimum_relative_distance(0.1)
+                .build()
+            )
+            log_info("[vox_plugin] lingua detector initialized.")
+        except Exception as exc:
+            log_warning(f"[vox_plugin] lingua not available: {exc}")
+    return _lingua_detector
+
+
+def _detect_language(text: str) -> str | None:
+    """Return a BCP-47 / ISO-639-1 language code or ``None``.
+
+    Uses ``lingua-language-detector`` for accurate detection, especially on
+    short texts and closely-related language pairs (e.g. Italian / Spanish).
+    Returns ``None`` when confidence is below the internal threshold or the
+    detector is unavailable.
+    """
+    if not text or not text.strip():
+        return None
+
+    detector = _get_lingua_detector()
+    if detector is not None:
+        try:
+            lang = detector.detect_language_of(text)
+            if lang is not None:
+                code = lang.iso_code_639_1.name.lower()
+                log_debug(f"[vox_plugin] lingua detected: {code!r} for {text[:50]!r}")
+                return code
+        except Exception:
+            pass
+
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Exposed config variables
 # ---------------------------------------------------------------------------
 
@@ -42,11 +103,12 @@ from core.vox_registry import VOX_REGISTRY
 register_exposed_var(
     "ACTIVE_VOX_ENGINE",
     label="Active Vox Engine",
-    default="kitten",
+    default="disabled",
     value_type=str,
     ui_type="string",
     description=(
-        "Name of the active Vox TTS engine (e.g. 'http', 'chatterbox', 'kitten')."
+        "Name of the active Vox TTS engine (e.g. 'disabled', 'kitten', 'http'). "
+        "Set to 'disabled' to turn off speech output."
     ),
     scope="plugins",
     component="vox_plugin",
@@ -144,6 +206,16 @@ class VoxPlugin(AIPluginBase):
         self._output_dir: Path = Path("res/synth_webui/static/audio/tts")
         self._fallback_to_text: bool = True
 
+        # Pre-warm the lingua detector in a daemon thread so it is ready before
+        # the first detect_language() call arrives from recon.  Building all
+        # language models can take 1-3 s on first run; doing it eagerly avoids
+        # cold-start timeouts (default LANGUAGE_DETECTOR_TIMEOUT = 2 s).
+        threading.Thread(
+            target=_get_lingua_detector,
+            daemon=True,
+            name="lingua-warmup",
+        ).start()
+
         # Import built-in engine modules so they self-register
         self._import_builtin_engines()
 
@@ -228,6 +300,16 @@ class VoxPlugin(AIPluginBase):
         if not clean:
             return {"status": "skipped", "reason": "empty_text"}
 
+        # Attempt language detection on the cleaned text so that downstream
+        # engines (e.g. cloud APIs) can pick an appropriate voice or model.
+        # Uses lingua-language-detector for much better accuracy on short texts
+        # and on closely-related language pairs (e.g. Italian / Spanish).
+        detected_lang: str | None = _detect_language(clean)
+        if detected_lang:
+            log_info(
+                f"[vox_plugin] detected text language: '{detected_lang}'"
+            )  # pragma: no branch
+
         # --- Load engine ---
         name = engine_name or self._active_engine_name
         try:
@@ -238,8 +320,13 @@ class VoxPlugin(AIPluginBase):
 
         # --- Generate audio ---
         try:
+            # pass detected language hint to engine if available; engines may
+            # ignore unexpected kwargs.
+            kwargs: dict[str, Any] = {}
+            if detected_lang:
+                kwargs["language"] = detected_lang
             audio_bytes: bytes | None = await asyncio.to_thread(
-                engine.generate_tts, clean, emotion
+                engine.generate_tts, clean, emotion, **kwargs
             )
         except Exception as exc:
             log_error(f"[vox_plugin] Engine '{name}' generation error: {exc}")
@@ -282,6 +369,41 @@ class VoxPlugin(AIPluginBase):
         )
 
         return {"status": "success", "audio_path": str(out_path), "filename": filename}
+
+    # ------------------------------------------------------------------
+    # Language detection helper (used by recon and other components)
+    # ------------------------------------------------------------------
+
+    def detect_language(
+        self, message: Any, interface_path: str | None = None
+    ) -> str | None:
+        """Return a detected language code (e.g. 'en' or 'it').
+
+        This method implements the *language detector plugin* contract used by
+        :mod:`core.recon`.  Uses ``lingua-language-detector`` for significantly
+        better accuracy on short texts and on closely-related language pairs
+        (e.g. Italian / Spanish / Portuguese).  Returns ``None`` gracefully
+        when detection fails or confidence is too low.
+
+        ``message`` may be a plain string, a dict (with a ``"text"`` key), or
+        any object that exposes a ``.text`` attribute (e.g. ``MessageWrapper``).
+        """
+        text: str
+        if isinstance(message, str):
+            text = message
+        elif isinstance(message, dict):
+            text = str(message.get("text") or "")
+        elif hasattr(message, "text"):
+            # handles MessageWrapper and any similar proxy object;
+            # .text may be None for voice messages before transcription
+            raw = message.text
+            text = str(raw) if raw is not None else ""
+        else:
+            # last resort: str() — at least we tried
+            text = str(message)
+        result = _detect_language(text)
+        log_debug(f"[vox_plugin] detect_language: input={text[:60]!r} → {result!r}")
+        return result
 
     # ------------------------------------------------------------------
     # Action wiring
@@ -539,7 +661,7 @@ class VoxPlugin(AIPluginBase):
         """Import built-in Vox engine modules so they self-register."""
         builtins = [
             "plugins.vox_engines.http",
-            "plugins.vox_engines.chatterbox",
+            # chatterbox moved to _dev; not imported by default
             "plugins.vox_engines.kitten",
         ]
         for mod in builtins:

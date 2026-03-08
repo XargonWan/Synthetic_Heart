@@ -855,7 +855,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # utility used in several places below; import once to avoid scoping issues
-    from core.mention_utils import is_message_for_bot
 
     # LIVE MEDIA HANDLING (Voice, Video, Video Note)
     # Earlier we disabled this and treated media as generic attachments,

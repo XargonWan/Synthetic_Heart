@@ -271,13 +271,13 @@ Component Import Errors
 
 1. Ensure the module is in the correct ``_dev`` directory
 2. Check for missing dependencies in ``pyproject.toml`` (use `uv sync` to install).
-   * Note: some engines (chatterbox, kitten) are not on PyPI and
-     are installed directly in the Docker image via `pip` commands.  If the
-     build fails it means one of those repositories was unreachable or its
-     dependencies could not be built (e.g. pkuseg for chatterbox).  Fixing the
-     underlying issue or updating the `Dockerfile` with additional build
-     dependencies is required; users should not attempt to manually install
-     inside a running container.3. Verify the import paths are correct (use ``interface_dev.module_name`` not ``interface.module_name``)
+   * Note: some development engines such as ``chatterbox`` are not pulled
+     from PyPI and live under ``plugins/_dev``; ``kitten`` is now vendored
+     directly and requires no external repository.  If a build fails it means
+     a third-party dependency (e.g. ``pkuseg`` for chatterbox) could not be
+     compiled.  Adding the necessary system packages to the Dockerfile or
+     fixing the upstream repo is the correct remedy; do not attempt to
+     manually ``pip``-install inside the container.3. Verify the import paths are correct (use ``interface_dev.module_name`` not ``interface.module_name``)
 4. Check Python syntax in the dev module
 
 See Also

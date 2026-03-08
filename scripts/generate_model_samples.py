@@ -252,12 +252,12 @@ def _make_generate_callback(
     return _generate_callback
 
 
-# Ensure plugin modules are imported so they can register their models with
-# MODEL_MANAGER.  This is particularly important when running as a stand-alone
-# script where the normal application import machinery may not have triggered
-# plugin loading.
+# Ensure plugin modules are imported so their engines (and sample
+# helpers) are registered with the VOX_REGISTRY.  Historically this also
+# triggered MODEL_MANAGER registrations, but the Kitten engine no longer uses
+# the model manager.
 try:
-    import plugins.vox_engines.kitten  # registers KittenTTS specs
+    import plugins.vox_engines.kitten  # needed for local TTS samples
 except ImportError:
     pass
 try:

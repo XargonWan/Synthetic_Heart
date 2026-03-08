@@ -3898,8 +3898,14 @@ class SynthWebUIInterface:
                 if entry.get("key") == "LIVE_CORTEX":
                     from core.cortex_registry import get_cortex_registry as _get_cr
 
+                    # include any engines registered in the Live registry as well
+                    from core.live_registry import LIVE_REGISTRY
+
                     live_engines = _get_cr().get_engines_by_cortex("live")
-                    options = ["Default"] + live_engines
+                    extra = LIVE_REGISTRY.get_available_engines()
+                    combined = sorted(set(live_engines + extra))
+                    # always allow explicit disable
+                    options = ["Default", "disabled"] + combined
                 elif entry.get("key") in ("GRILLO_CORTEX", "TRAINER_CORTEX"):
                     options = ["Default"] + available_cortex_engines
                 else:
@@ -7046,8 +7052,16 @@ class SynthWebUIInterface:
             log_warning(f"{LOG_PREFIX} unable to build Auris engine list: {exc}")
 
         # Live section: cortex engines with kind='live' + LIVE_REGISTRY engines
+        # determine which live engine (if any) is currently marked active
+        active_live: str | None = None
+        try:
+            # we persist the selected live engine using the LIVE_CORTEX key
+            active_live = config_registry.get_value("LIVE_CORTEX", None)
+        except Exception:  # pragma: no cover - defensive
+            active_live = None
+
         live_data: list[dict] = list(by_cortex.get("live", []))
-        # always offer disabled choice
+        # always offer disabled choice; mark it active if the config says so
         live_data.insert(
             0,
             {
@@ -7057,9 +7071,9 @@ class SynthWebUIInterface:
                 "capabilities": {},
                 "description": "Live subsystem turned off",
                 "status": "success",
-                "details": "",
+                "details": "Active" if active_live == "disabled" else "",
                 "error": None,
-                "active": False,
+                "active": active_live == "disabled",
             },
         )
         try:
@@ -7079,9 +7093,9 @@ class SynthWebUIInterface:
                         "capabilities": _caps,
                         "description": f"Live streaming engine — capabilities: {_caps_desc(_caps)}",
                         "status": "success",
-                        "details": "",
+                        "details": "Active" if _name == active_live else "",
                         "error": None,
-                        "active": False,
+                        "active": _name == active_live,
                     }
                 )
         except Exception as exc:
@@ -7200,6 +7214,20 @@ class SynthWebUIInterface:
             ) from exc
 
         if instance is None:
+            # if the requested name corresponds to a live engine, we treat it as a
+            # no-op; live engines manage their own models separately and are not
+            # part of the Cortex registry.  Returning success avoids a confusing
+            # 404 and keeps the dropdown from resetting to "disabled".
+            from core.live_registry import LIVE_REGISTRY
+
+            if engine_name in LIVE_REGISTRY.get_available_engines():
+                log_info(
+                    f"{LOG_PREFIX} ignoring model set for live engine '{engine_name}'"
+                )
+                return JSONResponse(
+                    {"status": "ok", "engine": engine_name, "model": model_name}
+                )
+
             raise HTTPException(
                 status_code=404, detail=f"Engine '{engine_name}' not loaded"
             )
