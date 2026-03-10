@@ -494,7 +494,7 @@ def register_all():
     register_exposed_var(
         "RESPONSE_TIMEOUT",
         label="Response Timeout",
-        default=240,
+        default=300,
         value_type=int,
         ui_type="number",
         description="Maximum time in seconds to wait for LLM responses before sending fallback message. (Advanced)",

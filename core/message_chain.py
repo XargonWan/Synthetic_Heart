@@ -47,7 +47,7 @@ FAILED_MESSAGE_TEXT = config_registry.get_var(
 # Register RESPONSE_TIMEOUT configuration
 RESPONSE_TIMEOUT = config_registry.get_var(
     "RESPONSE_TIMEOUT",
-    240,
+    300,
     label="Response Timeout",
     description="Maximum time in seconds to wait for LLM responses before sending fallback message.",
     value_type=int,
