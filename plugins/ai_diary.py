@@ -1156,7 +1156,7 @@ class DiaryPlugin:
                     "properties": {
                         "interaction_summary": {
                             "type": "string",
-                            "description": "Summary of what happened in this interaction",
+                            "description": "Summary of what happened in this interaction. Do NOT include weather, temperature, or location data — that context is provided separately.",
                         },
                         "content": {
                             "type": "string",
@@ -1164,7 +1164,7 @@ class DiaryPlugin:
                         },
                         "personal_thought": {
                             "type": "string",
-                            "description": "Personal reflection on the interaction (optional)",
+                            "description": "Personal reflection on the interaction (optional). Focus on emotions and relationship dynamics, not environmental conditions.",
                         },
                         "emotions": {
                             "type": "array",
@@ -1193,7 +1193,7 @@ class DiaryPlugin:
                     },
                     "required": ["interaction_summary"],
                 },
-                "brief": "Add a new diary entry to synth's memory - REQUIRED in every response",
+                "brief": "Add a new diary entry to synth's memory - REQUIRED in every response. Never include weather/location data in summaries.",
                 "examples": {
                     "description": "Create a diary entry recording what happened in this interaction. This action MUST be included in EVERY response to maintain synth's persistent memory.",
                     "when_to_use": "Use this action in every single response to record the interaction in synth's personal memory",

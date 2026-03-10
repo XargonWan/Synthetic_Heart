@@ -172,12 +172,13 @@ def test_local_global_separation(monkeypatch):
     )
 
     ctx = res["context"]
-    assert "local_history" in ctx and "global_history" in ctx
-    assert any("Local message" in e for e in ctx["local_history"])
-    # global_history must NOT contain the local message
-    assert all("Local message" not in e for e in ctx["global_history"])
-    # global_history should include the other chat's message
-    assert any("Other chat message" in e for e in ctx["global_history"])
+    # local/global aliases are only present when history_scope='local';
+    # check canonical keys instead.
+    assert any("Local message" in e for e in ctx["history_current_chat"])
+    # history_recent must NOT contain the local message
+    assert all("Local message" not in e for e in ctx["history_recent"])
+    # history_recent should include the other chat's message
+    assert any("Other chat message" in e for e in ctx["history_recent"])
 
 
 def test_history_scope_local_only(monkeypatch):
@@ -220,11 +221,17 @@ def test_history_scope_local_only(monkeypatch):
     )
 
     ctx = res["context"]
-    # local_history must contain the local entry
-    assert any("Local only" in e for e in ctx.get("local_history", []))
-    # global_history must still include external chat entries (and MUST NOT include local entries)
-    assert any("External" in e for e in ctx.get("global_history", []))
-    assert all("Local only" not in e for e in ctx.get("global_history", []))
+    # local_history / global_history aliases are no longer emitted (they were
+    # always identical to the canonical keys, wasting tokens).  Instead verify
+    # the canonical keys carry the expected data.
+    assert "local_history" not in ctx
+    assert "global_history" not in ctx
+    assert any("Local only" in e for e in ctx.get("history_current_chat", []))
+    assert any("External" in e for e in ctx.get("history_recent", []))
+    assert all("Local only" not in e for e in ctx.get("history_recent", []))
+
+    # history_scope is echoed so the LLM knows which stream is primary
+    assert ctx.get("history_scope") == "local"
 
     # The input payload should expose the requested scope so the LLM can prioritise
     assert res.get("input", {}).get("payload", {}).get("history_scope") == "local"
