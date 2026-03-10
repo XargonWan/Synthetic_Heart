@@ -1408,8 +1408,17 @@ async def handle_incoming_message(
             import traceback
 
             log_error(f"[message_chain] Traceback: {traceback.format_exc()}")
-            await send_llm_fallback_message(bot, message, failure_reason, context=ctx)
-            return LLM_FAILED
+            # Only send fallback if no actions have succeeded; otherwise suppress
+            # in accordance with the new policy that at least one delivered
+            # message prevents an LLM failure notification.
+            if not actions_executed_during_loop:
+                await send_llm_fallback_message(bot, message, failure_reason, context=ctx)
+                return LLM_FAILED
+            else:
+                log_warning(
+                    "[message_chain] Corrector exception but actions already executed; skipping fallback"
+                )
+                return ACTIONS_EXECUTED
 
         if not corrected:
             log_debug("[message_chain] Corrector returned no correction this attempt")

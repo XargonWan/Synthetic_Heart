@@ -342,3 +342,62 @@ async def test_fallback_on_technical_error(monkeypatch):
 
     assert called["fallback"] == 1
     assert result == message_chain.LLM_FAILED
+
+
+@pytest.mark.asyncio
+async def test_no_fallback_on_corrector_exception_with_success(monkeypatch):
+    """If the corrector itself raises but some actions already ran, no
+    fallback message should be emitted and ACTIONS_EXECUTED returned.
+    """
+    called = {"fallback": 0}
+
+    def fake_extract_json(text, return_metadata=False):
+        return ({"actions": [{"type": "dummy", "payload": {}}]}, {})
+
+    async def fake_run_actions(actions, ctx, bot, message):
+        # simulate successful action execution
+        return {"processed": actions, "failed_actions": [], "errors": []}
+
+    async def crashing_corrector(*args, **kwargs):
+        raise RuntimeError("corrector boom")
+
+    async def fake_send(bot, message, reason, context=None):
+        called["fallback"] += 1
+        return "fallback"
+
+    # ensure 'dummy' is considered supported so the action runs
+    monkeypatch.setattr(
+        action_parser,
+        "get_supported_action_types",
+        lambda: {"dummy"},
+    )
+
+    monkeypatch.setattr(
+        "core.transport_layer.extract_json_from_text",
+        fake_extract_json,
+    )
+    monkeypatch.setattr(
+        "core.action_parser.run_actions",
+        fake_run_actions,
+    )
+    monkeypatch.setattr(
+        "core.transport_layer.run_corrector_middleware",
+        crashing_corrector,
+    )
+    monkeypatch.setattr(
+        "core.message_chain.send_llm_fallback_message",
+        fake_send,
+    )
+
+    msg = SimpleNamespace(chat_id=55, interface_path="bot/55", from_cortex=True)
+    result = await message_chain.handle_incoming_message(
+        bot=None,
+        message=msg,
+        text="{}",
+        source="llm",
+        context={},
+    )
+
+    assert called["fallback"] == 0
+    assert result == message_chain.ACTIONS_EXECUTED
+
