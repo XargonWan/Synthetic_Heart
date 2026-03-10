@@ -568,7 +568,9 @@ async def test_handle_message_media_not_directed(monkeypatch):
         chat=SimpleNamespace(type="group", id=1),
     )
     update = SimpleNamespace(message=msg)
-    bot = SimpleNamespace(get_file=AsyncMock(return_value=DummyFile()), send_chat_action=AsyncMock())
+    bot = SimpleNamespace(
+        get_file=AsyncMock(return_value=DummyFile()), send_chat_action=AsyncMock()
+    )
     ctx = SimpleNamespace(bot=bot)
 
     monkeypatch.setattr(
