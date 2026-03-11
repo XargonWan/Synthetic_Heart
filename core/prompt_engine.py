@@ -52,46 +52,88 @@ DIARY_HISTORY_DAYS = config_registry.get_var(
 )
 
 
-def minify_actions_block(available_actions: dict) -> dict:
+def minify_actions_block(
+    available_actions: dict,
+    lite: bool = False,
+) -> dict:
     """Convert full action schemas to minimal versions for prompt.
 
     For LLM prompts, sends ONLY schema and brief description to minimize token usage.
     This dramatically reduces prompt size while preserving all critical information needed.
 
-    Uses new normalized action format:
-    - schema: JSON schema with structure, types, and required fields
-    - brief: One-line description of action purpose
-    - source: Which plugin/interface provides this action
+    When ``lite=True`` (Prompt Lite Mode for small/local models), applies aggressive
+    minification on top of the standard pass:
 
-    Full examples and detailed instructions are NOT included here - they're used by
-    the corrector when the LLM makes mistakes.
+    - Filters to essential actions only (message_*, diary, tts, animation)
+    - Strips schemas down to brief-only (no schema object)
 
     Parameters
     ----------
     available_actions : dict
-        Full actions block with schemas in new normalized format
+        Full actions block with schemas in new normalized format.
+    lite : bool
+        When True, apply aggressive filtering and strip to brief-only.
 
     Returns
     -------
     dict
-        Minified actions block suitable for LLM prompts (schema + brief only)
+        Minified actions block suitable for LLM prompts.
     """
     from core.action_schema_converter import (
         extract_for_llm_prompt,
         normalize_action_schema,
     )
 
+    _LITE_ESSENTIAL_ACTIONS = (
+        "create_personal_diary_entry",
+        "tts_speak",
+        "use_animation",
+    )
+
     minified = {}
     for action_name, action_def in available_actions.items():
+        # In lite mode, skip non-essential actions
+        if lite and not (
+            action_name.startswith("message_") or action_name in _LITE_ESSENTIAL_ACTIONS
+        ):
+            continue
+
         # Normalize to new format (handles both old and new formats)
         normalized = normalize_action_schema(action_name, action_def)
 
-        # Extract only what's needed for LLM (schema + brief)
-        minified_action = extract_for_llm_prompt(action_name, normalized)
-
-        minified[action_name] = minified_action
+        if lite:
+            # Lite: brief-only, no schema
+            minified[action_name] = {"brief": normalized.get("brief", "")}
+        else:
+            # Standard: schema + brief
+            minified[action_name] = extract_for_llm_prompt(action_name, normalized)
 
     return minified
+
+
+def _apply_lite_context_stripping(prompt: dict) -> dict:
+    """Strip redundant prompt sections for lite mode.
+
+    Called by the minification pipeline when PROMPT_LITE_MODE is enabled.
+    Removes verbose instructions, redundant context, and compacts emotions.
+    Action minification is handled by ``minify_actions_block(lite=True)``.
+    """
+    # Remove redundant top-level keys
+    prompt.pop("instructions_verbose", None)
+    prompt.pop("__pre_reduction_size", None)
+
+    # Compact context
+    ctx = prompt.get("context", {})
+    ctx.pop("recon", None)
+    ctx.pop("recon_instructions", None)
+    ctx.pop("tags_placeholder", None)
+    ctx.pop("participants", None)
+
+    # Compact emotions — keep current_emotions_nl, drop verbose instruction + list
+    ctx.pop("emotion_state", None)
+    ctx.pop("available_emotions", None)
+
+    return prompt
 
 
 async def build_json_prompt(
@@ -290,10 +332,11 @@ async def build_json_prompt(
     # (moved) prompt logging will occur later once input_payload exists
 
     # === 3. Recon contributions (prompt 0) ===
+    # Note: raw contributions are NOT included — their memories are already
+    # merged into the top-level `memories` list.  Only metadata is kept.
     try:
         if recon_contributions:
             context_section["recon"] = {
-                "contributions": recon_contributions,
                 "snippets": recon_snippets,
                 "language": resolved_language,
                 "message_tone": resolved_message_tone,
@@ -567,20 +610,62 @@ async def build_json_prompt(
     except Exception:
         prompt_with_instructions["__pre_reduction_size"] = None
 
+    # Resolve lite mode flag early so both actions and context use the same value
+    is_lite = False
+    try:
+        from core.config_manager import config_registry as _cfg
+
+        is_lite = bool(_cfg.get_value("PROMPT_LITE_MODE", 0, value_type=int))
+    except Exception:
+        pass
+
     # Include unified actions metadata from the initializer
     # Use minified version to keep prompt size manageable
+    # When lite mode is on, minify_actions_block handles the aggressive filtering too
     try:
         from core.core_initializer import core_initializer
 
         full_actions = core_initializer.actions_block.get("available_actions", {})
-        # Minify to reduce token usage
-        prompt_with_instructions["actions"] = minify_actions_block(full_actions)
+
+        # When audio attachments are present as multimodal content, remove
+        # stt_transcribe from the available actions so the LLM processes the
+        # audio directly instead of requesting a redundant transcription step.
+        has_audio_attachment = attachments and any(
+            (a.get("mime_type") or "").startswith("audio/") for a in attachments
+        )
+        if has_audio_attachment and "stt_transcribe" in full_actions:
+            full_actions = {
+                k: v for k, v in full_actions.items() if k != "stt_transcribe"
+            }
+            log_debug(
+                "[json_prompt] Removed stt_transcribe from actions "
+                "(audio sent as multimodal content)"
+            )
+
+        # Minify to reduce token usage (lite=True also filters + strips to brief-only)
+        prompt_with_instructions["actions"] = minify_actions_block(
+            full_actions, lite=is_lite
+        )
         log_debug(
-            f"[json_prompt] Actions block minified: {len(json_dumps(full_actions))} -> {len(json_dumps(prompt_with_instructions['actions']))} chars"
+            f"[json_prompt] Actions block minified: {len(json_dumps(full_actions))} -> {len(json_dumps(prompt_with_instructions['actions']))} chars (lite={is_lite})"
         )
     except Exception as e:
         log_warning(f"[prompt_engine] Failed to inject actions block: {e}")
         prompt_with_instructions["actions"] = {}
+
+    # === Apply lite mode context stripping if enabled ===
+    if is_lite:
+        try:
+            pre_lite = len(json_dumps(prompt_with_instructions))
+            prompt_with_instructions = _apply_lite_context_stripping(
+                prompt_with_instructions
+            )
+            post_lite = len(json_dumps(prompt_with_instructions))
+            log_info(
+                f"[json_prompt] Lite mode applied: {pre_lite} -> {post_lite} chars"
+            )
+        except Exception as e:
+            log_warning(f"[json_prompt] Failed to apply lite mode: {e}")
 
     # === Final check: Reduce prompt if it exceeds LLM character limits ===
     try:

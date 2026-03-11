@@ -1355,6 +1355,10 @@ class GeminiAPIPlugin(AIPluginBase):
         # Collect all attachments from all locations
         attachments: list[dict] = []
 
+        # Keys whose subtrees are schema definitions (not multimodal data)
+        # and should be skipped during recursive attachment collection.
+        SCHEMA_ONLY_KEYS = {"actions", "available_actions", "schema", "payload"}
+
         def collect_attachments_recursive(container: dict | list | str) -> None:
             """Recursively collect multimodal attachments from any level."""
             if isinstance(container, dict):
@@ -1381,8 +1385,12 @@ class GeminiAPIPlugin(AIPluginBase):
                             # Single item rather than list
                             attachments.append(items)
 
-                # Recurse into all dict values
-                for value in container.values():
+                # Recurse into dict values, skipping action schema subtrees
+                # which contain field definitions that look like attachments
+                # but are not (e.g. {"type": "string", "description": "..."}).
+                for key, value in container.items():
+                    if key in SCHEMA_ONLY_KEYS:
+                        continue
                     collect_attachments_recursive(value)
 
             elif isinstance(container, list):

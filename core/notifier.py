@@ -369,7 +369,7 @@ def notify_trainer(message: str) -> None:
         async def send(target: int | str):
             try:
                 # Build message data with thread_id for LogChat if applicable
-                message_data = {"text": message, "target": target}
+                message_data = {"text": message, "target": target, "skip_history": True}
                 log_chat_id = get_log_chat_id_sync()
                 if target == log_chat_id:
                     thread_id = get_log_chat_thread_id_sync()
