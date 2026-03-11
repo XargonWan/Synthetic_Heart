@@ -26,6 +26,10 @@ Key concepts
   Language detector plugins should only consider the user message and recent
   history from the same `interface_path` when making a decision; global chat or
   other interface histories must not influence the chosen language.
+  For the built-in language evaluator, incoming user text is given extra
+  prominence (weight 3) while any assistant response and the surrounding
+  local history are treated with weight 1 each when determining the primary
+  language.
 
 Plugin hooks and schemas
 ------------------------

@@ -298,7 +298,13 @@ Creating a new LLM engine requires extending ``AIPluginBase`` and implementing t
            self.notify_fn = notify_fn
 
        async def handle_incoming_message(self, bot, message, prompt):
-           """Process a message and generate response."""
+           """Process a message and generate response.
+
+           **IMPORTANT:** this method **must** return a plain string.  The core
+           transport and corrector layers assume a text response and will crash
+           if they receive an integer, dict, or other non-str value.  Engines
+           that send structured data should serialize it to JSON first.
+           """
            # Generate response using your LLM
            reply = await self.generate_response(prompt)
            

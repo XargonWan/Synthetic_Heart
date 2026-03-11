@@ -1215,9 +1215,7 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
                 )
 
                 # After processing actions, check if there's text outside the JSON that should be sent
-                if json_data and (
-                    json_data.get("prefix") or json_data.get("suffix")
-                ):
+                if json_data and (json_data.get("prefix") or json_data.get("suffix")):
                     companion_text = ""
 
                     # Combine prefix and suffix, removing duplicate content
@@ -1691,6 +1689,20 @@ async def run_corrector_middleware(
                 corrected = await llm_plugin.handle_incoming_message(
                     bot, correction_message, correction_prompt
                 )
+            # Normalize plugin output to string; some engines may erroneously
+            # return integers or other types which would crash subsequent
+            # len() calls.  Coerce and log a warning so author can fix the
+            # engine implementation.
+            if corrected is None:
+                corrected = ""
+            elif not isinstance(corrected, str):
+                try:
+                    log_warning(
+                        f"[corrector_middleware] LLM plugin returned non-str {type(corrected)}; coercing to str"
+                    )
+                except Exception:
+                    pass
+                corrected = str(corrected)
 
             # Log corrected result type/length
             try:
@@ -1824,6 +1836,15 @@ async def llm_to_interface(interface_send_func, *args, text: str = None, **kwarg
     """
     if text is None:
         text = ""
+    # guard against malicious or buggy plugins returning non-string objects
+    if not isinstance(text, str):
+        try:
+            log_warning(
+                f"[llm_to_interface] LLM returned non-str {type(text)}; coercing to str"
+            )
+        except Exception:
+            pass
+        text = str(text)
 
     # Extract chat_id for logging
     chat_id = kwargs.get("chat_id")

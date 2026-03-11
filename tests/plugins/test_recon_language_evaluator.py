@@ -36,9 +36,12 @@ async def test_recon_language_evaluator_uses_history_fallback(monkeypatch):
     async def fake_get_active():
         return "fake"
 
+    # create a shared fake engine instance so we can inspect the messages later
+    fake_engine = FakeEngine()
+
     class FakeRegistry:
         def get_engine(self, key):
-            return FakeEngine()
+            return fake_engine
 
     monkeypatch.setattr("core.config.get_active_cortex_engine", fake_get_active)
     monkeypatch.setattr(
@@ -64,3 +67,9 @@ async def test_recon_language_evaluator_uses_history_fallback(monkeypatch):
     assert len(contribs) == 1
     assert contribs[0]["type"] == "language_hint"
     assert contribs[0]["language_code"] == "it"
+
+    # make sure the system prompt included the new weighting guidance
+    assert fake_engine.calls, "engine was never invoked"
+    sys_msg = fake_engine.calls[0][0]["content"]
+    assert "weight" in sys_msg.lower()
+    assert "3" in sys_msg

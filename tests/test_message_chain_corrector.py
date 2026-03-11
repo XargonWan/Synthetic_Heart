@@ -168,6 +168,36 @@ async def test_normalize_message_unknown_obeys_supported_actions(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_corrector_handles_nonstring_response(monkeypatch, caplog):
+    """Corrector should survive when LLM plugin returns non-str.
+
+    A legacy bug raised TypeError (`len()` on int) and blocked the entire
+    correction loop.  We now coerce the value to a string and log a warning.
+    """
+
+    class FakeLLM:
+        async def handle_incoming_message(self, bot, message, prompt):
+            # deliberately return a number instead of a string
+            return 12345
+
+    import core.plugin_instance as plugin_instance
+
+    monkeypatch.setattr(plugin_instance, "get_plugin", lambda: FakeLLM())
+
+    from core.transport_layer import run_corrector_middleware
+
+    # run the middleware; ensure it handles the non-str value gracefully
+    result = await run_corrector_middleware(
+        text="test",
+        bot=None,
+        context={},
+        chat_id="1",
+    )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
 async def test_corrector_forces_message_to_ollama_serve(monkeypatch):
     """When the originating interface is `ollama_serve`, corrected JSON must
     route message actions back to `message_ollama_serve` and set
@@ -400,4 +430,3 @@ async def test_no_fallback_on_corrector_exception_with_success(monkeypatch):
 
     assert called["fallback"] == 0
     assert result == message_chain.ACTIONS_EXECUTED
-
