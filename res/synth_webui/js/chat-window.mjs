@@ -423,6 +423,20 @@ export function initChatUI() {
                                     window.VRMAnimations.preload(data.state, data.file, data.descriptor);
                                 }
                             } catch (e) { /* ignore */ }
+                        } else if (data && data.type === 'vrm_expression_set') {
+                            try {
+                                if (window.animationHandler && typeof window.animationHandler.addExpressionSource === 'function') {
+                                    const tgt = {};
+                                    if (data.name) tgt[String(data.name)] = Number(data.intensity) || 0;
+                                    window.animationHandler.addExpressionSource({targets: tgt, priority: 25, source: 'facial_expression'});
+                                }
+                            } catch (e) { /* ignore */ }
+                        } else if (data && data.type === 'vrm_expression_clear') {
+                            try {
+                                if (window.animationHandler && typeof window.animationHandler.clearExpressionSources === 'function') {
+                                    window.animationHandler.clearExpressionSources();
+                                }
+                            } catch (e) { /* ignore */ }
                         } else if (data && data.type === 'vrm_face') {
                             // Update VRM blend-shape face values
                             try {

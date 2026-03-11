@@ -1574,7 +1574,7 @@ class SynthWebUIInterface:
         # Push full VRM state to the newly connected client
         try:
             if self.animation_handler:
-                full_state = self.animation_handler.get_full_state()
+                full_state = await self.animation_handler.get_full_state()
 
                 # 1) VRM model
                 vrm = full_state.get("vrm_model", {})

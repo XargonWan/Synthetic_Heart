@@ -917,6 +917,53 @@ async def _handle_plugin_action(
                     log_debug(
                         "[action_parser] Text unescape normalization failed for plugin send_message (non-fatal)"
                     )
+                # === facial expression tag handling ===
+                try:
+                    from core.facial_expression_parser import parse_facial_expressions
+                    from plugins.facial_expression_plugin import FacialExpressionPlugin
+                    from core.animation_handler import get_karada_state_server
+
+                    original_text = payload.get("text", "") or ""
+                    clean_text, events = parse_facial_expressions(original_text)
+                    if clean_text != original_text:
+                        payload["text"] = clean_text
+                    if events and get_karada_state_server().has_connected_clients():
+                        # find our plugin instance (if loaded)
+                        expr_plugin = None
+                        from core.core_initializer import PLUGIN_REGISTRY
+                        if isinstance(PLUGIN_REGISTRY, dict):
+                            for p in PLUGIN_REGISTRY.values():
+                                if isinstance(p, FacialExpressionPlugin):
+                                    expr_plugin = p
+                                    break
+                        if expr_plugin:
+                            total_chars = len(clean_text)
+                            # read settings via persona manager as plugin does
+                            from core.persona_manager import get_persona_manager
+                            persona_json = None
+                            pm = get_persona_manager()
+                            if pm and getattr(pm, "_current_persona", None):
+                                try:
+                                    persona_json = pm._load_persona_json(pm._current_persona.name)
+                                except Exception:
+                                    persona_json = None
+                            cooldown = (
+                                persona_json.get("facial_expression_cooldown_s", 3)
+                                if persona_json
+                                else 3
+                            )
+                            chars_per_sec = (
+                                persona_json.get("facial_expression_chars_per_sec", 12)
+                                if persona_json
+                                else 12
+                            )
+                            asyncio.create_task(
+                                expr_plugin._play_expression_timeline(
+                                    events, total_chars, getattr(original_message, "session_id", ""), cooldown, chars_per_sec
+                                )
+                            )
+                except Exception:
+                    pass
 
                 # If this outbound message originates from a Grillo beat, store it in grillo_activity_log
                 try:

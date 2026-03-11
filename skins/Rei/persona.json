@@ -25,6 +25,20 @@
         "disgust": { "mouth_frown": 0.4, "eyes_closed": 0.2 },
         "neutral": {}
     },
+    "facial_expressions": {
+        "smile":         {"description": "gentle smile",    "targets": {"mouth_smile": 0.5, "eyes_smile": 0.3}},
+        "grin":          {"description": "wide grin",       "targets": {"mouth_smile": 0.9, "eyes_smile": 0.6}},
+        "sad":           {"description": "sadness",         "targets": {"mouth_frown": 0.7, "eyes_sad": 0.5}},
+        "blush":         {"description": "embarrassed",     "targets": {"cheek_blush": 0.8}},
+        "surprised":     {"description": "surprised",       "targets": {"eyes_wide": 0.8, "mouth_open": 0.3}},
+        "angry":         {"description": "angry",           "targets": {"brow_down": 0.8, "mouth_frown": 0.5}},
+        "neutral":       {"description": "neutral expression", "targets": {}},
+        "expressionless":{"description": "expressionless -_-",  "targets": {"eyes_squint": 0.6}},
+        "joy_eyes":      {"description": "smiling eyes ^^","targets": {"eyes_smile": 0.9}},
+        "tongue_out":    {"description": "tongue out :P", "targets": {"tongue_out": 0.8, "mouth_smile": 0.3}}
+    },
+    "facial_expression_cooldown_s": 3,
+    "facial_expression_chars_per_sec": 12,
     "emotion_speed": {
         "default": 1.0,
         "per_emotion": { "happy": 1.2, "sad": 0.8 }

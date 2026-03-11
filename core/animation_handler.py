@@ -106,6 +106,8 @@ class KaradaStateServer:
         self._animation_state_changed_callbacks: List[
             callable
         ] = []  # Callbacks when animation changes
+
+    # new methods inserted here (will add after class header)
         # Plugin/override state animations: state_name -> {'loop': [...], 'post': [...], 'other': [...]}
         self._registered_state_animations: Dict[str, Dict[str, List[str]]] = {}
         # State aliases map (normalized state -> list of alias names)
@@ -114,6 +116,10 @@ class KaradaStateServer:
         self._search_paths: List[Path] = []
         # Temporary search paths managed via uploads/helpers
         self._temporary_search_paths: List[Path] = []
+        # clients currently connected (mirrors self.webui.connections)
+        # used by external code to check whether any Karada-capable client exists
+        # without importing webui directly.
+        # we don't keep a separate set; callers should use has_connected_clients().
 
         # VRM model state: set via set_vrm_model() and read by get_full_state()
         self._vrm_model_url: Optional[str] = None
@@ -130,6 +136,76 @@ class KaradaStateServer:
         log_debug("[KaradaStateServer] WebUI reference set")
         # Register a lightweight summary callback so the WebUI can broadcast
         # the canonical animation state to all connected clients whenever it
+        # changes. This is different from the full 'animation' command (which
+        # includes playback instruction) and allows multiple clients to observe
+        # the central state even if they missed the immediate play command.
+        try:
+            cb = getattr(webui, "_broadcast_animation_state_summary", None)
+            if cb and cb not in self._animation_state_changed_callbacks:
+                self.register_animation_state_changed_callback(cb)
+                log_debug(
+                    "[KaradaStateServer] Registered WebUI animation state summary callback"
+                )
+        except Exception:
+            pass
+        # Also register the authoritative broadcast callback so that when the
+        # centralized animation state changes we explicitly push an
+        # 'animation' command to all connected WebUI clients. This helps
+        # ensure clients that treat the lightweight 'animation_state' as
+        # informational will still receive a playback command to apply.
+        try:
+            cb2 = getattr(webui, "_broadcast_animation_state", None)
+            if cb2 and cb2 not in self._animation_state_changed_callbacks:
+                self.register_animation_state_changed_callback(cb2)
+                log_debug(
+                    "[KaradaStateServer] Registered WebUI authoritative animation broadcast callback"
+                )
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Face / expression helpers
+    # ------------------------------------------------------------------
+
+    async def set_face_values(self, values: Dict[str, float]) -> None:
+        """Broadcast raw face values to all connected WebUI clients.
+
+        This is a thin wrapper used by EmotionManager.  The values map is sent
+        as-is in a ``vrm_face`` WebSocket packet.  Any exceptions are logged
+        but not re-raised since this call is often invoked inside a task.
+        """
+        if not self.webui:
+            return
+        payload = {"type": "vrm_face", "values": values}
+        for sid, websocket in list(getattr(self.webui, "connections", {}).items()):
+            try:
+                await websocket.send_json(payload)
+            except Exception as exc:  # pragma: no cover - best effort
+                log_warning(f"[KaradaStateServer] failed to send face_values to {sid}: {exc}")
+
+    async def push_face_expression(self, name: Optional[str], intensity: float) -> None:
+        """Emit a high-priority facial expression packet.
+
+        If ``name`` is None or empty, a ``vrm_expression_clear`` packet is
+        broadcast which instructs the client to remove the facial_expression
+        source from its pipeline.  Otherwise ``vrm_expression_set`` is used.
+        """
+        if not self.webui:
+            return
+        if not name:
+            payload = {"type": "vrm_expression_clear"}
+        else:
+            payload = {"type": "vrm_expression_set", "name": name, "intensity": intensity}
+        for sid, websocket in list(getattr(self.webui, "connections", {}).items()):
+            try:
+                await websocket.send_json(payload)
+            except Exception as exc:  # pragma: no cover
+                log_warning(f"[KaradaStateServer] failed to push expression to {sid}: {exc}")
+
+    def has_connected_clients(self) -> bool:
+        """Return True if any WebUI clients are currently connected."""
+        return bool(getattr(self.webui, "connections", {}))
+
         # changes. This is different from the full 'animation' command (which
         # includes playback instruction) and allows multiple clients to observe
         # the central state even if they missed the immediate play command.
@@ -374,13 +450,10 @@ class KaradaStateServer:
 
         return state
 
-    def get_full_state(self) -> Dict[str, Any]:
-        """Return the complete VRM state suitable for push-to-client on WebSocket connect.
+    async def get_full_state(self) -> Dict[str, Any]:
+        """Return the complete VRM state for clients on WebSocket connect.
 
-        Returns a dict with three keys:
-          - ``vrm_model``: {name, url, hash} — the currently active VRM model
-          - ``animation``: {file, url, state, loop, descriptor} — the current animation
-          - ``face_values``: {} — current face/emotion blend-shape values (best-effort)
+        Same keys as before, but this version awaits the emotion manager.
         """
         # VRM model: prefer explicitly stored state, fall back to reading from webui
         vrm_model: Dict[str, Any] = {}
@@ -413,7 +486,6 @@ class KaradaStateServer:
             except Exception:
                 vrm_model = {}
 
-        # Animation: current file, resolved URL, state name, loop flag, descriptor
         animation: Dict[str, Any] = {}
         anim_file = self._current_animation_file
         if anim_file:
@@ -431,7 +503,6 @@ class KaradaStateServer:
                 "animation_id": self._current_animation_id,
             }
 
-        # Face values: best-effort from EmotionManager plugin
         face_values: Dict[str, Any] = {}
         try:
             from core.core_initializer import PLUGIN_REGISTRY  # type: ignore[import]
@@ -442,12 +513,8 @@ class KaradaStateServer:
                 else None
             )
             if mgr is not None and hasattr(mgr, "get_emotion_state"):
-                import asyncio as _asyncio
-
-                raw = mgr.get_emotion_state()
-                if _asyncio.iscoroutine(raw):
-                    pass  # cannot await here; skip
-                elif isinstance(raw, dict):
+                raw = await mgr.get_emotion_state()  # awaitable now
+                if isinstance(raw, dict):
                     face_values = raw
         except Exception:
             face_values = {}

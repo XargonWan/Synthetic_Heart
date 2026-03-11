@@ -229,7 +229,10 @@ The optional ``hash`` field allows clients to skip reloading an already-cached m
 ``vrm_face`` — Blend-shape / emotion values
 ---------------------------------------------
 
-Emitted to update the avatar's facial expression sliders.
+Emitted to update the avatar's facial expression sliders.  Because the
+client's smoothing pipeline decays values rapidly, this message is generally
+only used for slow-changing EmotionManager state.  (Facial expression tags
+use ``vrm_expression_set`` instead.)
 
 .. code-block:: json
 
@@ -237,6 +240,27 @@ Emitted to update the avatar's facial expression sliders.
         "type": "vrm_face",
         "values": {"happy": 0.8, "neutral": 0.1}
     }
+
+``vrm_expression_set`` / ``vrm_expression_clear`` — instantaneous facial overrides
+-------------------------------------------------------------------------------
+
+New in 2026 release.  These packets allow the backend to inject a short-lived
+facial expression with high priority, bypassing the normal emotion decay.
+They are consumed by the WebUI's expression pipeline which applies a smooth
+lerp and automatically removes the source when a matching ``vrm_expression_clear``
+packet is received (typically after a cooldown).  This is the mechanism used
+by ``[em_*]`` tags inserted into LLM-generated text.
+
+.. code-block:: json
+
+    {"type": "vrm_expression_set", "name": "grin", "intensity": 0.9}
+
+To clear the override and return to the emotional baseline:
+
+.. code-block:: json
+
+    {"type": "vrm_expression_clear"}
+
 
 ``preload_animation`` — Preload an animation file
 ---------------------------------------------------

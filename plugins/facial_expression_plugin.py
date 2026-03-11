@@ -1,0 +1,128 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
+
+from core.plugin_base import PluginBase
+from core.animation_handler import get_karada_state_server
+from core.facial_expression_parser import (
+    FacialExpressionEvent,
+    parse_facial_expressions,
+)
+from core.persona_manager import get_persona_manager
+
+
+@dataclass
+class _TimelineEvent:
+    delay: float
+    name: Optional[str]
+    intensity: float
+
+
+class FacialExpressionPlugin(PluginBase):
+    """Plugin that handles LLM facial expression tags.
+
+    The plugin provides prompt instructions so that models know how to emit
+    ``[em_name:intensity]`` tokens and it also runs a background timeline when a
+    message containing tags is sent, driving the KaradaStateServer to push the
+    corresponding WebSocket packets at the appropriate times.
+    """
+
+    def get_supported_actions(self) -> Dict[str, Any]:
+        # produce a static injection with instructions and the available
+        # expressions read from the default persona (Rei) to make the list
+        # dynamic and overridable by skins.
+        from core.persona_manager import get_persona_manager
+
+        persona_json: Optional[Dict] = None
+        pm = get_persona_manager()
+        if pm and getattr(pm, "_current_persona", None):
+            try:
+                persona_json = pm._load_persona_json(pm._current_persona.name)
+            except Exception:
+                persona_json = None
+        expr_section = persona_json.get("facial_expressions", {}) if persona_json else {}
+        # fallback defaults if skin doesn't provide any
+        if not expr_section:
+            expr_section = {name: {} for name in [
+                "smile", "grin", "sad", "blush", "surprised", "angry",
+            ]}
+        expr_names = ", ".join(expr_section.keys()) or "<none>"
+
+        instructions = (
+            "You can embed facial expression tags in your message text: [em_NAME:INTENSITY]"
+            "\nAvailable: %s" % expr_names
+            + (
+                "\nINTENSITY: float 0.0-1.0. Use [em] to reset immediately."
+            )
+            + (
+                "\nThese tags are invisible to users. Example: \"Ciao! [em_grin:0.9] Come va?\""
+            )
+            + (
+                "\nOnly use these when responding to interfaces that support face rendering."
+            )
+        )
+        return {"facial_expression_helper": instructions}
+
+    async def process_message_text(self, text: str, session_id: str) -> str:
+        """Parse text for tags and schedule expression timeline.
+
+        Returns the cleaned text (tags stripped).
+        """
+        clean, events = parse_facial_expressions(text)
+        if events and get_karada_state_server().has_connected_clients():
+            total_chars = len(clean)
+            # load persona.json to access cooldown/char-rate settings
+            persona_json: Optional[Dict] = None
+            pm = get_persona_manager()
+            if pm and getattr(pm, "_current_persona", None):
+                try:
+                    persona_json = pm._load_persona_json(pm._current_persona.name)
+                except Exception:
+                    persona_json = None
+            cooldown = (
+                persona_json.get("facial_expression_cooldown_s", 3)
+                if persona_json
+                else 3
+            )
+            chars_per_sec = (
+                persona_json.get("facial_expression_chars_per_sec", 12)
+                if persona_json
+                else 12
+            )
+            asyncio.create_task(
+                self._play_expression_timeline(
+                    events, total_chars, session_id, cooldown, chars_per_sec
+                )
+            )
+        return clean
+
+    async def _play_expression_timeline(
+        self,
+        events: List[FacialExpressionEvent],
+        total_chars: int,
+        session_id: str,
+        cooldown_s: float,
+        chars_per_sec: float,
+    ) -> None:
+        """Drive KaradaStateServer through a sequence of expression events."""
+        karada = get_karada_state_server()
+        if not karada:
+            return
+        timeline: List[_TimelineEvent] = []
+        for ev in events:
+            # compute approximate delay based on character position
+            delay = (ev.position / total_chars) * (total_chars / chars_per_sec)
+            timeline.append(_TimelineEvent(delay, ev.name, ev.intensity))
+        start = asyncio.get_event_loop().time()
+        for item in timeline:
+            now = asyncio.get_event_loop().time()
+            sleep_for = item.delay - (now - start)
+            if sleep_for > 0:
+                await asyncio.sleep(sleep_for)
+            await karada.push_face_expression(item.name, item.intensity)
+        # after all events, schedule cooldown reset
+        await asyncio.sleep(cooldown_s)
+        await karada.push_face_expression(None, 0)

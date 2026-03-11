@@ -959,6 +959,15 @@ class AnimationHandler {
         }
     }
 
+    // allow external code to push/remove expression sources
+    addExpressionSource(source) {
+        if (!this._expressionSources) this._expressionSources = [];
+        this._expressionSources.push(source);
+    }
+    clearExpressionSources() {
+        this._expressionSources = [];
+    }
+
     // Placeholder: compute expressions for current frame and apply via blendShapeProxy
     // Apply expressions for the current frame with smoothing
     applyExpressionsForFrame(state, dt = 0.033) {
@@ -1068,6 +1077,10 @@ class AnimationHandler {
             // Respect expression priority: higher priority wins on conflicts
             const baseExpressions = Array.isArray(state.expressions) ? state.expressions : [];
             const exprs = (baseExpressions || []).slice().map(e => Object.assign({ priority: 0 }, e));
+            // include any externally pushed facial_expression sources (priority 25)
+            if (Array.isArray(this._expressionSources) && this._expressionSources.length) {
+                exprs.push(...this._expressionSources.map(e => Object.assign({priority:0}, e)));
+            }
 
             // Emotion/Feeling state injection: treat state.emotions/state.feelings as synthetic expressions keyed by name.
             // The client will map these names to blendshape targets using the per-persona
@@ -2177,6 +2190,20 @@ class AnimationHandler {
      * Call this right before starting a new animation so no old pose can bleed through.
      */
     _stopAllOverlays(fadeSec = 0.3) {
+        // Make sure baseIdle is at least minimally active before we fade others out.
+        try {
+            if (this._baseIdleAction) {
+                this._baseIdleAction.enabled = true;
+                if (typeof this._baseIdleAction.setEffectiveWeight === 'function') {
+                    // don't reduce existing weight; just enforce a floor
+                    const cur = this._baseIdleAction.getEffectiveWeight
+                        ? this._baseIdleAction.getEffectiveWeight()
+                        : 0;
+                    this._baseIdleAction.setEffectiveWeight(Math.max(cur, 0.15));
+                }
+            }
+        } catch (e) { /* ignore */ }
+
         try {
             const baseIdle = this._baseIdleAction;
             const seen = new Set();
@@ -3057,6 +3084,15 @@ class AnimationHandler {
             this._postOutroIdleToken = (this._postOutroIdleToken || 0) + 1;
         } catch (e) { /* ignore */ }
 
+        // GUARANTEE: make sure the base-idle layer is active and strong **before**
+        // we begin any loading or tearing down of the previous action.  This is the
+        // last line of defence against T-pose; even if the current clip ends while
+        // we're waiting for a new one, the skeleton will still be driven by idle.
+        try {
+            await this._ensureBaseIdle(1.0, false);
+        } catch (e) { /* ignore */ }
+        } catch (e) { /* ignore */ }
+
         // Ensure eyes are open when starting a new non-think action to avoid lingering closed lids
         try {
             const a = (actionName || '').toString().toLowerCase();
@@ -3128,6 +3164,9 @@ class AnimationHandler {
         // If a specific file was requested, wait for its preload/load BEFORE
         // we start fading out the current action. This eliminates transient
         // "no clip driving bones" gaps and reduces skipped WRITE.
+        // During this entire period the base-idle has been boosted to full weight
+        // above (see guarantee comment), so even if the previous action finishes
+        // the avatar will never fall back to a visible T-pose.
         try {
             if (animationFile) {
                 const clipReady = await this._awaitAnimationReady(actionName, animationFile, 30000);
@@ -3216,8 +3255,10 @@ class AnimationHandler {
         // will be faded out here, preventing residual poses from mixing with the new clip
         // (which is what causes the "T-pose idle" appearance).
         // _baseIdleAction is deliberately skipped so the skeleton stays covered during the
-        // transition (it will be faded back to 0.12 by _ensureBaseIdle below).
+        // transition; we also re-affirm its presence immediately after to guard against
+        // any accidental weight reduction.
         this._stopAllOverlays(0.3);
+        try { await this._ensureBaseIdle(1.0, false); } catch(e) { /* ignore */ }
 
         let action = this.actions[actionName];
 
