@@ -74,16 +74,24 @@ async def test_build_json_prompt_includes_recon_contributions(monkeypatch):
         message=msg, context_memory={}, interface_name="test"
     )
 
-    # Recon contributions should be present in context
+    # Recon metadata should be present in context (raw contributions are
+    # no longer included — their memories are merged into top-level memories)
     ctx = prompt.get("context", {})
     assert "recon" in ctx, "recon key missing from context"
     recon = ctx.get("recon")
     assert recon is not None
-    contribs = recon.get("contributions", [])
-    assert any(c.get("type") == "memory" for c in contribs)
+    assert "contributions" not in recon, (
+        "raw contributions should no longer be in recon"
+    )
     assert recon.get("language") == "it"
     assert recon.get("message_tone") == "empathetic"
     assert recon.get("conversation_tone") == "warm"
+
+    # Recon memories should be merged into top-level memories
+    memories = ctx.get("memories", [])
+    assert any(
+        isinstance(m, dict) and m.get("snippet") == "important memory" for m in memories
+    ), "recon memory should appear in top-level memories"
 
     # Instructions should include language and tone prefixes
     instr = prompt.get("instructions", "")

@@ -129,6 +129,17 @@ register_exposed_var(
     advanced=True,
 )
 
+register_exposed_var(
+    "PROMPT_LITE_MODE",
+    label="Prompt Lite Mode",
+    default=0,
+    value_type=int,
+    ui_type="bool",
+    description="Aggressively minimize prompt size for small/local models. Reduces history, strips actions, removes redundant context.",
+    scope="core",
+    component="history_engine",
+)
+
 
 def _get_int(key: str, default: int) -> int:
     try:
@@ -146,13 +157,24 @@ def _get_bool(key: str, default: bool) -> bool:
 
 
 def _format_ts(ts: Any) -> str:
+    """Format a timestamp for display in chat history.
+
+    Converts to the server's local timezone so history entries align with the
+    ``time`` context field that the time plugin injects (which also uses local time).
+    """
     try:
+        from core.time_zone_utils import utc_to_local
+
         if isinstance(ts, str):
             ts = ts.replace("Z", "+00:00")
             dt = datetime.fromisoformat(ts)
+            if dt.tzinfo is not None:
+                dt = utc_to_local(dt)
             return dt.strftime("%d/%m/%y:%H%M")
         if hasattr(ts, "isoformat"):
-            # datetime
+            # datetime object
+            if getattr(ts, "tzinfo", None) is not None:
+                ts = utc_to_local(ts)
             return ts.strftime("%d/%m/%y:%H%M")
     except Exception:
         pass
@@ -255,8 +277,15 @@ class HistoryEngine:
         memories: Optional[Sequence[HistoryEntry]] = None,
         history_scope: str | None = None,
     ) -> Dict[str, Any]:
+        lite_mode = _get_bool("PROMPT_LITE_MODE", False)
+
         verbosity = max(0, _get_int("CONTEXT_VERBOSITY", 10))
         thoughts_limit = max(0, _get_int("THOUGHTS_LIMIT", 5))
+
+        # In lite mode, aggressively cap limits for small/local models
+        if lite_mode:
+            verbosity = min(verbosity, 3)
+            thoughts_limit = min(thoughts_limit, 2)
 
         enable_current = _get_bool("ENABLE_HISTORY_CURRENT_CHAT", True)
         enable_recent = _get_bool("ENABLE_HISTORY_RECENT", True)
@@ -695,7 +724,8 @@ class HistoryEngine:
         # Core-provided memories (already searched by prompt engine)
         out_memories: List[Any] = []
         if enable_memories and memories:
-            out_memories = list(memories)[:verbosity] if verbosity > 0 else []
+            mem_limit = min(verbosity, 2) if lite_mode else verbosity
+            out_memories = list(memories)[:mem_limit] if mem_limit > 0 else []
 
         # Final per-target limits
         if verbosity > 0:
@@ -704,21 +734,17 @@ class HistoryEngine:
         if thoughts_limit > 0:
             thoughts = thoughts[-thoughts_limit:]
 
-        # Expose explicit local/global separation in addition to legacy keys
-        local_history = history_current_chat
-        global_history = history_recent
-
-        # Do NOT strip out the alternate history by default; always return both
-        # `local_history` and `global_history` so the assistant sees surrounding
-        # context while still being able to distinguish them.
-
         context: Dict[str, Any] = {
             "history_current_chat": history_current_chat,
             "history_recent": history_recent,
-            "local_history": local_history,
-            "global_history": global_history,
             "thoughts": thoughts,
         }
+
+        # NOTE: local_history / global_history used to be unconditional aliases
+        # of history_current_chat / history_recent.  They are *always* identical
+        # to the canonical keys, so including them just doubles token usage.
+        # The ``history_scope`` field below already tells the LLM which stream
+        # is primary — no alias keys are needed.
 
         # Echo the requested history_scope (if any) so downstream systems can
         # treat one stream as 'primary' while still seeing the other.
@@ -731,7 +757,7 @@ class HistoryEngine:
         if enable_memories:
             context["memories"] = out_memories
 
-        if enable_tags_placeholder:
+        if enable_tags_placeholder and not lite_mode:
             context["tags_placeholder"] = []
 
         return context
