@@ -1426,13 +1426,53 @@
                 ws.onopen = () => {
                     console.log('[synth_webui ws] onopen');
                     updateDebug('Chat WebSocket connected');
+                    // Announce capabilities so server can do a targeted full-state push
+                    try {
+                        ws.send(JSON.stringify({
+                            type: 'hello',
+                            client_type: 'web',
+                            capabilities: ['url_fetch'],
+                            has_assets: []
+                        }));
+                    } catch (e) { /* ignore */ }
                 };
                 ws.onmessage = (event) => {
                     try { console.log('[synth_webui ws] onmessage', event && event.data ? event.data.toString().slice(0,200) : event); } catch (e) {}
-                    // Handle incoming messages
-                    const data = JSON.parse(event.data);
-                    // Simplified message handling
-                    updateDebug('Received WebSocket message: ' + data.type);
+                    try {
+                        const data = JSON.parse(event.data);
+                        updateDebug('Received WebSocket message: ' + data.type);
+
+                        if (data.type === 'vrm_animation') {
+                            try {
+                                if (window.VRMAnimations && typeof window.VRMAnimations.play === 'function') {
+                                    window.VRMAnimations.play(data.state, {
+                                        animation: data.file,
+                                        playOnce: data.loop === false,
+                                        playSection: data.play_section,
+                                        descriptor: data.descriptor
+                                    });
+                                }
+                            } catch (e) { /* ignore */ }
+                        } else if (data.type === 'vrm_preload') {
+                            try {
+                                if (window.VRMAnimations && typeof window.VRMAnimations.preload === 'function') {
+                                    window.VRMAnimations.preload(data.state, data.file, data.descriptor);
+                                }
+                            } catch (e) { /* ignore */ }
+                        } else if (data.type === 'vrm_face') {
+                            try {
+                                if (window.VRMAnimations && typeof window.VRMAnimations.setFaceValues === 'function') {
+                                    window.VRMAnimations.setFaceValues(data.values);
+                                }
+                            } catch (e) { /* ignore */ }
+                        } else if (data.type === 'vrm_model') {
+                            try {
+                                if (typeof window.refreshVRM === 'function') {
+                                    window.refreshVRM(data.url, data.name);
+                                }
+                            } catch (e) { /* ignore */ }
+                        }
+                    } catch (e) { /* ignore non-JSON */ }
                 };
                 ws.onclose = (ev) => {
                     console.log('[synth_webui ws] onclose', ev && ev.code ? ev.code : ev);

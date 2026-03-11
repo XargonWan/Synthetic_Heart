@@ -61,6 +61,13 @@ Usage
 Enabling Dev Components
 ^^^^^^^^^^^^^^^^^^^^^^^
 
+.. note::
+
+   A comprehensive catalog of all HTTP and WebSocket endpoints exposed by
+   Synthetic Heart is available in :doc:`api_endpoints`.  Developers building
+   external integrations should consult that reference when writing clients.
+
+
 1. **Via WebUI**:
    
    * Navigate to the **Components** tab

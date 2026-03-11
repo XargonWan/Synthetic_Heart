@@ -6,6 +6,13 @@ to prevent lower-priority animations from interrupting higher-priority ones.
 
 ## Problem Statement
 
+The core logic that governs animation priority now lives inside the
+KaradaStateServer ("karada" means body), which replaced the previous
+animation handler abstraction.  The priority rules described below are
+implemented by that server and are invoked by any component that requests a
+state change.
+
+
 Previously, when SyntH was in a THINKING state (playing the "think" animation),
 it would immediately switch to IDLE state when the message was being sent,
 interrupting the thinking animation prematurely.

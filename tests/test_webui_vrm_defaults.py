@@ -149,3 +149,43 @@ async def test_upload_vrm_becomes_active_and_replaces_old(tmp_path):
     # reinstantiate UI to ensure marker keeps the uploaded model active
     ui2 = SynthWebUIInterface(autostart=False)
     assert ui2.active_vrm == "model.vrm"
+
+
+def test_current_skin_default_and_changes(tmp_path):
+    """Exercise the /api/skins/current_skin endpoint in various scenarios."""
+    # ensure a clean skins/temp directory
+    temp_dir = Path("skins") / "temp"
+    if temp_dir.exists():
+        shutil.rmtree(temp_dir)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+
+    ui = SynthWebUIInterface(autostart=False)
+    client = TestClient(ui.app)
+
+    # default environment (no user VRM) should return Rei
+    r = client.get("/api/skins/current_skin")
+    assert r.status_code == 200
+    assert r.json().get("skin") == "Rei"
+
+    # uploading a VRM clears the skin
+    files = {"file": ("http.vrm", b"dummy", "application/octet-stream")}
+    r2 = client.post("/api/vrm", files=files)
+    assert r2.status_code in (200, 204)
+    r3 = client.get("/api/skins/current_skin")
+    assert r3.status_code == 200
+    assert r3.json().get("skin") is None
+
+    # activate a fake skin and check value
+    dummy_skin = "FooSkin"
+    # create skin folder with a vrm
+    skin_dir = Path("skins") / dummy_skin
+    skin_dir.mkdir(parents=True, exist_ok=True)
+    vrm_file = skin_dir / "model.vrm"
+    vrm_file.write_bytes(b"vrm")
+    r4 = client.post(f"/api/skins/{dummy_skin}/activate")
+    assert r4.status_code == 201
+    r5 = client.get("/api/skins/current_skin")
+    assert r5.json().get("skin") == dummy_skin
+
+    # cleanup created skin
+    shutil.rmtree(skin_dir)

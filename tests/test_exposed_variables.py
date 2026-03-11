@@ -59,6 +59,13 @@ def test_chromium_headless_reflects_config_change():
     assert inst.CHROMIUM_HEADLESS is True
 
 
+def test_default_response_timeout():
+    # The configuration registry default should match the new value we set in the code.
+    from core.message_chain import RESPONSE_TIMEOUT
+
+    assert int(RESPONSE_TIMEOUT) == 300
+
+
 def test_system_reply_timeout_from_config():
     from core.transport_layer import _get_system_reply_timeout
     from core.config_manager import config_registry

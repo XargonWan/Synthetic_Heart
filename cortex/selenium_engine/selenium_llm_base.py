@@ -762,6 +762,29 @@ class SeleniumLLMBase(AIPluginBase):
             log_error(f"[selenium] Failed to create shared driver: {e}")
             raise
 
+    def _set_anim_state_sync(self, state: str) -> None:
+        """Post a fire-and-forget animation-state change from a sync worker thread.
+
+        Relies on ``self._event_loop`` being set by :meth:`generate_response`
+        before any :func:`asyncio.to_thread` call.  All exceptions are
+        suppressed so Selenium workflows are never interrupted by animation
+        bookkeeping failures.
+        """
+        try:
+            loop = getattr(self, "_event_loop", None)
+            if loop is None or not loop.is_running():
+                return
+            from core.persona_manager import get_persona_manager
+
+            pm = get_persona_manager()
+            if pm is None:
+                return
+            asyncio.run_coroutine_threadsafe(
+                pm.set_animation_state(state, session_id=None), loop
+            )
+        except Exception:
+            pass
+
     @classmethod
     def _locate_chromium_binary_static(cls) -> Optional[str]:
         """Static version of _locate_chromium_binary for shared driver creation."""
@@ -3976,6 +3999,11 @@ class SeleniumLLMBase(AIPluginBase):
                         f"[selenium] Using fresh shared driver with {window_count} window(s)"
                     )
 
+            # Capture the running loop so sync worker threads (_execute_complete_workflow,
+            # _execute_double_prompt_workflow) can post animation-state changes back to the
+            # async core without blocking the Selenium thread.
+            self._event_loop = asyncio.get_running_loop()
+
             # Check for double-prompt split condition (only when not explicitly skipping)
             try:
                 # Determine whether we must split into PART1/PART2
@@ -4681,6 +4709,10 @@ class SeleniumLLMBase(AIPluginBase):
                 f"[selenium] _execute_complete_workflow called with driver: {self.driver is not None}"
             )
 
+            # Signal that Synth is about to compose/submit a prompt (think phase).
+            # This covers both single-prompt and every PART in a multi-part workflow.
+            self._set_anim_state_sync("think")
+
             # Driver is guaranteed to be initialized by generate_response
             # Just verify it's still alive
             try:
@@ -4709,6 +4741,10 @@ class SeleniumLLMBase(AIPluginBase):
                 return "❌ Failed to send prompt"
             if isinstance(send_result, str) and send_result.startswith("❌"):
                 return send_result
+
+            # Prompt successfully submitted: the LLM is now generating its reply.
+            # Switch to the 'write' animation state.
+            self._set_anim_state_sync("write")
 
             # Handle response choice if applicable (e.g., ChatGPT offers two responses)
             self._handle_response_choice(self.driver)

@@ -2,13 +2,13 @@ import json
 import pytest
 from pathlib import Path
 
-from core.animation_handler import get_animation_handler, AnimationState
+from core.animation_handler import get_karada_state_server, AnimationState
 
 
 @pytest.fixture(autouse=True)
 def reset_handler():
     # Ensure a fresh handler for each test
-    handler = get_animation_handler()
+    handler = get_karada_state_server()
     handler._registered_state_animations.clear()
     handler._state_aliases.clear()
     handler._search_paths = []
@@ -36,7 +36,7 @@ def test_variants_discovery(tmp_path: Path):
     (think_dir / "thinking_post.fbx").write_text("FBX_PLACEHOLDER")
     write_json(think_dir / "thinking_post.fbx.json", {"play_once": True})
 
-    handler = get_animation_handler()
+    handler = get_karada_state_server()
     # set custom search path (this should be checked before Rei fallback)
     handler.set_animation_search_paths([base])
 
@@ -52,7 +52,7 @@ def test_exact_file_match_and_aliases(tmp_path: Path):
     (base / "eat.fbx").write_text("FBX_PLACEHOLDER")
     write_json(base / "eat.fbx.json", {"loop": {"start_frame": 0, "end_frame": 30}})
 
-    handler = get_animation_handler()
+    handler = get_karada_state_server()
     handler.set_animation_search_paths([base])
 
     variants = handler.get_animation_variants("eat")
@@ -65,7 +65,7 @@ def test_exact_file_match_and_aliases(tmp_path: Path):
 
 
 def test_register_state_animations_override():
-    handler = get_animation_handler()
+    handler = get_karada_state_server()
     handler.register_state_animations(
         "think", {"loop": ["override_loop.fbx"], "post": ["override_post.fbx"]}
     )

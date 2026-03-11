@@ -32,6 +32,7 @@ getting started.
    plugins
    auris_vox
    vrm_animations
+   animation_system
    webui_controls
    gemini/synth-live-voice-integration
    faq
@@ -42,6 +43,7 @@ getting started.
 
    COMPONENT_DEVELOPMENT_GUIDE
    dev_components
+   api_endpoints
    component_pattern
    two_phase_init_implementation
    config_management

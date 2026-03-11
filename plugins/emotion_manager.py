@@ -516,20 +516,13 @@ class EmotionManager(PluginBase):
 
             log_debug(f"[emotion_manager] Set {emotion} = {intensity}")
 
-            # Notify animation handler
+            # Push updated face value to all VRM clients
             try:
-                from core.animation_handler import get_animation_handler
+                from core.animation_handler import get_karada_state_server
 
-                handler = get_animation_handler()
+                handler = get_karada_state_server()
                 if handler:
-                    try:
-                        await handler._notify_animation_state_changed(
-                            handler.current_state,
-                            handler._current_animation_file,
-                            handler._current_animation_descriptor,
-                        )
-                    except Exception:
-                        pass
+                    await handler.set_face_values({emotion: intensity / 10.0})
             except Exception:
                 pass
             return True
@@ -587,20 +580,13 @@ class EmotionManager(PluginBase):
 
         # Get final merged state to return
         state = await self.get_emotion_state()
-        # After bulk update, try to nudge clients so overlay appears
+        # Push full face-values update to all VRM clients
         try:
-            from core.animation_handler import get_animation_handler
+            from core.animation_handler import get_karada_state_server
 
-            handler = get_animation_handler()
-            if handler:
-                try:
-                    await handler._notify_animation_state_changed(
-                        handler.current_state,
-                        handler._current_animation_file,
-                        handler._current_animation_descriptor,
-                    )
-                except Exception:
-                    pass
+            handler = get_karada_state_server()
+            if handler and state:
+                await handler.set_face_values({k: v / 10.0 for k, v in state.items()})
         except Exception:
             pass
 
