@@ -21,8 +21,8 @@
                   │  validation · dispatcher · notifier   │
                   └──┬──────────┬──────────────┬─────────┘
                      │          │              │
-              ┌──────┴──┐  ┌───┴────┐   ┌─────┴──────┐
-              │ plugins/ │  │ cortex/│   │ interface/  │
+              ┌──────┴───┐  ┌───┴────┐   ┌─────┴──────┐
+              │ plugins/ │  │ cortex/│   │ interface/ │
               │          │  │ llm_   │   │            │
               │ actions  │  │ engines│   │ Telegram   │
               │ agents   │  │        │   │ Discord    │
