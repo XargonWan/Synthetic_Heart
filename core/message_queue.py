@@ -709,7 +709,7 @@ async def _consumer_loop() -> None:
                 # Get timeout configuration from message_chain module
                 from core.message_chain import RESPONSE_TIMEOUT
 
-                timeout_seconds = int(RESPONSE_TIMEOUT) if RESPONSE_TIMEOUT else 240
+                timeout_seconds = int(RESPONSE_TIMEOUT) if RESPONSE_TIMEOUT else 300  # default bump from 240 to 300s
 
                 # Check if this is an event prompt
                 if "event_prompt" in final:
@@ -1040,7 +1040,7 @@ async def _consumer_loop() -> None:
                         except asyncio.TimeoutError:
                             timed_out = True
                             log_error(
-                                f"[QUEUE] Message processing timed out after {timeout_seconds}s for chat {chat_id}"
+                                f"[QUEUE] Message processing timed out after {timeout_seconds}s for chat {chat_id}"  # log uses whatever timeout is active
                             )
                             # Additional debug to capture routing context when timeouts occur
                             try:

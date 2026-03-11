@@ -1137,11 +1137,17 @@ async def _request_selective_correction(
 
     # Build detailed error descriptions with schemas
     error_details = []
+    # we'll also note globally whether any unknown action types occurred
+    unknown_actions: list[str] = []
     for failed in failed_actions:
         action = failed["action"]
         errors = failed["errors"]
         action_type = action.get("type", "unknown")
         schema = action_schemas.get(action_type, {})
+
+        # mark unknown actions for later hinting
+        if action_type not in action_schemas:
+            unknown_actions.append(action_type)
 
         detail = {
             "action_type": action_type,
@@ -1178,6 +1184,13 @@ FAILED ACTIONS REQUIRING CORRECTION:
             instruction += f"   REQUIRED FIELDS: {', '.join(detail['required_fields'])}\n"
         if detail["optional_fields"]:
             instruction += f"   OPTIONAL FIELDS: {', '.join(detail['optional_fields'])}\n"
+
+        # If this action was unknown, include a generic advisory instead of
+        # spitting out the entire current list (which may change depending on
+        # loaded plugins).  The corrector will already know which actions are
+        # valid; this note is just to highlight the mismatch.
+        if detail['description'] == 'Unknown action' or detail['action_type'] in unknown_actions:
+            instruction += f"   NOTE: '{detail['action_type']}' is not a valid action type.\n"
 
         # Add verbose instructions if available (include description, payload schema, examples, and important notes)
         if "verbose_instructions" in detail:

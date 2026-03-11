@@ -109,6 +109,9 @@ frontends).
   a given type for a skin (``think``, ``write``, ``idle``, etc.).
 - **GET** `/api/skins/{skin}/animations/{animation_type}/{animation_file}.json` –
   fetch a JSON descriptor for a specific animation file.
+- **GET** `/api/skins/current_skin` – return the folder name of the currently-
+  active skin (or ``null`` when a custom/uploaded VRM is in use).  Clients can
+  call this before hitting the `/api/animations/{skin}/…` endpoints.
 - **GET** `/api/animation_state` – query the current centralized animation state.
   Returns ``{state, animation, descriptor, animation_id}``.
 - **POST** `/api/animation_state` – request a centralized animation state change.

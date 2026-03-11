@@ -71,3 +71,7 @@ async def test_language_evaluator_uses_only_local_history(monkeypatch):
     assert "hola" not in captured["messages"][1]["content"], (
         "global history leaked into prompt"
     )
+
+    # ensure system prompt includes weight guidance
+    assert "weight" in captured["messages"][0]["content"].lower()
+    assert "3" in captured["messages"][0]["content"]

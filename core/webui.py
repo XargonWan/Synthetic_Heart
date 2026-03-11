@@ -123,6 +123,11 @@ class SynthWebUIInterface:
         # Track pending THINKING actions per session so we can deterministically
         # switch THINK -> WRITE -> IDLE when the async response is actually sent.
         self._pending_thinking_actions: Dict[str, Deque[str]] = {}
+        # Active skin tracker (folder name) – used by the new /api/skins/current_skin
+        # endpoint.  This is a hint for situations where the active VRM has lost
+        # its original path (e.g. after copying into avatars); for other cases the
+        # value is derived dynamically from `self.active_vrm`.
+        self._current_skin: Optional[str] = None
         # Track active WRITING actions per session so we can stop them immediately
         # after sending, and avoid starting WRITING too late.
         self._active_writing_actions: Dict[str, Deque[str]] = {}
@@ -253,6 +258,8 @@ class SynthWebUIInterface:
         self.active_vrm_marker = self.vrm_dir / ".active"
         # Load active VRM from marker or default
         self.active_vrm = self._load_active_vrm()
+        # initialise skin hint based on whatever active_vrm we found
+        self._current_skin = self._derive_skin_from_active_vrm()
 
         if static_dir.exists():
             self.app.mount(
@@ -492,6 +499,8 @@ class SynthWebUIInterface:
         self.app.post("/api/persona")(self.upload_persona_pack)
         # Skins management endpoints
         self.app.get("/api/skins")(self.list_skins)
+        # new helper: allow clients to query which skin is active
+        self.app.get("/api/skins/current_skin")(self.get_current_skin)
         self.app.post("/api/skins/{skin_name}/activate")(self.activate_skin)
         self.app.post("/api/skins/uploaded/clear")(self.clear_uploaded_vrm)
         self.app.get("/api/components")(self.components_summary)
@@ -2896,6 +2905,45 @@ class SynthWebUIInterface:
         log_info(f"{LOG_PREFIX} ✓ Active VRM set to: '{self.active_vrm}'")
         log_info(f"{LOG_PREFIX} ========== SET ACTIVE VRM END (success) ==========")
 
+    # ------------------------------------------------------------------
+    # skin/VRM helpers
+    # ------------------------------------------------------------------
+    def _derive_skin_from_active_vrm(self) -> Optional[str]:
+        """Return the skin folder implied by ``self.active_vrm``.
+
+        A string like ``"/skins/Rei/model.vrm"`` yields ``"Rei"``.  Otherwise we
+        fall back to ``self._current_skin`` which is explicitly set when a skin
+        is activated via the API.  ``None`` is returned for a custom/uploaded
+        VRM or when no skin information can be determined.
+        """
+        if self._current_skin:
+            return self._current_skin
+        av = getattr(self, "active_vrm", None)
+        if isinstance(av, str) and "/skins/" in av:
+            parts = av.split("/")
+            try:
+                idx = parts.index("skins")
+                if idx + 1 < len(parts):
+                    return parts[idx + 1]
+            except ValueError:
+                pass
+        return None
+
+    async def get_current_skin(self):
+        """Handler for **GET /api/skins/current_skin**.
+
+        Returns ``{"skin": <name>}`` where ``<name>`` is the active skin folder or
+        ``null`` if the currently selected VRM does not belong to any skin
+        (i.e. a custom/uploaded model).  For traditional setups with no custom
+        model, ``Rei`` is returned so clients have a sane default.
+        """
+        skin = self._derive_skin_from_active_vrm()
+        if skin is None:
+            rei = Path(__file__).parent.parent / "skins" / "Rei"
+            if rei.exists():
+                skin = "Rei"
+        return JSONResponse({"skin": skin})
+
     @staticmethod
     def _sanitize_vrm_filename(name: str) -> str:
         stem = Path(name or "avatar").stem
@@ -5211,6 +5259,8 @@ class SynthWebUIInterface:
 
     async def upload_vrm_model(self, file: UploadFile = File(...)):
         log_info(f"{LOG_PREFIX} ========== VRM UPLOAD START ==========")
+        # uploading a custom model means we're no longer using a named skin
+        self._current_skin = None
         log_info(
             f"{LOG_PREFIX} VRM upload started: {file.filename if file else 'no file'}"
         )
@@ -7390,6 +7440,8 @@ class SynthWebUIInterface:
 
         try:
             self._set_active_vrm("model.vrm")
+            # after restoring Rei we want the skin hint to reflect that
+            self._current_skin = "Rei"
         except Exception:
             pass
 
@@ -7432,6 +7484,10 @@ class SynthWebUIInterface:
 
         try:
             self._set_active_vrm(target.name)
+            # remember which skin we just activated; the active_vrm itself is
+            # just a filename once copied into avatars/, so we wouldn't be able
+            # to infer it later.
+            self._current_skin = skin_name
         except Exception as exc:
             log_error(
                 f"{LOG_PREFIX} Failed to set active VRM after activating skin {skin_name}: {exc}"

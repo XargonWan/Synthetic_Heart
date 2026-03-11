@@ -35,7 +35,9 @@ Backend: KaradaStateServer
 
 Located in ``core/animation_handler.py``, this component is the canonical VRM state service:
 
-- Maps logical animation states to FBX animation files
+- Maps logical animation states to FBX animation files (clients never
+  choose a file directly; they request a state and Karada picks an appropriate
+  animation based on the active skin and Rei fallback)
 - Tracks and broadcasts the current animation state to **all** connected clients
 - Manages VRM model state and pushes it on connect/change
 - Manages animation contexts and automatic fallback to Idle
@@ -64,6 +66,11 @@ The ``SynthWebUIInterface`` (``core/webui.py``) coordinates between the backend 
 
 Animation States
 ================
+
+Clients and internal components never supply a file path – they request one of the
+logical states below.  Karada (the ``AnimationHandler``) chooses an appropriate
+FBX from the active skin (falling back to Rei) and sends that filename to the
+front-end.
 
 The system defines four logical animation states:
 
@@ -180,6 +187,16 @@ animation changes.  This is the primary playback command.
             "outro":  {"start_frame": 61, "end_frame": 90},
             "fps": 30
         },
+
+.. note::
+   The descriptor object above comes directly from the companion
+   ``<animation>.fbx.json`` file located next to the FBX.  that file is
+   the *single source of truth* for loop/intro/outro timings, fps, and
+   related metadata; duplicating the same values elsewhere is a bug.
+   When no descriptor file exists, the handler synthesises sensible
+   defaults (idle animations loop, other states play once, and the
+   implicit loop section spans frames ``0``–``max``).
+
         "animation_state": {
             "action": "think",
             "phase": "loop",
