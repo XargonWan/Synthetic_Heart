@@ -25,6 +25,8 @@ CAPABILITIES = {
     "low_latency": True,
 }
 
+ENGINE_LABEL = "Gemini Live (experimental bidirectional streaming)"
+
 
 class GeminiLivePlugin:
     display_name = "Gemini Live (Prototype)"
