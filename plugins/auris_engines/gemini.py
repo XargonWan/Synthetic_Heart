@@ -14,7 +14,7 @@ from typing import Any
 
 from core.auris_registry import register_auris_engine
 from core.logging_utils import log_error, log_warning
-from plugins.auris_base import AurisEngineBase
+from plugins.auris_base import AurisEngineBase, AurisTranscriptResult
 
 
 class GeminiAurisEngine(AurisEngineBase):
@@ -51,8 +51,15 @@ class GeminiAurisEngine(AurisEngineBase):
 
     async def transcribe(
         self, file_path: str, mime_type: str | None = None
-    ) -> str | None:
-        """Transcribe *file_path* by calling ``handle_live_processing`` on the Gemini engine."""
+    ) -> AurisTranscriptResult | None:
+        """Transcribe *file_path* by calling ``handle_live_processing`` on the Gemini engine.
+
+        Gemini does not expose the detected spoken language in the standard
+        GenerateContent API response, so ``language`` is always ``None`` in the
+        returned :class:`AurisTranscriptResult`.  Downstream components
+        (e.g. :mod:`plugins.auris_plugin`) will apply text-based language
+        detection as a fallback.
+        """
         engine = self._get_gemini_engine()
         if engine is None:
             log_error("[auris/gemini] No Gemini engine found in cortex registry.")
@@ -64,10 +71,16 @@ class GeminiAurisEngine(AurisEngineBase):
             return None
 
         try:
-            return await handler(file_path, mime_type_hint=mime_type)
+            text: str | None = await handler(file_path, mime_type_hint=mime_type)
         except Exception as exc:
             log_error(f"[auris/gemini] Transcription failed: {exc}")
             return None
+
+        if not text:
+            return None
+        # Gemini doesn't expose the spoken language; return language=None so
+        # AurisPlugin can fill it in via text-based detection.
+        return AurisTranscriptResult(text=text, language=None)
 
 
 # ---------------------------------------------------------------------------

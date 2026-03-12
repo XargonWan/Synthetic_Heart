@@ -1221,8 +1221,13 @@ FAILED ACTIONS REQUIRING CORRECTION:
         # spitting out the entire current list (which may change depending on
         # loaded plugins).  The corrector will already know which actions are
         # valid; this note is just to highlight the mismatch.
-        if detail['description'] == 'Unknown action' or detail['action_type'] in unknown_actions:
-            instruction += f"   NOTE: '{detail['action_type']}' is not a valid action type.\n"
+        if (
+            detail["description"] == "Unknown action"
+            or detail["action_type"] in unknown_actions
+        ):
+            instruction += (
+                f"   NOTE: '{detail['action_type']}' is not a valid action type.\n"
+            )
 
         # Add verbose instructions if available (include description, payload schema, examples, and important notes)
         if "verbose_instructions" in detail:

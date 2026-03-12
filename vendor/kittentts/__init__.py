@@ -15,7 +15,7 @@ import ``kittentts`` and behave as if a proper neural engine were present.
 from __future__ import annotations
 
 import io
-from typing import Any, List
+from typing import List
 
 # the real package will have its own dependency list; in the vendored
 # stub we lazily import third-party libraries so that merely importing
@@ -49,9 +49,16 @@ class KittenTTS:
         # implementation will use it to select a downloaded model.
         self.model_id = model_id or "kitten-tts-nano-0.8"
 
-    def generate(self, text: str, voice: str = "Bella") -> bytes:
-        # ``gtts`` only supports a single voice/language; ignore the
-        # ``voice`` parameter but keep it in the signature for compatibility.
+    def generate(self, text: str, voice: str = "Bella", language: str = "en") -> bytes:
+        # NOTE: this is the vendored gTTS stub, used only when the real
+        # kittentts package is not installed.  gTTS does not support multiple
+        # voice personas — ``voice`` is accepted in the signature for API
+        # compatibility but has no effect on the audio output.  Install the
+        # real kittentts package for genuine multi-voice synthesis where each
+        # persona (Bella, Luna, Jasper …) sounds distinctly different.
+        #
+        # The ``language`` parameter IS respected: Italian text will be
+        # synthesised with the Italian gTTS voice, English with English, etc.
         try:
             from gtts import gTTS  # type: ignore[import]
             from pydub import AudioSegment  # type: ignore[import]
@@ -61,7 +68,7 @@ class KittenTTS:
                 f"{exc}. Install 'gtts' and 'pydub' or add the real package."
             )
 
-        tts = gTTS(text=text, lang="en")
+        tts = gTTS(text=text, lang=language)
         mp3_buf = io.BytesIO()
         tts.write_to_fp(mp3_buf)
         mp3_buf.seek(0)

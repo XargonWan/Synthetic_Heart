@@ -1821,7 +1821,8 @@ class DiscordInterface:
                             with open(path, "wb") as f:
                                 f.write(data)
                             log_debug(f"[discord_interface] wrote audio to {path}")
-                            transcribed = await auris.transcribe_audio(path, mime)
+                            _auris_result = await auris.transcribe_audio(path, mime)
+                            transcribed = _auris_result.text if _auris_result else None
                             if transcribed:
                                 wrapped.text = transcribed
                                 setattr(wrapped, "is_voice_input", True)

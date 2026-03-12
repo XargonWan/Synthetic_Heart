@@ -718,7 +718,9 @@ async def _consumer_loop() -> None:
                 # Get timeout configuration from message_chain module
                 from core.message_chain import RESPONSE_TIMEOUT
 
-                timeout_seconds = int(RESPONSE_TIMEOUT) if RESPONSE_TIMEOUT else 300  # default bump from 240 to 300s
+                timeout_seconds = (
+                    int(RESPONSE_TIMEOUT) if RESPONSE_TIMEOUT else 300
+                )  # default bump from 240 to 300s
 
                 # Check if this is an event prompt
                 if "event_prompt" in final:
@@ -786,12 +788,28 @@ async def _consumer_loop() -> None:
                         # to TRAINER_CORTEX when a scope override is configured.
                         context["is_trainer"] = is_trainer
                         # Propagate voice input flag from interface (used by message_chain TTS auto-inject)
+                        # We explicitly write *both* True and False so that stale values
+                        # from a previous message do not linger.  Previously we only
+                        # set the flag when it was True which meant a voice message
+                        # could taint the context for all subsequent text replies,
+                        # leading the bot to auto-send audio even when the new
+                        # incoming message was plain text.  See issue described by
+                        # user: "se il messaggio entrante non è un audio il synth
+                        # non dovrebbe rispondere con un audio".  Clearing the key
+                        # prevents unexpected audio responses.
                         _queued_msg = final.get("message")
                         if getattr(_queued_msg, "is_voice_input", False):
                             context["is_voice_input"] = True
+                        else:
+                            # remove stale flag if present
+                            context.pop("is_voice_input", None)
+
                         # Propagate explicit request_tts flag (e.g. from handle_media_live wrap)
                         if getattr(_queued_msg, "request_tts", False):
                             context["request_tts"] = True
+                        else:
+                            context.pop("request_tts", None)
+
                         # Propagate trainer flag so plugin_instance can route
                         # to TRAINER_CORTEX when a scope override is configured.
                         if is_trainer:

@@ -120,8 +120,8 @@ async def _try_auris(file_path: str, mime_type: str | None) -> str | None:
             log_debug("[media_dispatcher] Auris plugin not loaded.")
             return None
 
-        result: str | None = await auris.transcribe_audio(file_path, mime_type)
-        return result or None
+        result = await auris.transcribe_audio(file_path, mime_type)
+        return result.text if result else None
     except Exception as exc:
         log_warning(f"[media_dispatcher] Auris error: {exc}")
         return None

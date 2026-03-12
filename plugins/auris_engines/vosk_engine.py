@@ -59,7 +59,7 @@ from typing import Any
 from core.auris_registry import register_auris_engine
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.model_manager import MODEL_MANAGER, ModelSpec
-from plugins.auris_base import AurisEngineBase
+from plugins.auris_base import AurisEngineBase, AurisTranscriptResult
 
 _MODEL_CACHE: dict[str, Any] = {}  # path → vosk.Model singleton
 
@@ -550,18 +550,26 @@ class VoskAurisEngine(AurisEngineBase):
     # AurisEngineBase
     # ------------------------------------------------------------------
 
-    def transcribe(self, file_path: str, mime_type: str | None = None) -> str | None:
+    def transcribe(
+        self, file_path: str, mime_type: str | None = None
+    ) -> AurisTranscriptResult | None:
         """Transcribe *file_path* using a local Vosk model.
 
         When ``VOSK_LANGUAGE=auto``, the spoken language is first detected
         acoustically by Whisper-tiny (if ``faster-whisper`` is installed),
         and the matching Vosk model is selected accordingly.
+
+        Returns an :class:`AurisTranscriptResult` that includes the detected
+        language code so downstream components (e.g. the Vox TTS engine) can
+        select the appropriate voice or model without re-running language
+        detection on the transcribed text.
         """
         configured_lang = _get_configured_language()
         if configured_lang == "auto":
             effective_lang = _resolve_auto_language(audio_path=file_path)
             model_path = _model_path_from_language(effective_lang)
         else:
+            effective_lang = configured_lang
             model_path = self._model_path()
 
         model = _load_model(model_path)
@@ -616,7 +624,9 @@ class VoskAurisEngine(AurisEngineBase):
             log_info(
                 f"[auris/vosk] Transcribed {len(full)} chars from {Path(file_path).name}"
             )
-            return full if full else None
+            if not full:
+                return None
+            return AurisTranscriptResult(text=full, language=effective_lang)
         except Exception as exc:
             log_error(f"[auris/vosk] Transcription error: {exc}")
             return None

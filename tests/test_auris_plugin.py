@@ -67,11 +67,13 @@ def test_registry_load_engine_missing_engine_class() -> None:
 def test_registry_load_engine_caches_instance() -> None:
     import types
     from core.auris_registry import AurisRegistry
-    from plugins.auris_base import AurisEngineBase
+    from plugins.auris_base import AurisEngineBase, AurisTranscriptResult
 
     class FakeEngine(AurisEngineBase):
-        def transcribe(self, file_path, mime_type=None):
-            return "hello"
+        def transcribe(
+            self, file_path: str, mime_type: str | None = None
+        ) -> AurisTranscriptResult | None:
+            return AurisTranscriptResult(text="hello", language="en")
 
     dummy_mod = types.ModuleType("fake_m")
     dummy_mod.ENGINE_CLASS = FakeEngine  # type: ignore[attr-defined]
@@ -118,11 +120,13 @@ async def test_auris_plugin_transcribe_disabled() -> None:
 async def test_auris_plugin_transcribe_calls_engine() -> None:
     """transcribe_audio should call the engine's transcribe method."""
     from core.auris_registry import AurisRegistry
-    from plugins.auris_base import AurisEngineBase
+    from plugins.auris_base import AurisEngineBase, AurisTranscriptResult
 
     class MockEngine(AurisEngineBase):
-        def transcribe(self, file_path, mime_type=None):
-            return "transcribed text"
+        def transcribe(
+            self, file_path: str, mime_type: str | None = None
+        ) -> AurisTranscriptResult | None:
+            return AurisTranscriptResult(text="transcribed text", language="en")
 
     mock_registry = AurisRegistry()
     mock_registry._engine_modules["mock"] = "mock_module"
@@ -140,7 +144,44 @@ async def test_auris_plugin_transcribe_calls_engine() -> None:
         patch.object(plugin, "refresh_config"),
     ):
         result = await plugin.transcribe_audio("/tmp/fake.wav")
-    assert result == "transcribed text"
+    assert result is not None
+    assert result.text == "transcribed text"
+    assert result.language == "en"
+
+
+@pytest.mark.asyncio
+async def test_stt_transcribe_action_includes_language() -> None:
+    """handle_custom_action('stt_transcribe') should include 'language' in success result."""
+    from core.auris_registry import AurisRegistry
+    from plugins.auris_base import AurisEngineBase, AurisTranscriptResult
+    from plugins.auris_plugin import AurisPlugin
+
+    class MockEngine(AurisEngineBase):
+        def transcribe(
+            self, file_path: str, mime_type: str | None = None
+        ) -> AurisTranscriptResult | None:
+            return AurisTranscriptResult(text="ciao mondo", language="it")
+
+    mock_registry = AurisRegistry()
+    mock_registry._engine_modules["mock"] = "mock_module"
+    mock_registry._instances["mock"] = MockEngine()
+
+    plugin = AurisPlugin.__new__(AurisPlugin)
+    plugin._active_engine_name = "mock"
+    plugin._engine_settings = {}
+
+    with (
+        patch("plugins.auris_plugin.AURIS_REGISTRY", mock_registry),
+        patch("os.path.exists", return_value=True),
+        patch.object(plugin, "refresh_config"),
+    ):
+        result = await plugin.handle_custom_action(
+            "stt_transcribe", {"audio_path": "/tmp/fake.wav"}
+        )
+
+    assert result["status"] == "success"
+    assert result["text"] == "ciao mondo"
+    assert result.get("language") == "it"
 
 
 # ---------------------------------------------------------------------------

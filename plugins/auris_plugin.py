@@ -21,6 +21,7 @@ from core.config_manager import config_registry
 from core.core_initializer import register_plugin
 from core.logging_utils import log_error, log_info, log_warning
 from core.variables_engine import register_exposed_var
+from plugins.auris_base import AurisTranscriptResult
 
 # ---------------------------------------------------------------------------
 # Exposed config variables
@@ -137,8 +138,8 @@ class AurisPlugin(AIPluginBase):
         file_path: str,
         mime_type: str | None = None,
         engine_name: str | None = None,
-    ) -> str | None:
-        """Transcribe an audio file and return the text.
+    ) -> AurisTranscriptResult | None:
+        """Transcribe an audio file and return the result with language.
 
         Args:
             file_path:   Path to the audio file.
@@ -146,7 +147,10 @@ class AurisPlugin(AIPluginBase):
             engine_name: Override the active engine for this call.
 
         Returns:
-            Transcribed text or ``None``.
+            :class:`AurisTranscriptResult` with the transcribed text and
+            the detected language code, or ``None``.  When the engine cannot
+            determine the spoken language acoustically, the language is
+            inferred from the transcribed text using ``lingua``.
         """
         self.refresh_config()
 
@@ -170,13 +174,31 @@ class AurisPlugin(AIPluginBase):
             import inspect
 
             if inspect.iscoroutinefunction(engine.transcribe):
-                result: str | None = await engine.transcribe(file_path, mime_type)
+                result: AurisTranscriptResult | None = await engine.transcribe(
+                    file_path, mime_type
+                )
             else:
-                result: str | None = await asyncio.to_thread(
+                result = await asyncio.to_thread(
                     engine.transcribe, file_path, mime_type
                 )
-            if result:
-                log_info(f"[auris_plugin] Transcription via '{name}': {result[:80]}")
+
+            if result is None:
+                return None
+
+            # If the engine did not identify the spoken language, fall back to
+            # text-based detection using lingua-language-detector so that
+            # downstream components (e.g. Vox engines) always receive a language
+            # hint even when acoustic detection is unavailable.
+            if result.language is None:
+                result = AurisTranscriptResult(
+                    text=result.text,
+                    language=self._detect_language_from_text(result.text),
+                )
+
+            log_info(
+                f"[auris_plugin] Transcription via '{name}': "
+                f"{result.text[:80]!r} (lang={result.language!r})"
+            )
             return result
         except Exception as exc:
             log_error(f"[auris_plugin] Transcription error ({name}): {exc}")
@@ -232,9 +254,12 @@ class AurisPlugin(AIPluginBase):
             mime_type: str | None = payload.get("mime_type")
             engine_name: str | None = payload.get("engine")
 
-            text = await self.transcribe_audio(audio_path, mime_type, engine_name)
-            if text:
-                return {"status": "success", "text": text}
+            result = await self.transcribe_audio(audio_path, mime_type, engine_name)
+            if result:
+                response: dict[str, Any] = {"status": "success", "text": result.text}
+                if result.language is not None:
+                    response["language"] = result.language
+                return response
             return {"status": "error", "message": "Transcription returned no result."}
 
         return {"status": "error", "message": f"Unknown action: {action_type}"}
@@ -305,6 +330,33 @@ class AurisPlugin(AIPluginBase):
                 log_warning(
                     f"[auris_plugin] Could not import engine module '{mod}': {exc}"
                 )
+
+    @staticmethod
+    def _detect_language_from_text(text: str) -> str | None:
+        """Return a language code detected from *text* using lingua.
+
+        Used as a fallback when the STT engine cannot determine the spoken
+        language acoustically (e.g. Gemini).  Returns ``None`` when the
+        detection confidence is too low or ``lingua`` is not installed.
+        """
+        if not text or not text.strip():
+            return None
+        try:
+            from lingua import LanguageDetectorBuilder  # type: ignore[import]
+
+            detector = (
+                LanguageDetectorBuilder.from_all_languages()
+                .with_minimum_relative_distance(0.1)
+                .build()
+            )
+            lang = detector.detect_language_of(text)
+            if lang is not None:
+                code: str = lang.iso_code_639_1.name.lower()
+                log_info(f"[auris_plugin] lingua fallback detected language: {code!r}")
+                return code
+        except Exception as exc:
+            log_warning(f"[auris_plugin] lingua language detection failed: {exc}")
+        return None
 
 
 # ---------------------------------------------------------------------------

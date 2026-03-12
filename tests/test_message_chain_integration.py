@@ -540,6 +540,74 @@ class TestMessageChainIntegration(unittest.TestCase):
             "__auto_injected must be False so fallback text is sent on TTS failure",
         )
 
+    @patch("core.action_parser.run_actions")
+    async def test_no_tts_for_nonvoice_input(self, mock_run_actions):
+        """Plain text (non‑audio) responses should not generate a tts_speak action.
+
+        This covers the regression reported: when the incoming message is not
+        audio the synth must not reply with audio.  We simulate a standard
+        Telegram response on a private chat where the active Vox engine is
+        enabled but *no* voice input flags are set.
+        """
+        from core import message_chain
+
+        # configure an active voice engine so tts_allowed would normally be true
+        with patch("core.config_manager.config_registry.get_value") as mock_get_value:
+
+            def fake_get_value(key, default=None, **kwargs):
+                if key == "ACTIVE_VOX_ENGINE":
+                    return "http"
+                return default
+
+            mock_get_value.side_effect = fake_get_value
+
+            class FakeVar:
+                def __init__(self, value):
+                    self.value = value
+
+            def fake_get_var(name, default=None, **kwargs):
+                if name == "MESSAGE_ACTION_TYPES":
+                    return FakeVar(["message_telegram_bot"])
+                return default
+
+            from unittest.mock import patch
+
+            get_var_patcher = patch(
+                "core.config_manager.config_registry.get_var", new=fake_get_var
+            )
+            get_var_patcher.start()
+
+            # craft a simple message with a downstream tts_speak action
+            json_text = '{"actions": [{"type": "message_telegram_bot", "payload": {"text": "Hello","interface_path": "telegram_bot/1"}}]}'
+            msg = SimpleNamespace(
+                chat_id=1,
+                text=json_text,
+                from_cortex=True,
+                interface_path="telegram_bot/1",
+            )
+
+            result = await message_chain.handle_incoming_message(
+                bot=MagicMock(),
+                message=msg,
+                text=json_text,
+                source="llm",
+                interface_path="telegram_bot/1",
+                context={},  # no is_voice_input, no request_tts
+            )
+
+            self.assertEqual(result, message_chain.ACTIONS_EXECUTED)
+            get_var_patcher.stop()
+
+        # inspect actions that were executed; there should be only the
+        # original message action and *no* tts_speak insertion
+        called_actions = mock_run_actions.call_args[0][0]
+        types = [a.get("type") for a in called_actions if isinstance(a, dict)]
+        self.assertNotIn(
+            "tts_speak",
+            types,
+            "Non-voice input must not trigger a tts_speak action",
+        )
+
     # merge tests: ensure duplicate text actions are consolidated into tts_speak replies
     # Note: subsequent decorators rely on indentation
     @patch("core.transport_layer.run_corrector_middleware")

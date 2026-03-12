@@ -18,11 +18,12 @@ package may download and cache models under ``SYNTH_MODELS_DIR``.
 from __future__ import annotations
 
 import io
+import json
 import threading
 from typing import Any
 
 from core.config_manager import config_registry
-from core.logging_utils import log_error
+from core.logging_utils import log_error, log_info
 from core.variables_engine import register_exposed_var
 from core.vox_registry import register_vox_engine
 from plugins.vox_base import VoxEngineBase
@@ -68,11 +69,17 @@ class LocalKittenTTS:
         if KittenTTS is not None:
             self._engine = KittenTTS(model_path)
 
-    def generate(self, text: str, voice: str = "Bella") -> bytes:
+    def generate(
+        self, text: str, voice: str = "Bella", language: str | None = None
+    ) -> bytes:
         if not self._engine:
             raise RuntimeError(
                 "KittenTTS engine not available; install the 'kittentts' package"
             )
+        # Forward the language hint so the underlying engine (real or vendored
+        # stub) can select the correct voice model / gTTS language code.
+        if language:
+            return self._engine.generate(text=text, voice=voice, language=language)
         return self._engine.generate(text=text, voice=voice)
 
     @classmethod
@@ -113,6 +120,24 @@ _DEFAULT_VOICE = "Bella"
 _DEFAULT_MODEL = "builtin"
 _SAMPLE_RATE = 24000
 
+# ---------------------------------------------------------------------------
+# Localised sample texts used by KittenVoxEngine.sample()
+# The {voice} placeholder is replaced with the actual speaker name so
+# different personas are clearly distinguishable in the WebUI sample player.
+# ---------------------------------------------------------------------------
+_SAMPLE_TEXT_DEFAULT = "Hello! My name is {voice} and this is how I sound."
+_SAMPLE_TEXTS: dict[str, str] = {
+    "en": "Hello! My name is {voice} and this is how I sound.",
+    "it": "Ciao! Mi chiamo {voice} e questo è il mio modo di parlare.",
+    "fr": "Bonjour! Je m'appelle {voice} et voici comment je parle.",
+    "es": "¡Hola! Me llamo {voice} y así es como sueno.",
+    "de": "Hallo! Ich heiße {voice} und so klinge ich.",
+    "pt": "Olá! Meu nome é {voice} e é assim que eu soo.",
+    "ja": "こんにちは！私の名前は{voice}です。これが私の声です。",
+    "zh": "你好！我叫{voice}，这就是我的声音。",
+    "ko": "안녕하세요! 제 이름은 {voice}이고, 이것이 제 목소리입니다.",
+}
+
 
 # ---------------------------------------------------------------------------
 # Expose engine settings in the WebUI → Components section
@@ -142,6 +167,24 @@ register_exposed_var(
     scope="plugins",
     component="vox_plugin",
     advanced=False,
+)
+
+register_exposed_var(
+    "KITTEN_LANGUAGE_MODELS",
+    label="Kitten TTS — Language → Model mapping (JSON)",
+    default="{}",
+    value_type=str,
+    ui_type="string",
+    description=(
+        "JSON object mapping ISO-639-1 language codes to KittenTTS model IDs. "
+        'Example: {"it": "kitten-tts-nano-it-0.1", "en": "kitten-tts-nano-0.8"}. '
+        "When a matching entry exists the specified model is used instead of the "
+        "default KITTEN_MODEL.  Engines that support multiple languages can rely "
+        "on this to select the right model automatically."
+    ),
+    scope="plugins",
+    component="vox_plugin",
+    advanced=True,
 )
 
 # ---------------------------------------------------------------------------
@@ -242,17 +285,43 @@ class KittenVoxEngine(VoxEngineBase):
     # ------------------------------------------------------------------
 
     def get_speakers(self) -> list[dict]:
-        """Return list of voice dicts supported by the local engine."""
-        return [{"code": v, "name": v, "language": "en"} for v in _KITTEN_VOICES]
+        """Return list of voice dicts supported by the local engine.
+
+        KittenTTS voices are language-agnostic: the same set of voices
+        (Bella, Luna, Jasper …) works for any language — the model adapts
+        phonetics to the input text language automatically.  We advertise
+        ``"*"`` instead of ``"en"`` so callers never filter these out when
+        the active language is not English.
+        """
+        return [{"code": v, "name": v, "language": "*"} for v in _KITTEN_VOICES]
 
     def sample(self, speaker: str, text_hint: str | None = None) -> bytes:
-        """Return WAV bytes for a quick voice sample from the local engine."""
-        text = text_hint or f"Sample voice {speaker}"
-        tts = _get_model(self._active_model_id())
+        """Return WAV bytes for a quick voice sample from the local engine.
+
+        Uses a localised template that embeds the voice name so listeners
+        can distinguish between personas even in the WebUI sample player.
+        The real KittenTTS package renders each voice with a distinct
+        acoustic profile; the vendored gTTS stub does not support multiple
+        voice personas and will sound identical across voices.
+        """
+        if text_hint:
+            text = text_hint
+        else:
+            template = _SAMPLE_TEXTS.get("en", _SAMPLE_TEXT_DEFAULT)
+            text = template.format(voice=speaker)
+
+        # Respect language-specific model mapping for samples too.
+        model_id = self._active_model_id()
+        # samples always use the default language (no per-message context here)
+        sample_lang = "en"
+
+        tts = _get_model(model_id)
         if tts is None:
             raise NotImplementedError("TTS engine unavailable")
         try:
-            return tts.generate(text=text, voice=speaker)
+            # Pass the speaker name explicitly so the real KittenTTS package
+            # applies the correct voice model.
+            return tts.generate(text=text, voice=speaker, language=sample_lang)
         except Exception as exc:
             log_error(f"[vox/kitten] sample generation failed: {exc}")
             raise
@@ -277,13 +346,42 @@ class KittenVoxEngine(VoxEngineBase):
     # TTS generation
     # ------------------------------------------------------------------
 
+    def _active_language_model_map(self) -> dict[str, str]:
+        """Return the language → model_id map from ``KITTEN_LANGUAGE_MODELS``."""
+        raw = str(
+            config_registry.get_value(
+                "KITTEN_LANGUAGE_MODELS",
+                "{}",
+                value_type=str,
+                group="plugins",
+                component="vox_plugin",
+            )
+        )
+        try:
+            result = json.loads(raw or "{}")
+            return result if isinstance(result, dict) else {}
+        except Exception:
+            return {}
+
     def generate_tts(
         self,
         text: str,
         emotion: str | None = None,
         **kwargs: Any,
     ) -> bytes | None:
-        model_id = str(kwargs.get("model_id") or self._active_model_id())
+        language: str | None = kwargs.get("language")  # type: ignore[assignment]
+
+        # Select model: prefer a language-specific model when configured.
+        lang_models = self._active_language_model_map()
+        if language and language in lang_models:
+            model_id = str(lang_models[language])
+            log_info(
+                f"[vox/kitten] Using language-specific model '{model_id}' "
+                f"for language '{language}'."
+            )
+        else:
+            model_id = str(kwargs.get("model_id") or self._active_model_id())
+
         voice = str(
             kwargs.get("speaker") or kwargs.get("voice") or self._active_voice()
         )
@@ -293,7 +391,7 @@ class KittenVoxEngine(VoxEngineBase):
             return None
 
         try:
-            audio = tts.generate(text=text, voice=voice)
+            audio = tts.generate(text=text, voice=voice, language=language or "en")
             # Engine may return raw bytes (WAV/MP3) — pass through directly.
             if isinstance(audio, bytes):
                 return audio

@@ -721,7 +721,10 @@ async def handle_media_live(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 # Auris itself logs any successful transcription; the interface should
                 # remain a dumb carrier and avoid duplicating that message.
-                transcribed = await auris.transcribe_audio(input_path, media_type_hint)
+                _auris_result = await auris.transcribe_audio(
+                    input_path, media_type_hint
+                )
+                transcribed = _auris_result.text if _auris_result else None
 
             if transcribed:
                 # Wrap the Telegram message so the queue sees `text = transcribed`.

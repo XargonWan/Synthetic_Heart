@@ -170,7 +170,9 @@ class ReconLanguageEvaluatorPlugin:
 
         system_prompt = (
             "This is a Recon prompt, please execute what is requested below:\n"
-            "- Detect the primary language of the conversation.\n"            "- When determining language, treat the incoming message with weight 3, any response message (if present) with weight 1, and the local history with weight 1.\n"            "Use ONLY the user message and recent history from the same interface path.\n"
+            "- Detect the primary language of the conversation.\n"
+            "- When determining language, treat the incoming message with weight 3, any response message (if present) with weight 1, and the local history with weight 1.\n"
+            "Use ONLY the user message and recent history from the same interface path.\n"
             "Do NOT consider global chat or any other interface history when choosing the language.\n"
             'Return ONLY valid JSON: {"language_code":"it"}.\n'
             "Use BCP-47 language codes (e.g., en, it, es, fr)."
@@ -235,8 +237,8 @@ class ReconLanguageEvaluatorPlugin:
                     if hist_lines and engine:
                         history_prompt = "\n".join(hist_lines)
                         user_prompt = (
-                            f'Chat history for {interface_path}:\n{history_prompt}\n\n'
-                            "Detect the primary language of the conversation and return ONLY valid JSON: {\"language_code\": \"xx\"}. "
+                            f"Chat history for {interface_path}:\n{history_prompt}\n\n"
+                            'Detect the primary language of the conversation and return ONLY valid JSON: {"language_code": "xx"}. '
                             "When determining language, weight the incoming message 3, any response 1, and the history 1."
                         )
                         try:

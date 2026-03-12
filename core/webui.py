@@ -1929,9 +1929,10 @@ class SynthWebUIInterface:
                 transcribed_engine = engine or getattr(
                     auris, "_active_engine_name", None
                 )
-                text = await auris.transcribe_audio(
+                _auris_result = await auris.transcribe_audio(
                     str(tmp_path), mime_type=mime_hint, engine_name=engine
                 )
+                text = _auris_result.text if _auris_result else None
             finally:
                 try:
                     tmp_path.unlink(missing_ok=True)

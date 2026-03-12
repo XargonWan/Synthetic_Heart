@@ -73,6 +73,4 @@ async def test_request_selective_correction_includes_message_in_context(monkeypa
         or "not a valid action type" in instr
     )
     assert "message_send" in instr
-    assert (
-        "Unsupported type" in instr or "not a valid action type" in instr
-    )
+    assert "Unsupported type" in instr or "not a valid action type" in instr

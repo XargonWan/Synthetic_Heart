@@ -1144,7 +1144,14 @@ async def handle_incoming_message(
                             log_debug(
                                 f"[message_chain] Skipping TTS auto-inject: {', '.join(skip_reason)}"
                             )
-                        elif (is_user_facing and tts_allowed) or (
+                        # auto-inject only for voice-originated messages or when
+                        # the LLM explicitly asked for TTS.  previously the
+                        # ``tts_allowed`` flag would permit any text response from
+                        # WebUI/Matrix/other non-voice interfaces which caused the
+                        # synth to speak even though the incoming message was not
+                        # audio.  the requirement is that non-audio inputs should not
+                        # trigger spoken replies.
+                        elif (is_user_facing and tts_allowed and _is_voice_input) or (
                             context and context.get("request_tts")
                         ):
                             # With the new strategy we honor explicit TTS requests even when
@@ -1564,7 +1571,9 @@ async def handle_incoming_message(
             # in accordance with the new policy that at least one delivered
             # message prevents an LLM failure notification.
             if not actions_executed_during_loop:
-                await send_llm_fallback_message(bot, message, failure_reason, context=ctx)
+                await send_llm_fallback_message(
+                    bot, message, failure_reason, context=ctx
+                )
                 return LLM_FAILED
             else:
                 log_warning(

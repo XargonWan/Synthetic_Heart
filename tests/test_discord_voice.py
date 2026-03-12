@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from interface.discord_interface import DiscordInterface
 from core.core_initializer import PLUGIN_REGISTRY
 from core import message_queue
+from plugins.auris_base import AurisTranscriptResult
 
 
 class FakeAttachment:
@@ -41,7 +42,7 @@ async def test_discord_audio_attachment_transcribed(monkeypatch, tmp_path):
     # fake plugin
     class FakeAuris:
         async def transcribe_audio(self, path, hint):
-            return "hello disco"
+            return AurisTranscriptResult(text="hello disco", language="en")
 
     orig = PLUGIN_REGISTRY.get("auris_plugin")
     PLUGIN_REGISTRY["auris_plugin"] = FakeAuris()

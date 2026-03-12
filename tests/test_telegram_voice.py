@@ -6,6 +6,7 @@ import core.reaction_handler as rh
 
 from interface import telegram_bot
 from core.core_initializer import PLUGIN_REGISTRY
+from plugins.auris_base import AurisTranscriptResult
 
 
 class DummyFile:
@@ -19,7 +20,9 @@ class FakeAuris:
         self._ret = ret
 
     async def transcribe_audio(self, path, hint):
-        return self._ret
+        if self._ret is None:
+            return None
+        return AurisTranscriptResult(text=self._ret, language=None)
 
 
 @pytest.mark.asyncio
