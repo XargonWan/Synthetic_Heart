@@ -452,6 +452,140 @@ async def _fetchall(query: str, params: tuple = ()) -> List[Dict]:
         return await cursor.fetchall()
 
 
+def _merge_json_list(existing_json: str | None, new_items: list) -> list:
+    """Merge a JSON-encoded list with new_items, preserving order and deduplicating strings."""
+    try:
+        existing: list = json.loads(existing_json) if existing_json else []
+    except Exception:
+        existing = []
+    seen: set = {str(item) for item in existing}
+    combined = list(existing)
+    for item in new_items or []:
+        if str(item) not in seen:
+            combined.append(item)
+            seen.add(str(item))
+    return combined
+
+
+async def _upsert_diary_impl(
+    content: str,
+    personal_thought: str | None,
+    emotions: list,
+    interaction_summary: str | None,
+    user_message: str | None,
+    context_tags: list,
+    involved_users: list,
+    interface: str | None,
+    chat_id: str | None,
+    thread_id: str | None,
+) -> int | None:
+    """Core upsert: one diary row per calendar day, updated on every new entry.
+
+    If a row already exists for today (by server date) the new content is appended
+    to the existing row using a '---' separator.  JSON list fields (emotions,
+    context_tags, involved_users) are merged and deduplicated.  The row's timestamp
+    is updated to NOW() so it reflects the last-modified time.
+
+    Returns the diary entry id (existing or newly inserted), or None on error.
+    """
+    _SEP = "\n\n---\n\n"
+    try:
+        async with get_db() as conn:
+            cursor = await conn.cursor()
+            # Look for today's entry
+            await cursor.execute(
+                "SELECT id, content, personal_thought, interaction_summary, "
+                "user_message, emotions, context_tags, involved_users "
+                "FROM ai_diary WHERE DATE(timestamp) = CURDATE() "
+                "ORDER BY timestamp DESC LIMIT 1"
+            )
+            existing = await cursor.fetchone()
+            if existing:
+                (
+                    ex_id,
+                    ex_content,
+                    ex_thought,
+                    ex_summary,
+                    ex_user_msg,
+                    ex_emotions,
+                    ex_tags,
+                    ex_involved,
+                ) = existing
+                merged_content = (
+                    f"{ex_content}{_SEP}{content}" if ex_content else content
+                )
+                merged_thought = (
+                    f"{ex_thought}{_SEP}{personal_thought}"
+                    if ex_thought and personal_thought
+                    else (personal_thought or ex_thought)
+                )
+                merged_summary = (
+                    f"{ex_summary}\n---\n{interaction_summary}"
+                    if ex_summary and interaction_summary
+                    else (interaction_summary or ex_summary)
+                )
+                merged_user_msg = (
+                    f"{ex_user_msg}\n---\n{user_message}"
+                    if ex_user_msg and user_message
+                    else (user_message or ex_user_msg)
+                )
+                await cursor.execute(
+                    """
+                    UPDATE ai_diary
+                    SET content=%s, personal_thought=%s, interaction_summary=%s,
+                        user_message=%s, emotions=%s, context_tags=%s,
+                        involved_users=%s, timestamp=NOW()
+                    WHERE id=%s
+                    """,
+                    (
+                        merged_content,
+                        merged_thought,
+                        merged_summary,
+                        merged_user_msg,
+                        json.dumps(_merge_json_list(ex_emotions, emotions)),
+                        json.dumps(_merge_json_list(ex_tags, context_tags)),
+                        json.dumps(_merge_json_list(ex_involved, involved_users)),
+                        ex_id,
+                    ),
+                )
+                await conn.commit()
+                log_debug(
+                    f"[ai_diary] Updated today's diary entry id={ex_id}: {content[:50]}..."
+                )
+                return ex_id
+            else:
+                await cursor.execute(
+                    """
+                    INSERT INTO ai_diary
+                        (content, personal_thought, emotions, interaction_summary,
+                         user_message, context_tags, involved_users,
+                         interface, chat_id, thread_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        content,
+                        personal_thought,
+                        json.dumps(emotions),
+                        interaction_summary,
+                        user_message,
+                        json.dumps(context_tags),
+                        json.dumps(involved_users),
+                        interface,
+                        chat_id,
+                        thread_id,
+                    ),
+                )
+                await conn.commit()
+                diary_entry_id = cursor.lastrowid
+                log_debug(
+                    f"[ai_diary] Created new diary entry for today: {content[:50]}..."
+                )
+                return diary_entry_id
+    except Exception as e:
+        log_error(f"[ai_diary] _upsert_diary_impl failed: {e}")
+        return None
+
+
 def add_diary_entry(
     content: str,
     personal_thought: str = None,
@@ -541,30 +675,25 @@ def add_diary_entry(
             continue
 
     try:
-        cursor = _run(
-            _execute(
-                """
-            INSERT INTO ai_diary (content, personal_thought, emotions, 
-                                interaction_summary, user_message, context_tags, involved_users, interface, chat_id, thread_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
-                (
-                    content,
-                    personal_thought,
-                    json.dumps(emotions),
-                    interaction_summary,
-                    user_message,
-                    json.dumps(context_tags),
-                    json.dumps(involved_users),
-                    interface,
-                    chat_id,
-                    thread_id,
-                ),
+        diary_entry_id = _run(
+            _upsert_diary_impl(
+                content,
+                personal_thought,
+                emotions,
+                interaction_summary,
+                user_message,
+                context_tags,
+                involved_users,
+                interface,
+                chat_id,
+                thread_id,
             )
         )
-        diary_entry_id = cursor.lastrowid if hasattr(cursor, "lastrowid") else None
 
-        log_debug(f"[ai_diary] Added personal diary entry: {content[:50]}...")
+        if diary_entry_id is not None:
+            log_debug(
+                f"[ai_diary] Upserted today's diary entry id={diary_entry_id}: {content[:50]}..."
+            )
         if personal_thought:
             log_debug(f"[ai_diary] Personal thought: {personal_thought[:50]}...")
 
@@ -674,31 +803,23 @@ async def add_diary_entry_async(
             continue
 
     try:
-        conn = await get_conn()
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                INSERT INTO ai_diary (content, personal_thought, emotions, 
-                                    interaction_summary, user_message, context_tags, involved_users, interface, chat_id, thread_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    content,
-                    personal_thought,
-                    json.dumps(emotions),
-                    interaction_summary,
-                    user_message,
-                    json.dumps(context_tags),
-                    json.dumps(involved_users),
-                    interface,
-                    chat_id,
-                    thread_id,
-                ),
-            )
-            diary_entry_id = cur.lastrowid
-        conn.close()
+        diary_entry_id = await _upsert_diary_impl(
+            content,
+            personal_thought,
+            emotions,
+            interaction_summary,
+            user_message,
+            context_tags,
+            involved_users,
+            interface,
+            chat_id,
+            thread_id,
+        )
 
-        log_debug(f"[ai_diary] Added personal diary entry: {content[:50]}...")
+        if diary_entry_id is not None:
+            log_debug(
+                f"[ai_diary] Upserted today's diary entry id={diary_entry_id}: {content[:50]}..."
+            )
         if personal_thought:
             log_debug(f"[ai_diary] Personal thought: {personal_thought[:50]}...")
 
@@ -1112,7 +1233,7 @@ class DiaryPlugin:
         register_plugin("ai_diary", self)
 
     def get_supported_action_types(self):
-        return ["static_inject", "create_personal_diary_entry"]
+        return ["static_inject", "create_personal_diary_entry", "update_diary_entry"]
 
     def get_history_contributions(self, **kwargs):
         """Provide diary entries as a history contribution for the core HistoryEngine."""
@@ -1225,6 +1346,23 @@ class DiaryPlugin:
                         "This action MUST be included in every response without exception",
                     ],
                 },
+            },
+            "update_diary_entry": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "integer",
+                            "description": "ID of the diary entry to update (provided in the consolidation prompt).",
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Fully merged first-person prose that synthesises all of today's diary fragments.",
+                        },
+                    },
+                    "required": ["id", "content"],
+                },
+                "brief": "Replace diary entry content with a synthesised version (internal — triggered by the daily consolidation beat only).",
             },
         }
 
@@ -1407,9 +1545,123 @@ class DiaryPlugin:
                 )
                 return {"success": False, "error": str(e)}
 
+        elif action_type == "update_diary_entry":
+            entry_id = payload.get("id")
+            new_content = (payload.get("content") or "").strip()
+            if not entry_id or not new_content:
+                return {"success": False, "error": "id and content are required"}
+            try:
+                _run(
+                    _execute(
+                        "UPDATE ai_diary SET content=%s, timestamp=NOW() WHERE id=%s",
+                        (new_content, int(entry_id)),
+                    )
+                )
+                log_info(
+                    f"[ai_diary] Diary entry {entry_id} consolidated to clean prose"
+                )
+                return {"success": True, "message": f"Diary entry {entry_id} updated"}
+            except Exception as e:
+                log_error(f"[ai_diary] Failed to update diary entry {entry_id}: {e}")
+                return {"success": False, "error": str(e)}
+
         else:
             log_warning(f"[ai_diary] Unknown action type: {action_type}")
             return {"success": False, "error": f"Unknown action type: {action_type}"}
+
+    async def on_debrief(
+        self,
+        processed_actions: list,
+        failed_actions: list,
+        results: list,
+        context: dict,
+        original_message: object,
+    ) -> None:
+        """After each interaction, check whether today's diary has fragmented entries that need LLM consolidation.
+
+        If today's single diary row contains '---' separators (written by _upsert_diary_impl when
+        multiple interactions occur on the same day), a low-priority merge beat is enqueued.
+        The LLM receives the fragments and is asked to output an ``update_diary_entry`` action
+        with coherent first-person prose.  A ``diary_merge_beat`` flag in the context prevents
+        recursive triggering.
+        """
+        if not PLUGIN_ENABLED:
+            return
+        # Prevent recursive loop: the merge beat itself triggers on_debrief again
+        if (context or {}).get("diary_merge_beat"):
+            return
+
+        try:
+            rows = await _fetchall(
+                "SELECT id, content FROM ai_diary "
+                "WHERE DATE(timestamp) = CURDATE() "
+                "ORDER BY timestamp DESC LIMIT 1"
+            )
+        except Exception as e:
+            log_debug(f"[ai_diary] on_debrief: DB error fetching today's entry: {e}")
+            return
+
+        if not rows:
+            return
+
+        entry = rows[0]
+        entry_id: int = entry["id"]
+        content: str = entry["content"] or ""
+
+        if "---" not in content:
+            return  # already clean prose — nothing to do
+
+        log_info(
+            f"[ai_diary] on_debrief: today's diary entry id={entry_id} has fragments — enqueueing merge beat"
+        )
+
+        prompt = (
+            "[DIARY CONSOLIDATION — INTERNAL SYSTEM TASK]\n\n"
+            "Your personal diary has accumulated multiple entries from today's conversations "
+            "(separated by '---'). Rewrite them as a single, coherent first-person diary entry "
+            "that weaves all the information together naturally.\n\n"
+            "Rules:\n"
+            "- Write flowing first-person prose (no bullet lists, no '---' separators).\n"
+            "- Preserve every meaningful detail from all fragments.\n"
+            "- Remove exact duplicates; keep nuance and emotional context.\n"
+            f"- The entry id to update is: {entry_id}\n\n"
+            "Today's diary fragments:\n\n"
+            f"{content}\n\n"
+            "Respond with ONLY valid JSON — no other text:\n"
+            '{"actions": [{"type": "update_diary_entry", "payload": {"id": '
+            f'{entry_id}, "content": "<your merged prose here>"'
+            "}}]}"
+        )
+
+        try:
+            from types import SimpleNamespace
+            from core import message_queue
+
+            message = SimpleNamespace()
+            message.chat_id = -1
+            message.message_id = 0
+            message.text = prompt
+            message.from_user = SimpleNamespace(
+                id=-1,
+                username="diary_merge",
+                full_name="Diary Merge",
+                first_name="Diary",
+            )
+            message.chat = SimpleNamespace(id=-1, type="internal")
+            message.date = datetime.utcnow()
+
+            await message_queue.enqueue_low_priority(
+                None,
+                message,
+                context_memory={"diary_merge_beat": True, "diary_entry_id": entry_id},
+                interface_id="diary_merge",
+                original_message=None,
+            )
+            log_info(
+                f"[ai_diary] on_debrief: diary consolidation beat enqueued for entry id={entry_id}"
+            )
+        except Exception as e:
+            log_error(f"[ai_diary] on_debrief: failed to enqueue merge beat: {e}")
 
 
 def archive_diary_entries(entry_ids: List[int]) -> Dict[str, Any]:

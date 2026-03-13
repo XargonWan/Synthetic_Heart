@@ -121,21 +121,20 @@ def _parse_time_window_spec(spec: Any) -> Optional[Tuple[datetime, datetime]]:
         # Normalize trailing Z to +00:00 for fromisoformat
         if s2.endswith("Z"):
             s2 = s2[:-1] + "+00:00"
+        # Check date-only YYYY-MM-DD BEFORE fromisoformat: Python ≥3.11 accepts
+        # bare dates and returns midnight, which would silently ignore is_end.
+        m = re.match(r"^(?P<d>\d{4}-\d{2}-\d{2})$", s2)
+        if m:
+            if is_end:
+                return datetime.fromisoformat(m.group("d") + "T23:59:59.999999+00:00")
+            else:
+                return datetime.fromisoformat(m.group("d") + "T00:00:00+00:00")
         try:
             dt = datetime.fromisoformat(s2)
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             return dt
         except Exception:
-            # Try date-only YYYY-MM-DD
-            m = re.match(r"^(?P<d>\d{4}-\d{2}-\d{2})$", s2)
-            if m:
-                if is_end:
-                    return datetime.fromisoformat(
-                        m.group("d") + "T23:59:59.999999+00:00"
-                    )
-                else:
-                    return datetime.fromisoformat(m.group("d") + "T00:00:00+00:00")
             return None
 
     # If dict-like with explicit start/end
@@ -341,7 +340,10 @@ class MemorySearchPlugin:
                 query = payload.get("query", "")
                 tokens = [q.strip() for q in str(query).split() if q.strip()]
             if not tokens:
-                return "", []
+                # If a time_window is set, a time-only search is still meaningful:
+                # it will return all entries within the given time range across all sources.
+                if not payload.get("time_window"):
+                    return "", []
             # Expand tokens with synonyms for better recall on abstract terms
             original_count = len(tokens)
             tokens = _expand_tokens_with_synonyms(tokens)
@@ -356,12 +358,13 @@ class MemorySearchPlugin:
                 params.append(like)
             where_clauses_mem.append("(" + " OR ".join(token_clauses) + ")")
 
-            # For ai_diary search content/personal_thought/interaction_summary/user_message
+            # For ai_diary search personal_thought/interaction_summary/user_message only.
+            # NOTE: ai_diary.content holds Rekku's own response text, NOT user memories —
+            # including it causes self-referential "hallucinated recall" where the model
+            # receives its previous responses as if they were genuine memory snippets.
             diary_token_clauses: List[str] = []
             for tok in tokens:
                 like = "%" + tok + "%"
-                diary_token_clauses.append("content LIKE %s")
-                params.append(like)
                 diary_token_clauses.append("personal_thought LIKE %s")
                 params.append(like)
                 diary_token_clauses.append("interaction_summary LIKE %s")
@@ -404,18 +407,31 @@ class MemorySearchPlugin:
             table_where_clauses: List[str],
             table_name: str,
             select_expr: str,
+            group_by: Optional[str] = None,
         ) -> None:
-            """Add a table query with correctly ordered params: content params first, then time params."""
+            """Add a table sub-query wrapped in parentheses with its own ORDER+LIMIT.
+
+            Wrapping each source in its own LIMIT prevents a single source from
+            monopolising the outer LIMIT and displacing older-but-relevant entries
+            from other sources (e.g. chat history of today pushing out memories
+            from two weeks ago).
+            Params order: content/keyword params → time params → per-source limit.
+            """
             clauses = list(table_where_clauses)  # copy
             if time_clause_parts:
                 clauses.extend(time_clause_parts)
             if clauses:
                 where = " AND ".join(clauses)
-                queries.append(f"{select_expr} WHERE {where}")
-                # Params must match placeholder order: content/keyword params FIRST, then time params
+                q = f"{select_expr} WHERE {where}"
+                if group_by:
+                    q += f" GROUP BY {group_by}"
+                order_by = "RAND()" if randomize else "timestamp DESC"
+                queries.append(f"({q} ORDER BY {order_by} LIMIT %s)")
+                # Params must match placeholder order: content/keyword params FIRST, then time params, then per-source limit
                 final_params.extend(table_content_params)
                 if time_clause_parts:
                     final_params.extend(time_params)
+                final_params.append(max_results)  # per-source inner limit
 
         # Build per-table content params lists
         # For mode=tags: params are for JSON_CONTAINS calls
@@ -446,8 +462,9 @@ class MemorySearchPlugin:
             num_tokens = len(tokens)
             # memories: 1 LIKE per token
             mem_param_count = num_tokens if where_clauses_mem else 0
-            # ai_diary: 4 LIKEs per token (content, personal_thought, interaction_summary, user_message)
-            diary_param_count = num_tokens * 4 if where_clauses_diary else 0
+            # ai_diary: 3 LIKEs per token (personal_thought, interaction_summary, user_message)
+            # ai_diary.content is excluded — it holds Rekku's own responses, not user memories.
+            diary_param_count = num_tokens * 3 if where_clauses_diary else 0
             # chat_history_cache: 1 LIKE per token
             chat_param_count = num_tokens if where_clauses_chat else 0
 
@@ -460,11 +477,15 @@ class MemorySearchPlugin:
         chat_content_params = params[idx : idx + chat_param_count]
 
         if where_clauses_mem or time_clause_parts:
+            # Use MIN(id)/MAX(timestamp) + GROUP BY content to collapse duplicate entries.
+            # grillo_observer stores the same chat message once per beat-interval, producing
+            # dozens of identical rows that pollute the LIMIT slots.
             _maybe_add_table(
                 mem_content_params,
                 where_clauses_mem,
                 "memories",
-                "SELECT 'memories' AS source, id, timestamp, content FROM memories",
+                "SELECT 'memories' AS source, MIN(id) AS id, MAX(timestamp) AS timestamp, content FROM memories",
+                group_by="content",
             )
         if where_clauses_diary or time_clause_parts:
             # Exclude Grillo-generated internal entries (self-reflection, curiosity, etc.)
