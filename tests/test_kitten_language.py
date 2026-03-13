@@ -15,20 +15,28 @@ import pytest
 
 @pytest.mark.asyncio
 async def test_kitten_engine_passes_language_to_generate() -> None:
-    """generate_tts() must forward the 'language' kwarg to the underlying model."""
-    from plugins.vox_engines.kitten import KittenVoxEngine, LocalKittenTTS
+    """generate_tts() language handling differs by backend:
+
+    - Real kittentts package: the internal espeak phonemizer is swapped to the
+      detected language before generate() is called, so generate() receives
+      (text, voice) ONLY — no ``language`` kwarg in the call signature.
+      The phonemizer swap is verified by inspecting ``_get_phonemizer`` calls.
+    - Vendor gTTS stub: language must be forwarded explicitly so gTTS picks the
+      right phonetic model — generate() is called WITH language=<code>.
+    """
+    from plugins.vox_engines.kitten import (
+        KittenVoxEngine,
+        LocalKittenTTS,
+        _USING_VENDOR_STUB,
+    )
 
     calls: list[dict[str, Any]] = []
 
     class FakeTTS:
-        def generate(
-            self, text: str, voice: str = "Bella", language: str = "en"
-        ) -> bytes:
-            calls.append({"text": text, "voice": voice, "language": language})
-            # return a minimal valid WAV header so the engine doesn't try to
-            # convert non-bytes output.
-            import wave
+        def generate(self, text: str, voice: str = "Bella", **kwargs: Any) -> bytes:
+            calls.append({"text": text, "voice": voice, **kwargs})
             import io
+            import wave
 
             buf = io.BytesIO()
             with wave.open(buf, "wb") as wf:
@@ -38,18 +46,46 @@ async def test_kitten_engine_passes_language_to_generate() -> None:
                 wf.writeframes(b"\x00" * 100)
             return buf.getvalue()
 
+    class FakeModel:
+        """Minimal stand-in for KittenTTS_1_Onnx — has a mutable phonemizer attr."""
+
+        phonemizer: Any = None
+
     fake_local = LocalKittenTTS.__new__(LocalKittenTTS)
     fake_local._engine = FakeTTS()
+    fake_local._phonemizer_lock = __import__("threading").Lock()
+    fake_local._phonemizer_cache = {}
+    if not _USING_VENDOR_STUB:
+        # Real package path reads self._engine.model.phonemizer.
+        fake_local._engine.model = FakeModel()  # type: ignore[attr-defined]
+
+    phonemizer_langs: list[str] = []
+
+    def fake_get_phonemizer(lang: str) -> Any:
+        phonemizer_langs.append(lang)
+        return object()  # any sentinel — just needs to be assignable
 
     engine = KittenVoxEngine()
     with patch("plugins.vox_engines.kitten._get_model", return_value=fake_local):
+        if not _USING_VENDOR_STUB:
+            fake_local._get_phonemizer = fake_get_phonemizer  # type: ignore[method-assign]
         result = engine.generate_tts("Ciao mondo", language="it")
 
     assert result is not None
     assert calls, "generate() was never called"
-    assert calls[0]["language"] == "it", (
-        f"Expected language='it' but got {calls[0]['language']!r}"
-    )
+    if _USING_VENDOR_STUB:
+        # Stub: language must be forwarded to gTTS.
+        assert calls[0].get("language") == "it", (
+            f"Stub mode: expected language='it' but got {calls[0]!r}"
+        )
+    else:
+        # Real package: 'language' is NOT a kwarg of generate() — phonemizer swap instead.
+        assert "language" not in calls[0], (
+            f"Real package mode: language should NOT be in generate() call, got {calls[0]!r}"
+        )
+        assert "it" in phonemizer_langs, (
+            f"Real package mode: expected phonemizer for 'it', got {phonemizer_langs!r}"
+        )
 
 
 @pytest.mark.asyncio
@@ -62,7 +98,12 @@ async def test_kitten_engine_uses_language_model_map() -> None:
     def fake_get_model(model_id: str) -> Any:
         loaded_model_ids.append(model_id)
 
+        class FakeModel:
+            phonemizer: Any = None
+
         class FakeTTS:
+            model = FakeModel()
+
             def generate(
                 self, text: str, voice: str = "Bella", language: str = "en"
             ) -> bytes:
@@ -79,6 +120,8 @@ async def test_kitten_engine_uses_language_model_map() -> None:
 
         fake = LocalKittenTTS.__new__(LocalKittenTTS)
         fake._engine = FakeTTS()
+        fake._phonemizer_lock = __import__("threading").Lock()
+        fake._phonemizer_cache = {}
         return fake
 
     engine = KittenVoxEngine()
@@ -101,9 +144,14 @@ async def test_kitten_engine_uses_language_model_map() -> None:
 
 def test_kitten_engine_defaults_to_english_when_no_language() -> None:
     """Without a language kwarg the engine defaults to the configured model."""
-    from plugins.vox_engines.kitten import KittenVoxEngine, LocalKittenTTS
+    from plugins.vox_engines.kitten import KittenVoxEngine, LocalKittenTTS, _USING_VENDOR_STUB
+
+    class FakeModel:
+        phonemizer: Any = None
 
     class FakeTTS:
+        model = FakeModel()
+
         def generate(
             self, text: str, voice: str = "Bella", language: str = "en"
         ) -> bytes:
@@ -120,6 +168,8 @@ def test_kitten_engine_defaults_to_english_when_no_language() -> None:
 
     fake_local = LocalKittenTTS.__new__(LocalKittenTTS)
     fake_local._engine = FakeTTS()
+    fake_local._phonemizer_lock = __import__("threading").Lock()
+    fake_local._phonemizer_cache = {}
 
     engine = KittenVoxEngine()
     with patch("plugins.vox_engines.kitten._get_model", return_value=fake_local):
@@ -135,7 +185,16 @@ def test_kitten_engine_defaults_to_english_when_no_language() -> None:
 
 
 def test_vendor_kittentts_stub_accepts_language() -> None:
-    """KittenTTS.generate() must accept and honour the 'language' parameter."""
+    """KittenTTS vendor stub: generate() must pass 'language' to gTTS.
+
+    Skipped when the real kittentts package is installed because in that case
+    gTTS is never used and the language is handled by the neural model itself.
+    """
+    from plugins.vox_engines.kitten import _USING_VENDOR_STUB
+
+    if not _USING_VENDOR_STUB:
+        pytest.skip("Real kittentts package is installed; gTTS stub is not in use.")
+
     try:
         from kittentts import KittenTTS
     except ImportError:

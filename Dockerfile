@@ -44,7 +44,8 @@ RUN echo 'Package: snapd' > /etc/apt/preferences.d/no-snap && \
       lsb-release ca-certificates \
     openssl \
       htop net-tools iputils-ping \
-      ffmpeg mariadb-client libmariadb3 libmariadb-dev && \
+      ffmpeg mariadb-client libmariadb3 libmariadb-dev \
+      espeak-ng libespeak-ng1 && \
     update-ca-certificates --fresh && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 

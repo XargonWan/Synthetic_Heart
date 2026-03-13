@@ -3,7 +3,7 @@ name = "synthetic-heart"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "aiohttp<3.10",
     "aiomysql>=0.3.2",
@@ -49,6 +49,8 @@ dependencies = [
     "huggingface-hub>=1.5.0",
     "gtts>=2.5.4",
     "lingua-language-detector>=2.0.2",
+    "kittentts",
+    "torch",
 ]
 
 [project.optional-dependencies]
@@ -95,3 +97,12 @@ include = [
     "automation_tools",
     "main.py"
 ]
+
+[tool.uv.sources]
+kittentts = { url = "https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl" }
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
