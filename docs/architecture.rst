@@ -211,6 +211,13 @@ to improve continuity across interfaces and sessions.
           "123456": "lane_Trainer_Main"
         }
 
+    By default the WebUI uses a single persistent session id that is stored in
+    ``backups/webui_session_id.txt``.  This ensures history and window state
+    survive container restarts.  An **advanced, experimental** option
+    ``MULTI_SESSION`` can be toggled to ``true``; when enabled each browser
+    connection gets its own independent session.  This mode is unstable and
+    should only be used for testing.
+
     The resolver checks for exact path matches first and then tries a user-id
     match using the second path segment (``interface/chat_id/...``).
 

@@ -2,6 +2,7 @@ import os
 import asyncio
 import audioop
 import threading
+import time
 from collections import deque
 from types import SimpleNamespace
 from typing import List, Any
@@ -982,6 +983,10 @@ class DiscordInterface:
                 _cfg_r.get_value("LIVE_CORTEX", "") or ""
             ).strip()
             _all_engine_names = _creg.get_available_engines()
+            # When the configured value is explicitly "disabled" treat as no
+            # engine at all; we then leave _live_capable_engine = None below.
+            if _configured_live_engine.lower() == "disabled":
+                _configured_live_engine = ""
             # Prefer the configured LIVE_CORTEX; fall back to any already-loaded engine.
             _candidates = (
                 [_configured_live_engine]
@@ -1782,6 +1787,68 @@ class DiscordInterface:
                 ),  # Add attachments for image processing
             )
 
+            # Attempt transcription of any audio attachment via Auris and
+            # bypass normal pipeline if successful. The interface merely
+            # writes the file and passes the text on; it does not notify
+            # the user itself.
+            try:
+                from core.core_initializer import PLUGIN_REGISTRY
+            except Exception:
+                PLUGIN_REGISTRY = {}
+
+            if PLUGIN_REGISTRY.get("auris_plugin"):
+                for attachment in getattr(message, "attachments", []):
+                    mime = getattr(attachment, "content_type", None)
+                    if mime and mime.startswith("audio/"):
+                        auris = PLUGIN_REGISTRY.get("auris_plugin")
+                        try:
+                            temp_dir = os.path.join(os.getcwd(), "tmp", "live_io")
+                            os.makedirs(temp_dir, exist_ok=True)
+                            ext = (
+                                ".ogg"
+                                if "ogg" in mime
+                                else os.path.splitext(
+                                    getattr(attachment, "filename", "")
+                                )[-1]
+                            )
+                            if not ext:
+                                ext = ".mp3"
+                            path = os.path.join(
+                                temp_dir,
+                                f"disc_{getattr(message, 'id', 'x')}_{int(time.time())}{ext}",
+                            )
+                            data = await attachment.read()
+                            with open(path, "wb") as f:
+                                f.write(data)
+                            log_debug(f"[discord_interface] wrote audio to {path}")
+                            _auris_result = await auris.transcribe_audio(path, mime)
+                            transcribed = _auris_result.text if _auris_result else None
+                            if transcribed:
+                                wrapped.text = transcribed
+                                setattr(wrapped, "is_voice_input", True)
+                                await message_queue.enqueue(
+                                    self.client,
+                                    wrapped,
+                                    interface_id="discord_bot",
+                                    original_message=message,
+                                    skip_mention_check=True,
+                                )
+                                try:
+                                    os.remove(path)
+                                except Exception:
+                                    pass
+                                return
+                        except Exception as e:
+                            log_warning(
+                                f"[discord_interface] Auris transcription error: {e}"
+                            )
+                        finally:
+                            try:
+                                if path and os.path.exists(path):
+                                    os.remove(path)
+                            except Exception:
+                                pass
+
             # === Wake/Sleep & Attention Logic ===
             text_lower = content.lower()
             is_sleep_command, is_wake_command, _ = evaluate_triggers(text_lower)
@@ -1856,6 +1923,36 @@ class DiscordInterface:
                         live_mgr = None
                     if live_mgr and live_mgr.is_session_active(guild_id):
                         text = content
+
+                        # --- inject text-based file attachments as context ---
+                        _TEXT_MIME_PREFIXES = (
+                            "text/",
+                            "application/json",
+                            "application/xml",
+                        )
+                        for att in getattr(message, "attachments", []):
+                            mime = getattr(att, "content_type", "") or ""
+                            if not any(mime.startswith(p) for p in _TEXT_MIME_PREFIXES):
+                                continue
+                            try:
+                                raw = await att.read()
+                                doc_text = raw.decode("utf-8", errors="replace")
+                                fname = getattr(att, "filename", "document")
+                                await live_mgr.send_context_update(
+                                    guild_id,
+                                    f"[Document: {fname}]\n{doc_text}",
+                                )
+                                log_info(
+                                    f"[discord_interface] Injected attachment "
+                                    f"'{fname}' ({len(doc_text)} chars) into "
+                                    f"live session for guild {guild_id}"
+                                )
+                            except Exception as _att_err:
+                                log_warning(
+                                    f"[discord_interface] Failed to inject "
+                                    f"attachment into live session: {_att_err}"
+                                )
+
                         # forward into live model
                         await live_mgr.send_text(guild_id, text)
                         # replicate in history cache

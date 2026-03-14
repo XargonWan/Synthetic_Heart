@@ -1,8 +1,11 @@
 <section class="tab-panel" id="tab-components" data-tab="components" role="tabpanel">
     <div class="settings-grid" style="flex-direction: column;">
         <article class="card">
-            <h2>Cortex Engines</h2>
-            <div class="meta">A <strong>Cortex</strong> is a category of runtime engines (e.g., <em>llm_provider</em>, <em>selenium_engine</em>, <em>live</em>, <em>agent</em>). Choose the Cortex kind first, then pick an engine. Each engine shows a short label explaining its intended use (provided by the engine registration).</div>
+            <h2>Engines</h2>
+
+            <!-- ── Cortex ────────────────────────────────────────────────────── -->
+            <h3 style="margin:0 0 6px; font-size:1rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em;">Cortex</h3>
+            <div class="meta" style="margin-bottom:10px;">A <strong>Cortex</strong> is a category of runtime LLM backends (e.g. <em>llm_provider</em>, <em>selenium_engine</em>, <em>agent</em>). Choose the Cortex kind first, then pick an engine.</div>
             <div id="components-cortex">
                 <div class="meta" id="components-cortex-summary">Loading…</div>
 
@@ -12,6 +15,13 @@
 
                     <select id="cortex-engine-select" style="padding:10px 14px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; min-width:360px; font-size:1rem;">
                     </select>
+
+                    <!-- Model selector (populated dynamically from engine's supported_models) -->
+                    <div id="cortex-model-picker" style="position:relative; display:none;">
+                        <input id="cortex-model-search" type="text" placeholder="Search models…" autocomplete="off"
+                            style="padding:10px 14px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; font-size:1rem; min-width:320px;">
+                        <div id="cortex-model-dropdown" style="display:none; position:absolute; top:100%; left:0; right:0; max-height:300px; overflow-y:auto; border:1px solid var(--border); border-radius:8px; background:var(--bg-card,#1a1a2e); z-index:999; margin-top:2px;"></div>
+                    </div>
 
                     <div id="cortex-engine-info" class="meta" style="min-width:260px;">
                         <div style="font-weight:600;" id="cortex-engine-model">model: –</div>
@@ -35,6 +45,60 @@
                 </div>
 
                 <div class="components-list" id="components-cortex-list"></div>
+            </div>
+
+            <!-- ── Vox ────────────────────────────────────────────────────── -->
+            <div style="margin-top:28px; padding-top:20px; border-top:1px solid var(--border,#444);">
+                <h3 style="margin:0 0 6px; font-size:1rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em;">Vox — Text to Speech</h3>
+                <div class="meta" style="margin-bottom:10px;">File-based TTS engines. Select the active engine using the dropdown below.</div>
+                <div id="vox-controls" style="display:flex; gap:12px; align-items:flex-start; margin-bottom:12px; flex-wrap:wrap;">
+                    <select id="vox-engine-select" style="padding:8px 12px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; font-size:1rem; min-width:220px;">
+                    </select>
+                    <!-- speaker selector shown when a Kitten model is active -->
+                    <select id="kitten-speaker-select" title="Kitten TTS — Speaker voice" style="padding:8px 12px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; font-size:1rem; min-width:160px; display:none;">
+                    </select>
+                    <button id="kitten-play-btn" title="Play sample" style="display:none; padding:8px 12px; font-weight:600;">▶</button>
+                    <button id="vox-manage-models-btn" class="pill secondary" title="Download, update or remove TTS models" style="padding:8px 14px; font-weight:600;">🗂 Manage Models</button>
+                    <div id="vox-engine-info" class="meta" style="min-width:260px; display:none;">
+                        <div style="font-weight:600;" id="vox-engine-label">—</div>
+                        <div style="font-size:0.9rem; color:var(--muted);" id="vox-engine-description">—</div>
+                    </div>
+                </div>
+                <div class="components-list" id="components-vox-list"><div class="meta">Loading…</div></div>
+            </div>
+
+            <!-- ── Auris ───────────────────────────────────────────────────── -->
+            <div style="margin-top:28px; padding-top:20px; border-top:1px solid var(--border,#444);">
+                <h3 style="margin:0 0 6px; font-size:1rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em;">Auris — Speech to Text</h3>
+                <div class="meta" style="margin-bottom:10px;">File-based STT engines. Select the active engine using the dropdown below.</div>
+                <div id="auris-controls" style="display:flex; gap:12px; align-items:flex-start; margin-bottom:12px; flex-wrap:wrap;">
+                    <select id="auris-engine-select" style="padding:8px 12px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; font-size:1rem; min-width:220px;">
+                    </select>
+                    <!-- Vosk model picker populated from MODEL_MANAGER catalog (shows download status) -->
+                    <select id="auris-vosk-language" style="padding:8px 12px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; font-size:1rem; min-width:240px; display:none;">
+                    </select>
+                    <button id="auris-manage-models-btn" class="pill secondary" title="Download, update or remove STT models" style="padding:8px 14px; font-weight:600;">🗂 Manage Models</button>
+                    <div id="auris-engine-info" class="meta" style="min-width:260px; display:none;">
+                        <div style="font-weight:600;" id="auris-engine-label">—</div>
+                        <div style="font-size:0.9rem; color:var(--muted);" id="auris-engine-description">—</div>
+                    </div>
+                </div>
+                <div class="components-list" id="components-auris-list"><div class="meta">Loading…</div></div>
+            </div>
+
+            <!-- ── Live ────────────────────────────────────────────────────── -->
+            <div style="margin-top:28px; padding-top:20px; border-top:1px solid var(--border,#444);">
+                <h3 style="margin:0 0 6px; font-size:1rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em;">Live — Real-time Streaming</h3>
+                <div class="meta" style="margin-bottom:10px;">Bidirectional streaming engines (audio in + TTS out in real time). VAD is handled by <code>core.vad_service</code> — not listed here.</div>
+                <div id="live-controls" style="display:flex; gap:12px; align-items:flex-start; margin-bottom:12px; flex-wrap:wrap;">
+                    <select id="live-engine-select" style="padding:8px 12px; background:var(--background); color:var(--text); border:2px solid var(--primary); border-radius:10px; font-weight:700; font-size:1rem; min-width:220px;">
+                    </select>
+                    <div id="live-engine-info" class="meta" style="min-width:260px; display:none;">
+                        <div style="font-weight:600;" id="live-engine-label">—</div>
+                        <div style="font-size:0.9rem; color:var(--muted);" id="live-engine-description">—</div>
+                    </div>
+                </div>
+                <div class="components-list" id="components-live-list"><div class="meta">Loading…</div></div>
             </div>
         </article>
         <article class="card">
@@ -64,3 +128,50 @@
         </article>
     </div>
 </section>
+
+<script type="module">
+import { createModelManagerModal } from '/js/model-manager.mjs';
+
+// ── Vox "Manage Models" button ──────────────────────────────────────────────
+(function wireModelManagerButtons() {
+    function _wire() {
+        const voxBtn = document.getElementById('vox-manage-models-btn');
+        const aurisBtn = document.getElementById('auris-manage-models-btn');
+        if (voxBtn) voxBtn.addEventListener('click', () => createModelManagerModal());
+        if (aurisBtn) aurisBtn.addEventListener('click', () => createModelManagerModal());
+    }
+    // components.html may be injected dynamically; try immediately then via MutationObserver
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', _wire);
+    } else {
+        _wire();
+    }
+})();
+
+// ── Vosk language dropdown — populate from MODEL_MANAGER catalog ────────────
+(async function populateVoskModelDropdown() {
+    const select = document.getElementById('auris-vosk-language');
+    if (!select) return;
+    try {
+        const resp = await fetch('/api/models?plugin_id=auris_vosk');
+        if (!resp.ok) return;
+        const { models } = await resp.json();
+        if (!models || !models.length) return;
+        // Remove existing placeholder options (keep any already added by components.js)
+        const existingValues = new Set(Array.from(select.options).map(o => o.value));
+        for (const m of models) {
+            const tag = m.language || m.model_id;
+            if (existingValues.has(tag)) {
+                // Update label to reflect download status
+                const opt = select.querySelector(`option[value="${tag}"]`);
+                if (opt) {
+                    const prefix = m.downloaded ? '✓ ' : m.downloading ? '⬇ ' : '';
+                    if (!opt.textContent.startsWith(prefix) && prefix) {
+                        opt.textContent = prefix + opt.textContent.replace(/^[✓⬇] /, '');
+                    }
+                }
+            }
+        }
+    } catch (e) { /* non-fatal */ }
+})();
+</script>

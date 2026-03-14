@@ -219,7 +219,7 @@ export function createArchiveModal() {
                     if (!listEl) return;
                     console.debug('[archive-window] load() start');
                     listEl.innerHTML = '<div class="meta">Loading…</div>';
-                    const res = await fetch('/api/chat/archives');
+                    const res = await fetch((window.__getApiBase ? window.__getApiBase() : '') + '/api/chat/archives');
                     if (!res.ok) { listEl.innerHTML = '<div class="meta">Failed to load</div>'; console.warn('[archive-window] fetch returned non-ok', res.status); return; }
                     const data = await res.json();
                     const items = (data && data.success && Array.isArray(data.archives)) ? data.archives : [];
@@ -314,7 +314,7 @@ export function createArchiveModal() {
                     if (!confirm(`Delete ${count} archive${count === 1 ? '' : 's'}? This cannot be undone.`)) return;
                     const ids = Array.from(archiveSelectedIds);
                     for (const archId of ids) {
-                        try { await fetch(`/api/chat/archives/${archId}`, { method: 'DELETE' }); } catch (e) { /* ignore */ }
+                        try { await fetch((window.__getApiBase ? window.__getApiBase() : '') + `/api/chat/archives/${archId}`, { method: 'DELETE' }); } catch (e) { /* ignore */ }
                     }
                     archiveSelectedIds.clear();
                     archiveMultiSelect = false;
@@ -350,7 +350,7 @@ export function createArchiveModal() {
                     let successCount = 0;
                     for (const archId of ids) {
                         try {
-                            const res = await fetch('/api/chat/restore', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ archive_id: archId }) });
+                            const res = await fetch((window.__getApiBase ? window.__getApiBase() : '') + '/api/chat/restore', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ archive_id: archId }) });
                             if (res && res.ok) {
                                 try { const out = await res.json(); if (out && out.success) successCount++; } catch (e) { /* ignore */ }
                             }

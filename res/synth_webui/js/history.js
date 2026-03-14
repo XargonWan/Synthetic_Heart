@@ -4,8 +4,9 @@
 // History tab state and helpers (migrated from inline template)
 const historyState = {
     _initialized: false,
-    currentSubTab: 'diary',
-    diary: { page: 1, per_page: 20, search: '', include_archived: false, sort: 'desc' },
+    currentSubTab: 'interactions',
+    interactions: { page: 1, per_page: 20, search: '', include_archived: false, sort: 'desc' },
+    diary: { page: 1, per_page: 30, search: '', sort: 'desc' },
     grillo: { page: 1, per_page: 20, search: '', beat_type: '', sort: 'desc' },
     chat: { page: 1, per_page: 50, search: '', interface_path: '', sort: 'desc' }
 };
@@ -26,10 +27,10 @@ function initializeHistoryTab() {
     }
     allSubTabs.forEach((tab, idx) => { tab.classList.remove('active'); });
 
-    const diaryPanel = document.getElementById('subtab-diary');
+    const diaryPanel = document.getElementById('subtab-interactions');
     if (diaryPanel) {
         diaryPanel.classList.add('active');
-        historyState.currentSubTab = 'diary';
+        historyState.currentSubTab = 'interactions';
     }
 
     const subNavButtons = document.querySelectorAll('.sub-nav-btn[data-subtab]');
@@ -84,13 +85,20 @@ function initializeHistoryTab() {
 
 
     // Controls
+    document.getElementById('history-interactions-search')?.addEventListener('input', SynthUtils.debounce(() => {
+        historyState.interactions.search = document.getElementById('history-interactions-search').value;
+        historyState.interactions.page = 1; loadHistoryInteractions();
+    }, 500));
+
+    document.getElementById('history-interactions-sort')?.addEventListener('change', () => { historyState.interactions.sort = document.getElementById('history-interactions-sort').value; historyState.interactions.page = 1; loadHistoryInteractions(); });
+    document.getElementById('history-interactions-archived')?.addEventListener('change', () => { historyState.interactions.include_archived = document.getElementById('history-interactions-archived').checked; historyState.interactions.page = 1; loadHistoryInteractions(); });
+
     document.getElementById('history-diary-search')?.addEventListener('input', SynthUtils.debounce(() => {
         historyState.diary.search = document.getElementById('history-diary-search').value;
         historyState.diary.page = 1; loadHistoryDiary();
     }, 500));
 
     document.getElementById('history-diary-sort')?.addEventListener('change', () => { historyState.diary.sort = document.getElementById('history-diary-sort').value; historyState.diary.page = 1; loadHistoryDiary(); });
-    document.getElementById('history-diary-archived')?.addEventListener('change', () => { historyState.diary.include_archived = document.getElementById('history-diary-archived').checked; historyState.diary.page = 1; loadHistoryDiary(); });
 
     document.getElementById('history-grillo-search')?.addEventListener('input', SynthUtils.debounce(() => { historyState.grillo.search = document.getElementById('history-grillo-search').value; historyState.grillo.page = 1; loadHistoryGrillo(); }, 500));
     document.getElementById('history-grillo-beat-type')?.addEventListener('change', () => { historyState.grillo.beat_type = document.getElementById('history-grillo-beat-type').value; historyState.grillo.page = 1; loadHistoryGrillo(); });
@@ -100,11 +108,12 @@ function initializeHistoryTab() {
     document.getElementById('history-chat-search')?.addEventListener('input', SynthUtils.debounce(() => { historyState.chat.search = document.getElementById('history-chat-search').value; historyState.chat.page = 1; loadHistoryChat(); }, 500));
     document.getElementById('history-chat-sort')?.addEventListener('change', () => { historyState.chat.sort = document.getElementById('history-chat-sort').value; historyState.chat.page = 1; loadHistoryChat(); });
 
-    // Load initial diary data immediately
-    loadHistoryDiary();
+    // Load initial interactions data
+    loadHistoryInteractions();
 }
 
 function loadHistoryData(subtab) {
+    if (subtab === 'interactions') return loadHistoryInteractions();
     if (subtab === 'diary') return loadHistoryDiary();
     if (subtab === 'grillo') return loadHistoryGrillo();
     if (subtab === 'chat') return loadHistoryChat();
@@ -114,31 +123,59 @@ function loadHistoryData(subtab) {
     }
 }
 
+async function loadHistoryInteractions() {
+    const content = document.getElementById('history-interactions-content'); if (!content) return;
+    console.log('[History] loadHistoryInteractions called with state:', historyState.interactions);
+    content.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><p>Loading interactions...</p></div>';
+    const params = new URLSearchParams({ page: historyState.interactions.page, per_page: historyState.interactions.per_page, search: historyState.interactions.search, include_archived: historyState.interactions.include_archived, sort: historyState.interactions.sort });
+    try {
+        const response = await fetch(`/api/history/interactions?${params}`);
+        const data = await response.json();
+        console.log('[History] interactions response:', data);
+        if (data && data.success && Array.isArray(data.entries) && data.entries.length > 0) {
+            content.innerHTML = data.entries.map(entry => renderInteractionEntry(entry)).join('');
+            content.classList.add('history-populated');
+            try { content.scrollTop = 0; content.tabIndex = -1; setTimeout(() => { try { content.focus(); } catch (e) {} }, 50); } catch (e) {}
+            renderPagination('interactions', data.page, data.total_pages, data.total_count);
+        } else if (data && data.success) {
+            content.classList.remove('history-populated');
+            content.innerHTML = '<div class="empty-state"><div class="icon">🗂️</div><p>No interactions found</p></div>';
+        } else {
+            console.warn('[History] interactions response indicates failure or unexpected shape:', data);
+            content.classList.remove('history-populated');
+            content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load interactions</p></div>';
+        }
+    } catch (error) {
+        console.error('Failed to load interactions history:', error);
+        content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load interactions</p></div>';
+    }
+}
+
 async function loadHistoryDiary() {
     const content = document.getElementById('history-diary-content'); if (!content) return;
     console.log('[History] loadHistoryDiary called with state:', historyState.diary);
-    content.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><p>Loading diary entries...</p></div>';
-    const params = new URLSearchParams({ page: historyState.diary.page, per_page: historyState.diary.per_page, search: historyState.diary.search, include_archived: historyState.diary.include_archived, sort: historyState.diary.sort });
+    content.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><p>Loading diary...</p></div>';
+    const params = new URLSearchParams({ page: historyState.diary.page, per_page: historyState.diary.per_page, search: historyState.diary.search, sort: historyState.diary.sort });
     try {
         const response = await fetch(`/api/history/diary?${params}`);
         const data = await response.json();
         console.log('[History] diary response:', data);
         if (data && data.success && Array.isArray(data.entries) && data.entries.length > 0) {
-            content.innerHTML = data.entries.map(entry => renderDiaryEntry(entry)).join('');
+            content.innerHTML = data.entries.map(entry => renderDiaryDayEntry(entry)).join('');
             content.classList.add('history-populated');
             try { content.scrollTop = 0; content.tabIndex = -1; setTimeout(() => { try { content.focus(); } catch (e) {} }, 50); } catch (e) {}
             renderPagination('diary', data.page, data.total_pages, data.total_count);
         } else if (data && data.success) {
             content.classList.remove('history-populated');
-            content.innerHTML = '<div class="empty-state"><div class="icon">📖</div><p>No diary entries found</p></div>';
+            content.innerHTML = '<div class="empty-state"><div class="icon">📔</div><p>No diary entries found</p></div>';
         } else {
             console.warn('[History] diary response indicates failure or unexpected shape:', data);
             content.classList.remove('history-populated');
-            content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load diary entries</p></div>';
+            content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load diary</p></div>';
         }
     } catch (error) {
-        console.error('Failed to load diary history:', error);
-        content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load diary entries</p></div>';
+        console.error('Failed to load diary:', error);
+        content.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load diary</p></div>';
     }
 }
 
@@ -224,24 +261,58 @@ async function loadHistoryChat() {
     }
 }
 
-function renderDiaryEntry(entry) {
+function renderInteractionEntry(entry) {
     const timestamp = formatTimestamp(entry.timestamp);
     const archived = entry.archived ? ' archived' : '';
-    let safeContent = escapeHtml(entry.content || ''); safeContent = safeContent.replace(/^[\s\u00A0]+/, '').replace(/[\n\r]+$/, ''); const isLong = safeContent.split('\n').length > 6 || safeContent.length > 800; const longClass = isLong ? ' history-entry-content--limited' : '';
-    let safeThought = escapeHtml(entry.personal_thought || ''); safeThought = safeThought.replace(/^[\s\u00A0]+/, '').replace(/[\n\r]+$/, '');
+    // Interactions shows interaction_summary as main body — NOT the diary prose (content).
+    let safeSummary = escapeHtml(entry.interaction_summary || '').replace(/^[\s\u00A0]+/, '').replace(/[\n\r]+$/, '');
+    const summaryIsLong = safeSummary.split('\n').length > 6 || safeSummary.length > 800;
+    const longClass = summaryIsLong ? ' history-entry-content--limited' : '';
+    let safeThought = escapeHtml(entry.personal_thought || '').replace(/^[\s\u00A0]+/, '').replace(/[\n\r]+$/, '');
 
     return `
         <div class="history-entry${archived}">
             <div class="history-entry-header">
                 <div class="history-entry-meta">
                     <div class="history-entry-date">📅 ${timestamp}</div>
-                    ${entry.interaction_summary ? `<div class="history-entry-detail">${escapeHtml(entry.interaction_summary)}</div>` : ''}
                 </div>
             </div>
-            <div class="history-entry-content${longClass}">${safeContent}</div>
-            ${entry.personal_thought ? `<div class="history-entry-detail"><strong>💭 Thought:</strong> ${safeThought}</div>` : ''}
+            <div class="history-entry-content${longClass}">${safeSummary || '<em style="opacity:0.5">No summary available</em>'}</div>
+            ${safeThought ? `<div class="history-entry-detail"><strong>💭 Thought:</strong> ${safeThought}</div>` : ''}
             ${entry.primary_emotion ? `<div class="history-entry-detail"><strong>😊 Emotion:</strong> ${entry.primary_emotion}</div>` : ''}
             ${entry.user_count > 0 ? `<div class="history-entry-detail"><strong>👥 With:</strong> ${entry.user_count} user${entry.user_count > 1 ? 's' : ''}</div>` : ''}
+        </div>
+    `;
+}
+
+function renderDiaryDayEntry(entry) {
+    const ts = entry.timestamp ? new Date(entry.timestamp) : null;
+    const dayLabel = ts ? ts.toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }) : '—';
+    const rawContent = (entry.content || '').trim();
+
+    // Split on '---' separators (written by _upsert_diary_impl before LLM consolidation,
+    // or by GROUP_CONCAT when aggregating old multi-row days).
+    const fragments = rawContent.split(/\n\n---\n\n|\n---\n/).map(f => f.trim()).filter(Boolean);
+    let contentHtml;
+    if (fragments.length > 1) {
+        // Pre-consolidation: render each fragment as its own paragraph with a divider
+        contentHtml = fragments
+            .map(f => `<p class="diary-fragment">${escapeHtml(f).replace(/\n/g, '<br>')}</p>`)
+            .join('<hr class="diary-separator">');
+    } else {
+        contentHtml = escapeHtml(rawContent).replace(/\n/g, '<br>');
+    }
+
+    let safeThought = entry.personal_thought ? escapeHtml(entry.personal_thought).replace(/^[\s\u00A0]+/, '').replace(/[\n\r]+$/, '') : '';
+
+    return `
+        <div class="diary-day-entry">
+            <div class="diary-day-header">
+                <span class="diary-day-icon">📔</span>
+                <span class="diary-day-label">${dayLabel}</span>
+            </div>
+            <div class="diary-day-content">${contentHtml || '<em>No entry for this day</em>'}</div>
+            ${safeThought ? `<div class="diary-day-thought"><strong>💭</strong> ${safeThought}</div>` : ''}
         </div>
     `;
 }

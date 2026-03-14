@@ -1,5 +1,6 @@
 import pytest
 import asyncio
+from types import SimpleNamespace
 
 # The tests in this module exercise deep Grillo integration which is highly
 # sensitive to the state of the core container (LLM plugin availability,
@@ -63,6 +64,7 @@ def disable_corrector_and_clear_plugins(monkeypatch):
             await action_parser.run_actions(actions, context or {}, bot, message)
 
     import core.transport_layer as tl
+
     monkeypatch.setattr(tl, "_grillo_fire_and_forget", fake_grillo)
 
     return None
@@ -77,6 +79,7 @@ async def test_llm_to_interface_normalizes_mojibake(monkeypatch):
     # bypass corrector/orchestrator so we only inspect normalization
     async def fake_orch(text, context, bot, message, **kwargs):
         return None
+
     monkeypatch.setattr(
         "core.action_parser.corrector_orchestrator",
         fake_orch,
@@ -84,12 +87,13 @@ async def test_llm_to_interface_normalizes_mojibake(monkeypatch):
 
     async def fake_send(*args, **kwargs):
         # record the text actually sent
-        captured['text'] = kwargs.get('text') or (args[2] if len(args) > 2 else None)
+        captured["text"] = kwargs.get("text") or (args[2] if len(args) > 2 else None)
         return None
 
     # stub message_chain so the reply is forwarded as-is (no correction loop)
     async def fake_handle(bot, message, text, source, context=None, **kwargs):
         return message_chain.FORWARD_AS_TEXT
+
     monkeypatch.setattr("core.message_chain.handle_incoming_message", fake_handle)
 
     # call with intentionally mojibake'd string
@@ -102,13 +106,14 @@ async def test_llm_to_interface_normalizes_mojibake(monkeypatch):
     )
 
     # check normalization happened
-    assert 'text' in captured
-    assert "Si può" in captured['text'], f"unexpected: {captured['text']}"
+    assert "text" in captured
+    assert "Si può" in captured["text"], f"unexpected: {captured['text']}"
+
 
 @pytest.mark.asyncio
 async def test_grillo_persists_proposal_when_not_auto(monkeypatch):
     # Simulate checker suggesting actions
-    async def fake_inspect(llm_reply, original_user_message, context, message):
+    async def fake_inspect(self, llm_reply, original_user_message, context, message):
         return [
             {
                 "type": "schedule_message",
@@ -134,9 +139,9 @@ async def test_grillo_persists_proposal_when_not_auto(monkeypatch):
         classmethod(fake_create_activity_log),
     )
 
-    # Ensure action parser and message_chain behave simply: return FORWARD_AS_TEXT
+    # Chain ends with BLOCKED: no actions executed (LLM produced no JSON)
     async def fake_handle(bot, message, text, source, context=None, **kwargs):
-        return message_chain.FORWARD_AS_TEXT
+        return message_chain.BLOCKED
 
     monkeypatch.setattr("core.message_chain.handle_incoming_message", fake_handle)
 
@@ -176,7 +181,7 @@ async def test_grillo_persists_proposal_when_not_auto(monkeypatch):
 @pytest.mark.asyncio
 async def test_grillo_auto_executes_when_enabled(monkeypatch):
     # Simulate checker suggesting actions
-    async def fake_inspect(llm_reply, original_user_message, context, message):
+    async def fake_inspect(self, llm_reply, original_user_message, context, message):
         return [
             {
                 "type": "schedule_message",
@@ -213,38 +218,23 @@ async def test_grillo_auto_executes_when_enabled(monkeypatch):
 
     monkeypatch.setattr(action_parser, "run_actions", fake_run_actions)
 
-    # Make message_chain return FORWARD_AS_TEXT to simulate end-of-chain
-    async def fake_handle(bot, message, text, source, context=None, **kwargs):
-        return message_chain.FORWARD_AS_TEXT
-
-    monkeypatch.setattr("core.message_chain.handle_incoming_message", fake_handle)
-
-    # Set configs: auto exec True, synchronous check
+    # Enable auto-exec via config
     monkeypatch.setattr(
         config_registry,
         "get_value",
         lambda k, default=None, **kw: (
-            True
-            if k == "GRILLO_AUTO_GENERATE_ACTIONS"
-            else False
-            if k == "GRILLO_ACTION_CHECK_ASYNC"
-            else default
+            True if k == "GRILLO_AUTO_GENERATE_ACTIONS" else default
         ),
     )
 
-    async def fake_send(*args, **kwargs):
-        return None
-
-    await transport_layer.llm_to_interface(
-        fake_send,
+    msg = SimpleNamespace(chat_id=321)
+    await transport_layer._grillo_fire_and_forget(
         None,
-        text="Va bene, ti avviso domani",
-        chat_id=321,
-        interface="telegram",
+        msg,
+        "",
+        "Va bene, ti avviso domani",
+        {"chain_result": message_chain.BLOCKED},
     )
-
-    # Allow immediate tasks to finish
-    await asyncio.sleep(0.1)
 
     assert "actions" in called
     assert called["actions"][0]["type"] == "schedule_message"
@@ -254,7 +244,7 @@ async def test_grillo_auto_executes_when_enabled(monkeypatch):
 async def test_grillo_checker_receives_execution_metadata(monkeypatch):
     captured = {}
 
-    async def fake_inspect(llm_reply, original_user_message, context, message):
+    async def fake_inspect(self, llm_reply, original_user_message, context, message):
         captured["llm_reply"] = llm_reply
         captured["original_user_message"] = original_user_message
         captured["context"] = context
@@ -267,43 +257,16 @@ async def test_grillo_checker_receives_execution_metadata(monkeypatch):
         GrilloActionChecker, "inspect_reply_and_suggest_actions", fake_inspect
     )
 
-    # Make message_chain return FORWARD_AS_TEXT and set last_action_result on message
-    async def fake_handle(bot, message, text, source, context=None, **kwargs):
-        # Attach last_action_result to the message to simulate actions parsing result
-        message.last_action_result = {"processed": [], "failed": [], "errors": []}
-        return message_chain.FORWARD_AS_TEXT
+    msg = SimpleNamespace(chat_id=999)
+    msg.last_action_result = {"processed": [], "failed": [], "errors": []}
+    ctx = {"chain_result": message_chain.BLOCKED}
 
-    monkeypatch.setattr("core.message_chain.handle_incoming_message", fake_handle)
-
-    # Force synchronous invocation of grillo helper for test
-    monkeypatch.setattr(
-        config_registry,
-        "get_value",
-        lambda k, default=None, **kw: (
-            False
-            if k == "GRILLO_AUTO_GENERATE_ACTIONS"
-            else False
-            if k == "GRILLO_ACTION_CHECK_ASYNC"
-            else default
-        ),
+    await transport_layer._grillo_fire_and_forget(
+        None, msg, "", "Va bene, ti avviso domani", ctx
     )
-
-    async def fake_send(*args, **kwargs):
-        return None
-
-    await transport_layer.llm_to_interface(
-        fake_send,
-        None,
-        text="Va bene, ti avviso domani",
-        chat_id=999,
-        interface="telegram",
-    )
-
-    # Allow event loop to run tasks
-    await asyncio.sleep(0.1)
 
     assert captured.get("context") is not None
-    assert captured["context"].get("chain_result") == message_chain.FORWARD_AS_TEXT
+    assert captured["context"].get("chain_result") == message_chain.BLOCKED
     assert captured["message_last_action_result"] == {
         "processed": [],
         "failed": [],
@@ -314,7 +277,7 @@ async def test_grillo_checker_receives_execution_metadata(monkeypatch):
 @pytest.mark.asyncio
 async def test_grillo_persists_action_execs_when_not_auto(monkeypatch):
     # Simulate checker suggesting multiple actions
-    async def fake_inspect(llm_reply, original_user_message, context, message):
+    async def fake_inspect(self, llm_reply, original_user_message, context, message):
         return [
             {
                 "type": "schedule_message",
@@ -366,37 +329,37 @@ async def test_grillo_persists_action_execs_when_not_auto(monkeypatch):
         classmethod(fake_create_action_exec),
     )
 
-    # Make message_chain return FORWARD_AS_TEXT
-    async def fake_handle(bot, message, text, source, context=None, **kwargs):
-        return message_chain.FORWARD_AS_TEXT
-
-    monkeypatch.setattr("core.message_chain.handle_incoming_message", fake_handle)
-
-    # Force synchronous invocation and disable auto exec
+    # Disable auto-exec so actions are persisted as proposals
     monkeypatch.setattr(
         config_registry,
         "get_value",
         lambda k, default=None, **kw: (
-            False
-            if k == "GRILLO_AUTO_GENERATE_ACTIONS"
-            else False
-            if k == "GRILLO_ACTION_CHECK_ASYNC"
-            else default
+            False if k == "GRILLO_AUTO_GENERATE_ACTIONS" else default
         ),
     )
 
-    async def fake_send(*args, **kwargs):
-        return None
+    # Register fake grillo plugin so _grillo_fire_and_forget can call create_activity_log
+    from core import core_initializer
 
-    await transport_layer.llm_to_interface(
-        fake_send,
+    fake_plugin = grillo_impl.GrilloPlugin()
+    original_registry = (
+        core_initializer.PLUGIN_REGISTRY.copy()
+        if isinstance(core_initializer.PLUGIN_REGISTRY, dict)
+        else {}
+    )
+    core_initializer.PLUGIN_REGISTRY["grillo_impl"] = fake_plugin
+
+    msg = SimpleNamespace(chat_id=555)
+    await transport_layer._grillo_fire_and_forget(
         None,
-        text="Va bene, ti avviso domani",
-        chat_id=555,
-        interface="telegram",
+        msg,
+        "",
+        "Va bene, ti avviso domani",
+        {"chain_result": message_chain.BLOCKED},
     )
 
-    await asyncio.sleep(0.1)
+    # Restore registry
+    core_initializer.PLUGIN_REGISTRY.pop("grillo_impl", None)
 
     assert len(created_calls) == 2
     assert created_calls[0]["status"] == "pending"
@@ -406,7 +369,7 @@ async def test_grillo_persists_action_execs_when_not_auto(monkeypatch):
 @pytest.mark.asyncio
 async def test_grillo_records_action_exec_status_when_auto(monkeypatch):
     # Simulate checker suggesting actions
-    async def fake_inspect(llm_reply, original_user_message, context, message):
+    async def fake_inspect(self, llm_reply, original_user_message, context, message):
         return [
             {
                 "type": "schedule_message",
@@ -463,37 +426,32 @@ async def test_grillo_records_action_exec_status_when_auto(monkeypatch):
         classmethod(fake_create_action_exec),
     )
 
-    # Make message_chain return FORWARD_AS_TEXT
-    async def fake_handle(bot, message, text, source, context=None, **kwargs):
-        return message_chain.FORWARD_AS_TEXT
-
-    monkeypatch.setattr("core.message_chain.handle_incoming_message", fake_handle)
-
-    # Force synchronous invocation and enable auto exec
+    # Enable auto-exec
     monkeypatch.setattr(
         config_registry,
         "get_value",
         lambda k, default=None, **kw: (
-            True
-            if k == "GRILLO_AUTO_GENERATE_ACTIONS"
-            else False
-            if k == "GRILLO_ACTION_CHECK_ASYNC"
-            else default
+            True if k == "GRILLO_AUTO_GENERATE_ACTIONS" else default
         ),
     )
 
-    async def fake_send(*args, **kwargs):
-        return None
+    # Register fake grillo plugin so _grillo_fire_and_forget can call create_activity_log/create_action_exec
+    from core import core_initializer
 
-    await transport_layer.llm_to_interface(
-        fake_send,
+    fake_plugin = grillo_impl.GrilloPlugin()
+    core_initializer.PLUGIN_REGISTRY["grillo_impl"] = fake_plugin
+
+    msg = SimpleNamespace(chat_id=666)
+    await transport_layer._grillo_fire_and_forget(
         None,
-        text="Va bene, ti avviso domani",
-        chat_id=666,
-        interface="telegram",
+        msg,
+        "",
+        "Va bene, ti avviso domani",
+        {"chain_result": message_chain.BLOCKED},
     )
 
-    await asyncio.sleep(0.1)
+    # Restore registry
+    core_initializer.PLUGIN_REGISTRY.pop("grillo_impl", None)
 
     # After auto-exec, we should have recorded the processed action
     assert any(c["status"] == "processed" for c in created_calls)
@@ -502,7 +460,7 @@ async def test_grillo_records_action_exec_status_when_auto(monkeypatch):
 @pytest.mark.asyncio
 async def test_grillo_forces_auto_exec_when_context_is_grillo_beat(monkeypatch):
     # Simulate checker suggesting actions
-    async def fake_inspect(llm_reply, original_user_message, context, message):
+    async def fake_inspect(self, llm_reply, original_user_message, context, message):
         return [
             {
                 "type": "schedule_message",
@@ -523,41 +481,25 @@ async def test_grillo_forces_auto_exec_when_context_is_grillo_beat(monkeypatch):
 
     monkeypatch.setattr(action_parser, "run_actions", fake_run_actions)
 
-    # Make message_chain return FORWARD_AS_TEXT
-    async def fake_handle(bot, message, text, source, context=None, **kwargs):
-        return message_chain.FORWARD_AS_TEXT
-
-    monkeypatch.setattr("core.message_chain.handle_incoming_message", fake_handle)
-
-    # Force synchronous invocation and disable auto exec in config
+    # Auto-exec is disabled in config but grillo_beat forces it on
     monkeypatch.setattr(
         config_registry,
         "get_value",
         lambda k, default=None, **kw: (
-            False
-            if k == "GRILLO_AUTO_GENERATE_ACTIONS"
-            else False
-            if k == "GRILLO_ACTION_CHECK_ASYNC"
-            else default
+            False if k == "GRILLO_AUTO_GENERATE_ACTIONS" else default
         ),
     )
 
-    async def fake_send(*args, **kwargs):
-        return None
-
-    # Pass through a context representing a grillo observer beat
-    ctx = {"grillo_beat": True, "beat_type": "observer"}
-
-    await transport_layer.llm_to_interface(
-        fake_send,
-        None,
-        text="Va bene, ti avviso domani",
-        chat_id=777,
-        interface="telegram",
-        context=ctx,
+    msg = SimpleNamespace(chat_id=777)
+    # grillo_beat context should force auto_exec regardless of config
+    ctx = {
+        "grillo_beat": True,
+        "beat_type": "observer",
+        "chain_result": message_chain.BLOCKED,
+    }
+    await transport_layer._grillo_fire_and_forget(
+        None, msg, "", "Va bene, ti avviso domani", ctx
     )
-
-    await asyncio.sleep(0.1)
 
     assert "actions" in called
     assert called["actions"][0]["type"] == "schedule_message"

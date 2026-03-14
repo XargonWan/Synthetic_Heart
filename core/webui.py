@@ -33,12 +33,13 @@ from fastapi import (
     Request,
     HTTPException,
 )
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from core.core_initializer import register_interface
 from core.logging_utils import _LOG_FILE, log_debug, log_error, log_info, log_warning
 from core.config_manager import config_registry
+from core.variables_engine import register_exposed_var
 from core.message_chain import (
     get_failed_message_text,
     RESPONSE_TIMEOUT,
@@ -52,6 +53,23 @@ import mimetypes
 
 BRAND_NAME = "Synthetic Heart"
 INTERFACE_NAME = "synth_webui"
+
+# exposed configuration variable to toggle experimental multi-session mode
+register_exposed_var(
+    "MULTI_SESSION",
+    label="Enable multi-session WebUI (experimental)",
+    default=False,
+    value_type=bool,
+    ui_type="boolean",
+    description=(
+        "When true each browser connection receives its own session ID. "
+        "This is an experimental mode; history/animation state is not "
+        "persisted across container restarts and behaviour may be unstable."
+    ),
+    scope="core",
+    component="webui",
+    advanced=True,
+)
 LOG_PREFIX = "[synth_webui]"
 WEBUI_LOG = "webui"  # Log file name for WebUI (logs/webui.log)
 # Internal chat/component identifier used when interacting with the LLM and
@@ -214,6 +232,8 @@ class SynthWebUIInterface:
         backups_dir = os.environ.get("SYNTH_BACKUPS_DIR", "backups")
         self.session_id_file = Path(backups_dir) / "webui_session_id.txt"
         self.session_id = None
+        # helper value cache for multi-session flag (not used - evaluations are cheap)
+        # self._multi_session_cache: Optional[bool] = None
         try:
             self._ensure_persistent_session_id()
         except Exception:
@@ -490,6 +510,28 @@ class SynthWebUIInterface:
         self.app.post("/api/log-console")(self.log_console_endpoint)
         self.app.websocket("/ws")(self.websocket_endpoint)
         self.app.websocket("/logs")(self.logs_ws_endpoint)
+        # Auris audio endpoints
+        self.app.post("/api/audio/upload")(self.audio_upload_endpoint)
+        # helper endpoint for Vosk language selection (legacy compat, delegates to MODEL_MANAGER)
+        self.app.post("/api/auris/vosk/download")(self.vosk_model_download)
+        # Model management endpoints (SSOT: MODEL_MANAGER)
+        self.app.get("/api/models")(self.list_models)
+        self.app.get("/api/models/{model_id}")(self.get_model_detail)
+        self.app.post("/api/models/{model_id}/download")(self.start_model_download)
+        self.app.get("/api/models/{model_id}/progress")(self.get_model_progress)
+        self.app.delete("/api/models/{model_id}")(self.delete_model)
+        self.app.get("/api/models/{model_id}/sample/{voice}")(self.model_sample_voice)
+        self.app.get("/api/models/{model_id}/voice/{voice}/exists")(
+            self.model_voice_sample_exists
+        )
+        self.app.post("/api/models/{model_id}/voice/{voice}/generate")(
+            self.model_generate_voice_sample
+        )
+        self.app.websocket("/api/audio/stream")(self.audio_stream_ws_endpoint)
+
+        # Vox metadata/sample endpoints
+        self.app.get("/api/vox/speakers")(self.vox_speakers)
+        self.app.get("/api/vox/sample")(self.vox_sample)
         self.app.get("/api/vrm")(self.list_vrm_models)
         self.app.get("/api/vrm/active")(self.get_active_vrm_endpoint)
         self.app.post("/api/vrm")(self.upload_vrm_model)
@@ -503,6 +545,13 @@ class SynthWebUIInterface:
         self.app.get("/api/skins/current_skin")(self.get_current_skin)
         self.app.post("/api/skins/{skin_name}/activate")(self.activate_skin)
         self.app.post("/api/skins/uploaded/clear")(self.clear_uploaded_vrm)
+        # Skin editor endpoints
+        self.app.post("/api/skins")(self.create_skin)
+        self.app.post("/api/skins/upload")(self.upload_skin_zip)
+        self.app.post("/api/skins/{skin_name}/vrm")(self.upload_skin_vrm)
+        self.app.post("/api/skins/{skin_name}/preview")(self.upload_skin_preview)
+        self.app.get("/api/skins/{skin_name}/download")(self.download_skin)
+        self.app.delete("/api/skins/{skin_name}")(self.delete_skin)
         self.app.get("/api/components")(self.components_summary)
         self.app.post("/api/components/reload")(self.reload_component)
         self.app.post("/api/components/dev/toggle")(self.toggle_dev_components)
@@ -518,6 +567,8 @@ class SynthWebUIInterface:
         self.app.post("/api/components/cortex")(self.set_cortex_engine)
         # Login control for Selenium-based engines
         self.app.post("/api/components/cortex/login")(self.cortex_login)
+        # Model selection for cortex engines
+        self.app.post("/api/components/cortex/model")(self.set_cortex_model)
         # Run component actions on demand (e.g., Run Now button)
         self.app.post("/api/components/run")(self.run_component)
         self.app.get("/api/logchat/info")(self.get_logchat_info)
@@ -538,6 +589,7 @@ class SynthWebUIInterface:
         self.app.post("/api/chat/session_meta")(self.set_session_meta)
         self.app.get("/api/chat/session_meta")(self.get_session_meta)
         # History API endpoints (unified diary, grillo, chat history)
+        self.app.get("/api/history/interactions")(self.history_interactions)
         self.app.get("/api/history/diary")(self.history_diary)
         self.app.get("/api/history/grillo")(self.history_grillo)
         self.app.get("/api/history/chat")(self.history_chat)
@@ -1012,7 +1064,40 @@ class SynthWebUIInterface:
                 "%%CHAT_RESIZABLE%%": "true"
                 if str(self._get_chat_resizable()).lower() in ("1", "true", "yes")
                 else "false",
+                "%%MULTI_SESSION%%": "true"
+                if self._multi_session_enabled()
+                else "false",
             }
+
+            # Vox (TTS) flag exposed to the WebUI client is derived from
+            # which engine is active; a value of "disabled" means off.
+            try:
+                active_vox = str(
+                    config_registry.get_value(
+                        "ACTIVE_VOX_ENGINE",
+                        "",
+                        value_type=str,
+                        group="plugins",
+                        component="vox_plugin",
+                    )
+                )
+                _vox_enabled = bool(active_vox and active_vox != "disabled")
+            except Exception:
+                _vox_enabled = False
+            try:
+                _vox_cache = int(
+                    config_registry.get_value(
+                        "VOX_AUDIO_CACHE_SIZE",
+                        40,
+                        value_type=int,
+                        group="plugins",
+                        component="vox_plugin",
+                    )
+                )
+            except Exception:
+                _vox_cache = 40
+            replacements["%%VOX_ENABLED%%"] = "true" if _vox_enabled else "false"
+            replacements["%%VOX_AUDIO_CACHE_SIZE%%"] = str(_vox_cache)
 
             # Accent color config + presets (exposed to client as runtime config)
             try:
@@ -1520,14 +1605,18 @@ class SynthWebUIInterface:
             pass
         await websocket.accept()
         # Use persistent session id when available (single session per deploy)
-        session_id = self.session_id or str(uuid.uuid4())
-        # Ensure session id is persisted if it was generated now
-        if not self.session_id:
-            self.session_id = session_id
-            try:
-                self._ensure_persistent_session_id(force_write=True)
-            except Exception:
-                pass
+        # choose session id depending on mode
+        if self._multi_session_enabled():
+            session_id = str(uuid.uuid4())
+        else:
+            session_id = self.session_id or str(uuid.uuid4())
+            # Ensure session id is persisted if it was generated now
+            if not self.session_id:
+                self.session_id = session_id
+                try:
+                    self._ensure_persistent_session_id(force_write=True)
+                except Exception:
+                    pass
         self.connections[session_id] = websocket
         self.message_history.setdefault(session_id, deque(maxlen=self.max_history))
         await websocket.send_json({"type": "session", "session_id": session_id})
@@ -1799,6 +1888,578 @@ class SynthWebUIInterface:
                 await websocket.close()
             except Exception:
                 pass  # Websocket might already be closed
+
+    # ------------------------------------------------------------------
+    # Auris audio endpoints
+    # ------------------------------------------------------------------
+
+    async def audio_upload_endpoint(
+        self,
+        file: UploadFile = File(...),
+        engine: Optional[str] = Form(None),
+    ):
+        """POST /api/audio/upload — transcribe an uploaded audio file via Auris.
+
+        Multipart form fields:
+        - ``file``: the audio file (wav, ogg, mp4, …)
+        - ``engine``: optional engine override (default: active auris engine)
+
+        Returns JSON: ``{"text": "...", "engine": "..."}`` or
+        ``{"error": "..."}`` with an appropriate HTTP status.
+        """
+        if not file or not file.filename:
+            raise HTTPException(status_code=400, detail="No file uploaded")
+
+        try:
+            from core.core_initializer import PLUGIN_REGISTRY
+
+            auris = PLUGIN_REGISTRY.get("auris_plugin")
+            if auris is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Auris STT subsystem is not loaded. Select an Auris engine or disable via ACTIVE_AURIS_ENGINE.",
+                )
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            suffix = Path(file.filename).suffix or ".audio"
+            tmp_path = tmp_dir / f"webui_{uuid.uuid4().hex}{suffix}"
+            try:
+                contents = await file.read()
+                tmp_path.write_bytes(contents)
+
+                mime_hint = file.content_type or None
+                transcribed_engine = engine or getattr(
+                    auris, "_active_engine_name", None
+                )
+                _auris_result = await auris.transcribe_audio(
+                    str(tmp_path), mime_type=mime_hint, engine_name=engine
+                )
+                text = _auris_result.text if _auris_result else None
+            finally:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+            if text is None:
+                return JSONResponse(
+                    {"error": "Transcription returned no text"},
+                    status_code=422,
+                )
+            return JSONResponse({"text": text, "engine": transcribed_engine})
+
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} audio_upload_endpoint error: {exc}")
+            return JSONResponse({"error": str(exc)}, status_code=500)
+
+    # ------------------------------------------------------------------
+    # Vox metadata/sample endpoints
+    # ------------------------------------------------------------------
+
+    async def vox_speakers(self, request: Request):
+        """GET /api/vox/speakers?engine=<name>"""
+        from core.config_manager import config_registry
+        from core.vox_registry import VOX_REGISTRY
+
+        engine_name = request.query_params.get("engine") or config_registry.get_value(
+            "ACTIVE_VOX_ENGINE", "kitten", value_type=str
+        )
+        reg = VOX_REGISTRY
+        try:
+            engine = reg.load_engine(engine_name)
+        except ValueError:
+            raise HTTPException(status_code=404, detail="Engine not found")
+        try:
+            speakers = engine.get_speakers()
+        except Exception:
+            speakers = []
+        return JSONResponse(speakers)
+
+    async def vox_sample(self, request: Request):
+        """GET /api/vox/sample?engine=<name>&speaker=<code>"""
+        from core.config_manager import config_registry
+        from core.vox_registry import VOX_REGISTRY
+
+        engine_name = request.query_params.get("engine") or config_registry.get_value(
+            "ACTIVE_VOX_ENGINE", "kitten", value_type=str
+        )
+        speaker = request.query_params.get("speaker")
+        if not speaker:
+            raise HTTPException(status_code=400, detail="speaker parameter required")
+        reg = VOX_REGISTRY
+        try:
+            engine = reg.load_engine(engine_name)
+        except ValueError:
+            raise HTTPException(status_code=404, detail="Engine not found")
+        try:
+            data = engine.sample(speaker)
+        except NotImplementedError:
+            raise HTTPException(status_code=404, detail="No sample available")
+        return Response(data, media_type="audio/wav")
+
+    # ------------------------------------------------------------------
+    # Model management endpoints  (SSOT: core.model_manager.MODEL_MANAGER)
+    # ------------------------------------------------------------------
+
+    async def vosk_model_download(self, language: str = Form(...)):
+        """POST /api/auris/vosk/download  — legacy compat shim.
+
+        Looks up the Vosk model_id for *language* and delegates to
+        ``MODEL_MANAGER.download()``.  Also updates ``VOSK_LANGUAGE`` so the
+        engine picks up the new model on next load.
+        """
+        try:
+            from core.config_manager import config_registry
+            from core.model_manager import MODEL_MANAGER
+
+            # lang → model_id mapping (mirrors vosk_engine._LANG_TO_MODEL_ID)
+            _LANG_MAP: dict[str, str] = {
+                "en": "vosk-en-us",
+                "en-us": "vosk-en-us",
+                "en-gb": "vosk-en-us",
+                "it": "vosk-it-it",
+                "it-it": "vosk-it-it",
+                "fr": "vosk-fr-fr",
+                "fr-fr": "vosk-fr-fr",
+                "es": "vosk-es-es",
+                "es-es": "vosk-es-es",
+                "de": "vosk-de-de",
+                "de-de": "vosk-de-de",
+                "pt": "vosk-pt-pt",
+                "pt-pt": "vosk-pt-pt",
+                "zh": "vosk-zh-cn",
+                "zh-cn": "vosk-zh-cn",
+                "ja": "vosk-ja-jp",
+                "ja-jp": "vosk-ja-jp",
+                "ko": "vosk-ko-kr",
+                "ko-kr": "vosk-ko-kr",
+            }
+            model_id = _LANG_MAP.get(language.lower(), f"vosk-{language.lower()}")
+            config_registry.set_value("VOSK_LANGUAGE", language)
+            # Fire-and-forget in background so the endpoint always returns immediately;
+            # clients can poll /api/models/{id}/progress to track completion.
+            import asyncio as _asyncio
+
+            _asyncio.create_task(MODEL_MANAGER.download(model_id))
+            log_info(f"{LOG_PREFIX} vosk_model_download: started {model_id}")
+            return JSONResponse(
+                {"success": True, "language": language, "model_id": model_id}
+            )
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} vosk_model_download error: {exc}")
+            return JSONResponse({"error": str(exc)}, status_code=500)
+
+    async def list_models(self, request: Request) -> JSONResponse:
+        """GET /api/models[?plugin_id=<id>]  — return all registered models with status."""
+        from core.model_manager import MODEL_MANAGER
+
+        plugin_filter = request.query_params.get("plugin_id")
+        catalog = MODEL_MANAGER.catalog()
+        if plugin_filter:
+            catalog = [m for m in catalog if m["plugin_id"] == plugin_filter]
+        return JSONResponse({"models": catalog})
+
+    async def get_model_detail(self, model_id: str) -> JSONResponse:
+        """GET /api/models/{model_id}  — return single model info with sample list."""
+        from core.model_manager import MODEL_MANAGER
+
+        spec = MODEL_MANAGER.get_spec(model_id)
+        if not spec:
+            raise HTTPException(
+                status_code=404, detail=f"Model '{model_id}' not registered"
+            )
+        catalog_entry = next(
+            (m for m in MODEL_MANAGER.catalog() if m["model_id"] == model_id), None
+        )
+        if not catalog_entry:
+            raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+        catalog_entry["samples"] = MODEL_MANAGER.list_samples(model_id)
+        return JSONResponse(catalog_entry)
+
+    async def start_model_download(self, model_id: str) -> JSONResponse:
+        """POST /api/models/{model_id}/download  — start async download of a model."""
+        from core.model_manager import MODEL_MANAGER
+
+        spec = MODEL_MANAGER.get_spec(model_id)
+        if not spec:
+            raise HTTPException(
+                status_code=404, detail=f"Model '{model_id}' not registered"
+            )
+        if MODEL_MANAGER.is_downloaded(model_id):
+            return JSONResponse({"status": "already_downloaded", "model_id": model_id})
+        if MODEL_MANAGER.download_progress(model_id) is not None:
+            return JSONResponse({"status": "in_progress", "model_id": model_id})
+        # Fire-and-forget in background
+        import asyncio as _asyncio
+
+        _asyncio.create_task(MODEL_MANAGER.download(model_id))
+        log_info(f"{LOG_PREFIX} Model download started: {model_id}")
+        return JSONResponse({"status": "started", "model_id": model_id})
+
+    async def get_model_progress(self, model_id: str) -> JSONResponse:
+        """GET /api/models/{model_id}/progress  — poll download progress (0-1) or status."""
+        from core.model_manager import MODEL_MANAGER
+
+        progress = MODEL_MANAGER.download_progress(model_id)
+        downloaded = MODEL_MANAGER.is_downloaded(model_id)
+        return JSONResponse(
+            {
+                "model_id": model_id,
+                "downloaded": downloaded,
+                "in_progress": progress is not None,
+                "progress": progress,
+            }
+        )
+
+    async def delete_model(self, model_id: str) -> JSONResponse:
+        """DELETE /api/models/{model_id}  — remove a downloaded model from disk."""
+        from core.model_manager import MODEL_MANAGER
+
+        spec = MODEL_MANAGER.get_spec(model_id)
+        if not spec:
+            raise HTTPException(
+                status_code=404, detail=f"Model '{model_id}' not registered"
+            )
+        if not MODEL_MANAGER.is_downloaded(model_id):
+            raise HTTPException(
+                status_code=404, detail=f"Model '{model_id}' is not downloaded"
+            )
+        ok = MODEL_MANAGER.delete(model_id)
+        if ok:
+            return JSONResponse({"deleted": True, "model_id": model_id})
+        return JSONResponse(
+            {"deleted": False, "error": "Delete failed"}, status_code=500
+        )
+
+    async def model_sample_voice(
+        self, model_id: str, voice: str, request: Request
+    ) -> Response:
+        """GET /api/models/{model_id}/sample/{voice}?lang=en  — stream a sample MP3.
+
+        Returns 404 if the sample does not exist for the requested language so
+        the client can show a "Generate" button instead of a play button.
+        """
+        from core.model_manager import MODEL_MANAGER
+
+        lang = request.query_params.get("lang", "en")
+        # Try pre-generated file first
+        samples = MODEL_MANAGER.list_samples(model_id, lang=lang)
+        sample = next((s for s in samples if s.get("voice") == voice), None)
+        if sample:
+            path = Path(sample["path"])
+            if path.exists():
+                return Response(path.read_bytes(), media_type="audio/mpeg")
+        # No pre-generated file: 404 so the UI knows to show Generate button
+        raise HTTPException(
+            status_code=404,
+            detail=f"Sample for '{model_id}/{voice}' (lang={lang}) not yet generated",
+        )
+
+    async def model_voice_sample_exists(
+        self, model_id: str, voice: str, request: Request
+    ) -> JSONResponse:
+        """GET /api/models/{model_id}/voice/{voice}/exists?lang=en
+
+        Lightweight existence check — returns ``{"exists": true/false, "url": str|null}``.
+        """
+        from core.model_manager import MODEL_MANAGER
+
+        lang = request.query_params.get("lang", "en")
+        exists = MODEL_MANAGER.sample_exists(model_id, voice, lang)
+        url: str | None = None
+        if exists:
+            url = MODEL_MANAGER._sample_url(model_id, voice, lang)
+        return JSONResponse(
+            {
+                "exists": exists,
+                "url": url,
+                "model_id": model_id,
+                "voice": voice,
+                "lang": lang,
+            }
+        )
+
+    async def model_generate_voice_sample(
+        self, model_id: str, voice: str, request: Request
+    ) -> JSONResponse:
+        """POST /api/models/{model_id}/voice/{voice}/generate?lang=en
+
+        Generate a voice sample on-the-go.  Runs synchronously in an executor
+        so the endpoint returns the result (or an error) once generation is
+        complete (usually < 15 s).
+
+        Returns ``{"url": "..."}`` on success or ``{"error": "..."}`` with HTTP 500.
+        """
+        import asyncio as _asyncio
+        from core.model_manager import MODEL_MANAGER
+        from core.vox_registry import VOX_REGISTRY
+
+        lang = request.query_params.get("lang", "en")
+
+        spec = MODEL_MANAGER.get_spec(model_id)
+        if not spec:
+            raise HTTPException(
+                status_code=404, detail=f"Model '{model_id}' not registered"
+            )
+        if not MODEL_MANAGER.is_downloaded(model_id):
+            raise HTTPException(
+                status_code=404,
+                detail=f"Model '{model_id}' is not downloaded",
+            )
+        if voice not in spec.voices:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Voice '{voice}' not found in model '{model_id}'",
+            )
+
+        # Resolve gender for this voice (needed by edge-tts gender filter)
+        gender = "N"
+        for vm in spec.voices_meta:
+            if vm.name == voice:
+                gender = vm.gender
+                break
+
+        # Import generator helper lazily to avoid circular imports
+        import inspect
+
+        def _generate_fn(text: str, v: str | None) -> "bytes | None":
+            # Try VOX engine first
+            for engine_name in VOX_REGISTRY.get_available_engines():
+                try:
+                    engine = VOX_REGISTRY.load_engine(engine_name)
+                    if not hasattr(engine, "sample"):
+                        continue
+                    sig = inspect.signature(engine.sample)
+                    data: bytes | None = (
+                        engine.sample(text, v)
+                        if len(sig.parameters) == 2
+                        else engine.sample(v)
+                    )
+                    if data:
+                        return data
+                except Exception:
+                    continue
+            # edge-tts fallback with correct locale + gender
+            try:
+                from scripts.generate_model_samples import _edge_generate, _tweak_audio
+
+                data = _edge_generate(text, v, lang=lang, gender=gender)
+                if data:
+                    return _tweak_audio(data, v, lang)
+            except Exception:
+                pass
+            return None
+
+        loop = _asyncio.get_event_loop()
+        try:
+            path = await loop.run_in_executor(
+                None,
+                lambda: MODEL_MANAGER.ensure_sample(
+                    model_id, voice, _generate_fn, lang=lang
+                ),
+            )
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} model_generate_voice_sample error: {exc}")
+            return JSONResponse({"error": str(exc)}, status_code=500)
+
+        if not path:
+            return JSONResponse({"error": "Sample generation failed"}, status_code=500)
+
+        url = MODEL_MANAGER._sample_url(model_id, voice, lang)
+        return JSONResponse(
+            {"url": url, "model_id": model_id, "voice": voice, "lang": lang}
+        )
+
+    async def audio_stream_ws_endpoint(
+        self, websocket: WebSocket
+    ):  # pragma: no cover - runtime streaming
+        """WebSocket /api/audio/stream — real-time STT via VAD or a Live engine.
+
+        Protocol (client → server):
+        - Text frame ``{"sample_rate": 16000, "engine": "vad"}``: **must** be
+          sent first to configure the session.
+          ``engine`` values: ``"vad"`` / ``"silero"`` → use the core
+          ``VADService`` (local, always available when silero-vad is installed);
+          any other value → route to the Live streaming registry.
+        - Binary frames: raw PCM s16le audio chunks at the negotiated sample rate.
+
+        Protocol (server → client):
+        - ``{"type": "ready",   "session_id": "..."}`` — sent once after setup.
+        - ``{"type": "partial", "text": "..."}`` — interim transcript segment.
+        - ``{"type": "final",   "text": "..."}`` — final transcript (is_final=True).
+        - ``{"type": "vad",     "signal": "speech_start"|"speech_end"}`` — VAD events.
+        - ``{"type": "error",   "detail": "..."}`` — error notification.
+        """
+        await websocket.accept()
+        session_id = f"ws_{uuid.uuid4().hex}"
+        live_engine = None  # only set when using LIVE_REGISTRY
+
+        try:
+            import json as _json
+
+            from core.vad_service import VAD_SERVICE
+
+            # ── Config frame ────────────────────────────────────────────────
+            sample_rate = 16000
+            engine_name = "vad"
+            try:
+                config_raw = await asyncio.wait_for(
+                    websocket.receive_text(), timeout=5.0
+                )
+                config = _json.loads(config_raw)
+                sample_rate = int(config.get("sample_rate", 16000))
+                engine_name = str(config.get("engine", engine_name))
+            except asyncio.TimeoutError:
+                pass
+            except Exception:
+                pass
+
+            # ── Route: core VADService vs Live registry ──────────────────────
+            _VAD_ALIASES = {"vad", "silero", ""}
+
+            if engine_name in _VAD_ALIASES:
+                # ── VAD path (core service) ──────────────────────────────────
+                if not VAD_SERVICE.is_available():
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "detail": (
+                                "Silero VAD not available. "
+                                "Install the 'silero' extra: "
+                                "pip install '.[silero]'"
+                            ),
+                        }
+                    )
+                    await websocket.close()
+                    return
+
+                VAD_SERVICE.open_session(session_id)
+                await websocket.send_json({"type": "ready", "session_id": session_id})
+                log_info(
+                    f"{LOG_PREFIX} VAD stream session started: {session_id}, sr={sample_rate}"
+                )
+
+                try:
+                    while True:
+                        try:
+                            data = await asyncio.wait_for(
+                                websocket.receive_bytes(), timeout=30.0
+                            )
+                        except asyncio.TimeoutError:
+                            break
+                        except WebSocketDisconnect:
+                            break
+                        except Exception:
+                            break
+
+                        events = VAD_SERVICE.process_chunk(
+                            session_id, data, sample_rate
+                        )
+                        for evt in events:
+                            try:
+                                await websocket.send_json(
+                                    {"type": "vad", "signal": evt}
+                                )
+                            except Exception:
+                                break
+                finally:
+                    pending = VAD_SERVICE.close_session(session_id)
+                    for evt in pending:
+                        try:
+                            await websocket.send_json({"type": "vad", "signal": evt})
+                        except Exception:
+                            pass
+
+            else:
+                # ── Live engine path (bidirectional, e.g. gemini_live) ────────
+                from core.live_registry import LIVE_REGISTRY
+                from plugins.live_base import LiveEventType
+
+                try:
+                    live_engine = LIVE_REGISTRY.load_engine(engine_name)
+                except ValueError as exc:
+                    await websocket.send_json({"type": "error", "detail": str(exc)})
+                    await websocket.close()
+                    return
+
+                if not live_engine.supports_input:
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "detail": (
+                                f"Live engine '{engine_name}' does not support audio input / STT. "
+                                "Use POST /api/audio/upload for file-based transcription instead."
+                            ),
+                        }
+                    )
+                    await websocket.close()
+                    return
+
+                await live_engine.open_session(session_id, sample_rate=sample_rate)
+                await websocket.send_json({"type": "ready", "session_id": session_id})
+
+                log_info(
+                    f"{LOG_PREFIX} Live stream session started: {session_id}, "
+                    f"engine={engine_name}, sr={sample_rate}"
+                )
+
+                async def _receive_audio() -> None:
+                    while True:
+                        try:
+                            data = await asyncio.wait_for(
+                                websocket.receive_bytes(), timeout=30.0
+                            )
+                            await live_engine.send_audio(session_id, data, sample_rate)
+                        except asyncio.TimeoutError:
+                            break
+                        except WebSocketDisconnect:
+                            break
+                        except Exception:
+                            break
+
+                async def _forward_events() -> None:
+                    async for event in live_engine.receive_events(session_id):
+                        try:
+                            if event.type == LiveEventType.TRANSCRIPT:
+                                etype = "final" if event.is_final else "partial"
+                                await websocket.send_json(
+                                    {"type": etype, "text": event.text}
+                                )
+                            elif event.type == LiveEventType.VAD:
+                                await websocket.send_json(
+                                    {"type": "vad", "signal": event.vad_signal}
+                                )
+                            elif event.type == LiveEventType.AUDIO and event.audio:
+                                await websocket.send_bytes(event.audio)
+                            elif event.type == LiveEventType.ERROR:
+                                await websocket.send_json(
+                                    {"type": "error", "detail": event.detail}
+                                )
+                        except Exception:
+                            break
+
+                await _receive_audio()
+                await live_engine.close_session(session_id)
+                live_engine = None
+                await _forward_events()
+
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} audio_stream_ws_endpoint error: {exc}")
+            try:
+                await websocket.send_json({"type": "error", "detail": str(exc)})
+            except Exception:
+                pass
+        finally:
+            if live_engine is not None:
+                try:
+                    await live_engine.close_session(session_id)
+                except Exception:
+                    pass
+            try:
+                await websocket.close()
+            except Exception:
+                pass
 
     async def _broadcast_action_state(self, state: Optional[Dict[str, Any]]) -> None:
         """
@@ -2221,12 +2882,37 @@ class SynthWebUIInterface:
                 f"{LOG_PREFIX} Failed to persist chat message for {session_id}: {e}"
             )
 
+    def _multi_session_enabled(self) -> bool:
+        """Return True if the experimental multi-session flag is active.
+
+        This flag is exposed via a configurable variable; reading it is cheap
+        so we query the registry on each call to ensure runtime toggles take
+        effect (even though the feature is mostly intended to be set once)."""
+        try:
+            return bool(
+                config_registry.get_value(
+                    "MULTI_SESSION",
+                    False,
+                    value_type=bool,
+                    group="core",
+                    component="webui",
+                )
+            )
+        except Exception:
+            return False
+
     def _ensure_persistent_session_id(self, force_write: bool = False) -> None:
         """Ensure there's a persistent session id on disk for WebUI single-session deployments.
 
         If a session id file exists, read it; otherwise generate one and persist it.
         """
         try:
+            # if multi-session is enabled we do not persist or read any file
+            if self._multi_session_enabled():
+                log_debug(
+                    f"{LOG_PREFIX} MULTI_SESSION enabled; skipping persistent session file"
+                )
+                return
             if not self.session_id_file.parent.exists():
                 self.session_id_file.parent.mkdir(parents=True, exist_ok=True)
             if self.session_id_file.exists() and not force_write:
@@ -2318,14 +3004,17 @@ class SynthWebUIInterface:
         text: Optional[str] = None,
         **kwargs,
     ) -> None:
+        skip_history = kwargs.pop("skip_history", False)
         if isinstance(payload_or_chat_id, dict):
             payload = payload_or_chat_id
-            text = payload.get("text", text)
+            # Accept both "text" (standard) and "value" (legacy synthetic-action mapping)
+            text = payload.get("text") or payload.get("value") or text
             chat_id = (
                 payload.get("interface_path")
                 or payload.get("target")
                 or payload.get("chat_id")
             )
+            skip_history = payload.get("skip_history", skip_history)
         else:
             chat_id = payload_or_chat_id or kwargs.get("chat_id")
             if text is None:
@@ -2438,13 +3127,16 @@ class SynthWebUIInterface:
         await self._append_history(session_id, "synth", text)
 
         # Save SyntH's response via core chat_context_manager
-        try:
-            from core.chat_context_manager import save_response_message
+        if not skip_history:
+            try:
+                from core.chat_context_manager import save_response_message
 
-            msg_interface_path = f"{INTERFACE_NAME}/{chat_id}"
-            await save_response_message(msg_interface_path, text)
-        except Exception as e:
-            log_debug(f"{LOG_PREFIX} Failed to save response via context_manager: {e}")
+                msg_interface_path = f"{INTERFACE_NAME}/{chat_id}"
+                await save_response_message(msg_interface_path, text)
+            except Exception as e:
+                log_debug(
+                    f"{LOG_PREFIX} Failed to save response via context_manager: {e}"
+                )
 
         if websocket:
             log_info(
@@ -2502,6 +3194,72 @@ class SynthWebUIInterface:
             log_debug(
                 f"{LOG_PREFIX} Failed to clear session processing meta after send: {e}"
             )
+
+    async def send_tts_audio(
+        self,
+        session_id: str,
+        audio_path: str,
+        text: Optional[str] = None,
+        lipsync_data: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Push a TTS audio playback event to a WebUI session.
+
+        Called by :class:`~plugins.vox_plugin.VoxPlugin` immediately after the
+        audio file has been written to disk.  The client will auto-play the
+        audio and attach click-to-replay functionality to the last synth
+        message bubble.  The URL is derived from *audio_path* so it is
+        accessible via the ``/static`` mount.
+
+        Args:
+            session_id:   WebUI session identifier (plain or ``synth_webui/<id>`` form).
+            audio_path:   Absolute or relative filesystem path to the audio file.
+            text:         Optional caption / message text (for accessibility).
+            lipsync_data: Optional phoneme/timing dict forwarded to the animator.
+
+        Returns:
+            ``True`` if the message was delivered, ``False`` if no websocket was found.
+        """
+        # Normalise session_id – strip "synth_webui/" prefix if present
+        sid = str(session_id)
+        if "/" in sid:
+            parts = sid.split("/")
+            if len(parts) >= 2 and parts[0] == INTERFACE_NAME:
+                sid = parts[1]
+
+        websocket = self.connections.get(sid)
+        if not websocket:
+            log_warning(f"{LOG_PREFIX} send_tts_audio: no websocket for session {sid}")
+            return False
+
+        # Derive a client-accessible URL from the filesystem path.
+        # Audio is stored under the /static mount, e.g.
+        #   res/synth_webui/static/audio/tts/vox_123.wav → /static/audio/tts/vox_123.wav
+        try:
+            from pathlib import Path as _Path
+
+            p = _Path(audio_path)
+            parts_list = list(p.parts)
+            try:
+                idx = parts_list.index("static")
+                url = "/" + "/".join(parts_list[idx:])
+            except ValueError:
+                url = "/static/audio/tts/" + p.name
+        except Exception:
+            url = "/static/audio/tts/" + str(audio_path).rsplit("/", 1)[-1]
+
+        payload: Dict[str, Any] = {"type": "tts-play", "url": url}
+        if text is not None:
+            payload["text"] = text
+        if lipsync_data:
+            payload["lipsync"] = lipsync_data
+
+        try:
+            await websocket.send_json(payload)
+            log_info(f"{LOG_PREFIX} TTS audio dispatched to session {sid}: {url}")
+            return True
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} send_tts_audio failed for session {sid}: {exc}")
+            return False
 
     async def _webui_clear_pending_thinking(self, session_id: str) -> None:
         pending = self._pending_thinking_actions.get(session_id)
@@ -3163,10 +3921,11 @@ class SynthWebUIInterface:
             if entry.get("hidden"):
                 continue
 
-            # Hide Cortex-engine-specific variables unless their engine is loaded
+            # Hide Cortex-engine-specific variables unless their engine is registered
             if (
                 "cortex_engine" in entry.get("tags", [])
                 and entry.get("component") not in loaded_cortex_engines
+                and entry.get("component") not in available_cortex_engines
             ):
                 continue
             component_label = self._get_display_name(entry["component"], None)
@@ -3198,8 +3957,14 @@ class SynthWebUIInterface:
                 if entry.get("key") == "LIVE_CORTEX":
                     from core.cortex_registry import get_cortex_registry as _get_cr
 
+                    # include any engines registered in the Live registry as well
+                    from core.live_registry import LIVE_REGISTRY
+
                     live_engines = _get_cr().get_engines_by_cortex("live")
-                    options = ["Default"] + live_engines
+                    extra = LIVE_REGISTRY.get_available_engines()
+                    combined = sorted(set(live_engines + extra))
+                    # always allow explicit disable
+                    options = ["Default", "disabled"] + combined
                 elif entry.get("key") in ("GRILLO_CORTEX", "TRAINER_CORTEX"):
                     options = ["Default"] + available_cortex_engines
                 else:
@@ -4280,8 +5045,13 @@ class SynthWebUIInterface:
             log_error(f"{LOG_PREFIX} Failed to delete archived diary entries: {exc}")
             raise HTTPException(status_code=500, detail=str(exc))
 
-    async def history_diary(self, request: Request):
-        """Return diary entries for the History > Diary sub-tab - optimized for speed."""
+    async def history_interactions(self, request: Request):
+        """Return interaction-log data from ai_diary for the History > Interactions sub-tab.
+
+        Only the metadata fields (interaction_summary, personal_thought, emotions,
+        involved_users) are returned — NOT the diary prose (content), which belongs
+        exclusively to the Diary tab.
+        """
         params = request.query_params
 
         def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
@@ -4311,26 +5081,23 @@ class SynthWebUIInterface:
 
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
-                    # Build optimized query - load only essential fields
+                    # Interactions shows only metadata — NOT the diary prose (content).
+                    # Search searches only interaction_summary.
                     if search:
-                        # Search only in indexed/important fields
                         search_term = f"%{search}%"
-                        where_clause = (
-                            "WHERE (content LIKE %s OR interaction_summary LIKE %s)"
-                        )
-                        search_params = [search_term, search_term]
+                        where_clause = "WHERE interaction_summary LIKE %s"
+                        search_params = [search_term]
                     else:
                         where_clause = ""
                         search_params = []
 
                     # Simplified query without archived for speed (most common case)
                     if not include_archived:
-                        # Get approximate count using LIMIT + 1 trick (faster than COUNT)
                         query = f"""
-                            SELECT id, content as content, personal_thought as personal_thought, 
-                                   timestamp, interaction_summary, 
-                                   JSON_EXTRACT(emotions, '$[0].type') as primary_emotion,
-                                   JSON_LENGTH(involved_users) as user_count
+                            SELECT id, interaction_summary, personal_thought,
+                                   timestamp,
+                                   JSON_EXTRACT(emotions, '$[0].type') AS primary_emotion,
+                                   JSON_LENGTH(involved_users) AS user_count
                             FROM ai_diary
                             {where_clause}
                             ORDER BY timestamp {order}
@@ -4341,38 +5108,34 @@ class SynthWebUIInterface:
                         await cur.execute(query, params_list)
                         rows = await cur.fetchall()
 
-                        # Check if there are more results
                         has_more = len(rows) > per_page
                         if has_more:
                             rows = rows[:per_page]
 
-                        # Estimate total count based on current page
                         if page == 1 and not has_more:
                             total_count = len(rows)
                         else:
-                            # Approximate: if we have full page, estimate more pages exist
                             total_count = (
                                 offset + len(rows) + (per_page if has_more else 0)
                             )
                     else:
-                        # With archived: use simpler UNION but with LIMIT push-down
                         query = f"""
                             SELECT * FROM (
-                                (SELECT id, content as content, personal_thought as personal_thought, 
-                                       timestamp, interaction_summary,
-                                       JSON_EXTRACT(emotions, '$[0].type') as primary_emotion,
-                                       JSON_LENGTH(involved_users) as user_count,
-                                       0 as archived
+                                (SELECT id, interaction_summary, personal_thought,
+                                        timestamp,
+                                        JSON_EXTRACT(emotions, '$[0].type') AS primary_emotion,
+                                        JSON_LENGTH(involved_users) AS user_count,
+                                        0 AS archived
                                 FROM ai_diary
                                 {where_clause}
                                 ORDER BY timestamp {order}
                                 LIMIT {per_page * 2})
                                 UNION ALL
-                                (SELECT id, content as content, personal_thought as personal_thought, 
-                                       timestamp, interaction_summary,
-                                       JSON_EXTRACT(emotions, '$[0].type'),
-                                       JSON_LENGTH(involved_users),
-                                       1 as archived
+                                (SELECT id, interaction_summary, personal_thought,
+                                        timestamp,
+                                        JSON_EXTRACT(emotions, '$[0].type'),
+                                        JSON_LENGTH(involved_users),
+                                        1 AS archived
                                 FROM ai_diary_archive
                                 {where_clause}
                                 ORDER BY timestamp {order}
@@ -4395,24 +5158,20 @@ class SynthWebUIInterface:
                             rows = rows[:per_page]
                         total_count = offset + len(rows) + (per_page if has_more else 0)
 
-                    # Build minimal response objects with timezone conversion
+                    # Build response — row indices: 0=id,1=interaction_summary,2=personal_thought,
+                    # 3=timestamp,4=primary_emotion,5=user_count,[6=archived]
                     for row in rows:
-                        # Emit explicit UTC timestamps; naive datetimes are assumed local TZ.
                         timestamp_str = self._dt_to_utc_iso(row[3])
 
                         entries.append(
                             {
                                 "id": row[0],
-                                "content": row[1],
+                                "interaction_summary": row[1],
                                 "personal_thought": row[2],
                                 "timestamp": timestamp_str,
-                                "interaction_summary": row[4],
-                                "primary_emotion": row[
-                                    5
-                                ],  # Single emotion instead of array
-                                "user_count": row[6]
-                                or 0,  # Count instead of full array
-                                "archived": bool(row[7]) if len(row) > 7 else False,
+                                "primary_emotion": row[4],
+                                "user_count": row[5] or 0,
+                                "archived": bool(row[6]) if len(row) > 6 else False,
                             }
                         )
 
@@ -4433,7 +5192,107 @@ class SynthWebUIInterface:
             )
 
         except Exception as exc:
-            log_error(f"{LOG_PREFIX} Failed to fetch diary history: {exc}")
+            log_error(f"{LOG_PREFIX} Failed to fetch interactions history: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def history_diary(self, request: Request):
+        """Return one entry per day for the History > Diary sub-tab (daily consolidated view)."""
+        params = request.query_params
+
+        def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return default
+            return max(minimum, min(maximum, parsed))
+
+        page = _bounded_int(params.get("page"), default=1, minimum=1, maximum=1000)
+        per_page = _bounded_int(
+            params.get("per_page"), default=30, minimum=1, maximum=60
+        )
+        search = params.get("search", "").strip()
+        sort = params.get("sort", "desc")
+
+        try:
+            from core.db import get_conn_ctx
+
+            offset = (page - 1) * per_page
+            order = "DESC" if sort == "desc" else "ASC"
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    # Increase limit so long diary days aren't truncated
+                    await cur.execute("SET SESSION group_concat_max_len = 1048576")
+
+                    if search:
+                        search_term = f"%{search}%"
+                        where_clause = (
+                            "WHERE (content LIKE %s OR interaction_summary LIKE %s)"
+                        )
+                        search_params: list = [search_term, search_term]
+                    else:
+                        where_clause = ""
+                        search_params = []
+
+                    # Count distinct days that match the filter
+                    count_query = f"""
+                        SELECT COUNT(DISTINCT DATE(timestamp))
+                        FROM ai_diary
+                        {where_clause}
+                    """
+                    await cur.execute(count_query, search_params)
+                    count_row = await cur.fetchone()
+                    total_count = count_row[0] if count_row else 0
+
+                    # Aggregate ALL rows for each day — GROUP_CONCAT handles both
+                    # old multi-row days and new single-row upserted days correctly.
+                    # The '---' separator matches what _upsert_diary_impl uses, so
+                    # the frontend can split on it to render fragments.
+                    query = f"""
+                        SELECT
+                            MAX(id)                                                           AS id,
+                            GROUP_CONCAT(content ORDER BY id ASC SEPARATOR '\n\n---\n\n')    AS content,
+                            MAX(personal_thought)                                             AS personal_thought,
+                            MAX(timestamp)                                                    AS timestamp,
+                            JSON_EXTRACT(MAX(emotions), '$[0].type')                          AS primary_emotion
+                        FROM ai_diary
+                        {where_clause}
+                        GROUP BY DATE(timestamp)
+                        ORDER BY MAX(timestamp) {order}
+                        LIMIT %s OFFSET %s
+                    """
+                    await cur.execute(query, search_params + [per_page, offset])
+                    rows = await cur.fetchall()
+
+            entries = []
+            for row in rows:
+                entries.append(
+                    {
+                        "id": row[0],
+                        "content": row[1],
+                        "personal_thought": row[2],
+                        "timestamp": self._dt_to_utc_iso(row[3]),
+                        "primary_emotion": row[4],
+                    }
+                )
+
+            total_pages = (
+                (total_count + per_page - 1) // per_page if total_count > 0 else 1
+            )
+
+            return JSONResponse(
+                {
+                    "success": True,
+                    "entries": entries,
+                    "page": page,
+                    "per_page": per_page,
+                    "total_count": total_count,
+                    "total_pages": total_pages,
+                }
+            )
+
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to fetch daily diary: {exc}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
 
     async def history_grillo(self, request: Request):
@@ -6025,6 +6884,39 @@ class SynthWebUIInterface:
                 # If SeleniumLLMBase is not importable, just skip enrichment
                 pass
 
+            # Gather model information from engines that expose it
+            supported_models: list[str] = []
+            current_model: str | None = None
+            if instance is not None:
+                try:
+                    if hasattr(instance, "get_supported_models"):
+                        supported_models = instance.get_supported_models() or []
+                except Exception:
+                    pass
+                try:
+                    if hasattr(instance, "get_current_model"):
+                        current_model = instance.get_current_model()
+                except Exception:
+                    pass
+
+            # Re-evaluate health dynamically for loaded engines (init-time status
+            # may be stale, e.g. API key set after engine was first loaded)
+            engine_status = meta["status"]
+            engine_details = meta["details"]
+            engine_error = meta["error"]
+            if instance is not None and hasattr(instance, "get_health_status"):
+                try:
+                    ok, err_msg = core_initializer._evaluate_cortex_health(instance)
+                    if ok:
+                        engine_status = "success"
+                        engine_details = f"Cortex engine: {instance.__class__.__name__}"
+                        engine_error = ""
+                    else:
+                        engine_status = "failed"
+                        engine_error = err_msg or "Engine not ready"
+                except Exception:
+                    pass
+
             cortex_engines.append(
                 {
                     "name": engine_name,
@@ -6035,9 +6927,9 @@ class SynthWebUIInterface:
                     "label": cortex_reg._engine_meta.get(engine_name, {}).get(
                         "label", ""
                     ),
-                    "status": meta["status"],
-                    "details": meta["details"],
-                    "error": meta["error"],
+                    "status": engine_status,
+                    "details": engine_details,
+                    "error": engine_error,
                     "login_state": login_state,
                     "logged_in": logged_in,
                     "login_url": login_url,
@@ -6045,6 +6937,8 @@ class SynthWebUIInterface:
                     "cortex": cortex_reg._engine_meta.get(engine_name, {}).get(
                         "cortex", "llm_provider"
                     ),
+                    "supported_models": supported_models,
+                    "current_model": current_model,
                 }
             )
         interfaces_data: List[dict] = []
@@ -6211,7 +7105,7 @@ class SynthWebUIInterface:
         except Exception as exc:
             log_warning(f"{LOG_PREFIX} unable to check dev components status: {exc}")
 
-        # Build a cortex -> engines mapping for the UI
+        # Build a cortex -> engines mapping for the UI (exclude 'live' — shown in its own section)
         by_cortex: dict[str, list[dict]] = {}
         try:
             for e in cortex_engines:
@@ -6219,6 +7113,148 @@ class SynthWebUIInterface:
                 by_cortex.setdefault(k, []).append(e)
         except Exception:
             by_cortex = {}
+
+        # Remove 'live' from cortex kinds — it gets its own top-level section
+        available_cortexs = [k for k in available_cortexs if k != "live"]
+
+        # Build Vox / Auris / Live engine lists for the dedicated UI sections
+        def _caps_desc(caps: dict) -> str:
+            active = [k for k, v in (caps or {}).items() if v]
+            return ", ".join(active) if active else "none"
+
+        vox_data: list[dict] = []
+        try:
+            from core.vox_registry import VOX_REGISTRY
+
+            active_vox: str | None = None
+            try:
+                active_vox = config_registry.get_value("ACTIVE_VOX_ENGINE", None)
+            except Exception:
+                pass
+            # disabled option always available
+            vox_data.append(
+                {
+                    "name": "disabled",
+                    "display_name": "Disabled",
+                    "label": "No TTS engine (disabled)",
+                    "capabilities": {},
+                    "description": "TTS disabled",
+                    "status": "success",
+                    "details": "Active" if active_vox == "disabled" else "",
+                    "error": None,
+                    "active": active_vox == "disabled",
+                }
+            )
+            for _name in VOX_REGISTRY.get_available_engines():
+                _meta = VOX_REGISTRY.get_engine_meta(_name)
+                _caps = _meta.get("capabilities") or {}
+                vox_data.append(
+                    {
+                        "name": _name,
+                        "display_name": _name.replace("_", " ").title(),
+                        "label": _meta.get("label", ""),
+                        "capabilities": _caps,
+                        "description": f"TTS engine — capabilities: {_caps_desc(_caps)}",
+                        "status": "success",
+                        "details": "Active" if _name == active_vox else "",
+                        "error": None,
+                        "active": _name == active_vox,
+                    }
+                )
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} unable to build Vox engine list: {exc}")
+
+        auris_data: list[dict] = []
+        try:
+            from core.auris_registry import AURIS_REGISTRY
+
+            active_auris: str | None = None
+            try:
+                active_auris = config_registry.get_value("ACTIVE_AURIS_ENGINE", None)
+            except Exception:
+                pass
+            # add disabled option first
+            auris_data.append(
+                {
+                    "name": "disabled",
+                    "display_name": "Disabled",
+                    "label": "No STT engine (disabled)",
+                    "capabilities": {},
+                    "description": "STT disabled",
+                    "status": "success",
+                    "details": "Active" if active_auris == "disabled" else "",
+                    "error": None,
+                    "active": active_auris == "disabled",
+                }
+            )
+            for _name in AURIS_REGISTRY.get_available_engines():
+                _meta = AURIS_REGISTRY.get_engine_meta(_name)
+                _caps = _meta.get("capabilities") or {}
+                auris_data.append(
+                    {
+                        "name": _name,
+                        "display_name": _name.replace("_", " ").title(),
+                        "label": _meta.get("label", ""),
+                        "capabilities": _caps,
+                        "description": f"STT engine — capabilities: {_caps_desc(_caps)}",
+                        "status": "success",
+                        "details": "Active" if _name == active_auris else "",
+                        "error": None,
+                        "active": _name == active_auris,
+                    }
+                )
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} unable to build Auris engine list: {exc}")
+
+        # Live section: cortex engines with kind='live' + LIVE_REGISTRY engines
+        # determine which live engine (if any) is currently marked active
+        active_live: str | None = None
+        try:
+            # we persist the selected live engine using the LIVE_CORTEX key
+            active_live = config_registry.get_value("LIVE_CORTEX", None)
+        except Exception:  # pragma: no cover - defensive
+            active_live = None
+
+        live_data: list[dict] = list(by_cortex.get("live", []))
+        # always offer disabled choice; mark it active if the config says so
+        live_data.insert(
+            0,
+            {
+                "name": "disabled",
+                "display_name": "Disabled",
+                "label": "No live engine (disabled)",
+                "capabilities": {},
+                "description": "Live subsystem turned off",
+                "status": "success",
+                "details": "Active" if active_live == "disabled" else "",
+                "error": None,
+                "active": active_live == "disabled",
+            },
+        )
+        try:
+            from core.live_registry import LIVE_REGISTRY
+
+            existing_names = {e["name"] for e in live_data}
+            for _name in LIVE_REGISTRY.get_available_engines():
+                if _name in existing_names:
+                    continue
+                _meta = LIVE_REGISTRY.get_engine_meta(_name)
+                _caps = _meta.get("capabilities") or {}
+                live_data.append(
+                    {
+                        "name": _name,
+                        "display_name": _name.replace("_", " ").title(),
+                        "label": _meta.get("label", ""),
+                        "capabilities": _caps,
+                        "description": f"Live streaming engine — capabilities: {_caps_desc(_caps)}",
+                        "status": "success",
+                        "details": "Active" if _name == active_live else "",
+                        "error": None,
+                        "active": _name == active_live,
+                    }
+                )
+        except Exception as exc:
+            log_warning(f"{LOG_PREFIX} unable to build Live engine list: {exc}")
 
         # Build scope overrides for the UI (Grillo, Trainer, Live cortex selectors)
         cortex_scopes: list[dict] = []
@@ -6261,6 +7297,9 @@ class SynthWebUIInterface:
                 "by_cortex": by_cortex,
                 "scopes": cortex_scopes,
             },
+            "vox": vox_data,
+            "auris": auris_data,
+            "live": live_data,
             "interfaces": interfaces_data,
             "plugins": plugins_data,
             "summary": component_summary,
@@ -6302,6 +7341,89 @@ class SynthWebUIInterface:
             ) from exc
 
         return JSONResponse({"status": "ok", "active": name})
+
+    async def set_cortex_model(self, request: Request) -> JSONResponse:
+        """Set the active model for the currently loaded cortex engine.
+
+        Expects JSON: ``{"engine": "openrouter", "model": "anthropic/claude-sonnet-4"}``
+        """
+        try:
+            data = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+
+        engine_name = str(data.get("engine") or "").strip()
+        model_name = str(data.get("model") or "").strip()
+        if not engine_name or not model_name:
+            raise HTTPException(status_code=400, detail="Missing 'engine' or 'model'")
+
+        try:
+            from core.cortex_registry import get_cortex_registry
+
+            registry = get_cortex_registry()
+            instance = registry.get_engine(engine_name)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} unable to access Cortex registry: {exc}")
+            raise HTTPException(
+                status_code=500, detail="Unable to access Cortex registry"
+            ) from exc
+
+        if instance is None:
+            # if the requested name corresponds to a live engine, we treat it as a
+            # no-op; live engines manage their own models separately and are not
+            # part of the Cortex registry.  Returning success avoids a confusing
+            # 404 and keeps the dropdown from resetting to "disabled".
+            from core.live_registry import LIVE_REGISTRY
+
+            if engine_name in LIVE_REGISTRY.get_available_engines():
+                log_info(
+                    f"{LOG_PREFIX} ignoring model set for live engine '{engine_name}'"
+                )
+                return JSONResponse(
+                    {"status": "ok", "engine": engine_name, "model": model_name}
+                )
+
+            raise HTTPException(
+                status_code=404, detail=f"Engine '{engine_name}' not loaded"
+            )
+
+        if not hasattr(instance, "set_current_model"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Engine '{engine_name}' does not support model selection",
+            )
+
+        try:
+            instance.set_current_model(model_name)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            log_error(
+                f"{LOG_PREFIX} failed to set model '{model_name}' on {engine_name}: {exc}"
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to set model: {exc}",
+            ) from exc
+
+        # Also persist to the relevant config key if available
+        try:
+            model_config_keys = {
+                "openrouter": "OPENROUTER_DEFAULT_MODEL",
+                "gemini_api": "GEMINI_MODEL",
+            }
+            config_key = model_config_keys.get(engine_name)
+            if config_key:
+                config_registry.set_value(config_key, model_name)
+        except Exception as exc:
+            log_warning(
+                f"{LOG_PREFIX} model set on engine but config persist failed: {exc}"
+            )
+
+        log_info(f"{LOG_PREFIX} Model for '{engine_name}' set to '{model_name}'")
+        return JSONResponse(
+            {"status": "ok", "engine": engine_name, "model": model_name}
+        )
 
     async def cortex_login(self, request: Request):
         """Start the login flow for a Selenium-based Cortex engine (non-blocking).
@@ -7495,6 +8617,285 @@ class SynthWebUIInterface:
             raise HTTPException(status_code=500, detail="Failed to activate skin")
 
         return JSONResponse({"status": "ok", "name": target.name}, status_code=201)
+
+    # ------------------------------------------------------------------
+    # Skin editor endpoints
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _sanitize_skin_folder_name(name: str) -> str:
+        """Sanitize a skin name into a safe folder name."""
+        safe = "".join(
+            ch for ch in name if ch.isalnum() or ch in ("-", "_", " ")
+        ).strip()
+        # Replace spaces with underscores
+        safe = safe.replace(" ", "_")
+        if not safe:
+            safe = f"skin_{uuid.uuid4().hex[:8]}"
+        return safe
+
+    async def create_skin(self, request: Request) -> JSONResponse:
+        """Create a new skin folder with a persona.json.
+
+        Expects JSON body: {name, author?, version?, appearance?}
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+        name = (body.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Skin name is required")
+
+        author = (body.get("author") or "").strip()
+        version = (body.get("version") or "1.0").strip()
+        appearance = (body.get("appearance") or "").strip()
+
+        folder_name = self._sanitize_skin_folder_name(name)
+        skins_dir = Path(__file__).resolve().parent.parent / "skins"
+        skin_path = skins_dir / folder_name
+
+        if skin_path.exists():
+            raise HTTPException(
+                status_code=409,
+                detail=f"A skin folder '{folder_name}' already exists",
+            )
+
+        try:
+            skin_path.mkdir(parents=True, exist_ok=False)
+            persona = {
+                "name": name,
+                "description": f"Custom skin: {name}",
+                "version": version,
+                "author": author,
+                "attributes": {"appearance": appearance} if appearance else {},
+            }
+            persona_path = skin_path / "persona.json"
+            persona_path.write_text(json.dumps(persona, indent=4), encoding="utf-8")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to create skin '{name}': {exc}")
+            raise HTTPException(status_code=500, detail="Failed to create skin")
+
+        log_info(f"{LOG_PREFIX} Created new skin '{name}' at {skin_path}")
+        return JSONResponse(
+            {"status": "ok", "folder": folder_name, "name": name}, status_code=201
+        )
+
+    async def upload_skin_vrm(
+        self, skin_name: str, file: UploadFile = File(...)
+    ) -> JSONResponse:
+        """Upload a VRM file into an existing skin folder."""
+        if not file.filename or not file.filename.lower().endswith(".vrm"):
+            raise HTTPException(status_code=400, detail="Only .vrm files are accepted")
+
+        skins_dir = Path(__file__).resolve().parent.parent / "skins"
+        skin_path = skins_dir / Path(skin_name).name
+        if not skin_path.exists() or not skin_path.is_dir():
+            raise HTTPException(status_code=404, detail="Skin not found")
+
+        # Remove any existing VRM files in the skin folder
+        for existing_vrm in skin_path.glob("*.vrm"):
+            try:
+                existing_vrm.unlink()
+            except Exception:
+                pass
+
+        target = skin_path / "model.vrm"
+        try:
+            with target.open("wb") as f:
+                while True:
+                    chunk = await file.read(1 << 20)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+        finally:
+            await file.close()
+
+        log_info(f"{LOG_PREFIX} Uploaded VRM to skin '{skin_name}'")
+        return JSONResponse({"status": "ok", "skin": skin_name}, status_code=201)
+
+    async def upload_skin_preview(
+        self, skin_name: str, file: UploadFile = File(...)
+    ) -> JSONResponse:
+        """Upload a preview image into an existing skin folder."""
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="No file provided")
+
+        lower = file.filename.lower()
+        if not any(lower.endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".webp")):
+            raise HTTPException(
+                status_code=400,
+                detail="Only image files (.png, .jpg, .jpeg, .webp) are accepted",
+            )
+
+        skins_dir = Path(__file__).resolve().parent.parent / "skins"
+        skin_path = skins_dir / Path(skin_name).name
+        if not skin_path.exists() or not skin_path.is_dir():
+            raise HTTPException(status_code=404, detail="Skin not found")
+
+        target = skin_path / "preview.png"
+        try:
+            with target.open("wb") as f:
+                while True:
+                    chunk = await file.read(1 << 20)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+        finally:
+            await file.close()
+
+        log_info(f"{LOG_PREFIX} Uploaded preview to skin '{skin_name}'")
+        return JSONResponse({"status": "ok", "skin": skin_name}, status_code=201)
+
+    async def download_skin(self, skin_name: str) -> FileResponse:
+        """Download a skin folder as a .zip archive."""
+        import shutil
+        import tempfile
+
+        skins_dir = Path(__file__).resolve().parent.parent / "skins"
+        skin_path = skins_dir / Path(skin_name).name
+        if not skin_path.exists() or not skin_path.is_dir():
+            raise HTTPException(status_code=404, detail="Skin not found")
+
+        try:
+            tmp_dir = tempfile.mkdtemp()
+            archive_base = Path(tmp_dir) / skin_path.name
+            archive_path = shutil.make_archive(
+                str(archive_base),
+                "zip",
+                root_dir=str(skins_dir),
+                base_dir=skin_path.name,
+            )
+            return FileResponse(
+                path=archive_path,
+                filename=f"{skin_path.name}.zip",
+                media_type="application/zip",
+            )
+        except Exception as exc:
+            log_error(
+                f"{LOG_PREFIX} Failed to create skin archive for '{skin_name}': {exc}"
+            )
+            raise HTTPException(status_code=500, detail="Failed to create skin archive")
+
+    async def upload_skin_zip(self, file: UploadFile = File(...)) -> JSONResponse:
+        """Upload a .zip skin pack and extract it into skins/."""
+        import shutil
+        import tempfile
+        import zipfile
+
+        if not file.filename or not file.filename.lower().endswith(".zip"):
+            raise HTTPException(status_code=400, detail="Only .zip files are accepted")
+
+        skins_dir = Path(__file__).resolve().parent.parent / "skins"
+        skins_dir.mkdir(parents=True, exist_ok=True)
+
+        # Save to temp file
+        tmp_dir = tempfile.mkdtemp()
+        temp_path = Path(tmp_dir) / "upload.zip"
+        try:
+            with temp_path.open("wb") as f:
+                while True:
+                    chunk = await file.read(1 << 20)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+        finally:
+            await file.close()
+
+        try:
+            with zipfile.ZipFile(temp_path, "r") as zf:
+                # Determine root folder from archive
+                names = zf.namelist()
+                if not names:
+                    raise HTTPException(status_code=400, detail="Empty zip file")
+
+                # Find root folder(s)
+                root_candidates = {n.split("/")[0] for n in names if "/" in n}
+                if len(root_candidates) == 1:
+                    root = root_candidates.pop()
+                else:
+                    root = Path(file.filename).stem
+
+                dest = skins_dir / root
+                if dest.exists():
+                    # Overwrite existing skin (except Rei)
+                    if root == "Rei":
+                        raise HTTPException(
+                            status_code=403,
+                            detail="Cannot overwrite the default Rei skin",
+                        )
+                    shutil.rmtree(dest)
+
+                zf.extractall(skins_dir)
+
+                # Validate: must have at least a persona.json or .vrm
+                has_persona = (dest / "persona.json").exists()
+                has_vrm = any(dest.glob("*.vrm"))
+                if not has_persona and not has_vrm:
+                    # Check one level deeper (zip might have nested structure)
+                    nested = list(dest.iterdir())
+                    if len(nested) == 1 and nested[0].is_dir():
+                        inner = nested[0]
+                        has_persona = (inner / "persona.json").exists()
+                        has_vrm = any(inner.glob("*.vrm"))
+                        if has_persona or has_vrm:
+                            # Move inner contents up
+                            for item in inner.iterdir():
+                                shutil.move(str(item), str(dest / item.name))
+                            inner.rmdir()
+
+                if not (dest / "persona.json").exists() and not any(dest.glob("*.vrm")):
+                    shutil.rmtree(dest, ignore_errors=True)
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Invalid skin pack: must contain persona.json or a .vrm file",
+                    )
+
+        except zipfile.BadZipFile:
+            raise HTTPException(status_code=400, detail="Invalid zip file")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to extract skin zip: {exc}")
+            raise HTTPException(status_code=500, detail="Failed to extract skin pack")
+        finally:
+            # Clean up temp file
+            try:
+                temp_path.unlink(missing_ok=True)
+                Path(tmp_dir).rmdir()
+            except Exception:
+                pass
+
+        log_info(f"{LOG_PREFIX} Uploaded skin pack '{root}'")
+        return JSONResponse({"status": "ok", "folder": root}, status_code=201)
+
+    async def delete_skin(self, skin_name: str) -> JSONResponse:
+        """Delete a skin folder. Rei is protected and cannot be deleted."""
+        import shutil
+
+        safe_name = Path(skin_name).name
+        if safe_name == "Rei":
+            raise HTTPException(
+                status_code=403,
+                detail="The default skin 'Rei' cannot be deleted",
+            )
+
+        skins_dir = Path(__file__).resolve().parent.parent / "skins"
+        skin_path = skins_dir / safe_name
+        if not skin_path.exists() or not skin_path.is_dir():
+            raise HTTPException(status_code=404, detail="Skin not found")
+
+        try:
+            shutil.rmtree(skin_path)
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to delete skin '{safe_name}': {exc}")
+            raise HTTPException(status_code=500, detail="Failed to delete skin")
+
+        log_info(f"{LOG_PREFIX} Deleted skin '{safe_name}'")
+        return JSONResponse({"status": "ok", "deleted": safe_name})
 
     # ------------------------------------------------------------------
     # WebSocket logic

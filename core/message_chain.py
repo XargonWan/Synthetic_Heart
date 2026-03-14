@@ -18,7 +18,10 @@ parser will only operate on model outputs.
 Return codes:
 - ACTIONS_EXECUTED -> actions parsed and executed
 - BLOCKED -> message blocked (exhausted retries or explicit ignore)
-- FORWARD_AS_TEXT -> not JSON-like; caller may forward plain text to interface
+- LLM_FAILED -> LLM produced invalid output and all corrector attempts were exhausted
+
+Note: the LLM must always reply with valid JSON actions. Plain text from the LLM
+is treated as a correctable error; the corrector will request valid JSON format.
 """
 
 import asyncio
@@ -30,7 +33,6 @@ from core.config_manager import config_registry
 
 # Result constants
 ACTIONS_EXECUTED = "ACTIONS_EXECUTED"
-FORWARD_AS_TEXT = "FORWARD_AS_TEXT"
 BLOCKED = "BLOCKED"
 LLM_FAILED = "LLM_FAILED"
 
@@ -240,6 +242,8 @@ async def send_llm_fallback_message(
         if bot and hasattr(bot, "send_message"):
             try:
                 # First attempt: prefer interface-friendly args (message_thread_id is commonly used)
+                # skip_history=True: fallback messages must NOT be stored in chat history — they
+                # would pollute the LLM context and make future responses progressively slower.
                 await universal_send(
                     bot.send_message,
                     chat_id,
@@ -247,6 +251,7 @@ async def send_llm_fallback_message(
                     interface_path=interface_path,
                     thread_id=thread_id,
                     is_llm_response=True,  # Mark as LLM response so interface handles normally
+                    skip_history=True,  # Do NOT store fallback in chat history
                 )
             except TypeError as te:
                 # Some bots (or test fakes) don't accept 'message_thread_id'.
@@ -261,6 +266,7 @@ async def send_llm_fallback_message(
                         text=fallback_text,
                         interface_path=interface_path,
                         is_llm_response=True,
+                        skip_history=True,  # Do NOT store fallback in chat history
                     )
                 except Exception as e:
                     # If retry fails, surface the error but continue gracefully
@@ -644,13 +650,68 @@ async def handle_incoming_message(
                             synthetic_actions = []
                             for key in extra_keys:
                                 value = parsed.get(key)
-                                payload = (
-                                    value
-                                    if isinstance(value, dict)
-                                    else {"value": value}
-                                )
+                                # When a string value is stored under a message-like
+                                # root key (e.g. {"message": "hello"}) the LLM
+                                # probably intended a text reply.  Map it to
+                                # {"text": ...} so that message_synth_webui and
+                                # other send_message implementations can find it.
+                                if isinstance(value, dict):
+                                    payload = value
+                                elif key in (
+                                    "message",
+                                    "text",
+                                    "reply",
+                                    "response",
+                                ) and isinstance(value, str):
+                                    payload = {"text": value}
+                                else:
+                                    payload = {"value": value}
+                                # Skip synthetic message actions when the same text is
+                                # already present in an explicit message action — the LLM
+                                # commonly echoes the reply in a top-level "message" key in
+                                # addition to the proper actions list, which creates a
+                                # duplicate that fails validation (no interface_path) and
+                                # triggers an unnecessary correction loop.
+                                if key in (
+                                    "message",
+                                    "text",
+                                    "reply",
+                                    "response",
+                                ) and isinstance(value, str):
+                                    already_present = any(
+                                        isinstance(a, dict)
+                                        and (a.get("type") or "").startswith("message_")
+                                        and isinstance(a.get("payload"), dict)
+                                        and a["payload"].get("text") == value
+                                        for a in actions
+                                    )
+                                    if already_present:
+                                        log_debug(
+                                            f"[message_chain] Skipping synthetic '{key}' action — text already present in explicit message action"
+                                        )
+                                        continue
+                                # Resolve the correct action type and inject
+                                # interface_path for message-like synthetic actions
+                                # so they pass validation without a correction loop.
+                                synthetic_type = key
+                                ctx_ipath = ctx.get("interface_path") if ctx else None
+                                if key in (
+                                    "message",
+                                    "text",
+                                    "reply",
+                                    "response",
+                                ) and isinstance(value, str):
+                                    if ctx_ipath:
+                                        iface_prefix = str(ctx_ipath).split("/")[0]
+                                        resolved = _INTERFACE_TO_MESSAGE_ACTION.get(
+                                            iface_prefix
+                                        )
+                                        if resolved:
+                                            synthetic_type = resolved
+                                        if "interface_path" not in payload:
+                                            payload["interface_path"] = str(ctx_ipath)
                                 synthetic_actions.append(
-                                    {"type": key, "payload": payload}
+                                    {"type": synthetic_type, "payload": payload}
                                 )
 
                             actions.extend(synthetic_actions)
@@ -922,6 +983,13 @@ async def handle_incoming_message(
                             or payload.get("message")
                             or ""
                         )
+                        # If the LLM returned plain text rather than structured JSON,
+                        # there will be no user_message_action and text_to_speak will
+                        # be empty.  In cases where the interface explicitly asked for
+                        # speech (e.g. voice note, request_tts flag) we fall back to
+                        # speaking the raw text output so the user still hears audio.
+                        if not text_to_speak and ctx.get("request_tts") and text:
+                            text_to_speak = text
                         # Patterns that indicate internal/system messages that shouldn't get TTS
                         internal_message_patterns = [
                             "Synthetic Heart AI online",
@@ -968,7 +1036,8 @@ async def handle_incoming_message(
                                 tts_already_executed = True
 
                         # Determine if we should skip TTS
-                        # Skip for: internal grillo beats, internal chats, system messages, autonomous messages, AND already-executed TTS
+                        # Skip for: internal grillo beats, internal chats, system messages, autonomous messages, already-executed TTS,
+                        # or if the request_tts flag/feature is off
                         should_skip_tts = (
                             is_grillo_internal
                             or is_internal_chat
@@ -976,40 +1045,85 @@ async def handle_incoming_message(
                             or is_autonomous
                             or tts_already_executed
                         )
+                        # honor explicit request flag passed via context or wrapped message
+                        _explicit_tts_request = bool(
+                            context
+                            and isinstance(context, dict)
+                            and context.get("request_tts")
+                        )
+                        if context and isinstance(context, dict):
+                            if context.get("request_tts") is False:
+                                should_skip_tts = True
 
-                        # Additional check: if TTS endpoints are not configured, skip auto-inject
+                        # Determine whether Vox/TTS is effectively enabled.  The new
+                        # canonical switch is the active engine name: if the selected
+                        # engine is non-empty and not "disabled", we consider TTS on.
+                        # For backwards compatibility we also honour the old boolean
+                        # flags/endpoints, but they no longer drive the feature state.
+                        tts_raw = ""
                         try:
                             from core.config_manager import config_registry
 
-                            tts_raw = config_registry.get_value(
-                                "TTS_ENDPOINTS",
-                                "",
-                                value_type=str,
-                                group="plugins",
-                                component="tts_lipsync",
+                            active = str(
+                                config_registry.get_value(
+                                    "ACTIVE_VOX_ENGINE",
+                                    "",
+                                    value_type=str,
+                                    group="plugins",
+                                    component="vox_plugin",
+                                )
                             )
-                            tts_enabled = config_registry.get_value(
-                                "TTS_ENABLED",
-                                False,
-                                value_type=bool,
-                                group="plugins",
-                                component="tts_lipsync",
-                            )
+                            vox_enabled = bool(active and active != "disabled")
 
-                            if not tts_raw:
-                                should_skip_tts = True
-                                log_debug(
-                                    "[message_chain] Skipping TTS auto-inject because TTS_ENDPOINTS is not configured"
+                            # legacy fallback
+                            if not vox_enabled:
+                                tts_raw = str(
+                                    config_registry.get_value(
+                                        "TTS_ENDPOINTS",
+                                        "",
+                                        value_type=str,
+                                        group="plugins",
+                                        component="tts_lipsync",
+                                    )
+                                    or ""
+                                )
+                                vox_enabled = bool(
+                                    config_registry.get_value(
+                                        "TTS_ENABLED",
+                                        False,
+                                        value_type=bool,
+                                        group="plugins",
+                                        component="tts_lipsync",
+                                    )
+                                    or tts_raw
                                 )
 
-                            # If TTS is explicitly disabled via WebUI, skip injection
-                            if not bool(tts_enabled):
+                            if not vox_enabled and not _explicit_tts_request:
                                 should_skip_tts = True
                                 log_debug(
-                                    "[message_chain] Skipping TTS auto-inject because TTS_ENABLED is False"
+                                    "[message_chain] Skipping TTS auto-inject because Vox engine is disabled"
                                 )
+                            elif not vox_enabled and _explicit_tts_request:
+                                log_debug(
+                                    "[message_chain] Vox engine disabled but request_tts=True — "
+                                    "allowing TTS attempt (VoxPlugin will fall back to text if needed)"
+                                )
+
                         except Exception as e:
-                            log_debug(f"[message_chain] Error checking TTS config: {e}")
+                            log_debug(
+                                f"[message_chain] Error checking Vox/TTS config: {e}"
+                            )
+
+                        # For Telegram/Discord, only auto-inject TTS for voice-originated
+                        # messages. WebUI, Matrix and Ollama always get TTS when VOX is active.
+                        _is_voice_input = bool(ctx.get("is_voice_input", False))
+                        _iface_tts_prefix = (ctx.get("interface_path") or "").split(
+                            "/"
+                        )[0]
+                        _voice_only_tts_ifaces = {"telegram_bot", "discord_bot"}
+                        tts_allowed = (
+                            _iface_tts_prefix not in _voice_only_tts_ifaces
+                        ) or _is_voice_input
 
                         if should_skip_tts:
                             skip_reason = []
@@ -1030,27 +1144,89 @@ async def handle_incoming_message(
                             log_debug(
                                 f"[message_chain] Skipping TTS auto-inject: {', '.join(skip_reason)}"
                             )
-                        elif is_user_facing:
+                        # auto-inject only for voice-originated messages or when
+                        # the LLM explicitly asked for TTS.  previously the
+                        # ``tts_allowed`` flag would permit any text response from
+                        # WebUI/Matrix/other non-voice interfaces which caused the
+                        # synth to speak even though the incoming message was not
+                        # audio.  the requirement is that non-audio inputs should not
+                        # trigger spoken replies.
+                        elif (is_user_facing and tts_allowed and _is_voice_input) or (
+                            context and context.get("request_tts")
+                        ):
+                            # With the new strategy we honor explicit TTS requests even when
+                            # they come from non-WebUI interfaces (voice note, etc.).
                             if (
                                 text_to_speak
                                 and isinstance(text_to_speak, str)
                                 and len(text_to_speak.strip()) > 0
                             ):
-                                log_info(
-                                    f"[message_chain] 🗣️ Auto-injecting 'tts_speak' action for message: {text_to_speak[:30]}..."
+                                # Determine whether this is a voice-originated request.
+                                # For voice inputs we want to send a SINGLE audio+caption
+                                # message instead of separate text then audio.
+                                is_voice_response = _is_voice_input or bool(
+                                    context and context.get("request_tts")
                                 )
-                                tts_action = {
-                                    "type": "tts_speak",
-                                    "payload": {
-                                        "text": text_to_speak,
-                                        "emotion": payload.get("emotion")
-                                        if isinstance(payload, dict)
-                                        else None,
-                                    },
-                                }
+
+                                if is_voice_response:
+                                    # Voice response strategy:
+                                    #   • Remove the standalone message_* action so text
+                                    #     is NOT sent as a separate message.
+                                    #   • Inject tts_speak with __merged_text so the text
+                                    #     becomes the audio caption (Telegram) or is sent
+                                    #     immediately after the audio (other interfaces).
+                                    #   • Do NOT set __auto_injected — if TTS fails the
+                                    #     fallback will send text so the user is not left
+                                    #     with zero response.
+                                    log_info(
+                                        f"[message_chain] 🎤 Voice response: replacing text-only message with audio+caption for: {text_to_speak[:30]}..."
+                                    )
+                                    # Remove all message_* actions; audio+caption replaces them
+                                    actions[:] = [
+                                        a
+                                        for a in actions
+                                        if (a.get("action") or a.get("type"))
+                                        not in current_message_action_types
+                                    ]
+                                    tts_action = {
+                                        "type": "tts_speak",
+                                        "payload": {
+                                            "text": text_to_speak,
+                                            # __merged_text becomes the caption on Telegram
+                                            # and the follow-up text on other interfaces.
+                                            "__merged_text": text_to_speak,
+                                            "emotion": payload.get("emotion")
+                                            if isinstance(payload, dict)
+                                            else None,
+                                        },
+                                    }
+                                else:
+                                    # Non-voice: inject TTS alongside the existing message_*
+                                    # action.  Set __auto_injected so VoxPlugin suppresses
+                                    # the text fallback — text was already sent by message_*.
+                                    log_info(
+                                        f"[message_chain] 🗣️ Auto-injecting 'tts_speak' action for message: {text_to_speak[:30]}..."
+                                    )
+                                    tts_action = {
+                                        "type": "tts_speak",
+                                        "payload": {
+                                            "text": text_to_speak,
+                                            "emotion": payload.get("emotion")
+                                            if isinstance(payload, dict)
+                                            else None,
+                                            # Flag: auto-injected by message_chain (not emitted
+                                            # by the LLM). VoxPlugin uses this to suppress the
+                                            # text fallback when TTS fails — text was already
+                                            # sent by the message_*_bot action.
+                                            "__auto_injected": True,
+                                        },
+                                    }
                                 actions.append(tts_action)
                                 # Update has_tts flag since we just added it
                                 has_tts = True
+                                # clear request flag so we don't duplicate later
+                                if context and isinstance(context, dict):
+                                    context.pop("request_tts", None)
                         else:
                             log_debug(
                                 f"[message_chain] Skipping TTS auto-inject for non-user-facing interface: {interface_path}"
@@ -1061,6 +1237,8 @@ async def handle_incoming_message(
                     # the branch above). ensure they exist so the
                     # warning logic doesn't crash when has_user_response
                     # is False.
+                    if "interface_path" not in locals():
+                        interface_path = ctx.get("interface_path") or ""
                     if "is_user_facing" not in locals():
                         is_user_facing = False
                     if "is_grillo_internal" not in locals():
@@ -1106,90 +1284,67 @@ async def handle_incoming_message(
                             log_debug("[message_chain] LLM will send message to user")
 
                         # CRITICAL FIX: Merge text into TTS when both are present
-                        # This ensures text+audio are sent in the SAME message
-                        # SAFETY: Only do this if TTS plugin is actually loaded
+                        # This ensures text+audio are sent in the SAME message and
+                        # prevents a separate duplicate text reply.  We no longer
+                        # gate on plugin availability since the payload can still
+                        # fall back to merged_text if TTS fails.
                         if has_user_response and has_tts and isinstance(actions, list):
-                            # Check if TTS plugin is loaded and active
-                            tts_plugin_available = False
-                            try:
-                                from core.core_initializer import core_initializer
+                            # Find all message actions carrying text and any TTS actions
+                            message_actions_to_remove = []
+                            tts_actions = []
 
-                                available_actions = core_initializer.actions_block.get(
-                                    "available_actions", {}
-                                )
-                                # TTS plugin is available if tts_speak is in available actions
-                                tts_plugin_available = "tts_speak" in available_actions
-                                log_debug(
-                                    f"[message_chain] TTS plugin availability check: {tts_plugin_available}"
-                                )
-                            except Exception as e:
-                                log_warning(
-                                    f"[message_chain] Could not verify TTS plugin availability: {e}"
-                                )
-                                tts_plugin_available = False
+                            for idx, action in enumerate(actions):
+                                if not isinstance(action, dict):
+                                    continue
+                                action_type = action.get("action") or action.get("type")
 
-                            # Only merge and remove message actions if TTS plugin is confirmed available
-                            if tts_plugin_available:
-                                # Find message and TTS actions
-                                message_actions_to_remove = []
-                                tts_actions = []
+                                if action_type == "tts_speak":
+                                    tts_actions.append(action)
+                                elif action_type in current_message_action_types:
+                                    msg_payload = action.get("payload", {})
+                                    msg_text = msg_payload.get("text")
+                                    # record interface_path or chat_name for diagnostics
+                                    msg_ipath = msg_payload.get(
+                                        "interface_path"
+                                    ) or msg_payload.get("chat_name")
 
-                                for idx, action in enumerate(actions):
-                                    if not isinstance(action, dict):
+                                    if msg_text:
+                                        message_actions_to_remove.append(
+                                            (idx, msg_text, msg_ipath)
+                                        )
+
+                            # Merge text into each TTS payload and then drop the
+                            # standalone message actions.
+                            if message_actions_to_remove and tts_actions:
+                                log_info(
+                                    f"[message_chain] 🔗 Merging {len(message_actions_to_remove)} message action(s) into TTS to send text+audio together"
+                                )
+
+                                for tts_action in tts_actions:
+                                    tts_payload = tts_action.get("payload", {})
+                                    if not isinstance(tts_payload, dict):
                                         continue
-                                    action_type = action.get("action") or action.get(
-                                        "type"
-                                    )
 
-                                    if action_type == "tts_speak":
-                                        tts_actions.append(action)
-                                    elif action_type in current_message_action_types:
-                                        # Check if this message action has the same interface_path as TTS
-                                        msg_payload = action.get("payload", {})
-                                        msg_interface_path = msg_payload.get(
-                                            "interface_path"
-                                        )
-                                        msg_text = msg_payload.get("text")
-
-                                        if msg_text and msg_interface_path:
-                                            message_actions_to_remove.append(
-                                                (idx, msg_text, msg_interface_path)
+                                    for (
+                                        idx,
+                                        msg_text,
+                                        msg_ipath,
+                                    ) in message_actions_to_remove:
+                                        if "__merged_text" not in tts_payload:
+                                            tts_payload["__merged_text"] = msg_text
+                                            log_info(
+                                                f"[message_chain] ✅ Merged text into tts_speak: '{msg_text[:50]}...'"
                                             )
+                                            break
 
-                                # Merge text into TTS payloads that match interface_path
-                                if message_actions_to_remove and tts_actions:
+                                # Remove the standalone message actions
+                                for idx, _, _ in sorted(
+                                    message_actions_to_remove, reverse=True
+                                ):
+                                    removed_action = actions.pop(idx)
                                     log_info(
-                                        f"[message_chain] 🔗 Merging {len(message_actions_to_remove)} message action(s) into TTS to send text+audio together"
+                                        f"[message_chain] 🗑️ Removed duplicate message action (will be sent with TTS): {removed_action.get('type')}"
                                     )
-
-                                    for tts_action in tts_actions:
-                                        tts_payload = tts_action.get("payload", {})
-                                        if not isinstance(tts_payload, dict):
-                                            continue
-
-                                        # Find matching message text for this TTS (same or compatible interface)
-                                        for (
-                                            idx,
-                                            msg_text,
-                                            msg_ipath,
-                                        ) in message_actions_to_remove:
-                                            # Merge the text into TTS payload
-                                            if "__merged_text" not in tts_payload:
-                                                tts_payload["__merged_text"] = msg_text
-                                                log_info(
-                                                    f"[message_chain] ✅ Merged text into tts_speak: '{msg_text[:50]}...'"
-                                                )
-                                                break
-
-                                    # Remove the standalone message actions (they'll be sent with TTS)
-                                    # Remove in reverse order to avoid index shifting
-                                    for idx, _, _ in sorted(
-                                        message_actions_to_remove, reverse=True
-                                    ):
-                                        removed_action = actions.pop(idx)
-                                        log_info(
-                                            f"[message_chain] 🗑️ Removed duplicate message action (will be sent with TTS): {removed_action.get('type')}"
-                                        )
                             else:
                                 log_info(
                                     "[message_chain] ⚠️ TTS plugin not available - keeping separate message and TTS actions (text sent separately)"
@@ -1332,10 +1487,14 @@ async def handle_incoming_message(
                         else:
                             return ACTIONS_EXECUTED
 
-        # Not parsed. If it's from LLM, always attempt correction regardless of braces
-        # If it's non-LLM source, don't attempt correction
-        # IMPORTANT: Only attempt correction for LLM messages that failed JSON parsing
-        # Non-LLM messages and messages that don't require correction should be blocked
+        # Not parsed. Only attempt correction for LLM-origin messages.
+        # Non-LLM messages (interface/system source) are blocked without correction.
+        # Plain text from the LLM is treated as a correctable error: the corrector
+        # will request a valid JSON response from the model.
+        if source == "llm":
+            log_debug(
+                "[message_chain] LLM returned non-JSON output; activating corrector to request JSON format"
+            )
         if source != "llm" and not getattr(message, "from_cortex", False):
             log_debug("[message_chain] Non-LLM source; no correction needed")
             return BLOCKED
@@ -1412,7 +1571,9 @@ async def handle_incoming_message(
             # in accordance with the new policy that at least one delivered
             # message prevents an LLM failure notification.
             if not actions_executed_during_loop:
-                await send_llm_fallback_message(bot, message, failure_reason, context=ctx)
+                await send_llm_fallback_message(
+                    bot, message, failure_reason, context=ctx
+                )
                 return LLM_FAILED
             else:
                 log_warning(

@@ -34,6 +34,12 @@ _lock = asyncio.Lock()
 _consumer_task: asyncio.Task | None = None
 _counter = 0  # Monotonic counter to prevent dict comparison when priorities are equal
 
+# Track running LOW_PRIORITY background tasks by interface_path so they can be
+# cancelled when a higher-priority (user) message arrives for the same chat.
+# This prevents duplicate responses when a grillo outreach beat and a user
+# message target the same interface_path concurrently.
+_bg_tasks: dict[str, asyncio.Task] = {}
+
 
 class MessageQueue:
     """Minimal thread-safe queue for interfaces expecting blocking semantics."""
@@ -265,6 +271,7 @@ async def enqueue(
             consume=False,
         )
     ):
+        delay = 300
         log_debug(
             f"[RATE LIMIT] Delaying user {user_id} by {delay} seconds (quota exceeded)"
         )
@@ -682,7 +689,9 @@ async def _consumer_loop() -> None:
             )
             llm_name = plugin.__class__.__module__.split(".")[-1]
 
-            # Check if user is trainer for this interface
+            # Check if user is trainer for this interface.
+            # NOTE: interface_id lives on the queue item (final["interface"]),
+            # NOT on the message object itself.
             registry = get_interface_registry()
             interface_id = final.get("interface") or getattr(
                 user_msg, "interface_id", "unknown"
@@ -709,7 +718,9 @@ async def _consumer_loop() -> None:
                 # Get timeout configuration from message_chain module
                 from core.message_chain import RESPONSE_TIMEOUT
 
-                timeout_seconds = int(RESPONSE_TIMEOUT) if RESPONSE_TIMEOUT else 300  # default bump from 240 to 300s
+                timeout_seconds = (
+                    int(RESPONSE_TIMEOUT) if RESPONSE_TIMEOUT else 300
+                )  # default bump from 240 to 300s
 
                 # Check if this is an event prompt
                 if "event_prompt" in final:
@@ -724,8 +735,11 @@ async def _consumer_loop() -> None:
                         # Set session meta 'processing' True for this chat
                         try:
                             # Ensure interface_path is defined for events so session meta can be set
+                            # derive interface_path from explicit field or bot class name
                             interface_path = final.get("interface") or (
-                                bot.__class__.__name__ if bot else "unknown"
+                                final.get("bot").__class__.__name__
+                                if final.get("bot")
+                                else "unknown"
                             )
                             existing_meta = (
                                 await get_session_meta_fn(interface_path) or {}
@@ -770,7 +784,37 @@ async def _consumer_loop() -> None:
                     if isinstance(context, dict):
                         context["interface_path"] = interface_path
                         context["thread_id"] = thread_id
+                        # Propagate trainer flag so plugin_instance can route
+                        # to TRAINER_CORTEX when a scope override is configured.
                         context["is_trainer"] = is_trainer
+                        # Propagate voice input flag from interface (used by message_chain TTS auto-inject)
+                        # We explicitly write *both* True and False so that stale values
+                        # from a previous message do not linger.  Previously we only
+                        # set the flag when it was True which meant a voice message
+                        # could taint the context for all subsequent text replies,
+                        # leading the bot to auto-send audio even when the new
+                        # incoming message was plain text.  See issue described by
+                        # user: "se il messaggio entrante non è un audio il synth
+                        # non dovrebbe rispondere con un audio".  Clearing the key
+                        # prevents unexpected audio responses.
+                        _queued_msg = final.get("message")
+                        if getattr(_queued_msg, "is_voice_input", False):
+                            context["is_voice_input"] = True
+                        else:
+                            # remove stale flag if present
+                            context.pop("is_voice_input", None)
+
+                        # Propagate explicit request_tts flag (e.g. from handle_media_live wrap)
+                        if getattr(_queued_msg, "request_tts", False):
+                            context["request_tts"] = True
+                        else:
+                            context.pop("request_tts", None)
+
+                        # Propagate trainer flag so plugin_instance can route
+                        # to TRAINER_CORTEX when a scope override is configured.
+                        if is_trainer:
+                            context["is_trainer"] = True
+
                         # Propagate per-message history_scope when present so prompt_engine/history_engine can honour it
                         hs = final.get("history_scope")
                         if hs is not None:
@@ -984,9 +1028,30 @@ async def _consumer_loop() -> None:
                             _resolve_generation_animation_state("start")
                         )
 
-                        # Run message processing in a Task so we can avoid hard-cancelling long-running
-                        # flows (e.g. Selenium-based LLMs). On timeout we keep the task running and
-                        # clear the session 'processing' flag when it eventually finishes.
+                        # Cancel any running LOW_PRIORITY background task for the
+                        # same interface_path.  This prevents duplicate responses
+                        # when a grillo outreach beat races against a user message
+                        # for the same chat — the outreach prompt includes chat
+                        # history and the LLM would otherwise respond to the user's
+                        # message, producing a duplicate alongside the trainer
+                        # engine's proper reply.
+                        _existing_bg = _bg_tasks.pop(interface_path, None)
+                        if _existing_bg is not None and not _existing_bg.done():
+                            _existing_bg.cancel()
+                            log_info(
+                                f"[QUEUE] Cancelled LOW_PRIORITY background task for {interface_path} "
+                                f"(superseded by incoming user message)"
+                            )
+
+                        # Selenium-based LLMs manage browser state and cannot be safely
+                        # cancelled mid-flight. All other engines (HTTP-based Gemini, OpenAI, …)
+                        # support asyncio cancellation and should be stopped on timeout so they
+                        # don't deliver a "ghost" reply after the fallback has already been sent.
+                        task_is_cancellable = getattr(
+                            plugin_instance, "task_cancellable", True
+                        )
+
+                        # Run message processing in a Task so we can apply a per-element timeout.
                         processing_task = asyncio.create_task(
                             plugin_instance.handle_incoming_message(
                                 final["bot"],
@@ -996,7 +1061,7 @@ async def _consumer_loop() -> None:
                             )
                         )
                         log_debug(
-                            f"[QUEUE] Dispatched handle_incoming_message task for interface_path={interface_path}, interface={final.get('interface')}"
+                            f"[QUEUE] Dispatched handle_incoming_message task for interface_path={interface_path}, interface={final.get('interface')} cancellable={task_is_cancellable}"
                         )
 
                         # If this is a low-priority item, do not await it - run in background
@@ -1007,6 +1072,10 @@ async def _consumer_loop() -> None:
                                 f"[QUEUE] Low-priority task scheduled as background for interface_path={interface_path}; not awaiting"
                             )
 
+                            # Track this background task so it can be cancelled if a
+                            # user message arrives for the same interface_path.
+                            _bg_tasks[interface_path] = processing_task
+
                             # Ensure generation_end hook is called when background task completes
                             processing_task.add_done_callback(
                                 lambda t: asyncio.create_task(
@@ -1014,16 +1083,25 @@ async def _consumer_loop() -> None:
                                 )
                             )
 
-                            # Log any exceptions when done
-                            def _bg_done_cb(t: asyncio.Task) -> None:
+                            # Clean up tracking and log exceptions when done
+                            _captured_ipath = interface_path  # capture for closure
+
+                            def _bg_done_cb(
+                                t: asyncio.Task,
+                                _ipath: str = _captured_ipath,
+                            ) -> None:
+                                # Remove from tracking dict
+                                _bg_tasks.pop(_ipath, None)
                                 try:
                                     exc = t.exception()
                                     if exc is not None:
                                         log_warning(
-                                            f"[QUEUE] Background task for {interface_path} raised: {exc}"
+                                            f"[QUEUE] Background task for {_ipath} raised: {exc}"
                                         )
                                 except asyncio.CancelledError:
-                                    pass
+                                    log_info(
+                                        f"[QUEUE] Background task for {_ipath} was cancelled (user message arrived)"
+                                    )
                                 except Exception:
                                     pass
 
@@ -1068,74 +1146,102 @@ async def _consumer_loop() -> None:
                                     f"[QUEUE] Failed to send fallback message on timeout for chat {chat_id}: {send_exc}"
                                 )
 
-                            async def _clear_processing_when_done() -> None:
+                            if task_is_cancellable:
+                                # Cancel the task immediately so no delayed "ghost" response
+                                # arrives after the fallback has already been sent to the user.
+                                processing_task.cancel()
                                 try:
-                                    # Log exceptions from the background task, if any
-                                    try:
-                                        exc = processing_task.exception()
-                                        if exc is not None:
-                                            log_warning(
-                                                f"[QUEUE] Background processing task error for chat {chat_id}: {exc}"
-                                            )
-                                    except asyncio.CancelledError:
-                                        return
-                                    except Exception:
-                                        pass
-
-                                    # Notify optional hook that generation ended (even after a timeout).
-                                    try:
-                                        await _call_bot_generation_end(processing_task)
-                                    except Exception:
-                                        pass
-
-                                    # Only clear 'processing' if no other messages are pending for this chat
-                                    still_pending = False
-                                    for prio, _, queued_item in list(_queue._queue):
-                                        item_chat = (
-                                            queued_item.get("chat_id")
-                                            if isinstance(queued_item, dict)
-                                            else getattr(queued_item, "chat_id", None)
-                                        )
-                                        if item_chat == chat_id:
-                                            still_pending = True
-                                            break
-                                    if not still_pending:
-                                        try:
-                                            existing_meta = (
-                                                await get_session_meta_fn(
-                                                    interface_path
-                                                )
-                                                or {}
-                                            )
-                                            existing_meta["processing"] = False
-                                            await set_session_meta_fn(
-                                                interface_path, existing_meta
-                                            )
-                                        except Exception as set_e:
-                                            log_debug(
-                                                f"[QUEUE] Failed to clear processing session meta (background): {set_e}"
-                                            )
-
-                                        # Only return to IDLE when no other messages are pending for this chat.
-                                        await _broadcast_global_animation_state(
-                                            _resolve_generation_animation_state("end")
-                                        )
-                                except Exception as e:
-                                    log_debug(
-                                        f"[QUEUE] Error in background completion handler for chat {chat_id}: {e}"
+                                    await asyncio.wait_for(
+                                        asyncio.shield(processing_task), timeout=2
                                     )
-
-                            # Keep processing in background; clear meta when done.
-                            try:
-                                processing_task.add_done_callback(
-                                    lambda _t: asyncio.create_task(
-                                        _clear_processing_when_done()
-                                    )
-                                )
-                            except Exception as cb_e:
+                                except (
+                                    asyncio.TimeoutError,
+                                    asyncio.CancelledError,
+                                    Exception,
+                                ):
+                                    pass
+                                try:
+                                    await _call_bot_generation_end(processing_task)
+                                except Exception:
+                                    pass
                                 log_debug(
-                                    f"[QUEUE] Failed to attach background completion callback: {cb_e}"
+                                    f"[QUEUE] Processing task cancelled after timeout for chat {chat_id}"
                                 )
+                            else:
+                                # Non-cancellable engine (e.g. Selenium) — let task finish in
+                                # background and clean up when it eventually completes.
+                                log_debug(
+                                    f"[QUEUE] Processing task kept alive (non-cancellable engine) for chat {chat_id}"
+                                )
+
+                                async def _clear_processing_when_done() -> None:
+                                    try:
+                                        try:
+                                            exc = processing_task.exception()
+                                            if exc is not None:
+                                                log_warning(
+                                                    f"[QUEUE] Background processing task error for chat {chat_id}: {exc}"
+                                                )
+                                        except asyncio.CancelledError:
+                                            return
+                                        except Exception:
+                                            pass
+
+                                        try:
+                                            await _call_bot_generation_end(
+                                                processing_task
+                                            )
+                                        except Exception:
+                                            pass
+
+                                        still_pending = False
+                                        for prio, _, queued_item in list(_queue._queue):
+                                            item_chat = (
+                                                queued_item.get("chat_id")
+                                                if isinstance(queued_item, dict)
+                                                else getattr(
+                                                    queued_item, "chat_id", None
+                                                )
+                                            )
+                                            if item_chat == chat_id:
+                                                still_pending = True
+                                                break
+                                        if not still_pending:
+                                            try:
+                                                existing_meta = (
+                                                    await get_session_meta_fn(
+                                                        interface_path
+                                                    )
+                                                    or {}
+                                                )
+                                                existing_meta["processing"] = False
+                                                await set_session_meta_fn(
+                                                    interface_path, existing_meta
+                                                )
+                                            except Exception as set_e:
+                                                log_debug(
+                                                    f"[QUEUE] Failed to clear processing session meta (background): {set_e}"
+                                                )
+                                            await _broadcast_global_animation_state(
+                                                _resolve_generation_animation_state(
+                                                    "end"
+                                                )
+                                            )
+                                    except Exception as e:
+                                        log_debug(
+                                            f"[QUEUE] Error in background completion handler for chat {chat_id}: {e}"
+                                        )
+
+                                try:
+                                    processing_task.add_done_callback(
+                                        lambda _t: asyncio.create_task(
+                                            _clear_processing_when_done()
+                                        )
+                                    )
+                                except Exception as cb_e:
+                                    log_debug(
+                                        f"[QUEUE] Failed to attach background completion callback: {cb_e}"
+                                    )
                         finally:
                             # If we completed within the timeout (success or error), notify generation end now.
                             if not timed_out:

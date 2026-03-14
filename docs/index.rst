@@ -30,6 +30,7 @@ getting started.
    cortex
    interfaces
    plugins
+   auris_vox
    vrm_animations
    animation_system
    webui_controls

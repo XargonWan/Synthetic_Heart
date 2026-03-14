@@ -1477,10 +1477,24 @@
                 ws.onclose = (ev) => {
                     console.log('[synth_webui ws] onclose', ev && ev.code ? ev.code : ev);
                     updateDebug('Chat WebSocket disconnected');
+                    // notify the user and clear any typing indicator so the UI
+                    // doesn't appear stuck after a dropped connection
+                    try { if (typeof removeTypingIndicator === 'function') removeTypingIndicator(); } catch (e) {}
+                    try {
+                        if (window.SynthChat && typeof window.SynthChat.maybeNotify === 'function') {
+                            window.SynthChat.maybeNotify('⚠️ Connection lost. Please reload the page.');
+                        }
+                    } catch (e) {}
                 };
                 ws.onerror = (error) => {
                     console.error('[synth_webui ws] WebSocket error:', error);
                     updateDebug('Chat WebSocket error');
+                    try { if (typeof removeTypingIndicator === 'function') removeTypingIndicator(); } catch (e) {}
+                    try {
+                        if (window.SynthChat && typeof window.SynthChat.maybeNotify === 'function') {
+                            window.SynthChat.maybeNotify('⚠️ Chat WebSocket error.');
+                        }
+                    } catch (e) {}
                 };
 
                 // Store WebSocket globally for later use

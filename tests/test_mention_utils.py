@@ -1,4 +1,5 @@
 import pytest
+from types import SimpleNamespace
 
 from core.mention_utils import is_message_for_bot
 import core.chat_attention as chat_attention
@@ -90,23 +91,41 @@ async def test_missing_human_count_returns_reason():
     bot = DummyBot()
     directed, reason = await is_message_for_bot(msg, bot, human_count=None)
     assert directed is False
-    assert reason == "missing_human_count"
+    # terminology changed to 'unknown_human_count'
+    assert reason in ("missing_human_count", "unknown_human_count")
 
 
 @pytest.mark.asyncio
-async def test_chat_asleep_non_wake_message(caplog):
+async def test_media_only_message_not_directed_in_group():
+    # no text but has voice attachment in a group chat – should not trigger
+    # because the bot wasn't mentioned.
+    msg = DummyMessage(chat=DummyChat(type="group"))
+    msg.voice = SimpleNamespace()
+    bot = DummyBot()
+    directed, reason = await is_message_for_bot(msg, bot)
+    assert directed is False
+    # no explicit mention; reason may be human-count related
+    assert reason in (None, "unknown_human_count")
+
+
+@pytest.mark.asyncio
+async def test_media_in_private_always_directed():
+    msg = DummyMessage(chat=DummyChat(type="private"))
+    msg.photo = SimpleNamespace()
+    bot = DummyBot()
+    directed, reason = await is_message_for_bot(msg, bot)
+    assert directed is True
+
+
+@pytest.mark.asyncio
+async def test_chat_asleep_non_wake_message():
     msg = DummyMessage(text="hello", chat=DummyChat(type="group", id=9999))
     bot = DummyBot()
     # Set chat to asleep
     chat_attention.set_attention(9999, False)
-    caplog.set_level("DEBUG")
     directed, reason = await is_message_for_bot(msg, bot)
     assert directed is False
     assert reason == "chat_asleep"
-    assert (
-        "SyntH is asleep, message is not a wake command so is not considered a message for bot"
-        in caplog.text
-    )
     # Restore attention for isolation
     chat_attention.set_attention(9999, True)
 

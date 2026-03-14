@@ -43,7 +43,8 @@ To run the agent-specific unit tests locally:
 
 .. code-block:: bash
 
-   pip install -r requirements.txt
+   # install dependencies via uv
+   uv sync
    pip install pytest pytest-asyncio
 
 3. Run the agent tests only:

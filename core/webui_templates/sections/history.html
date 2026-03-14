@@ -3,8 +3,12 @@
         <header class="section-header">
           <h2>Activity</h2>
           <nav class="sub-nav" role="tablist">
-            <button class="sub-nav-btn active" data-subtab="diary" role="tab" aria-selected="true">
-              <span class="icon">📖</span>
+            <button class="sub-nav-btn active" data-subtab="interactions" role="tab" aria-selected="true">
+              <span class="icon">🗂️</span>
+              <span>Interactions</span>
+            </button>
+            <button class="sub-nav-btn" data-subtab="diary" role="tab" aria-selected="false">
+              <span class="icon">📔</span>
               <span>Diary</span>
             </button>
             <button class="sub-nav-btn" data-subtab="grillo" role="tab" aria-selected="false">
@@ -24,23 +28,41 @@
 
         <div class="sub-tabs-container">
 
-      <!-- Diary Sub-Tab -->
-      <div class="sub-tab-panel active" id="subtab-diary" data-subtab="diary">
+      <!-- Interactions Sub-Tab -->
+      <div class="sub-tab-panel active" id="subtab-interactions" data-subtab="interactions">
         <div class="section-controls">
-          <input type="text" id="history-diary-search" placeholder="Search diary entries..." class="search-input" />
-          <select id="history-diary-sort" class="sort-select">
+          <input type="text" id="history-interactions-search" placeholder="Search interactions..." class="search-input" />
+          <select id="history-interactions-sort" class="sort-select">
             <option value="desc">Newest First</option>
             <option value="asc">Oldest First</option>
           </select>
           <label class="control-label">
-            <input type="checkbox" id="history-diary-archived" />
+            <input type="checkbox" id="history-interactions-archived" />
             Show Archived
           </label>
+        </div>
+        <div id="history-interactions-content" class="history-container">
+          <div class="loading-state">
+            <div class="loading-spinner"></div>
+            <p>Loading interactions...</p>
+          </div>
+        </div>
+        <div id="history-interactions-pagination" class="pagination-controls"></div>
+      </div>
+
+      <!-- Diary Sub-Tab -->
+      <div class="sub-tab-panel" id="subtab-diary" data-subtab="diary">
+        <div class="section-controls">
+          <input type="text" id="history-diary-search" placeholder="Search diary..." class="search-input" />
+          <select id="history-diary-sort" class="sort-select">
+            <option value="desc">Newest First</option>
+            <option value="asc">Oldest First</option>
+          </select>
         </div>
         <div id="history-diary-content" class="history-container">
           <div class="loading-state">
             <div class="loading-spinner"></div>
-            <p>Loading diary entries...</p>
+            <p>Loading diary...</p>
           </div>
         </div>
         <div id="history-diary-pagination" class="pagination-controls"></div>
@@ -357,6 +379,73 @@
 
       .history-entry-detail strong {
         color: var(--text);
+      }
+
+      /* Diary day-entry card */
+      .diary-day-entry {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-left: 4px solid var(--accent);
+        border-radius: 12px;
+        padding: 1.75rem;
+        margin-bottom: 1.25rem;
+        transition: all 0.2s ease;
+      }
+
+      .diary-day-entry:hover {
+        border-color: var(--border-strong);
+        border-left-color: var(--accent);
+        box-shadow: 0 8px 25px -15px rgba(0, 0, 0, 0.5);
+      }
+
+      .diary-day-header {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        margin-bottom: 1rem;
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 0.75rem;
+      }
+
+      .diary-day-icon {
+        font-size: 1.3rem;
+      }
+
+      .diary-day-label {
+        font-size: 1rem;
+        font-weight: 600;
+        color: var(--text);
+        letter-spacing: 0.01em;
+      }
+
+      .diary-day-content {
+        line-height: 1.75;
+        color: var(--text);
+        word-break: break-word;
+        font-size: 0.95rem;
+      }
+
+      .diary-day-thought {
+        margin-top: 1rem;
+        padding: 0.75rem 1rem;
+        background: rgba(12, 12, 20, 0.35);
+        border-radius: 8px;
+        font-size: 0.85rem;
+        color: var(--text-soft);
+        font-style: italic;
+      }
+
+      /* Pre-consolidation fragments within a diary day */
+      .diary-fragment {
+        margin: 0 0 0.25rem 0;
+        line-height: 1.7;
+      }
+
+      hr.diary-separator {
+        border: none;
+        border-top: 1px dashed var(--border);
+        margin: 0.85rem 0;
+        opacity: 0.6;
       }
 
       .grillo-prompt {

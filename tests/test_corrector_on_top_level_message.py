@@ -78,6 +78,46 @@ async def test_corrector_invoked_when_top_level_message_without_message_action(
 
 
 @pytest.mark.asyncio
+async def test_corrector_orchestrator_auto_fix_numeric_string(monkeypatch):
+    """If run_actions fails because a numeric field was a string, the orchestrator
+    should normalize/auto‑fix and retry instead of blocking.
+    """
+    calls = []
+
+    async def fake_run_actions(actions, ctx, bot, msg):
+        # record each invocation and simulate a type error on first try
+        calls.append([dict(a) for a in actions])
+        if len(calls) == 1:
+            return {
+                "processed": [],
+                "failed_actions": [
+                    {
+                        "action": actions[0],
+                        "errors": ["payload.reply_to_message_id must be an int"],
+                    }
+                ],
+                "errors": ["payload.reply_to_message_id must be an int"],
+            }
+        else:
+            return {"processed": actions, "failed_actions": [], "errors": []}
+
+    monkeypatch.setattr("core.action_parser.run_actions", fake_run_actions)
+
+    message = SimpleNamespace()
+    message.from_cortex = True
+
+    text = '{"actions":[{"type":"message_telegram_bot","payload":{"text":"hi","interface_path":"telegram_bot/1","reply_to_message_id":" 42 "}}]}'
+    res = await corrector_orchestrator(
+        text, {"from_cortex": True}, bot=None, message=message
+    )
+    assert res is True
+    # two calls: initial attempt plus auto-fixed retry
+    assert len(calls) == 2
+    # second call should have coerced the id to int
+    assert isinstance(calls[1][0]["payload"]["reply_to_message_id"], int)
+
+
+@pytest.mark.asyncio
 async def test_message_chain_filters_duplicate_actions_on_retry(monkeypatch):
     """When a correction retry occurs, previously-successful action types
     should be removed from the next run_actions payload.

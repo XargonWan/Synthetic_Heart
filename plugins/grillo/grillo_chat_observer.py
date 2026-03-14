@@ -37,6 +37,34 @@ register_exposed_var(
     tags=["plugin"],
 )
 
+register_exposed_var(
+    "GRILLO_OBSERVER_SELF_WINDOW",
+    label="Grillo Observer Self-Skip Window (s)",
+    default=43200,
+    value_type=float,
+    ui_type="number",
+    description="Seconds during which a chat whose last message comes from the synth is ignored when collecting snippets",
+    scope="plugins",
+    component="grillo_chat_observer",
+    advanced=True,
+    tags=["plugin"],
+)
+
+# last_run_ts is purely internal; expose but hide it so UI won't show it
+register_exposed_var(
+    "GRILLO_OBSERVER_LAST_RUN_TS",
+    label="Grillo Observer Last Run TS",
+    default=0.0,
+    value_type=float,
+    ui_type="number",
+    description="Internal timestamp of the last observer run (UTC). Do not edit unless debugging.",
+    scope="plugins",
+    component="grillo_chat_observer",
+    advanced=True,
+    hidden=True,
+    tags=["plugin"],
+)
+
 
 class GrilloChatObserverPlugin:
     display_name = "G.R.I.L.L.O. Chat Observer"
@@ -98,6 +126,37 @@ class GrilloChatObserverPlugin:
             component="grillo_chat_observer",
             advanced=True,
         )
+        # How far back (seconds) we honour the "last message was from self" rule.
+        # If the most recent message in a conversation comes from the bot and is
+        # younger than this window, the chat will be skipped when gathering
+        # snippets. This prevents Grillo from endlessly re‑poking a channel that
+        # already has an unanswered synthetic question. Default 12h.
+        self.self_skip_window = float(
+            config_registry.get_value(
+                "GRILLO_OBSERVER_SELF_WINDOW",
+                43200,
+                label="Grillo Observer Self-Skip Window (s)",
+                description="Seconds during which a chat whose last message comes from the synth is ignored when collecting snippets",
+                value_type=float,
+                group="grillo",
+                component="grillo_chat_observer",
+                advanced=True,
+            )
+        )
+        # persistent storage of last-run timestamp - survives restarts
+        self._last_run_ts = float(
+            config_registry.get_value(
+                "GRILLO_OBSERVER_LAST_RUN_TS",
+                0.0,
+                label="Grillo Observer Last Run TS",
+                description="Internal timestamp (UTC) of the last observer run; used to avoid reprocessing history",
+                value_type=float,
+                group="grillo",
+                component="grillo_chat_observer",
+                advanced=True,
+                hidden=True,
+            )
+        )
 
         register_plugin("grillo_chat_observer", self)
         log_info("[grillo_chat_observer] Registered GrilloChatObserverPlugin")
@@ -125,6 +184,14 @@ class GrilloChatObserverPlugin:
             "GRILLO_OBSERVER_STORE_MEMORIES",
             lambda v: setattr(self, "store_memories", bool(v)),
         )
+        config_registry.add_listener(
+            "GRILLO_OBSERVER_SELF_WINDOW",
+            lambda v: setattr(self, "self_skip_window", float(v)),
+        )
+        config_registry.add_listener(
+            "GRILLO_OBSERVER_LAST_RUN_TS",
+            lambda v: setattr(self, "_last_run_ts", float(v)),
+        )
 
     def get_supported_action_types(self):
         return []
@@ -148,12 +215,20 @@ class GrilloChatObserverPlugin:
         GrilloChatObserverPlugin._scheduler_task = asyncio.create_task(
             self._observer_loop()
         )
-        # Initialize last run timestamp to now so we don't process old history
+        # Initialize last run timestamp from persisted config (if any). This
+        # allows us to survive process restarts without reprocessing the same
+        # conversation history. If the stored value is zero (initial launch) we
+        # set it to the current time as before.
         try:
-            self._last_run_ts = float(datetime.utcnow().timestamp())
-            log_debug(
-                f"[grillo_chat_observer] Initialized last_run_ts={self._last_run_ts}"
-            )
+            if self._last_run_ts and self._last_run_ts > 0:
+                log_debug(
+                    f"[grillo_chat_observer] Loaded last_run_ts={self._last_run_ts} from config"
+                )
+            else:
+                self._last_run_ts = float(datetime.utcnow().timestamp())
+                log_debug(
+                    f"[grillo_chat_observer] Initialized last_run_ts={self._last_run_ts}"
+                )
         except Exception:
             pass
         log_info("[grillo_chat_observer] Scheduler started")
@@ -334,6 +409,15 @@ class GrilloChatObserverPlugin:
                     log_debug(
                         f"[grillo_chat_observer] Updated last_run_ts to {self._last_run_ts}"
                     )
+                    # persist in config so restart doesn't reset us
+                    try:
+                        await config_registry.set_value(
+                            "GRILLO_OBSERVER_LAST_RUN_TS", self._last_run_ts
+                        )
+                    except Exception:
+                        log_debug(
+                            "[grillo_chat_observer] Failed to persist last_run_ts to config"
+                        )
                 except Exception:
                     pass
             except Exception as e:
@@ -358,6 +442,33 @@ class GrilloChatObserverPlugin:
                 )
                 try:
                     messages = await load_chat_history(chat_path)
+                    # if the most recent message belongs to the synth and it was
+                    # sent less than `self.self_skip_window` seconds ago, ignore
+                    # this chat entirely. this does not affect messages already
+                    # queued for processing; it only controls what snippets the
+                    # observer hands to the LLM.
+                    try:
+                        if messages:
+                            last_msg = messages[-1]
+                            if isinstance(last_msg, dict):
+                                sender = (
+                                    last_msg.get("sender_name")
+                                    or last_msg.get("sender_id")
+                                    or ""
+                                )
+                                ts_str = last_msg.get("timestamp") or ""
+                                if sender in ("self", "synth") and ts_str:
+                                    try:
+                                        ts = datetime.fromisoformat(ts_str)
+                                        age = (datetime.utcnow() - ts).total_seconds()
+                                        if age < self.self_skip_window:
+                                            # skip this chat
+                                            continue
+                                    except Exception:
+                                        pass
+                    except Exception:
+                        # defensively ignore any parsing errors and continue
+                        pass
                     # take up to 2 recent messages per chat
                     taken = 0
                     for msg in reversed(list(messages)):
