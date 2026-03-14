@@ -1577,13 +1577,15 @@ class DiaryPlugin:
         context: dict,
         original_message: object,
     ) -> None:
-        """After each interaction, check whether today's diary has fragmented entries that need LLM consolidation.
+        """After each interaction, find the oldest unmerged diary day (last 7 days) and enqueue a consolidation beat.
 
-        If today's single diary row contains '---' separators (written by _upsert_diary_impl when
-        multiple interactions occur on the same day), a low-priority merge beat is enqueued.
-        The LLM receives the fragments and is asked to output an ``update_diary_entry`` action
-        with coherent first-person prose.  A ``diary_merge_beat`` flag in the context prevents
-        recursive triggering.
+        Looks for diary rows whose ``content`` contains the ``---`` fragment separator,
+        meaning the LLM has not yet synthesised them into coherent prose.  Only ONE beat is
+        enqueued per debrief call (the oldest unmerged day) so that the queue is not flooded.
+        Each successive interaction will process the next oldest day until all are clean.
+
+        The ``diary_merge_beat`` context flag prevents recursive triggering when the merge
+        beat's own response goes through debrief.
         """
         if not PLUGIN_ENABLED:
             return
@@ -1592,40 +1594,55 @@ class DiaryPlugin:
             return
 
         try:
+            # Find the oldest day in the last 7 days that still has '---' in its content.
+            # Because historical days may have multiple rows (pre-upsert data), we use
+            # GROUP_CONCAT so a day with many separate rows still shows up here if any
+            # row contains '---' OR if there is more than one row for that day.
             rows = await _fetchall(
-                "SELECT id, content FROM ai_diary "
-                "WHERE DATE(timestamp) = CURDATE() "
-                "ORDER BY timestamp DESC LIMIT 1"
+                """
+                SELECT
+                    MAX(id) AS id,
+                    GROUP_CONCAT(content ORDER BY id ASC SEPARATOR '\n\n---\n\n') AS combined,
+                    COUNT(*) AS row_count
+                FROM ai_diary
+                WHERE timestamp >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+                GROUP BY DATE(timestamp)
+                HAVING row_count > 1 OR combined LIKE '%---%'
+                ORDER BY MIN(timestamp) ASC
+                LIMIT 1
+                """
             )
         except Exception as e:
-            log_debug(f"[ai_diary] on_debrief: DB error fetching today's entry: {e}")
+            log_debug(f"[ai_diary] on_debrief: DB error fetching unmerged entries: {e}")
             return
 
         if not rows:
             return
 
-        entry = rows[0]
-        entry_id: int = entry["id"]
-        content: str = entry["content"] or ""
+        row = rows[0]
+        entry_id: int = row["id"]
+        content: str = row["combined"] or ""
+        row_count: int = row["row_count"]
 
-        if "---" not in content:
-            return  # already clean prose — nothing to do
+        if "---" not in content and row_count <= 1:
+            return
 
         log_info(
-            f"[ai_diary] on_debrief: today's diary entry id={entry_id} has fragments — enqueueing merge beat"
+            f"[ai_diary] on_debrief: oldest unmerged day has entry id={entry_id} "
+            f"({row_count} rows, {content.count('---')} separators) — enqueueing merge beat"
         )
 
         prompt = (
             "[DIARY CONSOLIDATION — INTERNAL SYSTEM TASK]\n\n"
-            "Your personal diary has accumulated multiple entries from today's conversations "
+            "Your personal diary has accumulated multiple entries from the same day "
             "(separated by '---'). Rewrite them as a single, coherent first-person diary entry "
             "that weaves all the information together naturally.\n\n"
             "Rules:\n"
             "- Write flowing first-person prose (no bullet lists, no '---' separators).\n"
             "- Preserve every meaningful detail from all fragments.\n"
             "- Remove exact duplicates; keep nuance and emotional context.\n"
-            f"- The entry id to update is: {entry_id}\n\n"
-            "Today's diary fragments:\n\n"
+            f"- The entry id to UPDATE is: {entry_id}\n\n"
+            "Diary fragments:\n\n"
             f"{content}\n\n"
             "Respond with ONLY valid JSON — no other text:\n"
             '{"actions": [{"type": "update_diary_entry", "payload": {"id": '

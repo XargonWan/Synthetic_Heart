@@ -589,6 +589,7 @@ class SynthWebUIInterface:
         self.app.post("/api/chat/session_meta")(self.set_session_meta)
         self.app.get("/api/chat/session_meta")(self.get_session_meta)
         # History API endpoints (unified diary, grillo, chat history)
+        self.app.get("/api/history/interactions")(self.history_interactions)
         self.app.get("/api/history/diary")(self.history_diary)
         self.app.get("/api/history/grillo")(self.history_grillo)
         self.app.get("/api/history/chat")(self.history_chat)
@@ -5044,8 +5045,8 @@ class SynthWebUIInterface:
             log_error(f"{LOG_PREFIX} Failed to delete archived diary entries: {exc}")
             raise HTTPException(status_code=500, detail=str(exc))
 
-    async def history_diary(self, request: Request):
-        """Return diary entries for the History > Diary sub-tab - optimized for speed."""
+    async def history_interactions(self, request: Request):
+        """Return interactions (all ai_diary rows) for the History > Interactions sub-tab."""
         params = request.query_params
 
         def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
@@ -5197,7 +5198,107 @@ class SynthWebUIInterface:
             )
 
         except Exception as exc:
-            log_error(f"{LOG_PREFIX} Failed to fetch diary history: {exc}")
+            log_error(f"{LOG_PREFIX} Failed to fetch interactions history: {exc}")
+            return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
+
+    async def history_diary(self, request: Request):
+        """Return one entry per day for the History > Diary sub-tab (daily consolidated view)."""
+        params = request.query_params
+
+        def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return default
+            return max(minimum, min(maximum, parsed))
+
+        page = _bounded_int(params.get("page"), default=1, minimum=1, maximum=1000)
+        per_page = _bounded_int(
+            params.get("per_page"), default=30, minimum=1, maximum=60
+        )
+        search = params.get("search", "").strip()
+        sort = params.get("sort", "desc")
+
+        try:
+            from core.db import get_conn_ctx
+
+            offset = (page - 1) * per_page
+            order = "DESC" if sort == "desc" else "ASC"
+
+            async with get_conn_ctx() as conn:
+                async with conn.cursor() as cur:
+                    # Increase limit so long diary days aren't truncated
+                    await cur.execute("SET SESSION group_concat_max_len = 1048576")
+
+                    if search:
+                        search_term = f"%{search}%"
+                        where_clause = (
+                            "WHERE (content LIKE %s OR interaction_summary LIKE %s)"
+                        )
+                        search_params: list = [search_term, search_term]
+                    else:
+                        where_clause = ""
+                        search_params = []
+
+                    # Count distinct days that match the filter
+                    count_query = f"""
+                        SELECT COUNT(DISTINCT DATE(timestamp))
+                        FROM ai_diary
+                        {where_clause}
+                    """
+                    await cur.execute(count_query, search_params)
+                    count_row = await cur.fetchone()
+                    total_count = count_row[0] if count_row else 0
+
+                    # Aggregate ALL rows for each day — GROUP_CONCAT handles both
+                    # old multi-row days and new single-row upserted days correctly.
+                    # The '---' separator matches what _upsert_diary_impl uses, so
+                    # the frontend can split on it to render fragments.
+                    query = f"""
+                        SELECT
+                            MAX(id)                                                           AS id,
+                            GROUP_CONCAT(content ORDER BY id ASC SEPARATOR '\n\n---\n\n')    AS content,
+                            MAX(personal_thought)                                             AS personal_thought,
+                            MAX(timestamp)                                                    AS timestamp,
+                            JSON_EXTRACT(MAX(emotions), '$[0].type')                          AS primary_emotion
+                        FROM ai_diary
+                        {where_clause}
+                        GROUP BY DATE(timestamp)
+                        ORDER BY MAX(timestamp) {order}
+                        LIMIT %s OFFSET %s
+                    """
+                    await cur.execute(query, search_params + [per_page, offset])
+                    rows = await cur.fetchall()
+
+            entries = []
+            for row in rows:
+                entries.append(
+                    {
+                        "id": row[0],
+                        "content": row[1],
+                        "personal_thought": row[2],
+                        "timestamp": self._dt_to_utc_iso(row[3]),
+                        "primary_emotion": row[4],
+                    }
+                )
+
+            total_pages = (
+                (total_count + per_page - 1) // per_page if total_count > 0 else 1
+            )
+
+            return JSONResponse(
+                {
+                    "success": True,
+                    "entries": entries,
+                    "page": page,
+                    "per_page": per_page,
+                    "total_count": total_count,
+                    "total_pages": total_pages,
+                }
+            )
+
+        except Exception as exc:
+            log_error(f"{LOG_PREFIX} Failed to fetch daily diary: {exc}")
             return JSONResponse({"success": False, "error": str(exc)}, status_code=500)
 
     async def history_grillo(self, request: Request):
