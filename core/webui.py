@@ -5046,7 +5046,12 @@ class SynthWebUIInterface:
             raise HTTPException(status_code=500, detail=str(exc))
 
     async def history_interactions(self, request: Request):
-        """Return interactions (all ai_diary rows) for the History > Interactions sub-tab."""
+        """Return interaction-log data from ai_diary for the History > Interactions sub-tab.
+
+        Only the metadata fields (interaction_summary, personal_thought, emotions,
+        involved_users) are returned — NOT the diary prose (content), which belongs
+        exclusively to the Diary tab.
+        """
         params = request.query_params
 
         def _bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
@@ -5076,26 +5081,23 @@ class SynthWebUIInterface:
 
             async with get_conn_ctx() as conn:
                 async with conn.cursor() as cur:
-                    # Build optimized query - load only essential fields
+                    # Interactions shows only metadata — NOT the diary prose (content).
+                    # Search searches only interaction_summary.
                     if search:
-                        # Search only in indexed/important fields
                         search_term = f"%{search}%"
-                        where_clause = (
-                            "WHERE (content LIKE %s OR interaction_summary LIKE %s)"
-                        )
-                        search_params = [search_term, search_term]
+                        where_clause = "WHERE interaction_summary LIKE %s"
+                        search_params = [search_term]
                     else:
                         where_clause = ""
                         search_params = []
 
                     # Simplified query without archived for speed (most common case)
                     if not include_archived:
-                        # Get approximate count using LIMIT + 1 trick (faster than COUNT)
                         query = f"""
-                            SELECT id, content as content, personal_thought as personal_thought, 
-                                   timestamp, interaction_summary, 
-                                   JSON_EXTRACT(emotions, '$[0].type') as primary_emotion,
-                                   JSON_LENGTH(involved_users) as user_count
+                            SELECT id, interaction_summary, personal_thought,
+                                   timestamp,
+                                   JSON_EXTRACT(emotions, '$[0].type') AS primary_emotion,
+                                   JSON_LENGTH(involved_users) AS user_count
                             FROM ai_diary
                             {where_clause}
                             ORDER BY timestamp {order}
@@ -5106,38 +5108,34 @@ class SynthWebUIInterface:
                         await cur.execute(query, params_list)
                         rows = await cur.fetchall()
 
-                        # Check if there are more results
                         has_more = len(rows) > per_page
                         if has_more:
                             rows = rows[:per_page]
 
-                        # Estimate total count based on current page
                         if page == 1 and not has_more:
                             total_count = len(rows)
                         else:
-                            # Approximate: if we have full page, estimate more pages exist
                             total_count = (
                                 offset + len(rows) + (per_page if has_more else 0)
                             )
                     else:
-                        # With archived: use simpler UNION but with LIMIT push-down
                         query = f"""
                             SELECT * FROM (
-                                (SELECT id, content as content, personal_thought as personal_thought, 
-                                       timestamp, interaction_summary,
-                                       JSON_EXTRACT(emotions, '$[0].type') as primary_emotion,
-                                       JSON_LENGTH(involved_users) as user_count,
-                                       0 as archived
+                                (SELECT id, interaction_summary, personal_thought,
+                                        timestamp,
+                                        JSON_EXTRACT(emotions, '$[0].type') AS primary_emotion,
+                                        JSON_LENGTH(involved_users) AS user_count,
+                                        0 AS archived
                                 FROM ai_diary
                                 {where_clause}
                                 ORDER BY timestamp {order}
                                 LIMIT {per_page * 2})
                                 UNION ALL
-                                (SELECT id, content as content, personal_thought as personal_thought, 
-                                       timestamp, interaction_summary,
-                                       JSON_EXTRACT(emotions, '$[0].type'),
-                                       JSON_LENGTH(involved_users),
-                                       1 as archived
+                                (SELECT id, interaction_summary, personal_thought,
+                                        timestamp,
+                                        JSON_EXTRACT(emotions, '$[0].type'),
+                                        JSON_LENGTH(involved_users),
+                                        1 AS archived
                                 FROM ai_diary_archive
                                 {where_clause}
                                 ORDER BY timestamp {order}
@@ -5160,24 +5158,20 @@ class SynthWebUIInterface:
                             rows = rows[:per_page]
                         total_count = offset + len(rows) + (per_page if has_more else 0)
 
-                    # Build minimal response objects with timezone conversion
+                    # Build response — row indices: 0=id,1=interaction_summary,2=personal_thought,
+                    # 3=timestamp,4=primary_emotion,5=user_count,[6=archived]
                     for row in rows:
-                        # Emit explicit UTC timestamps; naive datetimes are assumed local TZ.
                         timestamp_str = self._dt_to_utc_iso(row[3])
 
                         entries.append(
                             {
                                 "id": row[0],
-                                "content": row[1],
+                                "interaction_summary": row[1],
                                 "personal_thought": row[2],
                                 "timestamp": timestamp_str,
-                                "interaction_summary": row[4],
-                                "primary_emotion": row[
-                                    5
-                                ],  # Single emotion instead of array
-                                "user_count": row[6]
-                                or 0,  # Count instead of full array
-                                "archived": bool(row[7]) if len(row) > 7 else False,
+                                "primary_emotion": row[4],
+                                "user_count": row[5] or 0,
+                                "archived": bool(row[6]) if len(row) > 6 else False,
                             }
                         )
 

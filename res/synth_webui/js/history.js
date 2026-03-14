@@ -264,19 +264,21 @@ async function loadHistoryChat() {
 function renderInteractionEntry(entry) {
     const timestamp = formatTimestamp(entry.timestamp);
     const archived = entry.archived ? ' archived' : '';
-    let safeContent = escapeHtml(entry.content || ''); safeContent = safeContent.replace(/^[\s\u00A0]+/, '').replace(/[\n\r]+$/, ''); const isLong = safeContent.split('\n').length > 6 || safeContent.length > 800; const longClass = isLong ? ' history-entry-content--limited' : '';
-    let safeThought = escapeHtml(entry.personal_thought || ''); safeThought = safeThought.replace(/^[\s\u00A0]+/, '').replace(/[\n\r]+$/, '');
+    // Interactions shows interaction_summary as main body — NOT the diary prose (content).
+    let safeSummary = escapeHtml(entry.interaction_summary || '').replace(/^[\s\u00A0]+/, '').replace(/[\n\r]+$/, '');
+    const summaryIsLong = safeSummary.split('\n').length > 6 || safeSummary.length > 800;
+    const longClass = summaryIsLong ? ' history-entry-content--limited' : '';
+    let safeThought = escapeHtml(entry.personal_thought || '').replace(/^[\s\u00A0]+/, '').replace(/[\n\r]+$/, '');
 
     return `
         <div class="history-entry${archived}">
             <div class="history-entry-header">
                 <div class="history-entry-meta">
                     <div class="history-entry-date">📅 ${timestamp}</div>
-                    ${entry.interaction_summary ? `<div class="history-entry-detail">${escapeHtml(entry.interaction_summary)}</div>` : ''}
                 </div>
             </div>
-            <div class="history-entry-content${longClass}">${safeContent}</div>
-            ${entry.personal_thought ? `<div class="history-entry-detail"><strong>💭 Thought:</strong> ${safeThought}</div>` : ''}
+            <div class="history-entry-content${longClass}">${safeSummary || '<em style="opacity:0.5">No summary available</em>'}</div>
+            ${safeThought ? `<div class="history-entry-detail"><strong>💭 Thought:</strong> ${safeThought}</div>` : ''}
             ${entry.primary_emotion ? `<div class="history-entry-detail"><strong>😊 Emotion:</strong> ${entry.primary_emotion}</div>` : ''}
             ${entry.user_count > 0 ? `<div class="history-entry-detail"><strong>👥 With:</strong> ${entry.user_count} user${entry.user_count > 1 ? 's' : ''}</div>` : ''}
         </div>
