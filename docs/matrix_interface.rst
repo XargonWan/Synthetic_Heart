@@ -99,7 +99,7 @@ Troubleshooting
 Missing dependency
    ``matrix-nio`` is optional; if it is not installed you will see
    ``matrix-nio dependency missing`` in the logs and the interface will stay
-   disabled. Re-run ``pip install -r requirements.txt``.
+   disabled. Install it via ``uv sync`` (or `pip install matrix-nio`).
 
 Login failures
    Ensure the account credentials are correct. When using an access token, leave

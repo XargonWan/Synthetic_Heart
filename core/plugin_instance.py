@@ -504,10 +504,24 @@ async def handle_incoming_message(
                 )
 
         # Unified multimodal extraction (extract BEFORE prompt building so
-        # attachments flow through the pipeline with full context)
-        attachments = await _extract_multimodal_attachments(
-            bot, message, interface_name
+        # attachments flow through the pipeline with full context).
+        # Skip extraction ONLY when the voice was already transcribed to text
+        # (e.g. by Auris STT). If the message has is_voice_input=True but NO
+        # text, it means transcription failed/was skipped and we need the raw
+        # audio attachment so the LLM engine can process it natively.
+        _is_voice_input = isinstance(context_memory_or_prompt, dict) and bool(
+            context_memory_or_prompt.get("is_voice_input", False)
         )
+        _has_transcribed_text = bool(getattr(message, "text", None))
+        if _is_voice_input and _has_transcribed_text:
+            attachments: list[dict] = []
+            log_debug(
+                "[plugin_instance] Skipping multimodal extraction: is_voice_input=True and text present (already transcribed)"
+            )
+        else:
+            attachments = await _extract_multimodal_attachments(
+                bot, message, interface_name
+            )
         if attachments:
             log_info(
                 f"[plugin_instance] Message contains {len(attachments)} attachments from user {user_id}"
@@ -661,12 +675,53 @@ async def handle_incoming_message(
             f"[flow] -> LLM plugin: handing off chat_id={getattr(message, 'chat_id', None)} interface={interface}"
         )
 
+    # ── Scope-based engine resolution ───────────────────────────────
+    # Determine whether this request should be routed to a different
+    # cortex engine than the globally-loaded one (e.g. TRAINER_CORTEX).
+    effective_plugin = plugin
     try:
-        if plugin is None:
+        _scope: str | None = None
+        if isinstance(context_memory_or_prompt, dict):
+            if context_memory_or_prompt.get("is_trainer"):
+                _scope = "trainer"
+            elif context_memory_or_prompt.get("grillo_beat"):
+                _scope = "grillo"
+
+        log_debug(
+            f"[plugin_instance] Scope routing: _scope={_scope}, "
+            f"is_trainer={context_memory_or_prompt.get('is_trainer') if isinstance(context_memory_or_prompt, dict) else 'N/A'}, "
+            f"global_plugin={plugin.__class__.__name__ if plugin else None}"
+        )
+
+        if _scope is not None:
+            from core.config import get_active_cortex_engine
+
+            scope_engine_name = await get_active_cortex_engine(scope=_scope)
+            global_engine_name = (
+                plugin.__class__.__module__.split(".")[-1] if plugin is not None else ""
+            )
+            if scope_engine_name and scope_engine_name != global_engine_name:
+                reg = get_cortex_registry()
+                scope_engine = reg.get_engine(scope_engine_name)
+                if scope_engine is None:
+                    scope_engine = reg.load_engine(scope_engine_name)
+                if scope_engine is not None:
+                    effective_plugin = scope_engine
+                    log_info(
+                        f"[plugin_instance] Scope override: using '{scope_engine_name}' "
+                        f"for scope='{_scope}' instead of global '{global_engine_name}'"
+                    )
+    except Exception as scope_exc:
+        log_warning(
+            f"[plugin_instance] Scope routing failed, falling back to global plugin: {scope_exc}"
+        )
+
+    try:
+        if effective_plugin is None:
             log_error("[plugin_instance] No LLM plugin loaded, cannot process message")
             raise ValueError("No LLM plugin loaded")
 
-        result = await plugin.handle_incoming_message(bot, message, prompt)
+        result = await effective_plugin.handle_incoming_message(bot, message, prompt)
         try:
             _log_llm_traffic(prompt, result, interface)
         except Exception as e:

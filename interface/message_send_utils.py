@@ -720,11 +720,16 @@ async def cortex_response_send(
         json_data = extract_json_from_text(text)
         if json_data:
             log_debug(f"[cortex_response_send] JSON parsed successfully: {json_data}")
-        elif ("{" in text and "}" in text) or ("[" in text and "]" in text):
+        elif text.lstrip().startswith(("{", "[")):
+            # Text genuinely starts with a JSON-like structure but failed to
+            # parse — route through the corrector to attempt recovery.
+            # NOTE: We intentionally do NOT match on braces *anywhere* in the
+            # text (e.g. emotion tags like ``{happy 10}`` or markdown) — only
+            # text that *starts* with ``{`` or ``[`` is treated as potential
+            # malformed JSON.
             log_debug(
-                f"[cortex_response_send] Text contains JSON-like content but failed to parse: {text[:200]}..."
+                f"[cortex_response_send] Text starts with JSON-like content but failed to parse: {text[:200]}..."
             )
-            # Try to process with action parser if available
             try:
                 from types import SimpleNamespace
                 from datetime import datetime
@@ -735,9 +740,6 @@ async def cortex_response_send(
                 message.original_text = text
                 message.thread_id = kwargs.get("thread_id")
                 message.date = datetime.utcnow()
-                # mark origin so corrector will operate on this artificial message
-                # mark origin to indicate AI/cortex output; no need for multiple
-                # legacy flags since we now normalise on "from_cortex" throughout.
                 message.from_cortex = True
 
                 current_interface = "telegram"
@@ -766,17 +768,12 @@ async def cortex_response_send(
                     )
                     return None
                 else:
-                    # If the text looked JSON-like but orchestrator declined to
-                    # handle it (returned None), we should block rather than
-                    # echo the potentially-invalid payload back to the user.
-                    if "{" in (text or "") or "[" in (text or ""):
-                        log_warning(
-                            "[cortex_response_send] corrector_orchestrator returned None on JSON-like text; blocking to prevent invalid send"
-                        )
-                        return None
-                    log_debug(
-                        "[cortex_response_send] corrector_orchestrator returned None -> forwarding as normal text"
+                    # Orchestrator declined — block to prevent sending raw
+                    # malformed JSON to the user.
+                    log_warning(
+                        "[cortex_response_send] corrector_orchestrator returned None on JSON-like text; blocking to prevent invalid send"
                     )
+                    return None
 
             except Exception as e:
                 log_debug(f"[cortex_response_send] corrector_orchestrator failed: {e}")
@@ -790,8 +787,67 @@ async def cortex_response_send(
         try:
             from types import SimpleNamespace
 
-            # Handle different JSON formats
-            if isinstance(json_data, dict) and "actions" in json_data:
+            # If the JSON payload contains any unexpected top-level keys,
+            # escalate to the corrector so the LLM can resend proper actions.
+            if isinstance(json_data, dict):
+                try:
+                    from core.validation_registry import get_validation_registry
+
+                    allowed_metadata = (
+                        get_validation_registry().get_response_metadata_keys()
+                    )
+                except Exception:
+                    allowed_metadata = []
+                extra_keys = [
+                    k
+                    for k in json_data.keys()
+                    if k != "actions" and k not in allowed_metadata
+                ]
+                if extra_keys:
+                    log_warning(
+                        f"[cortex_response_send] JSON contains unexpected top-level keys {extra_keys}; invoking corrector"
+                    )
+                    # build a dummy message for the corrector call
+                    msg_obj = SimpleNamespace()
+                    msg_obj.chat_id = chat_id
+                    msg_obj.text = ""
+                    msg_obj.original_text = text
+                    msg_obj.thread_id = kwargs.get("thread_id")
+                    msg_obj.from_cortex = True
+
+                    corr_ctx = {
+                        "interface": "telegram",
+                        "original_chat_id": chat_id,
+                        "original_thread_id": kwargs.get("thread_id"),
+                        "original_text": text[:500] if text else "",
+                        "from_cortex": True,
+                    }
+                    from core import action_parser
+
+                    try:
+                        corr_res = await action_parser.corrector_orchestrator(
+                            text, corr_ctx, bot, msg_obj
+                        )
+                        if corr_res is True:
+                            log_debug(
+                                "[cortex_response_send] corrector handled extra keys; not forwarding text"
+                            )
+                            return
+                        elif corr_res is False:
+                            log_warning(
+                                "[cortex_response_send] corrector blocked message due to extra keys"
+                            )
+                            return None
+                        else:
+                            log_warning(
+                                "[cortex_response_send] corrector declined; blocking message"
+                            )
+                            return None
+                    except Exception as e:
+                        log_warning(
+                            f"[cortex_response_send] corrector invocation failed: {e}"
+                        )
+                        return None
                 actions = json_data["actions"]
                 if not isinstance(actions, list):
                     log_warning("[cortex_response_send] actions field must be a list")

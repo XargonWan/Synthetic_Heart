@@ -60,6 +60,41 @@ async def test_corrector_flags_and_block(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_corrector_invoked_for_extra_top_level_keys(monkeypatch):
+    """If the LLM JSON includes unregistered top-level keys the corrector should
+    be executed before any actions are run.
+    """
+    called = {}
+
+    async def fake_corrector(text, context=None, bot=None, message=None):
+        called["text"] = text
+        called["context"] = context.copy() if context else {}
+        called["message"] = message
+        # tell the caller that correction blocked the message
+        return False
+
+    monkeypatch.setattr("core.action_parser.corrector_orchestrator", fake_corrector)
+
+    sent = []
+
+    async def fake_send(bot, chat_id, text, *a, **kw):
+        sent.append((chat_id, text))
+        return "ok"
+
+    monkeypatch.setattr("interface.message_send_utils._send_with_retry", fake_send)
+
+    # valid JSON with actions plus an extra 'message' key
+    text = '{"actions":[{"type":"message_telegram_bot","payload":{"text":"hi","interface_path":"t/1"}}],"message":"oops"}'
+    res = await cortex_response_send("bot", 321, text)
+    assert res is None
+    assert called["text"] == text
+    # ensure corrector saw cortical flag in context
+    assert called["context"].get("from_cortex") is True
+    # nothing should have been sent
+    assert sent == []
+
+
+@pytest.mark.asyncio
 async def test_dedupe_not_required_when_blocking(monkeypatch):
     """If corrector blocks, multiple identical calls shouldn't trigger sends."""
 

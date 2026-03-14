@@ -1,5 +1,8 @@
 // chat-window.mjs — encapsulated Chat window management using SynthWindowManager/WinBox
 
+// Experimental flag carried from server via __SYNTH_CONFIG -> main.js
+const MULTI_SESSION = (typeof window !== 'undefined' && window.MULTI_SESSION) || false;
+
 // Inject chat-specific styles (keeps chat CSS encapsulated inside this module)
 function injectChatStyles() {
     try {
@@ -10,11 +13,85 @@ function injectChatStyles() {
         /* chat styles (injected by chat-window.mjs) */
         .synth-chat { display:flex; flex-direction:column; height:100%; min-height:0; width:100%; position:relative; }
         .synth-chat-header { width:100%; display:flex; align-items:center; justify-content:flex-start; padding:0.35rem 0.6rem 0 0.6rem; }
-        .synth-chat-body { flex:1 1 auto; min-height:0; overflow-y:auto; }
+        .synth-chat-body { flex:1 1 auto; min-height:0; overflow:hidden; transition: overflow 0s; }
+        .synth-chat-body.at-max { overflow-y:auto; }
         .synth-chat-footer { flex:0 0 auto; position:sticky; bottom:0; z-index:2; background: inherit; }
         .synth-chat-composer { width:100%; display:flex; gap:0.6rem; align-items:flex-end; padding:0.6rem 1rem; box-sizing:border-box; }
         #input { flex:1 1 auto; min-height:2.4rem; max-height:7rem; resize:none; }
-        #send { flex:0 0 auto; border-radius:50%; height:2.6rem; width:2.6rem; }
+        #send { flex:0 0 auto; border-radius:50%; height:2.6rem; width:2.6rem; cursor:pointer; transition: background 0.2s, transform 0.15s; }
+        #send.send-mode { /* text ready */ }
+        #send.mic-mode  { background: var(--accent, #6bfefe); color: #111; }
+        #send.recording { background: #d94; color: #fff; animation: synth-mic-pulse 0.9s ease-in-out infinite; }
+        /* Brighter pulse while voice is actively detected (toggle mode) */
+        #send.recording.speaking {
+            background: #e63;
+            animation: synth-mic-pulse-active 0.45s ease-in-out infinite;
+            box-shadow: 0 0 0 4px rgba(230,60,30,0.35);
+        }
+        #send.processing {
+            background: rgba(255,255,255,0.08);
+            color: transparent;
+            border: 2px solid var(--accent, #6bfefe);
+            cursor: pointer;
+            position: relative;
+            overflow: hidden;
+        }
+        #send.processing::before {
+            content: '';
+            position: absolute;
+            inset: 4px;
+            border: 2px solid transparent;
+            border-top-color: var(--accent, #6bfefe);
+            border-radius: 50%;
+            animation: synth-stt-spin 0.75s linear infinite;
+        }
+        #send.processing::after {
+            content: '✕';
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.8rem;
+            color: var(--accent, #6bfefe);
+            opacity: 0;
+            transition: opacity 0.15s;
+        }
+        #send.processing:hover::after  { opacity: 1; }
+        #send.processing:hover::before { opacity: 0.3; }
+        @keyframes synth-stt-spin {
+            from { transform: rotate(0deg); }
+            to   { transform: rotate(360deg); }
+        }
+        @keyframes synth-mic-pulse {
+            0%,100% { transform:scale(1);   box-shadow:0 0 0 0   rgba(210,100,0,0.5); }
+            50%      { transform:scale(1.12); box-shadow:0 0 0 7px rgba(210,100,0,0);   }
+        }
+        @keyframes synth-mic-pulse-active {
+            0%,100% { transform:scale(1);    box-shadow:0 0 0 0   rgba(230,60,30,0.7); }
+            50%      { transform:scale(1.18); box-shadow:0 0 0 9px rgba(230,60,30,0);   }
+        }
+        /* User audio processing indicator */
+        .user-audio-indicator { display:flex; flex-direction:column; align-items:flex-end; margin-bottom:0.4rem; }
+        .user-audio-indicator .bubble {
+            background: rgba(255,255,255,0.06);
+            border: 1.5px solid var(--accent, #6bfefe);
+            color: var(--text-soft);
+            display:flex; align-items:center; gap:0.5rem; padding:0.7rem 1rem 0.7rem;
+        }
+        .user-audio-indicator .bubble.audio-error {
+            border-color: #d94;
+            color: #d94;
+        }
+        .user-audio-indicator .mic-label { font-size:0.8rem; opacity:0.7; }
+        .user-audio-indicator .dot {
+            width:7px; height:7px; border-radius:50%;
+            background: var(--accent, #6bfefe);
+            display:inline-block;
+            animation: typingDot 1.4s ease-in-out infinite;
+        }
+        .user-audio-indicator .dot:nth-child(2) { animation-delay:0.2s; }
+        .user-audio-indicator .dot:nth-child(3) { animation-delay:0.4s; }
         .synth-chat-archive { margin-left:auto; margin-top:0.6rem; margin-right:0.6rem; display:flex; gap:0.5rem; align-items:center; }
         .synth-chat-archive .pill { padding:0.4rem 0.6rem; }
         /* Message day separator */
@@ -23,8 +100,19 @@ function injectChatStyles() {
         /* Message timestamp in bubble */
         .bubble { position: relative; padding: 1rem 1.2rem 1.8rem; }
         .bubble-time { position: absolute; right: 8px; bottom: 6px; font-size: 0.75rem; color: var(--text-soft); opacity: 0.9; }
-        `;
-        document.head.appendChild(style);
+        /* Synth bubbles with attached TTS audio – click to replay */
+        .bubble.synth.clickable-audio { cursor: pointer; }
+        .bubble.synth.clickable-audio::after {
+            content: '🔊';
+            position: absolute;
+            bottom: 6px;
+            left: 10px;
+            font-size: 0.75rem;
+            opacity: 0.5;
+            pointer-events: none;
+        }
+        .bubble.synth.clickable-audio:hover::after { opacity: 0.9; }
+        `, document.head.appendChild(style);
     } catch (e) { /* ignore */ }
 }
 
@@ -50,13 +138,78 @@ function createChatTemplate() {
                 <div class="synth-chat-footer synth-chat-toolbar">
                     <form id="composer" class="synth-chat-composer" autocomplete="off">
                         <textarea id="input" placeholder="Type a message…" rows="2"></textarea>
-                        <button id="send" type="submit" disabled="disabled">➤</button>
+                        <button id="send" type="button">➤</button>
                     </form>
                 </div>
             </div>
         `;
         document.body.appendChild(tpl);
     } catch (e) { /* ignore */ }
+}
+
+// ---------------------------------------------------------------------------
+// Auto-resize the WinBox chat window to fit content, anchored to the bottom.
+// Grows upward until 65% viewport height; only then enables scroll in body.
+// ---------------------------------------------------------------------------
+function _attachChatAutoResize(winbox, mount) {
+    if (!winbox || !mount) return;
+
+    const TITLE_BAR_H = 44; // approximate WinBox title-bar height in px
+    const getMaxH = () => Math.floor(window.innerHeight * 0.65);
+    let _rafId = null;
+
+    function _resize() {
+        _rafId = null;
+        try {
+            // Don't interfere while the user has minimized/maximized
+            if (winbox.min || winbox.max || winbox.full) return;
+
+            const header = mount.querySelector('.synth-chat-header');
+            const body   = mount.querySelector('.synth-chat-body');
+            const footer = mount.querySelector('.synth-chat-footer');
+            if (!body) return;
+
+            const headerH = header ? header.offsetHeight : 0;
+            const footerH = footer ? footer.offsetHeight : 0;
+            // scrollHeight gives the natural (un-clipped) height of the messages
+            const bodyNatural = body.scrollHeight;
+            const contentH = headerH + bodyNatural + footerH;
+            const maxH = getMaxH();
+            const targetH = Math.min(contentH + TITLE_BAR_H + 8, maxH);
+            const minH = headerH + footerH + TITLE_BAR_H + 24;
+            const finalH = Math.max(minH, targetH);
+
+            // Toggle the at-max class to enable scrollbar only when capped
+            body.classList.toggle('at-max', finalH >= maxH);
+
+            if (Math.abs((winbox.height || 0) - finalH) < 3) return;
+
+            // Keep the window bottom-anchored: move y up by the height delta
+            const oldBottom = (winbox.y || 0) + (winbox.height || 0);
+            const newY = Math.max(0, oldBottom - finalH);
+            winbox.resize(winbox.width, finalH);
+            winbox.move(winbox.x, newY);
+        } catch (e) { /* ignore */ }
+    }
+
+    function _schedule() {
+        if (_rafId) cancelAnimationFrame(_rafId);
+        _rafId = requestAnimationFrame(_resize);
+    }
+
+    // Watch for new messages
+    const messagesEl = mount.querySelector('#messages');
+    if (messagesEl) {
+        const mo = new MutationObserver(_schedule);
+        mo.observe(messagesEl, { childList: true, subtree: true, characterData: true });
+    }
+
+    // Also observe window resize (viewport changes)
+    window.addEventListener('resize', _schedule, { passive: true });
+
+    // Initial sizing — wait one tick for history to load from localStorage
+    _schedule();
+    setTimeout(_schedule, 120);
 }
 
 export async function createChatWindow() {
@@ -132,10 +285,10 @@ export async function createChatWindow() {
                 title: 'Chat',
                 mount: mount,
                 width: 420,
-                height: '70%',
+                height: 180,
                 x: 18,
                 y: 'bottom',
-                overflow: true,
+                overflow: false,
 
                 iconText: '💬',
                 dockLabel: 'Chat',
@@ -143,6 +296,9 @@ export async function createChatWindow() {
                 dockClass: 'chat-toggle-btn',
                 className: 'synth-winbox no-close'
             });
+
+            // Auto-grow the WinBox when messages are added (anchored to bottom)
+            try { _attachChatAutoResize(winbox, mount); } catch (e) { /* ignore */ }
 
             // Slight title size tweak for visibility
             try {
@@ -164,6 +320,19 @@ export async function createChatWindow() {
 
 // --- Chat UI helpers migrated here ---
 const CHAT_WINDOW_STATE_KEY = 'synth-webui-window-state';
+
+// Scroll the .synth-chat-body ancestor (the real scroll container) to the bottom.
+// Falls back to scrolling the element itself when no ancestor is found.
+function _scrollToBottom(el) {
+    try {
+        const body = el ? el.closest('.synth-chat-body') : null;
+        if (body) {
+            body.scrollTop = body.scrollHeight;
+        } else if (el) {
+            el.scrollTop = el.scrollHeight;
+        }
+    } catch (e) { /* ignore */ }
+}
 const CHAT_RECT_KEY = 'synth-webui-chat-rect';
 const TYPING_INDICATOR_KEY = 'synth-webui-typing-indicator';
 const TYPING_INDICATOR_TS_KEY = 'synth-webui-typing-indicator-ts';
@@ -218,7 +387,7 @@ function addTypingIndicator() {
         bubble.innerHTML = '<span class="dot"></span><span class="dot"></span><span class="dot"></span>';
         container.appendChild(bubble);
         messagesEl.appendChild(container);
-        messagesEl.scrollTop = messagesEl.scrollHeight;
+        _scrollToBottom(messagesEl);
         try { localStorage.setItem(TYPING_INDICATOR_KEY, '1'); } catch (e) { /* ignore */ }
         try { localStorage.setItem(TYPING_INDICATOR_TS_KEY, String(Date.now())); } catch (e) { /* ignore */ }
         try { _scheduleTypingTimeout(); } catch (e) { /* ignore */ }
@@ -286,13 +455,66 @@ function appendMessage(container, sender, text, ts) {
     bubble.innerHTML = `<div class="bubble-sender">${senderLabel}</div><div class="bubble-content">${escaped}</div><div class="bubble-time">${timeText}</div>`;
     wrapper.appendChild(bubble);
     container.appendChild(wrapper);
-    container.scrollTop = container.scrollHeight;
+    // Scroll the actual scrollable ancestor (.synth-chat-body) to the bottom.
+    // #messages itself has overflow:hidden — the parent body is the real scroll container.
+    _scrollToBottom(container);
 
     if (sender === 'synth') {
         try { if (window.SynthChat && typeof window.SynthChat.maybeNotify === 'function') window.SynthChat.maybeNotify(text); } catch (e) { /* ignore */ }
         try { removeTypingIndicator(); } catch (e) { /* ignore */ }
     }
 }
+
+// ── User audio processing indicator (3-dots bubble while STT runs) ─────────
+let _userAudioIndicatorEl = null;
+
+function _addUserAudioIndicator(container) {
+    _removeUserAudioIndicator();
+    if (!container) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'user-audio-indicator';
+    wrap.innerHTML = `
+        <div class="bubble user">
+            <span class="mic-label">🎤</span>
+            <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+        </div>`;
+    container.appendChild(wrap);
+    _userAudioIndicatorEl = wrap;
+    _scrollToBottom(container);
+}
+
+function _removeUserAudioIndicator() {
+    if (_userAudioIndicatorEl) {
+        try { _userAudioIndicatorEl.remove(); } catch (e) { /* ignore */ }
+        _userAudioIndicatorEl = null;
+    }
+}
+
+function _replaceUserAudioIndicator(container, text, ts) {
+    _removeUserAudioIndicator();
+    if (container && text) appendMessage(container, 'user', text, ts || Date.now());
+}
+
+function _setUserAudioError(container, msg) {
+    if (_userAudioIndicatorEl) {
+        const bubble = _userAudioIndicatorEl.querySelector('.bubble');
+        if (bubble) {
+            bubble.classList.add('audio-error');
+            bubble.innerHTML = `<span>${msg || '❌ Transcription failed'}</span>`;
+        }
+        // auto-remove after 4 s
+        setTimeout(_removeUserAudioIndicator, 4000);
+    } else if (container) {
+        // fallback: insert a transient error row
+        const wrap = document.createElement('div');
+        wrap.className = 'user-audio-indicator';
+        wrap.innerHTML = `<div class="bubble user audio-error"><span>${msg || '❌ Transcription failed'}</span></div>`;
+        container.appendChild(wrap);
+        _scrollToBottom(container);
+        setTimeout(() => { try { wrap.remove(); } catch(e){} }, 4000);
+    }
+}
+// ─────────────────────────────────────────────────────────────────────────────
 
 export function initChatUI() {
     try {
@@ -311,11 +533,269 @@ export function initChatUI() {
         let ws = null;
         let _typingAnimActive = false; // true when user is typing; reset after submit
 
-        function updateSendState() {
+        // ── Mic recording state ────────────────────────────────────────────
+        let micMediaRecorder = null;
+        let micAudioChunks   = [];
+        let micStream        = null;   // shared: ambient VAD + recording
+        let micAmbientCtx    = null;
+        let micAmbientAnalyser = null;
+        let micVADInterval   = null;
+        let micRecordingMode = null;   // 'ptt' | 'toggle' | null
+        let micPressTimer    = null;   // setTimeout id OR string 'long'
+        let micSilenceTimer  = null;
+        let micSpeaking      = false;
+        let micSilenceMs     = 0;
+        let micHasSpoken     = false;  // true once voice is detected during current recording
+        let _sttAbortController = null;  // AbortController for in-flight STT request
+        const MIC_LONG_PRESS_MS   = 300;   // ms before PTT activates
+        const MIC_SILENCE_SEND_MS = 1800;  // ms of silence after speech → auto-send (toggle)
+        const MIC_VAD_THRESHOLD   = 0.015; // RMS volume threshold
+
+        // ── Button mode (➤ send / 🎤 mic / ⏹ recording / ⏳ processing) ──
+        function updateButtonMode() {
             if (!sendBtn || !input) return;
             const hasText = input.value.trim().length > 0;
             const wsReady = ws && ws.readyState === WebSocket.OPEN;
-            sendBtn.disabled = !(hasText && wsReady);
+            if (_sttAbortController) {
+                // STT in progress: spin + click = cancel
+                sendBtn.type        = 'button';
+                sendBtn.textContent = '';
+                sendBtn.disabled    = false;
+                sendBtn.className   = 'processing';
+                sendBtn.title       = 'Tap to cancel transcription';
+            } else if (micRecordingMode) {
+                sendBtn.type        = 'button';
+                sendBtn.textContent = '⏹';
+                sendBtn.disabled    = false;
+                sendBtn.className   = 'recording';
+                sendBtn.title       = micRecordingMode === 'ptt' ? 'Release to send (PTT)' : 'Tap to stop & send';
+            } else if (hasText) {
+                sendBtn.type        = 'submit';
+                sendBtn.textContent = '➤';
+                sendBtn.disabled    = !wsReady;
+                sendBtn.className   = 'send-mode';
+                sendBtn.title       = 'Send message (Enter)';
+            } else {
+                sendBtn.type        = 'button';
+                sendBtn.textContent = '🎤';
+                sendBtn.disabled    = false;
+                sendBtn.className   = 'mic-mode';
+                sendBtn.title       = 'Hold to record (PTT) • Tap to toggle recording';
+            }
+        }
+
+        // ── Ambient VAD (volume-based, triggers look-at-camera always) ───────
+        function _startVADLoop(stream) {
+            if (micVADInterval) return;
+            try {
+                micAmbientCtx = micAmbientCtx || new (window.AudioContext || window.webkitAudioContext)();
+                const src = micAmbientCtx.createMediaStreamSource(stream);
+                micAmbientAnalyser = micAmbientCtx.createAnalyser();
+                micAmbientAnalyser.fftSize = 512;
+                src.connect(micAmbientAnalyser);
+                micSpeaking = false; micSilenceMs = 0;
+                const buf = new Float32Array(micAmbientAnalyser.fftSize);
+                micVADInterval = setInterval(() => {
+                    try {
+                        if (!micAmbientAnalyser) return;
+                        micAmbientAnalyser.getFloatTimeDomainData(buf);
+                        const rms = Math.sqrt(buf.reduce((s, v) => s + v * v, 0) / buf.length);
+                        if (rms > MIC_VAD_THRESHOLD) {
+                            micSilenceMs = 0;
+                            if (!micSpeaking) {
+                                micSpeaking = true;
+                                try { if (typeof window._synthVADLookAtCamera === 'function') window._synthVADLookAtCamera(true); } catch (_) { /* ignore */ }
+                            }
+                            if (micRecordingMode === 'toggle') {
+                                clearTimeout(micSilenceTimer); micSilenceTimer = null;
+                                // Mark that voice was detected at least once in this recording
+                                micHasSpoken = true;
+                                // Visual: brighter pulse while speaking
+                                if (sendBtn) sendBtn.classList.add('speaking');
+                            }
+                        } else {
+                            micSilenceMs += 100;
+                            if (micSpeaking && micSilenceMs > 400) {
+                                micSpeaking = false;
+                                try { if (typeof window._synthVADLookAtCamera === 'function') window._synthVADLookAtCamera(false); } catch (_) { /* ignore */ }
+                                // Visual: dim back to idle pulse when silence detected
+                                if (sendBtn) sendBtn.classList.remove('speaking');
+                            }
+                            // Auto-send only if user actually spoke (avoid sending empty clips)
+                            if (micRecordingMode === 'toggle' && micHasSpoken && !micSilenceTimer && micSilenceMs >= MIC_SILENCE_SEND_MS) {
+                                micSilenceTimer = setTimeout(() => { stopRecordingAndSend(); }, 0);
+                            }
+                        }
+                    } catch (_) { /* ignore */ }
+                }, 100);
+            } catch (e) { console.warn('[chat-window] VAD loop failed:', e); }
+        }
+
+        async function _ensureMicStream() {
+            if (micStream && micStream.active) return micStream;
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+                micStream = stream;
+                _startVADLoop(stream);
+                return stream;
+            } catch (e) { console.warn('[chat-window] Mic permission denied:', e); return null; }
+        }
+
+        // ── Recording ─────────────────────────────────────────────────
+        async function startRecording(mode) {
+            if (micRecordingMode) return;
+            const stream = await _ensureMicStream();
+            if (!stream) return;
+            try {
+                micAudioChunks = [];
+                micHasSpoken   = false;  // reset for each new recording
+                const mt = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus'
+                    : (MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '');
+                micMediaRecorder = mt ? new MediaRecorder(stream, { mimeType: mt }) : new MediaRecorder(stream);
+                micMediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) micAudioChunks.push(e.data); };
+                micMediaRecorder.start(100);
+                micRecordingMode = mode;
+                updateButtonMode();
+            } catch (e) { console.warn('[chat-window] startRecording failed:', e); micRecordingMode = null; updateButtonMode(); }
+        }
+
+        // helper to compute base URL for API calls.  When the UI is served
+        // directly from the backend (port 9009/9010) we can use relative paths.
+        // However in the typical dev container the static assets are fronted by
+        // nginx on port 3000/3001 which does *not* proxy /api, so relative fetches
+        // will return 404.  Detect that case and point to the backend port
+        // explicitly instead.
+        function _getApiBase() {
+            try {
+                const port = window.location.port;
+                // backend listens with TLS on 9009 and HTTP on 9010
+                if (port === '3000' || port === '3001' || port === '9007') {
+                    const proto = window.location.protocol === 'https:' ? 'https' : 'http';
+                    return `${proto}://${window.location.hostname}:9009`;
+                }
+            } catch (_) {
+                /* ignore */
+            }
+            return '';
+        }
+
+        async function stopRecordingAndSend() {
+            clearTimeout(micSilenceTimer); micSilenceTimer = null;
+            if (!micMediaRecorder || micRecordingMode === null) return;
+            micRecordingMode = null;
+            if (sendBtn) sendBtn.classList.remove('speaking');  // clear VAD visual
+            updateButtonMode();
+            await new Promise((resolve) => {
+                micMediaRecorder.onstop = async () => {
+                    try {
+                        const mt   = (micMediaRecorder && micMediaRecorder.mimeType) || 'audio/webm';
+                        const blob = new Blob(micAudioChunks, { type: mt });
+                        micAudioChunks = [];
+                        if (blob.size < 512) { resolve(); return; }
+                        const fd = new FormData();
+                        fd.append('file', blob, 'recording.webm');
+                        const base = _getApiBase();
+
+                        // Show user-side 3-dot bubble immediately
+                        if (messages) _addUserAudioIndicator(messages);
+
+                        // Enter processing state on the button
+                        _sttAbortController = new AbortController();
+                        updateButtonMode();
+
+                        let data = null;
+                        let aborted = false;
+                        try {
+                            const resp = await fetch(base + '/api/audio/upload', {
+                                method: 'POST',
+                                body: fd,
+                                signal: _sttAbortController.signal,
+                            });
+                            const json = await resp.json().catch(() => null);
+                            if (!resp.ok) {
+                                const errMsg = (json && json.error) ? json.error : `HTTP ${resp.status}`;
+                                throw new Error(errMsg);
+                            }
+                            data = json;
+                        } catch (fetchErr) {
+                            if (fetchErr && fetchErr.name === 'AbortError') {
+                                aborted = true;
+                                console.info('[chat-window] STT request cancelled by user');
+                            } else {
+                                console.warn('[chat-window] STT failed:', fetchErr);
+                                _setUserAudioError(messages, '❌ ' + (fetchErr.message || 'Transcription failed'));
+                            }
+                        } finally {
+                            _sttAbortController = null;
+                            updateButtonMode();
+                        }
+
+                        if (aborted) {
+                            // User cancelled — remove indicator silently
+                            _removeUserAudioIndicator();
+                        } else {
+                            const text = (data && data.text) ? String(data.text).trim() : '';
+                            if (text) {
+                                // Replace 3-dot bubble with the real transcribed text
+                                _replaceUserAudioIndicator(messages, text, Date.now());
+                                if (ws && ws.readyState === WebSocket.OPEN) {
+                                    ws.send(JSON.stringify({ text }));
+                                }
+                            } else if (data) {
+                                // Response OK but no text
+                                _setUserAudioError(messages, '⚠️ No speech detected');
+                            }
+                        }
+                    } catch (e) {
+                        console.warn('[chat-window] mic transcription failed:', e);
+                        _setUserAudioError(messages, '❌ Error: ' + (e.message || 'unknown'));
+                    }
+                    resolve();
+                };
+                try { micMediaRecorder.stop(); } catch (_) { resolve(); }
+                micMediaRecorder = null;
+            });
+        }
+
+        // ── PTT + toggle button interactions ───────────────────────────────
+        sendBtn.addEventListener('pointerdown', (e) => {
+            // If STT upload in progress, a click will cancel it (handled on pointerup)
+            if (_sttAbortController) { e.preventDefault(); return; }
+            if (input.value.trim().length > 0) return;
+            e.preventDefault();
+            micPressTimer = setTimeout(() => { micPressTimer = 'long'; startRecording('ptt'); }, MIC_LONG_PRESS_MS);
+        });
+        sendBtn.addEventListener('pointerup', (e) => {
+            // Cancel in-flight STT request if the user taps during processing
+            if (_sttAbortController) {
+                e.preventDefault();
+                _sttAbortController.abort();
+                return;
+            }
+            if (input.value.trim().length > 0) return;
+            e.preventDefault();
+            if (micPressTimer === 'long') {
+                stopRecordingAndSend();
+            } else {
+                clearTimeout(micPressTimer); micPressTimer = null;
+                if (micRecordingMode === 'toggle') { stopRecordingAndSend(); }
+                else { _ensureMicStream().then((s) => { if (s) startRecording('toggle'); }); }
+            }
+        });
+        sendBtn.addEventListener('pointerleave',  () => { if (micPressTimer !== 'long') { clearTimeout(micPressTimer); micPressTimer = null; } });
+        sendBtn.addEventListener('pointercancel', () => { if (micPressTimer !== 'long') { clearTimeout(micPressTimer); micPressTimer = null; } });
+
+        let _wsReconnectTimer = null;
+        let _wsReconnectDelay = 1500;  // ms; doubles on each failure, caps at 30s
+        const _WS_MAX_DELAY   = 30000;
+
+        function _scheduleReconnect() {
+            if (_wsReconnectTimer) return;
+            _wsReconnectTimer = setTimeout(() => {
+                _wsReconnectTimer = null;
+                if (!ws || ws.readyState === WebSocket.CLOSED) connectWs();
+            }, _wsReconnectDelay);
+            _wsReconnectDelay = Math.min(_wsReconnectDelay * 2, _WS_MAX_DELAY);
         }
 
         function connectWs() {
@@ -325,9 +805,17 @@ export function initChatUI() {
                 window.chatWs = ws;
 
                 ws.onopen = () => {
+                    _wsReconnectDelay = 1500;  // reset backoff on success
                     if (statusLabel) statusLabel.textContent = 'Connected';
                     if (statusIndicator) statusIndicator.classList.add('online');
                     updateSendState();
+                    // Try to start ambient VAD immediately if mic permission already granted.
+                    // This lets Synth look at the camera even when not in recording mode.
+                    // Silently ignored if permission hasn't been granted yet.
+                    _ensureMicStream().catch(() => {});
+                    // After the server pushes history messages on connect, scroll to bottom.
+                    // We use a small delay so the messages have time to render.
+                    setTimeout(() => { try { _scrollToBottom(messages); } catch (e) { /* ignore */ } }, 400);
                     // Send hello so server knows our capabilities
                     try {
                         ws.send(JSON.stringify({
@@ -339,14 +827,15 @@ export function initChatUI() {
                     } catch (e) { /* ignore */ }
                 };
                 ws.onclose = () => {
-                    if (statusLabel) statusLabel.textContent = 'Disconnected';
+                    if (statusLabel) statusLabel.textContent = 'Reconnecting…';
                     if (statusIndicator) statusIndicator.classList.remove('online');
-                    updateSendState();
+                    updateButtonMode();
+                    _scheduleReconnect();
                 };
                 ws.onerror = () => {
-                    if (statusLabel) statusLabel.textContent = 'Disconnected';
+                    if (statusLabel) statusLabel.textContent = 'Reconnecting…';
                     if (statusIndicator) statusIndicator.classList.remove('online');
-                    updateSendState();
+                    updateButtonMode();
                 };
                 window.pendingAnimationCommands = window.pendingAnimationCommands || window.pendingAnimationCommands;
                 ws.onmessage = (event) => {
@@ -446,6 +935,41 @@ export function initChatUI() {
                                     panel.dispatchEvent(new CustomEvent('archive:refresh', { detail: data }));
                                 }
                             } catch (e) { /* ignore */ }
+                        } else if (data && data.type === 'tts-play' && data.url) {
+                            // ── Vox TTS audio playback ────────────────────────────────────
+                            try {
+                                const voxEnabled = (typeof window.VOX_ENABLED !== 'undefined')
+                                    ? window.VOX_ENABLED
+                                    : (window.__SYNTH_CONFIG && window.__SYNTH_CONFIG.VOX_ENABLED !== undefined
+                                        ? window.__SYNTH_CONFIG.VOX_ENABLED
+                                        : true);
+                                if (voxEnabled) {
+                                    // Auto-play
+                                    try { new Audio(data.url).play().catch(() => {}); } catch (e) { /* ignore */ }
+
+                                    // Cache management
+                                    const cacheLimit = (typeof window.VOX_AUDIO_CACHE_SIZE === 'number' && window.VOX_AUDIO_CACHE_SIZE > 0)
+                                        ? window.VOX_AUDIO_CACHE_SIZE
+                                        : ((window.__SYNTH_CONFIG && window.__SYNTH_CONFIG.VOX_AUDIO_CACHE_SIZE) || 40);
+                                    window.__synth_tts_cache = window.__synth_tts_cache || [];
+                                    window.__synth_tts_cache.push({ url: data.url, ts: Date.now() });
+                                    while (window.__synth_tts_cache.length > cacheLimit) {
+                                        window.__synth_tts_cache.shift();
+                                    }
+
+                                    // Attach URL to the last synth bubble so the user can tap to replay
+                                    try {
+                                        if (messages) {
+                                            const synthBubbles = messages.querySelectorAll('.bubble.synth');
+                                            const lastBubble = synthBubbles.length > 0 ? synthBubbles[synthBubbles.length - 1] : null;
+                                            if (lastBubble) {
+                                                lastBubble.dataset.ttsUrl = data.url;
+                                                lastBubble.classList.add('clickable-audio');
+                                            }
+                                        }
+                                    } catch (e) { /* ignore */ }
+                                }
+                            } catch (e) { /* ignore */ }
                         }
                     } catch (e) {
                         // ignore non-JSON
@@ -517,7 +1041,21 @@ export function initChatUI() {
             });
         }
 
+        // ── Click-to-replay delegated handler ──────────────────────────────────
+        if (messages) {
+            messages.addEventListener('click', (ev) => {
+                try {
+                    const bubble = ev.target ? ev.target.closest('.bubble.synth.clickable-audio') : null;
+                    if (!bubble) return;
+                    const url = bubble.dataset.ttsUrl;
+                    if (!url) return;
+                    try { new Audio(url).play().catch(() => {}); } catch (e) { /* ignore */ }
+                } catch (e) { /* ignore */ }
+            });
+        }
+
         connectWs();
+        updateButtonMode(); // set initial icon state
         try {
             if (typeof localStorage !== 'undefined' && localStorage.getItem && localStorage.getItem(TYPING_INDICATOR_KEY)) {
                 // Respect configured RESPONSE_TIMEOUT: if typing indicator timestamp is older than allowed, clear it
@@ -642,7 +1180,7 @@ function bindArchiveButton() {
                     const payload = { session_id: typeof sessionId !== 'undefined' ? sessionId : null };
                     let out = null;
                     try {
-                        const res = await fetch('/api/chat/archive', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                        const res = await fetch((window.__getApiBase ? window.__getApiBase() : '') + '/api/chat/archive', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
                         out = res.ok ? await res.json() : null;
                     } catch (e) { out = null; }
 
@@ -674,12 +1212,13 @@ function saveChatState() {
         }
         const chatEl = document.getElementById('chat');
         if (!chatEl) return;
+        const storage = MULTI_SESSION ? sessionStorage : localStorage;
         const stateKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}` : `${CHAT_WINDOW_STATE_KEY}`;
         let state = 'normal';
         if (chatEl.classList.contains('minimized')) state = 'minimized';
         else if (chatEl.classList.contains('maximized')) state = 'maximized';
         else if (chatEl.classList.contains('expanded')) state = 'expanded';
-        try { localStorage.setItem(stateKey, state); } catch (e) { /* ignore */ }
+        try { storage.setItem(stateKey, state); } catch (e) { /* ignore */ }
 
         const rectKey = sessionId ? `${CHAT_RECT_KEY}-${sessionId}` : `${CHAT_RECT_KEY}`;
         try {
@@ -690,7 +1229,7 @@ function saveChatState() {
                 width: Math.round(rect.width),
                 height: Math.round(rect.height)
             };
-            localStorage.setItem(rectKey, JSON.stringify(payload));
+            storage.setItem(rectKey, JSON.stringify(payload));
         } catch (e) { /* ignore */ }
     } catch (e) { /* ignore */ }
 }
@@ -705,10 +1244,11 @@ function restoreChatState() {
         if (!chatEl) return;
         // Restore rect
         try {
-            const rectKey = sessionId ? `${CHAT_RECT_KEY}-${sessionId}` : `${CHAT_RECT_KEY}`;
+            const storage = MULTI_SESSION ? sessionStorage : localStorage;
+        const rectKey = sessionId ? `${CHAT_RECT_KEY}-${sessionId}` : `${CHAT_RECT_KEY}`;
             const legacyMobileKey = sessionId ? `${CHAT_RECT_KEY}-${sessionId}-mobile` : `${CHAT_RECT_KEY}-mobile`;
             const legacyDesktopKey = sessionId ? `${CHAT_RECT_KEY}-${sessionId}-desktop` : `${CHAT_RECT_KEY}-desktop`;
-            const rectRaw = localStorage.getItem(rectKey) || localStorage.getItem(legacyDesktopKey) || localStorage.getItem(legacyMobileKey) || localStorage.getItem(sessionId ? `${CHAT_RECT_KEY}-${sessionId}` : CHAT_RECT_KEY) || localStorage.getItem(CHAT_RECT_KEY);
+            const rectRaw = storage.getItem(rectKey) || storage.getItem(legacyDesktopKey) || storage.getItem(legacyMobileKey) || storage.getItem(sessionId ? `${CHAT_RECT_KEY}-${sessionId}` : CHAT_RECT_KEY) || storage.getItem(CHAT_RECT_KEY);
             if (rectRaw) {
                 const rect = JSON.parse(rectRaw);
                 // If the stored rect is positioned near the top of the viewport (likely an accidental top-left placement),
@@ -726,7 +1266,7 @@ function restoreChatState() {
                         chatEl.style.right = 'auto';
                         if (typeof rect.width === 'number' && rect.width >= 260) chatEl.style.width = rect.width + 'px';
                         if (typeof rect.height === 'number' && rect.height >= 180) chatEl.style.height = rect.height + 'px';
-                        try { localStorage.removeItem(rectKey); } catch (e) { /* ignore */ }
+                        try { (MULTI_SESSION ? sessionStorage : localStorage).removeItem(rectKey); } catch (e) { /* ignore */ }
                     } catch (e) { /* ignore */ }
                 } else {
                     if (typeof rect.left === 'number') chatEl.style.left = rect.left + 'px';
@@ -744,10 +1284,11 @@ function restoreChatState() {
 
         // Restore window state
         try {
-            const stateKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}` : `${CHAT_WINDOW_STATE_KEY}`;
+            const storage = MULTI_SESSION ? sessionStorage : localStorage;
+        const stateKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}` : `${CHAT_WINDOW_STATE_KEY}`;
             const legacyMobileKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}-mobile` : `${CHAT_WINDOW_STATE_KEY}-mobile`;
             const legacyDesktopKey = sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}-desktop` : `${CHAT_WINDOW_STATE_KEY}-desktop`;
-            const localState = localStorage.getItem(stateKey) || localStorage.getItem(legacyDesktopKey) || localStorage.getItem(legacyMobileKey) || localStorage.getItem(sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}` : CHAT_WINDOW_STATE_KEY) || localStorage.getItem(CHAT_WINDOW_STATE_KEY);
+            const localState = storage.getItem(stateKey) || storage.getItem(legacyDesktopKey) || storage.getItem(legacyMobileKey) || storage.getItem(sessionId ? `${CHAT_WINDOW_STATE_KEY}-${sessionId}` : CHAT_WINDOW_STATE_KEY) || storage.getItem(CHAT_WINDOW_STATE_KEY);
             const chatToggleBtn = document.getElementById('chat-toggle');
             if (localState === 'minimized') {
                 chatEl.classList.add('hidden');
@@ -776,7 +1317,7 @@ function restoreChatState() {
                         }
                         return;
                     }
-                    const res = await fetch('/api/chat/session_meta?session_id=' + encodeURIComponent(sessionId));
+                    const res = await fetch((window.__getApiBase ? window.__getApiBase() : '') + '/api/chat/session_meta?session_id=' + encodeURIComponent(sessionId));
                     if (!res.ok) return;
                     const out = await res.json();
                     const meta = out && out.meta ? out.meta : {};

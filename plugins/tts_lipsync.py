@@ -237,6 +237,27 @@ class TTSLipSyncPlugin(AIPluginBase):
         # Refresh configuration (in case WebUI changed settings)
         self.refresh_config()
 
+        # Defer to VoxPlugin when the new Vox TTS subsystem is active.
+        # tts_lipsync is the legacy handler; VoxPlugin is canonical when an
+        # active engine is configured (i.e. ACTIVE_VOX_ENGINE != "disabled").
+        try:
+            active = str(
+                config_registry.get_value(
+                    "ACTIVE_VOX_ENGINE",
+                    "",
+                    value_type=str,
+                    group="plugins",
+                    component="vox_plugin",
+                )
+            )
+            if active and active != "disabled":
+                log_info(
+                    "[tts_lipsync] Active Vox engine present — deferring tts_speak to VoxPlugin"
+                )
+                return {"status": "skipped", "reason": "vox_active"}
+        except Exception:
+            pass
+
         # If plugin is not enabled (either user disabled or no endpoints configured), skip TTS entirely
         if not getattr(self, "enabled", False):
             log_info(

@@ -102,7 +102,11 @@
             <div class="settings-grid" style="flex-direction: column;">
             
             <article class="card">
-                <h2>Cortex Engines</h2>
+                <h2>Engines</h2>
+
+                <!-- ── Cortex ─────────────────────────────────────────────── -->
+                <h3 style="margin:0 0 6px; font-size:1rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em;">Cortex</h3>
+                <div class="meta" style="margin-bottom:10px;">A <strong>Cortex</strong> is a category of runtime LLM backends (e.g. <em>llm_provider</em>, <em>selenium_engine</em>, <em>agent</em>). Choose the Cortex kind first, then pick an engine.</div>
                 <div id="components-cortex">
                 <div class="meta" id="components-cortex-summary">Loading…</div>
 
@@ -121,6 +125,27 @@
                 </div>
 
                 <div class="components-list" id="components-cortex-list"></div>
+                </div>
+
+                <!-- ── Vox ───────────────────────────────────────────────── -->
+                <div style="margin-top:28px; padding-top:20px; border-top:1px solid var(--border,#444);">
+                    <h3 style="margin:0 0 6px; font-size:1rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em;">Vox — Text to Speech</h3>
+                    <div class="meta" style="margin-bottom:10px;">File-based TTS engines. Active engine: <code>ACTIVE_VOX_ENGINE</code> ("disabled" = off).</div>
+                    <div class="components-list" id="components-vox-list"><div class="meta">Loading…</div></div>
+                </div>
+
+                <!-- ── Auris ──────────────────────────────────────────────── -->
+                <div style="margin-top:28px; padding-top:20px; border-top:1px solid var(--border,#444);">
+                    <h3 style="margin:0 0 6px; font-size:1rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em;">Auris — Speech to Text</h3>
+                    <div class="meta" style="margin-bottom:10px;">File-based STT engines. Active engine: <code>ACTIVE_AURIS_ENGINE</code> ("disabled" = off).</div>
+                    <div class="components-list" id="components-auris-list"><div class="meta">Loading…</div></div>
+                </div>
+
+                <!-- ── Live ───────────────────────────────────────────────── -->
+                <div style="margin-top:28px; padding-top:20px; border-top:1px solid var(--border,#444);">
+                    <h3 style="margin:0 0 6px; font-size:1rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em;">Live — Real-time Streaming</h3>
+                    <div class="meta" style="margin-bottom:10px;">Bidirectional streaming engines (audio in + TTS out in real time). VAD is handled by <code>core.vad_service</code> — not listed here.</div>
+                    <div class="components-list" id="components-live-list"><div class="meta">Loading…</div></div>
                 </div>
             </article>
             <article class="card">

@@ -40,7 +40,25 @@ dependencies = [
     "webdriver-manager>=4.0.1",
     "setuptools>=70.0.0",
     "discord-ext-voice-recv>=0.5.2a179",
+    # Auris/Vox default audio engines (packages that exist on PyPI and build cleanly)
+    "vosk>=0.3.45",                    # local STT; model downloaded at runtime
+    # audio dependencies are intentionally pared back for a CPU-only container.
+    # VOSK remains the only default engine; other packages are available via extras
+    # (see [project.optional-dependencies] below). Keeping these in the base
+    "pydub>=0.25.1",
+    "huggingface-hub>=1.5.0",
+    "gtts>=2.5.4",
+    "lingua-language-detector>=2.0.2",
 ]
+
+[project.optional-dependencies]
+# Install one or more extras to enable the corresponding audio engine.
+# Example: uv pip install '.[silero]' or uv pip install '.[vosk,qwen3tts]'
+
+# ── Auris STT engines ─────────────────────────────────────────────────────────
+vosk      = ["vosk>=0.3.45"]          # local CPU STT (Auris vosk engine)
+                                       # ~50 MB model downloaded on first use
+whisper   = ["faster-whisper>=0.8.1"]   # optional language-detection helper
 
 [dependency-groups]
 dev = [
@@ -59,6 +77,7 @@ target-version = "py310"
 
 [tool.ruff.lint]
 fixable = ["ALL"]
+
 
 [tool.ty.environment]
 # "python-version" must be inside [environment], not at the top

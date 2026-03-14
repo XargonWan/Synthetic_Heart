@@ -1,5 +1,4 @@
 import asyncio
-from datetime import datetime, timezone
 
 import pytest
 
@@ -12,7 +11,10 @@ def _make_descriptor(intro: float, loop: float, outro: float, fps: float = 30.0)
         "fps": fps,
         "intro": {"start_frame": 0, "end_frame": intro * fps},
         "loop": {"start_frame": intro * fps, "end_frame": (intro + loop) * fps},
-        "outro": {"start_frame": (intro + loop) * fps, "end_frame": (intro + loop + outro) * fps},
+        "outro": {
+            "start_frame": (intro + loop) * fps,
+            "end_frame": (intro + loop + outro) * fps,
+        },
     }
 
 

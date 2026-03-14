@@ -90,7 +90,8 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       xfce4 xfce4-goodies xfce4-terminal thunar mousepad ristretto \
       adwaita-icon-theme util-linux dbus-x11 at-spi2-core \
-      pulseaudio pulseaudio-utils pavucontrol && \
+      pulseaudio pulseaudio-utils pavucontrol \
+      espeak-ng && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # --- [Python & UV Setup] ---
@@ -98,7 +99,8 @@ WORKDIR /app
 
 # 1. Copy dependency files FIRST (for caching)
 COPY pyproject.toml uv.lock ./
-# (Optional fallback if you don't have lockfiles yet: COPY requirements.txt . )
+# (no vendored packages needed any more)
+# (Optional fallback if you don't have lockfiles yet: COPY requirements.txt . )  # kept for backwards compatibility, not needed in normal builds
 
 # 2. Tell uv to create the venv at /app/venv (Matching your old structure)
 ENV UV_PROJECT_ENVIRONMENT=/app/venv
@@ -108,14 +110,20 @@ ENV UV_PROJECT_ENVIRONMENT=/app/venv
 # --frozen: Uses the exact versions from uv.lock
 RUN uv sync --frozen --no-cache
 
+
 # --- [App Setup] ---
 # Copy scripts
 COPY automation_tools/cleanup_chrome.sh /usr/local/bin/cleanup_chrome.sh
 COPY automation_tools/container_synth.sh /app/synth.sh
 RUN chmod +x /usr/local/bin/cleanup_chrome.sh /app/synth.sh
 
-# Copy application code
+# Copy application code (includes vendor packages)
 COPY . /app
+
+# vendored packages are installed by `uv sync` earlier via path sources.
+# Historically we pip-installed them here, but that invoked the system pip
+# outside of the UV_PROJECT_ENVIRONMENT and caused modules to be missing at
+# runtime.  Keeping them solely under uv sync ensures they live in /app/venv.
 
 # Cleanup & Permissions
 RUN rm -rf /app/s6-services /app/automation_tools

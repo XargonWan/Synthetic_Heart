@@ -79,8 +79,6 @@ def get_current_aliases() -> list[str]:
     return deduped
 
 
-
-
 async def get_bot_username(bot):
     """Get the bot's username from the bot instance."""
     try:
@@ -171,6 +169,39 @@ async def is_message_for_bot(
     except Exception as e:
         print(f"ERROR in log_debug: {e}")
         return False, "error_in_function"
+
+    # If there's no textual content but the update contains media, we
+    # previously treated it as automatically directed.  That caused the bot to
+    # react/reply to *every* photo/voice/video in group chats even when it
+    # wasn't mentioned, which was too noisy.  Instead only consider media-only
+    # messages to be directed when they come from a private (1:1) chat.  Group
+    # media will now fall through to the normal mention logic below.
+    if not message_text:
+        has_media = any(
+            getattr(message, attr, None)
+            for attr in (
+                "photo",
+                "voice",
+                "video",
+                "video_note",
+                "document",
+                "sticker",
+                "animation",
+                "audio",
+            )
+        )
+        if has_media:
+            chat_type = getattr(message.chat, "type", None)
+            if chat_type == "private":
+                log_debug(
+                    "[mention] media-only private message detected; treating as directed"
+                )
+                return True, None
+            else:
+                log_debug("[mention] media-only group/channel message - not directed")
+                # fall through so the message will be treated as not-for-bot
+                # unless an alias/mention is present
+                pass
 
     # Priority 1: Check for private messages (1:1 chat) - HIGHEST PRIORITY
     try:

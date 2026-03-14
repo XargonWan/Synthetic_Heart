@@ -2,6 +2,8 @@
 export function createDebugWindow() {
     try {
         console.log('[debug-window] module loaded');
+        // compute API base once for the entire module
+        const _apiBase = (window.__getApiBase && window.__getApiBase()) || '';
         // clamp01 helper
         const clamp01 = (x) => {
             const v = Number(x);
@@ -261,7 +263,7 @@ export function createDebugWindow() {
                     }
                 } catch (e) { /* ignore */ }
                 try {
-                    const resp = await fetch('/api/animation_state');
+                    const resp = await fetch(_apiBase + '/api/animation_state');
                     if (resp && resp.ok) {
                         const summary = await resp.json();
                         if (summary && summary.state) {
@@ -441,7 +443,7 @@ export function createDebugWindow() {
                         const skinFromActive = (window.activeSkinName && String(window.activeSkinName).split('/').pop().replace('.vrm','')) ? String(window.activeSkinName).split('/').pop().replace('.vrm','') : null;
                         const skin = skinFromActive || (window.VRMAnimationMappings && Object.keys(window.VRMAnimationMappings || {})[0]) || 'Rei';
                         try {
-                            const resp = await fetch(`/api/animations/${encodeURIComponent(skin)}/${encodeURIComponent(actionType)}`);
+                            const resp = await fetch(_apiBase + `/api/animations/${encodeURIComponent(skin)}/${encodeURIComponent(actionType)}`);
                             if (resp && resp.ok) {
                                 const j = await resp.json();
                                 if (j && Array.isArray(j.animations)) {
@@ -1464,7 +1466,7 @@ export function createDebugWindow() {
                                 if (needFetch) {
                                     (async () => {
                                         try {
-                                            const r = await fetch('/api/emotion_state');
+                                            const r = await fetch(_apiBase + '/api/emotion_state');
                                             if (r && r.ok) {
                                                 const j = await r.json();
                                                 if (j && j.emotions && typeof j.emotions === 'object') {

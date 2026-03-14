@@ -1,10 +1,13 @@
 (function(){
 'use strict';
 
+// compute base URL for API calls
+const _apiBase = (window.__getApiBase && window.__getApiBase()) || '';
+
 // Agent tab helpers (migrated from inline template)
 async function fetchAgentTasks(){
   try{
-    const resp = await fetch('/api/agent/tasks');
+    const resp = await fetch(_apiBase + '/api/agent/tasks');
     const data = await resp.json();
     const list = data.tasks || [];
     const container = document.getElementById('agent-tasks-list');
@@ -17,7 +20,7 @@ async function fetchAgentTasks(){
 
 async function loadAgentTask(id){
   try{
-    const resp = await fetch(`/api/agent/tasks/${id}`);
+    const resp = await fetch(_apiBase + `/api/agent/tasks/${id}`);
     if(!resp.ok){ document.getElementById('agent-task-detail').innerText = 'Failed to fetch task'; return; }
     const data = await resp.json();
     const detail = document.getElementById('agent-task-detail');
@@ -30,13 +33,13 @@ async function loadAgentTask(id){
   }catch(e){ console.error(e); }
 }
 
-async function pauseTask(id){ await fetch(`/api/agent/tasks/${id}/pause`, {method:'POST'}); await fetchAgentTasks(); loadAgentTask(id);} 
-async function resumeTask(id){ await fetch(`/api/agent/tasks/${id}/resume`, {method:'POST'}); await fetchAgentTasks(); loadAgentTask(id);} 
-async function cancelTask(id){ await fetch(`/api/agent/tasks/${id}/cancel`, {method:'POST'}); await fetchAgentTasks(); loadAgentTask(id);} 
+async function pauseTask(id){ await fetch(_apiBase + `/api/agent/tasks/${id}/pause`, {method:'POST'}); await fetchAgentTasks(); loadAgentTask(id);} 
+async function resumeTask(id){ await fetch(_apiBase + `/api/agent/tasks/${id}/resume`, {method:'POST'}); await fetchAgentTasks(); loadAgentTask(id);} 
+async function cancelTask(id){ await fetch(_apiBase + `/api/agent/tasks/${id}/cancel`, {method:'POST'}); await fetchAgentTasks(); loadAgentTask(id);} 
 
 async function fetchAgentProposals(){
   try{
-    const resp = await fetch('/api/agent/proposals');
+    const resp = await fetch(_apiBase + '/api/agent/proposals');
     const data = await resp.json();
     const list = data.proposals || [];
     const container = document.getElementById('agent-proposals-list');
@@ -50,7 +53,7 @@ async function fetchAgentProposals(){
 async function approveProposal(id){
   if(!confirm('Approve proposal #' + id + '?')) return;
   try{
-    const resp = await fetch(`/api/agent/proposals/${id}/approve`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({trainer: 'webui'})});
+    const resp = await fetch(_apiBase + `/api/agent/proposals/${id}/approve`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({trainer: 'webui'})});
     const data = await resp.json();
     alert('Approve result: ' + JSON.stringify(data));
     fetchAgentProposals(); fetchAgentTasks();

@@ -243,12 +243,14 @@ async def test_cortex_command_kind_only_uses_default():
     # ensure default engine logic returns gemini_live for kind live
     mock_reg.get_default_engine = Mock(return_value="gemini_live")
     mock_reg.get_available_engines = Mock(
-        side_effect=lambda kind=None: [
-            "gemini_live",
-            "other_engine" if kind == "live" else [],
-        ]
-        if kind == "live"
-        else (["gemini_api"] if kind == "llm_provider" else [])
+        side_effect=lambda kind=None: (
+            [
+                "gemini_live",
+                "other_engine" if kind == "live" else [],
+            ]
+            if kind == "live"
+            else (["gemini_api"] if kind == "llm_provider" else [])
+        )
     )
 
     with (

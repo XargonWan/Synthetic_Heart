@@ -102,7 +102,21 @@ class OllamaCompatServer:
         self.stream_timeout = float(os.getenv("OLLAMA_STREAM_TIMEOUT", "60.0"))
         self.completion_timeout = float(os.getenv("OLLAMA_COMPLETION_TIMEOUT", "0.0"))
 
-        self._schedule_server_startup()
+        # Check if server should be enabled (default: true for backward compatibility)
+        self.server_enabled = os.getenv("OLLAMA_SERVER_ENABLED", "true").lower() in (
+            "true",
+            "1",
+            "yes",
+            "on",
+        )
+
+        if self.server_enabled:
+            self._schedule_server_startup()
+        else:
+            log_info(
+                "[ollama_serve] Server disabled via OLLAMA_SERVER_ENABLED=false. "
+                "Interface actions still available but HTTP server will not start."
+            )
 
     # ------------------------------------------------------------------
     # Interface metadata
@@ -942,6 +956,17 @@ class OllamaCompatServer:
             await server.serve()
         except asyncio.CancelledError:  # pragma: no cover - cancellation path
             log_info("[ollama_serve] HTTP server task cancelled")
+            raise
+        except OSError as exc:  # pragma: no cover - port conflict
+            if "address already in use" in str(exc).lower() or exc.errno == 48:
+                log_error(
+                    f"[ollama_serve] ❌ Port {port} already in use! "
+                    f"Either disable this server with OLLAMA_SERVER_ENABLED=false "
+                    f"or change the port with OLLAMA_PORT=<other_port>. "
+                    f"If you want to CONNECT to llama.cpp/ollama, use the 'openapi' cortex engine instead."
+                )
+            else:
+                log_error(f"[ollama_serve] HTTP server failed to start: {exc}")
             raise
         except Exception as exc:  # pragma: no cover - defensive logging
             log_error(f"[ollama_serve] HTTP server crashed: {exc}")

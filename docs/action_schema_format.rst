@@ -295,4 +295,10 @@ Best Practices
 - Ensure ``required`` fields are actually required for the action
 - Validate enum values are appropriate and complete
 
+*Note:* when LLM responses are parsed by the interface, any unregistered
+top‑level keys (for example a stray ``"message"`` field alongside
+``"actions"``) will cause the system to invoke the corrector before
+attempting execution.  This guards against silent drops of unwanted metadata
+and prompts the model to resend a clean actions‑only response.
+
 For implementation examples, see ``plugins/ai_diary.py`` (new format) or ``plugins/terminal.py`` (legacy format automatically converted).

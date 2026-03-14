@@ -5,7 +5,11 @@ import asyncio
 
 
 def test_execute_skipped_when_disabled():
-    """If the plugin has no endpoints configured (disabled), execute_action should skip."""
+    """If the plugin has no endpoints configured (disabled), execute_action should skip.
+
+    Because the plugin now defers to Vox when an engine is active we also stub
+    the active engine to "disabled" to ensure we exercise the tts_disabled path.
+    """
     from plugins.tts_lipsync import TTSLipSyncPlugin
 
     # Create instance without running __init__ to avoid heavy imports
@@ -13,6 +17,18 @@ def test_execute_skipped_when_disabled():
 
     # Mark disabled
     plugin.enabled = False
+
+    # Stub config_registry to return disabled for ACTIVE_VOX_ENGINE
+    import core.config_manager as cm
+
+    orig_get = cm.config_registry.get_value
+
+    def fake_get(key, default=None, **kwargs):
+        if key == "ACTIVE_VOX_ENGINE":
+            return "disabled"
+        return orig_get(key, default, **kwargs)
+
+    cm.config_registry.get_value = fake_get
 
     action = {"type": "tts_speak", "payload": {"text": "hello"}}
 
@@ -24,7 +40,10 @@ def test_execute_skipped_when_disabled():
         assert result.get("status") == "skipped"
         assert result.get("reason") == "tts_disabled"
 
-    asyncio.run(run())
+    try:
+        asyncio.run(run())
+    finally:
+        cm.config_registry.get_value = orig_get
 
 
 def test_refresh_config_respects_enabled_flag():

@@ -151,6 +151,17 @@ Updated Behavior
        callers such as `cortex_response_send` and `message_chain` now populate it
        automatically.
 
+5. **Automatic minor fixes before correction** (new)
+   - Before handing a failed action list back to the model the corrector will try
+     to make a few trivial repairs on its own.  Currently the only transformation
+     performed is a second pass of ``_normalize_payload`` on every action, which
+     converts numeric strings (including those with surrounding whitespace) into
+     integers.  This means things like ``"reply_to_message_id": " 42 "`` or
+     ``"chat_id": "123"`` are fixed transparently and will not trigger the
+     corrector loop.
+   - The heuristic is intentionally narrow to avoid guessing about meaning; it
+     can be extended in the future if additional common 'typos' are discovered.
+
 No Hardcoding
 ~~~~~~~~~~~~~
 

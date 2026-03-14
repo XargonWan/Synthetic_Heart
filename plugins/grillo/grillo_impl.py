@@ -22,10 +22,11 @@ class GrilloPlugin(AIPluginBase):
     display_name = "G.R.I.L.L.O. (light)"
 
     BEAT_TYPES = {
-        "tag_elaboration": 0.3,
+        "tag_elaboration": 0.25,
         "memory_consolidation": 0.15,
-        "self_reflection": 0.25,
-        "curiosity": 0.2,
+        "diary_consolidation": 0.15,
+        "self_reflection": 0.2,
+        "curiosity": 0.15,
         "relationship": 0.1,
     }
 

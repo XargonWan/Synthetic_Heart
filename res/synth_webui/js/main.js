@@ -150,6 +150,10 @@ try {
     if (window.__SYNTH_CONFIG.RESPONSE_TIMEOUT !== undefined) window.RESPONSE_TIMEOUT = window.__SYNTH_CONFIG.RESPONSE_TIMEOUT;
     if (window.__SYNTH_CONFIG.FAILED_MESSAGE_TEXT !== undefined) window.FAILED_MESSAGE_TEXT = window.__SYNTH_CONFIG.FAILED_MESSAGE_TEXT;
     if (window.__SYNTH_CONFIG.WEB_DEBUG !== undefined) window.__synth_web_debug_enabled = window.__SYNTH_CONFIG.WEB_DEBUG;
+    if (window.__SYNTH_CONFIG.MULTI_SESSION !== undefined) window.MULTI_SESSION = window.__SYNTH_CONFIG.MULTI_SESSION;
+    // Vox (TTS) flags – used by chat-window.mjs for auto-play and replay
+    if (window.__SYNTH_CONFIG.VOX_ENABLED !== undefined) window.VOX_ENABLED = window.__SYNTH_CONFIG.VOX_ENABLED;
+    if (window.__SYNTH_CONFIG.VOX_AUDIO_CACHE_SIZE !== undefined) window.VOX_AUDIO_CACHE_SIZE = Number(window.__SYNTH_CONFIG.VOX_AUDIO_CACHE_SIZE) || 40;
 
     // Apply accent color from server-rendered runtime config (if provided)
     try {
@@ -273,6 +277,9 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
         const componentsCortexList = document.getElementById('components-cortex-list');
         const componentsInterfacesList = document.getElementById('components-interfaces-list');
         const componentsPluginsList = document.getElementById('components-plugins-list');
+        const componentsVoxList = document.getElementById('components-vox-list');
+        const componentsAurisList = document.getElementById('components-auris-list');
+        const componentsLiveList = document.getElementById('components-live-list');
         const configGeneralList = document.getElementById('config-general-list');
         const configAdvancedList = document.getElementById('config-advanced-list');
         const configDisclaimer = document.getElementById('config-env-disclaimer');
@@ -1040,7 +1047,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                 const configDisclaimerEl = document.getElementById('config-env-disclaimer');
                 const configAdvancedWarningEl = document.getElementById('config-advanced-warning');
                 if (!configGeneralListEl || !configAdvancedListEl) return;
-                const response = await fetch('/api/config');
+                const response = await fetch((window.__getApiBase ? window.__getApiBase() : '') + '/api/config');
                 if (!response.ok) throw new Error('HTTP ' + response.status);
                 const payload = await response.json();
                 const items = Array.isArray(payload.items) ? payload.items : [];
@@ -1172,7 +1179,7 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                     // Show a download link pointing to the file endpoint
                                     const link = document.createElement('a');
                                     link.textContent = (typeof value === 'string') ? value.split('/').pop() : 'file';
-                                    link.href = `/api/config/${encodeURIComponent(item.key)}/file`;
+                                    link.href = (window.__getApiBase ? window.__getApiBase() : '') + `/api/config/${encodeURIComponent(item.key)}/file`;
                                     link.target = '_blank';
                                     current.appendChild(link);
                                 } catch (e) {
@@ -1380,26 +1387,106 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                             swatchWrap.appendChild(reset);
                             inputEl = swatchWrap;
 
-                        // --- Combobox: free-text input with datalist suggestions ---
+                        // --- Combobox: free-text input with searchable dropdown ---
                         } else if (item.ui_type === 'combobox') {
-                            const input = document.createElement('input');
-                            input.type = 'text';
-                            input.value = typeof value === 'string' ? value : '';
-                            input.disabled = !isEditable;
-                            if (Array.isArray(item.options) && item.options.length) {
-                                const dlId = `datalist-${item.key}`;
-                                const dl = document.createElement('datalist');
-                                dl.id = dlId;
-                                item.options.forEach((opt) => {
-                                    const o = document.createElement('option');
-                                    o.value = opt;
-                                    dl.appendChild(o);
+                            const opts = Array.isArray(item.options) ? item.options : [];
+                            // Large option sets get a custom searchable dropdown
+                            if (opts.length > 20) {
+                                const wrap = document.createElement('div');
+                                wrap.className = 'searchable-combo';
+                                wrap.style.position = 'relative';
+                                wrap.style.flex = '1';
+                                skipAutoSave = true;
+
+                                const input = document.createElement('input');
+                                input.type = 'text';
+                                input.value = typeof value === 'string' ? value : '';
+                                input.disabled = !isEditable;
+                                input.placeholder = `Search ${opts.length} options...`;
+                                input.autocomplete = 'off';
+
+                                const panel = document.createElement('div');
+                                panel.className = 'combo-dropdown';
+                                panel.style.cssText = 'display:none;position:absolute;top:100%;left:0;right:0;max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;background:var(--bg-card,#1a1a2e);z-index:999;margin-top:2px;';
+
+                                const MAX_VISIBLE = 80;
+                                const renderList = (filter) => {
+                                    panel.innerHTML = '';
+                                    const q = (filter || '').toLowerCase();
+                                    let count = 0;
+                                    for (const opt of opts) {
+                                        if (q && !opt.toLowerCase().includes(q)) continue;
+                                        if (++count > MAX_VISIBLE) {
+                                            const more = document.createElement('div');
+                                            more.style.cssText = 'padding:0.35rem 0.6rem;color:var(--text-soft);font-size:0.8rem;';
+                                            more.textContent = `${opts.length - MAX_VISIBLE}+ more — refine your search`;
+                                            panel.appendChild(more);
+                                            break;
+                                        }
+                                        const row = document.createElement('div');
+                                        row.textContent = opt;
+                                        row.style.cssText = 'padding:0.35rem 0.6rem;cursor:pointer;font-size:0.9rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+                                        row.addEventListener('mouseenter', () => { row.style.background = 'var(--accent-dim, rgba(107,254,254,0.12))'; });
+                                        row.addEventListener('mouseleave', () => { row.style.background = ''; });
+                                        row.addEventListener('mousedown', (ev) => {
+                                            ev.preventDefault(); // prevent blur before click
+                                            input.value = opt;
+                                            panel.style.display = 'none';
+                                            persistValue(opt, [input]);
+                                        });
+                                        panel.appendChild(row);
+                                    }
+                                    if (count === 0) {
+                                        const empty = document.createElement('div');
+                                        empty.style.cssText = 'padding:0.5rem 0.6rem;color:var(--text-soft);font-size:0.85rem;';
+                                        empty.textContent = 'No matching models';
+                                        panel.appendChild(empty);
+                                    }
+                                };
+
+                                input.addEventListener('focus', () => {
+                                    renderList(input.value);
+                                    panel.style.display = '';
                                 });
-                                // Ensure unique id by attaching to document.body
-                                document.body.appendChild(dl);
-                                input.setAttribute('list', dlId);
+                                input.addEventListener('input', () => { renderList(input.value); });
+                                input.addEventListener('blur', () => {
+                                    // Delay to allow mousedown on options
+                                    setTimeout(() => { panel.style.display = 'none'; }, 180);
+                                });
+                                input.addEventListener('keydown', (ev) => {
+                                    if (ev.key === 'Enter') {
+                                        ev.preventDefault();
+                                        panel.style.display = 'none';
+                                        persistValue(input.value, [input]);
+                                    } else if (ev.key === 'Escape') {
+                                        panel.style.display = 'none';
+                                        input.blur();
+                                    }
+                                });
+
+                                wrap.appendChild(input);
+                                wrap.appendChild(panel);
+                                inputEl = wrap;
+                            } else {
+                                // Small option sets: use native datalist
+                                const input = document.createElement('input');
+                                input.type = 'text';
+                                input.value = typeof value === 'string' ? value : '';
+                                input.disabled = !isEditable;
+                                if (opts.length) {
+                                    const dlId = `datalist-${item.key}`;
+                                    const dl = document.createElement('datalist');
+                                    dl.id = dlId;
+                                    opts.forEach((opt) => {
+                                        const o = document.createElement('option');
+                                        o.value = opt;
+                                        dl.appendChild(o);
+                                    });
+                                    document.body.appendChild(dl);
+                                    input.setAttribute('list', dlId);
+                                }
+                                inputEl = input;
                             }
-                            inputEl = input;
 
                         // --- Action list: dropdown rows with add/remove ---
                         } else if (item.ui_type === 'action-list') {
@@ -2058,8 +2145,29 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     const componentsCortexListEl = document.getElementById('components-cortex-list');
                     const componentsInterfacesListEl = document.getElementById('components-interfaces-list');
                     const componentsPluginsListEl = document.getElementById('components-plugins-list');
+                    const componentsVoxListEl = document.getElementById('components-vox-list');
+                    const componentsAurisListEl = document.getElementById('components-auris-list');
+                    const componentsLiveListEl = document.getElementById('components-live-list');
                     if (!componentsCortexListEl || !componentsInterfacesListEl || !componentsPluginsListEl) return;
-                    const res = await fetch('/api/components');
+                    const [res, cfgRes] = await Promise.all([
+                        fetch('/api/components'),
+                        fetch('/api/config').catch(() => null),
+                    ]);
+                    // Build a map of component name → config items for inline editing
+                    let _componentConfigMap = {};
+                    try {
+                        if (cfgRes && cfgRes.ok) {
+                            const cfgPayload = await cfgRes.json();
+                            const cfgItems = Array.isArray(cfgPayload.items) ? cfgPayload.items : [];
+                            cfgItems.forEach((ci) => {
+                                if (ci && ci.component) {
+                                    if (!_componentConfigMap[ci.component]) _componentConfigMap[ci.component] = [];
+                                    _componentConfigMap[ci.component].push(ci);
+                                }
+                            });
+                        }
+                    } catch (e) { console.debug('[synth_webui] Failed to load config for components', e); }
+
                     // Handle non-2xx responses gracefully and display server-provided
                     // error details in the UI without throwing. This avoids breaking
                     // the Components tab when the server returns 500 and does not
@@ -2162,10 +2270,101 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
 
                         // Update info field with active engine for this cortex
                         const active = engines.find(e => e.active) || engines.find(e => e.name === (data.cortex && data.cortex.active_engine)) || engines[0] || null;
-                        if (engineModelLabel) engineModelLabel.textContent = `model: ${active ? (active.display_name || active.name || '—') : '—'}`;
+                        if (engineModelLabel) engineModelLabel.textContent = `model: ${active ? (active.current_model || active.display_name || active.name || '—') : '—'}`;
                         if (engineLabel) engineLabel.textContent = active ? (active.label || active.description || '') : '';
                         const loginState = active ? (active.login_state || (active.logged_in ? 'logged' : 'unlogged')) : '—';
                         if (engineLoginStateLabel) engineLoginStateLabel.textContent = `state: ${loginState}`;
+
+                        // --- Searchable model picker for engines with supported_models ---
+                        const modelPicker = document.getElementById('cortex-model-picker');
+                        const modelSearch = document.getElementById('cortex-model-search');
+                        const modelDropdown = document.getElementById('cortex-model-dropdown');
+                        if (modelPicker && modelSearch && modelDropdown) {
+                            const models = (active && Array.isArray(active.supported_models)) ? active.supported_models : [];
+                            if (models.length > 1) {
+                                modelPicker.style.display = '';
+                                modelSearch.value = active.current_model || '';
+                                modelSearch.placeholder = `Search ${models.length} models…`;
+                                const MAX_VIS = 80;
+                                const renderModelList = (filter) => {
+                                    modelDropdown.innerHTML = '';
+                                    const q = (filter || '').toLowerCase();
+                                    let count = 0;
+                                    for (const m of models) {
+                                        if (q && !m.toLowerCase().includes(q)) continue;
+                                        if (++count > MAX_VIS) {
+                                            const more = document.createElement('div');
+                                            more.style.cssText = 'padding:0.35rem 0.6rem;color:var(--text-soft,#aaa);font-size:0.8rem;';
+                                            more.textContent = `${models.length - MAX_VIS}+ more — refine your search`;
+                                            modelDropdown.appendChild(more);
+                                            break;
+                                        }
+                                        const row = document.createElement('div');
+                                        row.textContent = m;
+                                        row.style.cssText = 'padding:0.4rem 0.7rem;cursor:pointer;font-size:0.9rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+                                        if (m === active.current_model) row.style.fontWeight = '700';
+                                        row.addEventListener('mouseenter', () => { row.style.background = 'var(--accent-dim, rgba(107,254,254,0.12))'; });
+                                        row.addEventListener('mouseleave', () => { row.style.background = ''; });
+                                        row.addEventListener('mousedown', (ev) => {
+                                            ev.preventDefault();
+                                            modelSearch.value = m;
+                                            modelDropdown.style.display = 'none';
+                                            // Persist model selection via API
+                                            fetch('/api/components/cortex/model', {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({ engine: active.name, model: m })
+                                            }).then((res) => {
+                                                if (!res.ok) throw new Error('HTTP ' + res.status);
+                                                if (engineModelLabel) engineModelLabel.textContent = `model: ${m}`;
+                                            }).catch((err) => {
+                                                console.error('[synth_webui] Failed to set model', err);
+                                                alert('Failed to set model: ' + err.message);
+                                            });
+                                        });
+                                        modelDropdown.appendChild(row);
+                                    }
+                                    if (count === 0) {
+                                        const empty = document.createElement('div');
+                                        empty.style.cssText = 'padding:0.5rem 0.7rem;color:var(--text-soft,#aaa);font-size:0.85rem;';
+                                        empty.textContent = 'No matching models';
+                                        modelDropdown.appendChild(empty);
+                                    }
+                                };
+
+                                // Wire events only once
+                                if (!modelSearch.dataset.bound) {
+                                    modelSearch.addEventListener('focus', () => { renderModelList(modelSearch.value); modelDropdown.style.display = ''; });
+                                    modelSearch.addEventListener('input', () => { renderModelList(modelSearch.value); });
+                                    modelSearch.addEventListener('blur', () => { setTimeout(() => { modelDropdown.style.display = 'none'; }, 180); });
+                                    modelSearch.addEventListener('keydown', (ev) => {
+                                        if (ev.key === 'Enter') {
+                                            ev.preventDefault();
+                                            modelDropdown.style.display = 'none';
+                                            const val = modelSearch.value.trim();
+                                            if (val && active) {
+                                                fetch('/api/components/cortex/model', {
+                                                    method: 'POST',
+                                                    headers: { 'Content-Type': 'application/json' },
+                                                    body: JSON.stringify({ engine: active.name, model: val })
+                                                }).then((res) => {
+                                                    if (!res.ok) throw new Error('HTTP ' + res.status);
+                                                    if (engineModelLabel) engineModelLabel.textContent = `model: ${val}`;
+                                                }).catch((err) => {
+                                                    console.error('[synth_webui] Failed to set model', err);
+                                                });
+                                            }
+                                        } else if (ev.key === 'Escape') {
+                                            modelDropdown.style.display = 'none';
+                                            modelSearch.blur();
+                                        }
+                                    });
+                                    modelSearch.dataset.bound = '1';
+                                }
+                            } else {
+                                modelPicker.style.display = 'none';
+                            }
+                        }
                         const isSeleniumKind = String(kind || '').toLowerCase().includes('selenium');
                         if (engineLoginBtn) {
                             engineLoginBtn.style.display = isSeleniumKind ? '' : 'none';
@@ -2450,6 +2649,239 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                                 actionsWrap.appendChild(list);
                                 details.appendChild(actionsWrap);
                             }
+                            // ── Inline config editing for cortex engines ──────────
+                            const compName = item.name || '';
+                            const cfgItems = _componentConfigMap[compName] || [];
+                            if (cfgItems.length) {
+                                const cfgSection = document.createElement('div');
+                                cfgSection.className = 'component-config-section';
+                                cfgSection.style.cssText = 'margin-top:12px; padding-top:10px; border-top:1px solid var(--border, #444);';
+
+                                const cfgHeader = document.createElement('div');
+                                cfgHeader.style.cssText = 'display:flex; align-items:center; gap:8px; margin-bottom:8px; cursor:pointer; user-select:none;';
+                                const cfgToggleIcon = document.createElement('span');
+                                cfgToggleIcon.textContent = '▶';
+                                cfgToggleIcon.style.cssText = 'font-size:0.7rem; transition:transform 0.2s;';
+                                const cfgTitle = document.createElement('span');
+                                cfgTitle.style.cssText = 'font-size:0.85rem; font-weight:600; color:var(--muted); text-transform:uppercase; letter-spacing:0.05em;';
+                                cfgTitle.textContent = 'Configuration';
+                                cfgHeader.appendChild(cfgToggleIcon);
+                                cfgHeader.appendChild(cfgTitle);
+
+                                const cfgBody = document.createElement('div');
+                                cfgBody.style.display = 'none';
+
+                                cfgHeader.addEventListener('click', () => {
+                                    const open = cfgBody.style.display !== 'none';
+                                    cfgBody.style.display = open ? 'none' : '';
+                                    cfgToggleIcon.style.transform = open ? '' : 'rotate(90deg)';
+                                });
+
+                                // Separate normal vs advanced items
+                                const normalCfg = cfgItems.filter(ci => !ci.advanced);
+                                const advancedCfg = cfgItems.filter(ci => ci.advanced);
+
+                                const buildCfgRow = (ci) => {
+                                    const row = document.createElement('div');
+                                    row.style.cssText = 'display:flex; flex-direction:column; gap:3px; margin-bottom:10px;';
+
+                                    const lbl = document.createElement('label');
+                                    lbl.style.cssText = 'font-size:0.88rem; font-weight:600; color:var(--text);';
+                                    lbl.textContent = ci.label || ci.key;
+                                    row.appendChild(lbl);
+
+                                    if (ci.description) {
+                                        const helpText = document.createElement('div');
+                                        helpText.style.cssText = 'font-size:0.78rem; color:var(--muted); margin-bottom:2px;';
+                                        helpText.textContent = ci.description;
+                                        row.appendChild(helpText);
+                                    }
+
+                                    const val = ci.value === null || ci.value === undefined ? '' : ci.value;
+                                    const editable = !!ci.editable && !ci.env_override;
+
+                                    const saveCfg = async (newVal, el) => {
+                                        try {
+                                            if (el) el.disabled = true;
+                                            const r = await fetch('/api/config', {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({ key: ci.key, value: newVal })
+                                            });
+                                            if (!r.ok) {
+                                                const t = await r.text();
+                                                window.showToast && window.showToast('Save failed: ' + t, true);
+                                            } else {
+                                                const out = await r.json();
+                                                window.showToast && window.showToast('Saved', false);
+                                                if (out && out.requires_reload) {
+                                                    window.showToast && window.showToast(out.message || 'Reload recommended', false);
+                                                }
+                                            }
+                                        } catch (e) {
+                                            window.showToast && window.showToast('Save failed', true);
+                                        } finally {
+                                            if (el) el.disabled = !editable;
+                                        }
+                                    };
+
+                                    let inputEl = null;
+
+                                    if (ci.ui_type === 'bool' || ci.value_type === 'bool') {
+                                        const wrap = document.createElement('div');
+                                        wrap.style.cssText = 'display:flex; align-items:center; gap:8px;';
+                                        const cb = document.createElement('input');
+                                        cb.type = 'checkbox';
+                                        cb.checked = val === true || val === 1 || val === '1' || val === 'true';
+                                        cb.disabled = !editable;
+                                        cb.id = `comp-cfg-${ci.key}`;
+                                        const toggleLbl = document.createElement('label');
+                                        toggleLbl.className = 'toggle-switch';
+                                        toggleLbl.setAttribute('for', cb.id);
+                                        const slider = document.createElement('span');
+                                        slider.className = 'toggle-slider';
+                                        toggleLbl.appendChild(slider);
+                                        cb.addEventListener('change', () => saveCfg(cb.checked, cb));
+                                        wrap.appendChild(cb);
+                                        wrap.appendChild(toggleLbl);
+                                        inputEl = wrap;
+                                    } else if (ci.ui_type === 'select' && Array.isArray(ci.options) && ci.options.length) {
+                                        const sel = document.createElement('select');
+                                        sel.style.cssText = 'padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:6px; font-size:0.88rem; max-width:400px;';
+                                        ci.options.forEach(opt => {
+                                            const o = document.createElement('option');
+                                            o.value = opt; o.textContent = opt;
+                                            if (String(val) === String(opt)) o.selected = true;
+                                            sel.appendChild(o);
+                                        });
+                                        sel.disabled = !editable;
+                                        sel.addEventListener('change', () => saveCfg(sel.value, sel));
+                                        inputEl = sel;
+                                    } else if (ci.ui_type === 'textarea' || (ci.value_type === 'json' && ci.ui_type !== 'tags')) {
+                                        const ta = document.createElement('textarea');
+                                        ta.rows = 3;
+                                        ta.style.cssText = 'width:100%; max-width:500px; padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:6px; font-family:monospace; font-size:0.85rem; resize:vertical;';
+                                        ta.value = typeof val === 'string' ? val : JSON.stringify(val, null, 2);
+                                        ta.disabled = !editable;
+                                        ta.addEventListener('keydown', (ev) => {
+                                            if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); saveCfg(ta.value, ta); }
+                                        });
+                                        ta.addEventListener('blur', () => saveCfg(ta.value, ta));
+                                        inputEl = ta;
+                                    } else if (ci.ui_type === 'combobox') {
+                                        // Searchable dropdown with free-text fallback
+                                        const models = (item && Array.isArray(item.supported_models)) ? item.supported_models : [];
+                                        const wrap = document.createElement('div');
+                                        wrap.style.cssText = 'position:relative; max-width:400px; width:100%;';
+                                        const inp = document.createElement('input');
+                                        inp.type = 'text';
+                                        inp.autocomplete = 'off';
+                                        inp.style.cssText = 'padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:6px; font-size:0.88rem; width:100%; box-sizing:border-box;';
+                                        inp.value = typeof val === 'string' ? val : JSON.stringify(val);
+                                        inp.disabled = !editable;
+                                        inp.placeholder = models.length ? `Search ${models.length} models…` : '';
+                                        wrap.appendChild(inp);
+
+                                        if (models.length) {
+                                            const dd = document.createElement('div');
+                                            dd.style.cssText = 'display:none; position:absolute; top:100%; left:0; right:0; max-height:220px; overflow-y:auto; border:1px solid var(--border,#444); border-radius:6px; background:var(--bg-card,#1a1a2e); z-index:999; margin-top:2px;';
+                                            const MAX_SHOW = 60;
+                                            const renderDd = (filter) => {
+                                                dd.innerHTML = '';
+                                                const q = (filter || '').toLowerCase();
+                                                let count = 0;
+                                                for (const m of models) {
+                                                    if (q && !m.toLowerCase().includes(q)) continue;
+                                                    if (++count > MAX_SHOW) {
+                                                        const more = document.createElement('div');
+                                                        more.style.cssText = 'padding:0.3rem 0.6rem; color:var(--muted); font-size:0.78rem;';
+                                                        more.textContent = `${models.length - MAX_SHOW}+ more — refine search`;
+                                                        dd.appendChild(more);
+                                                        break;
+                                                    }
+                                                    const row = document.createElement('div');
+                                                    row.textContent = m;
+                                                    row.style.cssText = 'padding:0.35rem 0.6rem; cursor:pointer; font-size:0.85rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;';
+                                                    if (m === val) row.style.fontWeight = '700';
+                                                    row.addEventListener('mouseenter', () => { row.style.background = 'var(--accent-dim, rgba(107,254,254,0.12))'; });
+                                                    row.addEventListener('mouseleave', () => { row.style.background = ''; });
+                                                    row.addEventListener('mousedown', (ev) => {
+                                                        ev.preventDefault();
+                                                        inp.value = m;
+                                                        dd.style.display = 'none';
+                                                        saveCfg(m, inp);
+                                                    });
+                                                    dd.appendChild(row);
+                                                }
+                                                if (count === 0) {
+                                                    const empty = document.createElement('div');
+                                                    empty.style.cssText = 'padding:0.4rem 0.6rem; color:var(--muted); font-size:0.82rem;';
+                                                    empty.textContent = 'No matching models';
+                                                    dd.appendChild(empty);
+                                                }
+                                            };
+                                            inp.addEventListener('focus', () => { renderDd(inp.value); dd.style.display = ''; });
+                                            inp.addEventListener('input', () => { renderDd(inp.value); });
+                                            inp.addEventListener('blur', () => { setTimeout(() => { dd.style.display = 'none'; }, 180); });
+                                            wrap.appendChild(dd);
+                                        }
+                                        inp.addEventListener('keydown', (ev) => {
+                                            if (ev.key === 'Enter') { ev.preventDefault(); saveCfg(inp.value, inp); }
+                                        });
+                                        inputEl = wrap;
+                                    } else {
+                                        // Default: text / password / number input
+                                        const inp = document.createElement('input');
+                                        inp.type = ci.ui_type === 'password' ? 'password'
+                                            : (ci.value_type === 'int' || ci.value_type === 'float' || ci.ui_type === 'number') ? 'number' : 'text';
+                                        inp.style.cssText = 'padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:6px; font-size:0.88rem; max-width:400px; width:100%;';
+                                        inp.value = typeof val === 'string' ? val : JSON.stringify(val);
+                                        inp.disabled = !editable;
+                                        inp.addEventListener('keydown', (ev) => {
+                                            if (ev.key === 'Enter') { ev.preventDefault(); saveCfg(inp.value, inp); }
+                                        });
+                                        inp.addEventListener('blur', () => saveCfg(inp.value, inp));
+                                        inputEl = inp;
+                                    }
+
+                                    if (inputEl) row.appendChild(inputEl);
+                                    return row;
+                                };
+
+                                normalCfg.forEach(ci => cfgBody.appendChild(buildCfgRow(ci)));
+
+                                if (advancedCfg.length) {
+                                    const advHeader = document.createElement('div');
+                                    advHeader.style.cssText = 'display:flex; align-items:center; gap:6px; margin-top:8px; margin-bottom:6px; cursor:pointer; user-select:none;';
+                                    const advIcon = document.createElement('span');
+                                    advIcon.textContent = '▶';
+                                    advIcon.style.cssText = 'font-size:0.65rem; transition:transform 0.2s;';
+                                    const advLabel = document.createElement('span');
+                                    advLabel.style.cssText = 'font-size:0.8rem; font-weight:600; color:var(--muted);';
+                                    advLabel.textContent = 'Advanced';
+                                    advHeader.appendChild(advIcon);
+                                    advHeader.appendChild(advLabel);
+
+                                    const advBody = document.createElement('div');
+                                    advBody.style.display = 'none';
+                                    advancedCfg.forEach(ci => advBody.appendChild(buildCfgRow(ci)));
+
+                                    advHeader.addEventListener('click', (ev) => {
+                                        ev.stopPropagation();
+                                        const open = advBody.style.display !== 'none';
+                                        advBody.style.display = open ? 'none' : '';
+                                        advIcon.style.transform = open ? '' : 'rotate(90deg)';
+                                    });
+
+                                    cfgBody.appendChild(advHeader);
+                                    cfgBody.appendChild(advBody);
+                                }
+
+                                cfgSection.appendChild(cfgHeader);
+                                cfgSection.appendChild(cfgBody);
+                                details.appendChild(cfgSection);
+                            }
+
                             container.appendChild(details);
                         });
                     };
@@ -2460,6 +2892,221 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     renderDetailsList(byCortex[toRenderKind] || [], componentsCortexListEl);
                     renderDetailsList(data.interfaces || [], componentsInterfacesListEl);
                     renderDetailsList(data.plugins || [], componentsPluginsListEl);
+
+                    // ── Audio registry selectors (Vox / Auris / Live) ──────────────
+                    const setupRegistrySelect = (selectId, infoId, labelId, descId, engines, configKey) => {
+                        const sel = document.getElementById(selectId);
+                        const info = document.getElementById(infoId);
+                        const lbl = document.getElementById(labelId);
+                        const desc = document.getElementById(descId);
+                        if (!sel) return;
+                        if (!engines || !engines.length) {
+                            sel.style.display = 'none';
+                            return;
+                        }
+                        sel.innerHTML = '';
+                        engines.forEach((eng) => {
+                            const opt = document.createElement('option');
+                            opt.value = eng.name;
+                            opt.textContent = eng.display_name || eng.name;
+                            if (eng.active) opt.selected = true;
+                            sel.appendChild(opt);
+                        });
+                        const updateInfo = () => {
+                            const current = engines.find(e => e.name === sel.value) || engines[0] || null;
+                            if (current && info) {
+                                info.style.display = '';
+                                if (lbl) lbl.textContent = current.display_name || current.name || '—';
+                                if (desc) desc.textContent = current.description || current.label || '—';
+                            }
+                        };
+                        updateInfo();
+                        if (!sel.dataset.bound) {
+                            sel.addEventListener('change', async () => {
+                                updateInfo();
+                                if (!configKey) return;
+                                try {
+                                    const r = await fetch('/api/config', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ key: configKey, value: sel.value })
+                                    });
+                                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                                    window.showToast && window.showToast(selectId.replace('-engine-select', '').toUpperCase() + ' engine updated to ' + sel.value);
+                                    await loadComponentsSummary();
+                                } catch (e) {
+                                    console.error('[synth_webui] Failed to switch engine for ' + configKey, e);
+                                    window.showToast && window.showToast('Failed to switch engine', true);
+                                }
+                            });
+                            sel.dataset.bound = '1';
+                        }
+                    };
+
+                    setupRegistrySelect('vox-engine-select',  'vox-engine-info',  'vox-engine-label',  'vox-engine-description',  data.vox  || [], 'ACTIVE_VOX_ENGINE');
+                    setupRegistrySelect('auris-engine-select','auris-engine-info','auris-engine-label','auris-engine-description', data.auris || [], 'ACTIVE_AURIS_ENGINE');
+                    setupRegistrySelect('live-engine-select', 'live-engine-info', 'live-engine-label', 'live-engine-description',  data.live || [], 'LIVE_CORTEX');  // persist selected live engine via LIVE_CORTEX config
+
+                    // ── Kitten TTS speaker selector ───────────────────────────
+                    const kittenSpeakerSelect = document.getElementById('kitten-speaker-select');
+                    const kittenPlayBtn = document.getElementById('kitten-play-btn');
+                    let kittenSpeakerList = [];
+
+                    function populateKittenSpeakers(currentValue) {
+                        if (!kittenSpeakerSelect) return;
+                        kittenSpeakerSelect.innerHTML = '';
+                        kittenSpeakerList.forEach(s => {
+                            const opt = document.createElement('option');
+                            opt.value = s.code;
+                            opt.textContent = s.name || s.code;
+                            if (String(currentValue) === s.code) opt.selected = true;
+                            kittenSpeakerSelect.appendChild(opt);
+                        });
+                    }
+
+                    async function loadKittenSpeakers() {
+                        try {
+                            const r = await fetch('/api/vox/speakers?engine=kitten');
+                            if (r.ok) {
+                                kittenSpeakerList = await r.json();
+                            } else {
+                                kittenSpeakerList = [];
+                            }
+                        } catch (e) {
+                            console.error('[synth_webui] failed to load kitten speakers', e);
+                            kittenSpeakerList = [];
+                        }
+                    }
+                    async function updateKittenControlsVisibility() {
+                        if (!kittenSpeakerSelect) return;
+                        const voxSel = document.getElementById('vox-engine-select');
+                        if (voxSel && voxSel.value === 'kitten') {
+                            // ensure we have the speaker list before populating
+                            await loadKittenSpeakers();
+                            kittenSpeakerSelect.style.display = '';
+                            kittenPlayBtn.style.display = '';
+                            try {
+                                const r = await fetch('/api/config');
+                                if (r.ok) {
+                                    const cfg = await r.json();
+                                    const item = Array.isArray(cfg.items)
+                                        ? cfg.items.find(i => i.key === 'KITTEN_VOICE')
+                                        : null;
+                                    populateKittenSpeakers(item && item.value ? item.value : 'en_1');
+                                } else {
+                                    populateKittenSpeakers('en_1');
+                                }
+                            } catch (e) {
+                                populateKittenSpeakers('en_1');
+                            }
+                        } else {
+                            kittenSpeakerSelect.style.display = 'none';
+                            if (kittenPlayBtn) kittenPlayBtn.style.display = 'none';
+                        }
+                    }
+                    if (kittenSpeakerSelect && !kittenSpeakerSelect.dataset.bound) {
+                        kittenSpeakerSelect.addEventListener('change', async () => {
+                            const speaker = kittenSpeakerSelect.value;
+                            try {
+                                await fetch('/api/config', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ key: 'KITTEN_VOICE', value: speaker })
+                                });
+                                window.showToast && window.showToast('Kitten speaker set to ' + speaker);
+                            } catch (e) {
+                                console.error('[synth_webui] Failed to set KITTEN_VOICE', e);
+                                window.showToast && window.showToast('Failed to save speaker', true);
+                            }
+                        });
+                        kittenSpeakerSelect.dataset.bound = '1';
+                    }
+                    if (kittenPlayBtn && !kittenPlayBtn.dataset.bound) {
+                        kittenPlayBtn.addEventListener('click', () => {
+                            const code = kittenSpeakerSelect.value;
+                            const audio = new Audio(`/api/vox/sample?engine=kitten&speaker=${code}`);
+                            audio.play();
+                        });
+                        kittenPlayBtn.dataset.bound = '1';
+                    }
+                    // show kitten controls now + wire engine change event
+                    updateKittenControlsVisibility();
+                    const voxEngineSel = document.getElementById('vox-engine-select');
+                    if (voxEngineSel) {
+                        voxEngineSel.addEventListener('change', updateKittenControlsVisibility);
+                    }
+
+                    // ── Vosk language selector ─────────────────────────────────
+                    const voskLangSelect = document.getElementById('auris-vosk-language');
+                    const VOSK_LANGUAGES = [
+                        {code:'en-us', label:'English (US)'},
+                        {code:'it-it', label:'Italiano'},
+                        {code:'fr-fr', label:'Français'},
+                        {code:'es-es', label:'Español'},
+                    ];
+                    function populateVoskLanguages(){
+                        if(!voskLangSelect) return;
+                        voskLangSelect.innerHTML = '';
+                        VOSK_LANGUAGES.forEach(l=>{
+                            const opt = document.createElement('option');
+                            opt.value = l.code;
+                            opt.textContent = l.label;
+                            voskLangSelect.appendChild(opt);
+                        });
+                    }
+                    async function updateVoskLangVisibility(){
+                        if(!voskLangSelect) return;
+                        const aurisSel = document.getElementById('auris-engine-select');
+                        if(aurisSel && aurisSel.value === 'vosk'){
+                            voskLangSelect.style.display = '';
+                            populateVoskLanguages();
+                            // fetch current config value
+                            try{
+                                const r = await fetch('/api/config');
+                                if(r.ok){
+                                    const cfg = await r.json();
+                                    const item = Array.isArray(cfg.items)? cfg.items.find(i=>i.key==='VOSK_LANGUAGE') : null;
+                                    if(item && item.value) voskLangSelect.value = item.value;
+                                }
+                            }catch(e){/* ignore */}
+                        } else {
+                            voskLangSelect.style.display = 'none';
+                        }
+                    }
+                    if (voskLangSelect && !voskLangSelect.dataset.bound) {
+                        voskLangSelect.addEventListener('change', async () => {
+                            const lang = voskLangSelect.value;
+                            try {
+                                await fetch('/api/config', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ key: 'VOSK_LANGUAGE', value: lang })
+                                });
+                                const r2 = await fetch('/api/auris/vosk/download', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                                    body: `language=${encodeURIComponent(lang)}`
+                                });
+                                if (!r2.ok) throw new Error('download failed');
+                                window.showToast && window.showToast('Vosk language set to ' + lang + ', model download started');
+                            } catch (e) {
+                                console.error('[synth_webui] Vosk language update failed', e);
+                                window.showToast && window.showToast('Failed to set Vosk language', true);
+                            }
+                        });
+                        voskLangSelect.dataset.bound = '1';
+                    }
+                    // ensure visibility reflects current engine choice
+                    updateVoskLangVisibility();
+                    // re-run when auris engine selection changes
+                    const aurisSel = document.getElementById('auris-engine-select');
+                    if(aurisSel){
+                        aurisSel.addEventListener('change', updateVoskLangVisibility);
+                    }
+
+                    if (componentsVoxListEl)   renderDetailsList(data.vox   || [], componentsVoxListEl);
+                    if (componentsAurisListEl) renderDetailsList(data.auris || [], componentsAurisListEl);
+                    if (componentsLiveListEl)  renderDetailsList(data.live  || [], componentsLiveListEl);
 
                     // Render cortex scope selectors (Grillo / Trainer / Live)
                     try {
@@ -2514,6 +3161,12 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     if (componentsCortexListEl) componentsCortexListEl.innerHTML = '<div class="meta">Failed to load components.</div>';
                     if (componentsInterfacesListEl) componentsInterfacesListEl.innerHTML = '<div class="meta">Failed to load components.</div>';
                     if (componentsPluginsListEl) componentsPluginsListEl.innerHTML = '<div class="meta">Failed to load components.</div>';
+                    const componentsVoxListErrEl = document.getElementById('components-vox-list');
+                    const componentsAurisListErrEl = document.getElementById('components-auris-list');
+                    const componentsLiveListErrEl = document.getElementById('components-live-list');
+                    if (componentsVoxListErrEl) componentsVoxListErrEl.innerHTML = '<div class="meta">Failed to load components.</div>';
+                    if (componentsAurisListErrEl) componentsAurisListErrEl.innerHTML = '<div class="meta">Failed to load components.</div>';
+                    if (componentsLiveListErrEl) componentsLiveListErrEl.innerHTML = '<div class="meta">Failed to load components.</div>';
                 }
             }
 

@@ -277,8 +277,14 @@ Component Import Errors
 **Solutions**:
 
 1. Ensure the module is in the correct ``_dev`` directory
-2. Check for missing dependencies in ``requirements.txt``
-3. Verify the import paths are correct (use ``interface_dev.module_name`` not ``interface.module_name``)
+2. Check for missing dependencies in ``pyproject.toml`` (use `uv sync` to install).
+   * Note: some development engines such as ``chatterbox`` are not pulled
+     from PyPI and live under ``plugins/_dev``; ``kitten`` is now vendored
+     directly and requires no external repository.  If a build fails it means
+     a third-party dependency (e.g. ``pkuseg`` for chatterbox) could not be
+     compiled.  Adding the necessary system packages to the Dockerfile or
+     fixing the upstream repo is the correct remedy; do not attempt to
+     manually ``pip``-install inside the container.3. Verify the import paths are correct (use ``interface_dev.module_name`` not ``interface.module_name``)
 4. Check Python syntax in the dev module
 
 See Also
