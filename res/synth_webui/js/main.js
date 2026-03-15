@@ -2947,6 +2947,68 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                     setupRegistrySelect('auris-engine-select','auris-engine-info','auris-engine-label','auris-engine-description', data.auris || [], 'ACTIVE_AURIS_ENGINE');
                     setupRegistrySelect('live-engine-select', 'live-engine-info', 'live-engine-label', 'live-engine-description',  data.live || [], 'LIVE_CORTEX');  // persist selected live engine via LIVE_CORTEX config
 
+                    // ── Live voice configuration ──────────────────────────────
+                    const liveVoiceCfg = document.getElementById('live-voice-config');
+                    const liveVoiceNameSel = document.getElementById('live-voice-name');
+                    const liveVoiceStyleTa = document.getElementById('live-voice-style');
+                    const liveEngineSel = document.getElementById('live-engine-select');
+
+                    function updateLiveVoiceVisibility() {
+                        if (!liveVoiceCfg || !liveEngineSel) return;
+                        liveVoiceCfg.style.display = (liveEngineSel.value && liveEngineSel.value !== 'disabled') ? '' : 'none';
+                    }
+                    updateLiveVoiceVisibility();
+                    if (liveEngineSel && !liveEngineSel.dataset.liveVoiceBound) {
+                        liveEngineSel.addEventListener('change', updateLiveVoiceVisibility);
+                        liveEngineSel.dataset.liveVoiceBound = '1';
+                    }
+
+                    // Load current values from config
+                    if (liveVoiceNameSel || liveVoiceStyleTa) {
+                        try {
+                            const cfgR = await fetch('/api/config');
+                            if (cfgR.ok) {
+                                const cfgD = await cfgR.json();
+                                const cfgI = Array.isArray(cfgD.items) ? cfgD.items : [];
+                                const voiceItem = cfgI.find(i => i.key === 'LIVE_VOICE_NAME');
+                                const styleItem = cfgI.find(i => i.key === 'LIVE_VOICE_STYLE');
+                                if (voiceItem && liveVoiceNameSel) {
+                                    const opts = liveVoiceNameSel.options;
+                                    for (let i = 0; i < opts.length; i++) {
+                                        if (opts[i].value === String(voiceItem.value)) { opts[i].selected = true; break; }
+                                    }
+                                }
+                                if (styleItem && liveVoiceStyleTa) {
+                                    liveVoiceStyleTa.value = String(styleItem.value || '');
+                                }
+                            }
+                        } catch (e) { console.debug('[synth_webui] Failed to load live voice config', e); }
+                    }
+
+                    // Save on change
+                    if (liveVoiceNameSel && !liveVoiceNameSel.dataset.bound) {
+                        liveVoiceNameSel.addEventListener('change', async () => {
+                            try {
+                                const r = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: 'LIVE_VOICE_NAME', value: liveVoiceNameSel.value }) });
+                                if (r.ok) window.showToast && window.showToast('Voice set to ' + liveVoiceNameSel.value);
+                                else window.showToast && window.showToast('Failed to save voice', true);
+                            } catch (e) { window.showToast && window.showToast('Failed to save voice', true); }
+                        });
+                        liveVoiceNameSel.dataset.bound = '1';
+                    }
+                    if (liveVoiceStyleTa && !liveVoiceStyleTa.dataset.bound) {
+                        const saveStyle = async () => {
+                            try {
+                                const r = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: 'LIVE_VOICE_STYLE', value: liveVoiceStyleTa.value }) });
+                                if (r.ok) window.showToast && window.showToast('Voice style saved');
+                                else window.showToast && window.showToast('Failed to save style', true);
+                            } catch (e) { window.showToast && window.showToast('Failed to save style', true); }
+                        };
+                        liveVoiceStyleTa.addEventListener('blur', saveStyle);
+                        liveVoiceStyleTa.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); saveStyle(); } });
+                        liveVoiceStyleTa.dataset.bound = '1';
+                    }
+
                     // ── Kitten TTS speaker selector ───────────────────────────
                     const kittenSpeakerSelect = document.getElementById('kitten-speaker-select');
                     const kittenPlayBtn = document.getElementById('kitten-play-btn');

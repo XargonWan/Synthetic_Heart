@@ -98,6 +98,33 @@
                         <div style="font-size:0.9rem; color:var(--muted);" id="live-engine-description">—</div>
                     </div>
                 </div>
+                <!-- Live voice configuration (visible when a live engine is active) -->
+                <div id="live-voice-config" style="display:none; margin-bottom:14px; padding:12px; background:var(--card-bg,#1a1a2e); border:1px solid var(--border,#444); border-radius:8px;">
+                    <div style="font-size:0.85rem; font-weight:600; color:var(--muted); text-transform:uppercase; letter-spacing:0.05em; margin-bottom:10px;">Voice Settings</div>
+                    <div style="display:flex; flex-direction:column; gap:10px;">
+                        <div style="display:flex; flex-direction:column; gap:3px;">
+                            <label for="live-voice-name" style="font-size:0.85rem; font-weight:600;">Voice</label>
+                            <div style="font-size:0.8rem; color:var(--muted);">Prebuilt voice for Gemini Live sessions.</div>
+                            <select id="live-voice-name" style="padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--primary); border-radius:6px; font-size:0.88rem; max-width:300px;">
+                                <option value="Aoede">Aoede — Breezy, natural</option>
+                                <option value="Puck">Puck — Upbeat, playful</option>
+                                <option value="Charon">Charon — Informational, calm</option>
+                                <option value="Kore">Kore — Firm, clear</option>
+                                <option value="Fenrir">Fenrir — Excitable</option>
+                                <option value="Orbit">Orbit — Easy-going</option>
+                                <option value="Zephyr">Zephyr — Bright</option>
+                                <option value="Leda">Leda — Youthful</option>
+                                <option value="Orus">Orus — Firm, deep</option>
+                                <option value="Autonoe">Autonoe — Bright, warm</option>
+                            </select>
+                        </div>
+                        <div style="display:flex; flex-direction:column; gap:3px;">
+                            <label for="live-voice-style" style="font-size:0.85rem; font-weight:600;">Voice Style Prompt</label>
+                            <div style="font-size:0.8rem; color:var(--muted);">Extra instructions to shape how the model speaks (tone, pacing, personality). Leave empty for default.</div>
+                            <textarea id="live-voice-style" rows="3" style="width:100%; max-width:500px; padding:6px 10px; background:var(--background); color:var(--text); border:1px solid var(--border,#444); border-radius:6px; font-family:monospace; font-size:0.85rem; resize:vertical;"></textarea>
+                        </div>
+                    </div>
+                </div>
                 <div class="components-list" id="components-live-list"><div class="meta">Loading…</div></div>
             </div>
         </article>

@@ -64,6 +64,7 @@ def disable_corrector_and_clear_plugins(monkeypatch):
             await action_parser.run_actions(actions, context or {}, bot, message)
 
     import core.transport_layer as tl
+
     monkeypatch.setattr(tl, "_grillo_fire_and_forget", fake_grillo)
 
     return None
@@ -78,6 +79,7 @@ async def test_llm_to_interface_normalizes_mojibake(monkeypatch):
     # bypass corrector/orchestrator so we only inspect normalization
     async def fake_orch(text, context, bot, message, **kwargs):
         return None
+
     monkeypatch.setattr(
         "core.action_parser.corrector_orchestrator",
         fake_orch,
@@ -85,12 +87,13 @@ async def test_llm_to_interface_normalizes_mojibake(monkeypatch):
 
     async def fake_send(*args, **kwargs):
         # record the text actually sent
-        captured['text'] = kwargs.get('text') or (args[2] if len(args) > 2 else None)
+        captured["text"] = kwargs.get("text") or (args[2] if len(args) > 2 else None)
         return None
 
     # stub message_chain so the reply is forwarded as-is (no correction loop)
     async def fake_handle(bot, message, text, source, context=None, **kwargs):
         return message_chain.FORWARD_AS_TEXT
+
     monkeypatch.setattr("core.message_chain.handle_incoming_message", fake_handle)
 
     # call with intentionally mojibake'd string
@@ -103,8 +106,9 @@ async def test_llm_to_interface_normalizes_mojibake(monkeypatch):
     )
 
     # check normalization happened
-    assert 'text' in captured
-    assert "Si può" in captured['text'], f"unexpected: {captured['text']}"
+    assert "text" in captured
+    assert "Si può" in captured["text"], f"unexpected: {captured['text']}"
+
 
 @pytest.mark.asyncio
 async def test_grillo_persists_proposal_when_not_auto(monkeypatch):

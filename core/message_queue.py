@@ -718,7 +718,9 @@ async def _consumer_loop() -> None:
                 # Get timeout configuration from message_chain module
                 from core.message_chain import RESPONSE_TIMEOUT
 
-                timeout_seconds = int(RESPONSE_TIMEOUT) if RESPONSE_TIMEOUT else 300  # default bump from 240 to 300s
+                timeout_seconds = (
+                    int(RESPONSE_TIMEOUT) if RESPONSE_TIMEOUT else 300
+                )  # default bump from 240 to 300s
 
                 # Check if this is an event prompt
                 if "event_prompt" in final:

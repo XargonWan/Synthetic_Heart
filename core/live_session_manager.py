@@ -10,8 +10,8 @@ Manages WebSocket sessions to the Gemini Live API, handling:
 - Session duration tracking and automatic reconnection
 
 Audio format: PCM 16-bit signed little-endian, 16000 Hz, mono.
-This matches both Discord.py's voice receive format and the Gemini Live API's
-expected input format.
+Discord provides 48kHz stereo; the sink downsamples to 16kHz mono before
+sending to the Gemini Live API.
 """
 
 from __future__ import annotations
@@ -22,8 +22,10 @@ import time
 from typing import Any, Callable, Awaitable, ClassVar
 
 from core.logging_utils import log_debug, log_error, log_info, log_warning
+from core.live_api_logger import log_live_send, log_live_recv, log_live_session_event
 
 # PCM audio constants for Gemini Live API
+# Discord provides 48kHz PCM; we downsample to 16kHz before sending.
 LIVE_AUDIO_SAMPLE_RATE = 16000
 LIVE_AUDIO_MIME = f"audio/pcm;rate={LIVE_AUDIO_SAMPLE_RATE}"
 # Gemini outputs 24kHz PCM by default
@@ -85,6 +87,8 @@ class LiveSessionState:
         "last_injected_ts",
         "generating",  # whether a model turn is currently in progress
         "pending_context_updates",  # queued texts awaiting flush
+        "_user_speaking",  # whether we have sent activity_start (manual VAD)
+        "attachment_context",  # document text for system instruction (survives reconnects)
     )
 
     def __init__(
@@ -106,6 +110,11 @@ class LiveSessionState:
         # live-turn state
         self.generating: bool = False
         self.pending_context_updates: list[str] = []
+        self._user_speaking: bool = (
+            False  # manual VAD: True between activity_start/activity_end
+        )
+        # Document context embedded in system instruction (persisted for reconnects)
+        self.attachment_context: str | None = None
 
     @property
     def elapsed_seconds(self) -> float:
@@ -251,6 +260,7 @@ class LiveSessionManager:
         channel_id: int,
         system_instruction: str,
         tools: list[dict[str, Any]] | None = None,
+        attachment_context: str | None = None,
     ) -> bool:
         """Start a Live API session for a guild's voice channel.
 
@@ -291,6 +301,17 @@ class LiveSessionManager:
                     )
                 )
             ),
+            # Disable server-side VAD and use manual activity_start/activity_end
+            # signals instead.  Discord stops sending RTP packets when users are
+            # silent, which freezes the server-side VAD clock and prevents it from
+            # ever detecting the end of a turn.  Manual VAD gives us full control:
+            # we send activity_start when we first receive Discord audio and
+            # activity_end after a configurable silence timeout.
+            realtime_input_config=types.RealtimeInputConfig(
+                automatic_activity_detection=types.AutomaticActivityDetection(
+                    disabled=True,
+                ),
+            ),
             system_instruction=system_instruction,
         )
         if tools:
@@ -301,6 +322,7 @@ class LiveSessionManager:
             guild_id=guild_id,
             channel_id=channel_id,
         )
+        state.attachment_context = attachment_context
 
         try:
             session_ctx = self._client.aio.live.connect(
@@ -315,6 +337,18 @@ class LiveSessionManager:
 
             self._sessions[guild_id] = state
             self._reconnect_locks.setdefault(guild_id, asyncio.Lock())
+
+            log_live_session_event(
+                guild_id,
+                "start",
+                f"model={LIVE_MODEL} voice={_voice_name} "
+                f"system_instruction={len(system_instruction)} chars",
+            )
+            log_live_send(
+                guild_id,
+                msg_type="system_instruction",
+                content=system_instruction,
+            )
 
             # Start receive loop
             state._receive_task = asyncio.create_task(
@@ -447,6 +481,8 @@ class LiveSessionManager:
         """
         send_count = 0
         total_bytes = 0
+        idle_ticks = 0
+        _SILENCE_TICKS = max(1, int(1.5 / self._FLUSH_INTERVAL_S))
         try:
             log_info(f"[live_session] Audio flush loop started for guild {guild_id}")
             while True:
@@ -468,10 +504,48 @@ class LiveSessionManager:
 
                 buf = self._send_buffers.get(guild_id)
                 if not buf:
-                    continue  # Nothing to send
+                    idle_ticks += 1
+                    # Discord stops sending packets when the user stops talking.
+                    # After a silence timeout, send activity_end so Gemini knows
+                    # the user finished speaking and should respond.
+                    if idle_ticks == _SILENCE_TICKS and state._user_speaking:
+                        try:
+                            log_info(
+                                f"[live_session] Sending activity_end for guild {guild_id} "
+                                f"after {idle_ticks * self._FLUSH_INTERVAL_S:.1f}s silence"
+                            )
+                            await state._session.send_realtime_input(
+                                activity_end=types.ActivityEnd()
+                            )
+                            state._user_speaking = False
+                            log_live_send(guild_id, msg_type="activity_end")
+                        except Exception as e:
+                            log_warning(
+                                f"[live_session] Failed to send activity_end for guild {guild_id}: {e}"
+                            )
+                    continue
+                else:
+                    chunk = bytes(buf)
+                    buf.clear()
 
-                chunk = bytes(buf)
-                buf.clear()
+                    # Send activity_start on first audio after silence
+                    if not state._user_speaking:
+                        try:
+                            log_info(
+                                f"[live_session] Sending activity_start for guild {guild_id}"
+                            )
+                            await state._session.send_realtime_input(
+                                activity_start=types.ActivityStart()
+                            )
+                            state._user_speaking = True
+                            log_live_send(guild_id, msg_type="activity_start")
+                        except Exception as e:
+                            log_warning(
+                                f"[live_session] Failed to send activity_start for guild {guild_id}: {e}"
+                            )
+
+                    idle_ticks = 0
+
                 send_count += 1
                 total_bytes += len(chunk)
 
@@ -487,6 +561,13 @@ class LiveSessionManager:
                     await state._session.send_realtime_input(
                         audio=types.Blob(data=chunk, mime_type=LIVE_AUDIO_MIME)
                     )
+                    if send_count == 1 or send_count % 25 == 0:
+                        log_live_send(
+                            guild_id,
+                            msg_type="audio",
+                            audio_bytes=len(chunk),
+                            extra={"flush_num": send_count, "total_bytes": total_bytes},
+                        )
                 except Exception as e:
                     log_warning(
                         f"[live_session] Failed to send audio for guild {guild_id}: {e}"
@@ -536,8 +617,16 @@ class LiveSessionManager:
                     for msg in new_msgs:
                         text = msg.get("text") or ""
                         if text:
-                            # forward into live model
-                            await self.send_text(guild_id, text)
+                            # Forward as a system-role context update so the
+                            # model internalises the text without generating an
+                            # audio response.  Using send_text (role=user,
+                            # turn_complete=True) would trigger a model reply
+                            # for every message, flooding the session.
+                            sender = msg.get("sender_name") or "[unknown]"
+                            await self.send_context_update(
+                                guild_id,
+                                f"[Text chat] {sender}: {text}",
+                            )
                             # replicate to live history path
                             await save_chat_message(
                                 interface_path=f"discord_live_{guild_id}",
@@ -582,9 +671,19 @@ class LiveSessionManager:
             return
 
         try:
+            full_text = f"[System Context Update] {text}"
             await state._session.send_client_content(
-                turns=types.Content(role="system", parts=[types.Part(text=text)]),
+                turns=types.Content(
+                    role="user",
+                    parts=[types.Part(text=full_text)],
+                ),
                 turn_complete=False,
+            )
+            log_live_send(
+                guild_id,
+                msg_type="context_update",
+                content=full_text,
+                extra={"turn_complete": False},
             )
             log_info(
                 f"[live_session] Sent context update to guild {guild_id}: {text[:60]}"
@@ -607,9 +706,18 @@ class LiveSessionManager:
             return
         for upd in list(state.pending_context_updates):
             try:
+                _upd_text = f"[System Context Update] {upd}"
                 await state._session.send_client_content(
-                    turns=types.Content(role="system", parts=[types.Part(text=upd)]),
+                    turns=types.Content(
+                        role="user",
+                        parts=[types.Part(text=_upd_text)],
+                    ),
                     turn_complete=False,
+                )
+                log_live_send(
+                    guild_id,
+                    msg_type="context_update_flush",
+                    content=_upd_text,
                 )
                 log_info(
                     f"[live_session] Flushed buffered context update for guild {guild_id}: {upd[:60]}"
@@ -635,8 +743,69 @@ class LiveSessionManager:
                 turns=types.Content(role="user", parts=[types.Part(text=text)]),
                 turn_complete=True,
             )
+            log_live_send(
+                guild_id,
+                msg_type="send_text",
+                content=text,
+                extra={"turn_complete": True},
+            )
         except Exception as e:
             log_warning(f"[live_session] Failed to send text for guild {guild_id}: {e}")
+
+    async def send_multimodal_context(
+        self,
+        guild_id: int,
+        text: str | None = None,
+        file_data: bytes | None = None,
+        mime_type: str = "application/octet-stream",
+    ) -> bool:
+        """Inject a multimodal context message (text + optional file) into a Live session.
+
+        This allows sending documents, images, or other files alongside a text
+        description so the model can discuss them during voice conversation.
+
+        Args:
+            guild_id: Target guild's Live session.
+            text: Optional text description / instruction for the file.
+            file_data: Raw file bytes (image, PDF, etc.).
+            mime_type: MIME type of ``file_data``.
+
+        Returns:
+            True if the message was sent successfully.
+        """
+        state = self._sessions.get(guild_id)
+        if not state or not state.is_active or not state._session:
+            log_warning(
+                f"[live_session] Cannot send multimodal context: no active session for guild {guild_id}"
+            )
+            return False
+
+        parts: list[types.Part] = []
+        if text:
+            parts.append(types.Part(text=f"[Document Context] {text}"))
+        if file_data:
+            parts.append(
+                types.Part(inline_data=types.Blob(mime_type=mime_type, data=file_data))
+            )
+
+        if not parts:
+            return False
+
+        try:
+            await state._session.send_client_content(
+                turns=types.Content(role="user", parts=parts),
+                turn_complete=False,
+            )
+            log_info(
+                f"[live_session] Sent multimodal context to guild {guild_id}: "
+                f"text={bool(text)}, file={bool(file_data)} ({mime_type})"
+            )
+            return True
+        except Exception as e:
+            log_warning(
+                f"[live_session] Failed to send multimodal context for guild {guild_id}: {e}"
+            )
+            return False
 
     def is_session_active(self, guild_id: int) -> bool:
         """Check if a Live API session is active for a guild."""
@@ -665,6 +834,10 @@ class LiveSessionManager:
             # Loop to keep receiving across all turns for the duration of the session.
             while state.is_active and state._session:
                 turn_count += 1
+                log_info(
+                    f"[live_session] Waiting for turn {turn_count} from Gemini "
+                    f"(guild {guild_id})"
+                )
                 # Per-turn transcript accumulators (filled from transcription fields).
                 user_parts: list[str] = []
                 model_parts: list[str] = []
@@ -674,6 +847,73 @@ class LiveSessionManager:
                         break
 
                     msg_count += 1
+
+                    # --- Deep debug: log every message's structure ---
+                    sc = getattr(message, "server_content", None)
+                    _tc = getattr(sc, "turn_complete", None) if sc else None
+                    _interrupted = getattr(sc, "interrupted", None) if sc else None
+                    _gen_complete = (
+                        getattr(sc, "generation_complete", None) if sc else None
+                    )
+                    _has_model_turn = bool(
+                        getattr(sc, "model_turn", None) if sc else None
+                    )
+                    _has_tool_call = bool(getattr(message, "tool_call", None))
+                    _has_input_tx = bool(
+                        getattr(sc, "input_transcription", None) if sc else None
+                    )
+                    _has_output_tx = bool(
+                        getattr(sc, "output_transcription", None) if sc else None
+                    )
+                    log_debug(
+                        f"[live_session] MSG#{msg_count} turn={turn_count} "
+                        f"guild={guild_id}: "
+                        f"model_turn={_has_model_turn} "
+                        f"turn_complete={_tc} "
+                        f"interrupted={_interrupted} "
+                        f"gen_complete={_gen_complete} "
+                        f"tool_call={_has_tool_call} "
+                        f"input_tx={_has_input_tx} "
+                        f"output_tx={_has_output_tx} "
+                        f"has_data={bool(message.data)} "
+                        f"has_text={bool(message.text)}"
+                    )
+
+                    # ── Bidirectional log to live_api.log ──
+                    _input_tx_text: str | None = None
+                    _output_tx_text: str | None = None
+                    _tool_call_str: str | None = None
+                    _sc = getattr(message, "server_content", None)
+                    if _sc:
+                        _it = getattr(_sc, "input_transcription", None)
+                        if _it:
+                            _input_tx_text = getattr(_it, "text", None)
+                        _ot = getattr(_sc, "output_transcription", None)
+                        if _ot:
+                            _output_tx_text = getattr(_ot, "text", None)
+                    _tc_obj = getattr(message, "tool_call", None)
+                    if _tc_obj:
+                        _fcs = getattr(_tc_obj, "function_calls", []) or []
+                        _tool_call_str = ", ".join(
+                            str(getattr(fc, "name", "?")) for fc in _fcs
+                        )
+                    log_live_recv(
+                        guild_id,
+                        turn=turn_count,
+                        msg_num=msg_count,
+                        model_turn=_has_model_turn,
+                        turn_complete=_tc,
+                        interrupted=_interrupted,
+                        audio_bytes=len(message.data) if message.data else 0,
+                        text=message.text,
+                        input_transcript=_input_tx_text,
+                        output_transcript=_output_tx_text,
+                        tool_call=_tool_call_str,
+                        extra={"gen_complete": _gen_complete}
+                        if _gen_complete
+                        else None,
+                    )
+
                     if msg_count <= 3 or msg_count % 50 == 0:
                         log_info(
                             f"[live_session] Received message #{msg_count} "
@@ -743,6 +983,11 @@ class LiveSessionManager:
                                     f"[live_session] Tool call handling error: {e}"
                                 )
 
+                log_info(
+                    f"[live_session] Turn {turn_count} receive loop exited "
+                    f"(guild {guild_id}, {msg_count} total msgs)"
+                )
+
                 # Turn complete — fire callback with accumulated transcripts.
                 if self._on_turn_complete and (user_parts or model_parts):
                     user_transcript = _clean_transcript(user_parts)
@@ -803,12 +1048,15 @@ class LiveSessionManager:
             )
 
             channel_id = state.channel_id
+            _att_ctx = state.attachment_context
             await self.stop_session(guild_id)
 
             # Rebuild system instruction from current persona for the new session
             from core.prompt_engine import build_live_system_instruction
 
-            instruction = await build_live_system_instruction()
+            instruction = await build_live_system_instruction(
+                attachment_context=_att_ctx,
+            )
 
             # Re-discover tool declarations so function calling persists
             tools: list[dict[str, Any]] | None = None
@@ -826,6 +1074,7 @@ class LiveSessionManager:
                 channel_id=channel_id,
                 system_instruction=instruction,
                 tools=tools,
+                attachment_context=_att_ctx,
             )
 
     async def reconnect_with_instruction(

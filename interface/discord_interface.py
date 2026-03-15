@@ -23,8 +23,152 @@ except ImportError:
     voice_recv = None  # type: ignore[assignment]
     _HAS_VOICE_RECV = False
 
+import logging as _stdlib_logging
+
 from core.logging_utils import log_debug, log_error, log_info, log_warning
 from core.chat_attention import set_attention, evaluate_triggers
+
+# ── Route discord.ext.voice_recv logs into the synth logger ──────────────
+# voice_recv uses stdlib logging; without this its errors are invisible.
+if _HAS_VOICE_RECV:
+    _vr_logger = _stdlib_logging.getLogger("discord.ext.voice_recv")
+    _synth_logger = _stdlib_logging.getLogger("synth")
+    if _synth_logger.handlers and not _vr_logger.handlers:
+        for _h in _synth_logger.handlers:
+            _vr_logger.addHandler(_h)
+        _vr_logger.setLevel(_stdlib_logging.DEBUG)
+
+# ── Monkey-patch voice_recv internals to survive errors ──────────────────
+# voice_recv's internal Opus decoder produces far better audio than our own
+# (it has jitter buffer, FEC, PLC), but ANY unhandled exception in the
+# PacketRouter thread kills it permanently — no more audio is received.
+#
+# We patch two things:
+#   1. PacketDecoder._decode_packet — catch OpusError, return silence frame
+#   2. PacketRouter._do_run — catch exceptions per-iteration so one bad
+#      packet doesn't kill the whole thread
+if _HAS_VOICE_RECV and discord is not None:
+    from discord.ext.voice_recv.opus import PacketDecoder as _PacketDecoder
+    from discord.ext.voice_recv.router import PacketRouter as _PacketRouter
+
+    _vr_patch_log = _stdlib_logging.getLogger("discord.ext.voice_recv")
+
+    # --- DAVE (Discord Audio Visual Encryption) support ---
+    # voice_recv handles transport encryption (AEAD) but not DAVE E2EE.
+    # After AEAD decryption, packet.decrypted_data may still be DAVE-encrypted.
+    # We must DAVE-decrypt before Opus decode.
+    try:
+        import davey as _davey
+
+        _DAVE_MEDIA_AUDIO = _davey.MediaType.audio
+        _HAS_DAVEY = True
+    except ImportError:
+        _HAS_DAVEY = False
+
+    # --- Patch 1: _decode_packet with DAVE decryption + resilience ---
+    _orig_decode_packet = _PacketDecoder._decode_packet
+    _SILENCE_FRAME = b"\x00" * 3840  # 20ms of 48kHz stereo 16-bit silence
+    _decode_stats: dict[str, int] = {
+        "count": 0,
+        "errors": 0,
+        "dave_ok": 0,
+        "dave_fail": 0,
+    }
+
+    def _safe_decode_packet(
+        self: "_PacketDecoder", packet: "Any"
+    ) -> "tuple[Any, bytes]":
+        _decode_stats["count"] += 1
+
+        # --- DAVE decryption: unwrap E2EE before Opus decode ---
+        if _HAS_DAVEY and packet and getattr(packet, "decrypted_data", None):
+            dave_session = getattr(
+                getattr(self.sink, "voice_client", None),
+                "_connection",
+                None,
+            )
+            dave_session = getattr(dave_session, "dave_session", None)
+            user_id = self._cached_id
+            if dave_session is not None and user_id is not None:
+                try:
+                    packet.decrypted_data = dave_session.decrypt(
+                        user_id,
+                        _DAVE_MEDIA_AUDIO,
+                        bytes(packet.decrypted_data),
+                    )
+                    _decode_stats["dave_ok"] += 1
+                except Exception as dave_exc:
+                    _decode_stats["dave_fail"] += 1
+                    if _decode_stats["dave_fail"] <= 10:
+                        _vr_patch_log.warning(
+                            "[voice_recv] DAVE decrypt failed: %s: %s",
+                            type(dave_exc).__name__,
+                            dave_exc,
+                        )
+                    # Fall through — Opus decode will likely fail, PLC handles it
+
+        try:
+            return _orig_decode_packet(self, packet)
+        except Exception as exc:
+            _decode_stats["errors"] += 1
+            errs = _decode_stats["errors"]
+            if errs <= 5 or errs % 500 == 0:
+                _vr_patch_log.warning(
+                    "[voice_recv] Opus decode error #%d: %s: %s",
+                    errs,
+                    type(exc).__name__,
+                    exc,
+                )
+            # Use PLC instead of raw silence to maintain decoder state
+            try:
+                if self._decoder is not None:
+                    return packet, self._decoder.decode(None, fec=False)
+            except Exception:
+                pass
+            return packet, _SILENCE_FRAME
+
+    _PacketDecoder._decode_packet = _safe_decode_packet  # type: ignore[assignment]
+
+    # --- Patch 2: _do_run per-iteration resilience ---
+    def _resilient_do_run(self: "_PacketRouter") -> None:  # type: ignore[name-defined]
+        """Patched _do_run that catches exceptions per-iteration.
+
+        The original exits on ANY exception, permanently killing audio
+        receive.  This version logs and continues.
+        """
+        _consecutive_errors = 0
+        while not self._end_thread.is_set():
+            try:
+                self.waiter.wait()
+                with self._lock:
+                    for decoder in self.waiter.items:
+                        try:
+                            data = decoder.pop_data()
+                            if data is not None:
+                                self.sink.write(data.source, data)
+                        except Exception:
+                            _consecutive_errors += 1
+                            if (
+                                _consecutive_errors <= 5
+                                or _consecutive_errors % 100 == 0
+                            ):
+                                _vr_patch_log.warning(
+                                    "[voice_recv] Error #%d in decode/write, continuing",
+                                    _consecutive_errors,
+                                    exc_info=True,
+                                )
+            except Exception:
+                _consecutive_errors += 1
+                if _consecutive_errors <= 5 or _consecutive_errors % 100 == 0:
+                    _vr_patch_log.warning(
+                        "[voice_recv] Error #%d in router loop, continuing",
+                        _consecutive_errors,
+                        exc_info=True,
+                    )
+            else:
+                _consecutive_errors = 0
+
+    _PacketRouter._do_run = _resilient_do_run  # type: ignore[assignment]
 from core.transport_layer import universal_send
 from core.core_initializer import register_interface
 from core.command_registry import execute_command, handle_command_message, list_commands
@@ -633,22 +777,15 @@ class DiscordInterface:
             return {
                 "description": "Join a Discord voice channel, optionally starting a live voice session.",
                 "payload": {
-                    "channel_id": {
-                        "type": "string",
-                        "example": "123456789",
-                        "description": "The ID of the voice channel to join. If the sender is in a voice channel, use input.payload.source.voice_channel_id. Otherwise derive from interface_path or omit to auto-resolve.",
-                        "optional": True,
-                    },
                     "interface_path": {
                         "type": "string",
                         "example": "discord_bot/1234567890/9876543210",
-                        "description": "Optional interface path to derive guild/channel.",
-                        "optional": True,
+                        "description": "REQUIRED. Use the exact interface_path from input.payload.source.interface_path.",
                     },
                 },
                 "important_notes": [
-                    "If the sender is currently in a voice channel, their voice_channel_id is available in input.payload.source.voice_channel_id — use it as channel_id.",
-                    "If voice_channel_id is not available and no channel_id is known, omit channel_id and the system will attempt auto-resolve.",
+                    "IMPORTANT: Do NOT provide channel_id parameter - the system will automatically detect which voice channel the sender is in.",
+                    "Simply provide interface_path only from input.payload.source.interface_path",
                 ],
             }
         if action_name == "leave_voice_discord":
@@ -944,12 +1081,22 @@ class DiscordInterface:
     # Gemini Live API voice session management
     # ------------------------------------------------------------------
 
-    async def _start_live_voice(self, channel_id: str | int) -> dict[str, str]:
+    async def _start_live_voice(
+        self,
+        channel_id: str | int,
+        attachments: list[Any] | None = None,
+    ) -> dict[str, str]:
         """Start a Gemini Live API voice session in a Discord voice channel.
 
         Joins the voice channel (using VoiceRecvClient if available for
         audio reception), starts a Live API WebSocket session with the
         current persona, and begins bidirectional audio streaming.
+
+        Args:
+            channel_id: The voice channel to join.
+            attachments: Optional list of Discord attachment objects from the
+                triggering message.  Text files are injected as context
+                updates; images/PDFs use multimodal injection.
         """
         if not self.client:
             return {"status": "failed", "message": "Discord client not initialized"}
@@ -1041,15 +1188,96 @@ class DiscordInterface:
                     await vc.move_to(channel)
                 # If already connected but not a VoiceRecvClient, reconnect
                 if not isinstance(vc, voice_recv.VoiceRecvClient):
+                    log_info(
+                        f"[live_voice] Existing vc is {type(vc).__name__}, not VoiceRecvClient - reconnecting"
+                    )
                     await vc.disconnect()
                     vc = await channel.connect(cls=voice_recv.VoiceRecvClient)
             else:
                 vc = await channel.connect(cls=voice_recv.VoiceRecvClient)
 
+            log_info(
+                f"[live_voice] Voice client connected: type={type(vc).__name__}, "
+                f"is_connected={vc.is_connected()}, channel={vc.channel.name}"
+            )
+
+            # Extract text from attachments BEFORE building the system
+            # instruction so document content is embedded in the core prompt
+            # (survives reconnects and is strongly attended to by the model).
+            _attachment_context_parts: list[str] = []
+            if attachments:
+                _DECODABLE_PREFIXES = (
+                    "text/",
+                    "application/json",
+                    "application/xml",
+                    "application/javascript",
+                )
+                _TEXT_EXTENSIONS = (
+                    ".txt",
+                    ".md",
+                    ".csv",
+                    ".log",
+                    ".json",
+                    ".xml",
+                    ".yaml",
+                    ".yml",
+                    ".toml",
+                    ".ini",
+                    ".cfg",
+                    ".conf",
+                    ".py",
+                    ".js",
+                    ".ts",
+                    ".html",
+                    ".css",
+                    ".sh",
+                    ".bat",
+                    ".rst",
+                    ".tex",
+                )
+                for att in attachments:
+                    mime = getattr(att, "content_type", "") or ""
+                    fname = getattr(att, "filename", "document")
+                    is_decodable = any(mime.startswith(p) for p in _DECODABLE_PREFIXES)
+                    if not is_decodable and fname:
+                        is_decodable = any(
+                            fname.lower().endswith(ext) for ext in _TEXT_EXTENSIONS
+                        )
+                    if not is_decodable:
+                        log_info(
+                            f"[live_voice] Skipping non-text attachment '{fname}' "
+                            f"({mime}) — Live API only supports text context"
+                        )
+                        continue
+                    try:
+                        raw = await att.read()
+                        doc_text = raw.decode("utf-8", errors="replace")
+                        if len(doc_text) > 50000:
+                            doc_text = doc_text[:50000] + "\n[... truncated]"
+                        _attachment_context_parts.append(
+                            f"=== Document: {fname} ===\n{doc_text}"
+                        )
+                        log_info(
+                            f"[live_voice] Extracted text from '{fname}' "
+                            f"({len(doc_text)} chars) for system instruction"
+                        )
+                    except Exception as _att_err:
+                        log_warning(
+                            f"[live_voice] Failed to read attachment '{fname}': {_att_err}"
+                        )
+
+            _attachment_context: str | None = (
+                "\n\n".join(_attachment_context_parts)
+                if _attachment_context_parts
+                else None
+            )
+
             # Build persona system instruction
             from core.prompt_engine import build_live_system_instruction
 
-            system_instruction = await build_live_system_instruction()
+            system_instruction = await build_live_system_instruction(
+                attachment_context=_attachment_context,
+            )
 
             # Build Gemini function declarations from the SyntH action registry
             tools = _build_gemini_tool_declarations()
@@ -1105,7 +1333,8 @@ class DiscordInterface:
                     await save_chat_message(
                         interface_path=live_interface_path,
                         message_text=model_transcript,
-                        sender_name="Synth",
+                        sender_name="self",
+                        sender_id="self",
                     )
 
                 # Track turn count for diagnostics.
@@ -1153,6 +1382,7 @@ class DiscordInterface:
                 channel_id=channel.id,
                 system_instruction=system_instruction,
                 tools=tools,
+                attachment_context=_attachment_context,
             )
             if not started:
                 return {
@@ -1167,8 +1397,18 @@ class DiscordInterface:
             vc.play(source)
 
             # Start listening to Discord voice → forward to Live API
-            sink = LiveVoiceAudioSink(manager, guild_id)
+            sink = LiveVoiceAudioSink(
+                manager, guild_id, self.client.loop, playback_buffer=audio_buffer
+            )
+            log_info(
+                f"[live_voice] Starting vc.listen() with sink={sink}, "
+                f"vc={vc}, vc.is_listening()={getattr(vc, 'is_listening', lambda: 'N/A')()}"
+            )
             vc.listen(sink)
+            log_info(
+                f"[live_voice] vc.listen() completed, "
+                f"vc.is_listening()={getattr(vc, 'is_listening', lambda: 'N/A')()}"
+            )
 
             # Activate per-path cortex routing for the live voice interface
             # path so that any message-chain activity on this path uses the
@@ -1195,6 +1435,21 @@ class DiscordInterface:
                 "live_engine": _live_capable_engine,
                 "interface_path": live_interface_path,
             }
+
+            # Start a watchdog that re-creates the listening sink if the
+            # PacketRouter thread dies unexpectedly.  The voice_recv library
+            # tears down listening on *any* unhandled exception in its
+            # background threads, so we need to be ready to restart.
+            asyncio.create_task(
+                self._listen_watchdog(guild_id, vc, manager),
+                name=f"listen_watchdog_{guild_id}",
+            )
+
+            # Store attachment context for reconnects
+            if _attachment_context:
+                self._live_voice_state[guild_id]["attachment_context"] = (
+                    _attachment_context
+                )
 
             log_info(
                 f"[discord_interface] Live voice session started in "
@@ -1265,6 +1520,81 @@ class DiscordInterface:
         except Exception as e:
             log_error(f"[discord_interface] Failed to stop live voice: {e}")
             return {"status": "failed", "message": str(e)}
+
+    async def _listen_watchdog(
+        self,
+        guild_id: int,
+        vc: Any,
+        manager: Any,
+    ) -> None:
+        """Background task: monitor ``vc.is_listening()`` and restart if it drops.
+
+        The voice_recv PacketRouter thread tears down listening on *any*
+        unhandled exception (e.g. Opus decode error, threading race).  This
+        watchdog detects the drop and re-creates the sink so audio reception
+        continues.
+
+        Args:
+            guild_id: Guild whose voice session to monitor.
+            vc: The VoiceRecvClient instance.
+            manager: The LiveSessionManager forwarding audio to Gemini.
+        """
+        _POLL_INTERVAL = 2.0  # seconds between checks
+        _restart_count = 0
+        _MAX_RESTARTS = 10
+        try:
+            while True:
+                await asyncio.sleep(_POLL_INTERVAL)
+
+                # Check if the live session is still active
+                state = getattr(self, "_live_voice_state", {}).get(guild_id)
+                if not state:
+                    log_debug(
+                        f"[listen_watchdog] Guild {guild_id} no longer has "
+                        "live state — exiting watchdog"
+                    )
+                    return
+
+                if not vc.is_connected():
+                    log_debug(
+                        f"[listen_watchdog] VC disconnected for guild "
+                        f"{guild_id} — exiting watchdog"
+                    )
+                    return
+
+                is_listening = getattr(vc, "is_listening", lambda: False)()
+                if is_listening:
+                    continue  # all good
+
+                # Listening stopped unexpectedly — restart
+                _restart_count += 1
+                if _restart_count > _MAX_RESTARTS:
+                    log_warning(
+                        f"[listen_watchdog] Too many restarts ({_restart_count}) "
+                        f"for guild {guild_id} — giving up"
+                    )
+                    return
+
+                log_warning(
+                    f"[listen_watchdog] Listening dropped for guild {guild_id} "
+                    f"(restart #{_restart_count}), re-creating sink"
+                )
+                try:
+                    new_sink = LiveVoiceAudioSink(manager, guild_id, self.client.loop)
+                    vc.listen(new_sink)
+                    state["sink"] = new_sink
+                    log_info(
+                        f"[listen_watchdog] Successfully restarted listening "
+                        f"for guild {guild_id}"
+                    )
+                except Exception as e:
+                    log_warning(
+                        f"[listen_watchdog] Failed to restart listening "
+                        f"for guild {guild_id}: {e}"
+                    )
+                    await asyncio.sleep(2.0)  # back off before next attempt
+        except asyncio.CancelledError:
+            log_debug(f"[listen_watchdog] Cancelled for guild {guild_id}")
 
     async def _handle_voice_state_update(
         self,
@@ -1923,26 +2253,66 @@ class DiscordInterface:
                     if live_mgr and live_mgr.is_session_active(guild_id):
                         text = content
 
-                        # --- inject text-based file attachments as context ---
-                        _TEXT_MIME_PREFIXES = (
+                        # --- inject text-decodable file attachments as context ---
+                        # Live API only supports text; binary files (images,
+                        # PDFs) cannot be sent as inline_data.
+                        _DECODABLE_PREFIXES = (
                             "text/",
                             "application/json",
                             "application/xml",
+                            "application/javascript",
+                        )
+                        _TEXT_EXTENSIONS = (
+                            ".txt",
+                            ".md",
+                            ".csv",
+                            ".log",
+                            ".json",
+                            ".xml",
+                            ".yaml",
+                            ".yml",
+                            ".toml",
+                            ".ini",
+                            ".cfg",
+                            ".conf",
+                            ".py",
+                            ".js",
+                            ".ts",
+                            ".html",
+                            ".css",
+                            ".sh",
+                            ".bat",
+                            ".rst",
+                            ".tex",
                         )
                         for att in getattr(message, "attachments", []):
                             mime = getattr(att, "content_type", "") or ""
-                            if not any(mime.startswith(p) for p in _TEXT_MIME_PREFIXES):
+                            fname = getattr(att, "filename", "document")
+                            _is_decodable = any(
+                                mime.startswith(p) for p in _DECODABLE_PREFIXES
+                            )
+                            if not _is_decodable and fname:
+                                _is_decodable = any(
+                                    fname.lower().endswith(ext)
+                                    for ext in _TEXT_EXTENSIONS
+                                )
+                            if not _is_decodable:
+                                log_info(
+                                    f"[discord_interface] Skipping non-text attachment "
+                                    f"'{fname}' ({mime}) — Live API text-only"
+                                )
                                 continue
                             try:
                                 raw = await att.read()
                                 doc_text = raw.decode("utf-8", errors="replace")
-                                fname = getattr(att, "filename", "document")
+                                if len(doc_text) > 50000:
+                                    doc_text = doc_text[:50000] + "\n[... truncated]"
                                 await live_mgr.send_context_update(
                                     guild_id,
                                     f"[Document: {fname}]\n{doc_text}",
                                 )
                                 log_info(
-                                    f"[discord_interface] Injected attachment "
+                                    f"[discord_interface] Injected text attachment "
                                     f"'{fname}' ({len(doc_text)} chars) into "
                                     f"live session for guild {guild_id}"
                                 )
@@ -1952,8 +2322,16 @@ class DiscordInterface:
                                     f"attachment into live session: {_att_err}"
                                 )
 
-                        # forward into live model
-                        await live_mgr.send_text(guild_id, text)
+                        # Forward into live model as a context update (system
+                        # role, turn_complete=False) so the model internalises
+                        # the text without generating an audio response for it.
+                        sender = getattr(
+                            message.author, "display_name", None
+                        ) or getattr(message.author, "name", "unknown")
+                        await live_mgr.send_context_update(
+                            guild_id,
+                            f"[Text chat] {sender}: {text}",
+                        )
                         # replicate in history cache
                         await save_chat_message(
                             interface_path=f"discord_live_{guild_id}",
@@ -2053,6 +2431,46 @@ class DiscordInterface:
             channel_id = payload.get("channel_id")
             # note: start_live_voice flag removed – live sessions must be started
             # explicitly via a dedicated action (`start_live_voice_discord`).
+
+            # Validate channel_id: if it looks like a guild ID instead of a channel ID,
+            # clear it so auto-resolution can find the correct voice channel.
+            if channel_id:
+                interface_path = payload.get("interface_path") or context.get(
+                    "interface_path"
+                )
+                if interface_path:
+                    from core.interface_path_utils import parse_interface_path
+
+                    _, levels = parse_interface_path(interface_path)
+                    if levels and str(channel_id) == str(levels[0]):
+                        # channel_id matches guild_id - LLM likely confused them
+                        log_warning(
+                            f"[discord_interface] join_voice_discord: channel_id {channel_id} "
+                            f"matches guild_id from interface_path - ignoring and using auto-resolve"
+                        )
+                        channel_id = None
+
+            # Validate channel_id: if it resolves to a text channel, clear it so
+            # auto-resolution picks the correct voice channel instead.
+            if channel_id and self.client and discord is not None:
+                try:
+                    _ch = self.client.get_channel(int(channel_id))
+                    if _ch is not None and isinstance(
+                        _ch,
+                        (
+                            discord.TextChannel,
+                            discord.ForumChannel,
+                            discord.CategoryChannel,
+                        ),
+                    ):
+                        log_warning(
+                            f"[discord_interface] join_voice_discord: channel_id {channel_id} "
+                            f"resolved to {type(_ch).__name__}, not a voice channel "
+                            f"- ignoring and using auto-resolve"
+                        )
+                        channel_id = None
+                except (ValueError, TypeError):
+                    pass
 
             # Gate: LIVE_TRAINER_ONLY_VOICE — only the trainer may request a voice join
             try:
@@ -2232,7 +2650,10 @@ class DiscordInterface:
                                 f"in channel {getattr(vc_channel, 'id', channel_id)} — auto-starting live session"
                             )
                             live_result = await self._start_live_voice(
-                                getattr(vc_channel, "id", channel_id)
+                                getattr(vc_channel, "id", channel_id),
+                                attachments=getattr(
+                                    original_message, "attachments", None
+                                ),
                             )
                             if live_result and live_result.get("status") == "failed":
                                 log_warning(
@@ -2582,6 +3003,9 @@ class LiveAudioBuffer:
         self._lock = threading.Lock()
         self._closed = False
         self._ratecv_state: Any = None  # audioop ratecv state for continuity
+        self._last_nonempty_read: float = (
+            0.0  # monotonic timestamp of last real audio read
+        )
 
     def write(self, pcm_24k_mono: bytes) -> None:
         """Write 24kHz mono PCM data, converting to 48kHz stereo."""
@@ -2613,6 +3037,7 @@ class LiveAudioBuffer:
             data = b"".join(self._chunks)
             self._chunks.clear()
 
+        self._last_nonempty_read = time.monotonic()
         if len(data) <= nbytes:
             return data
         # Return requested amount, put remainder back
@@ -2620,6 +3045,21 @@ class LiveAudioBuffer:
         with self._lock:
             self._chunks.insert(0, data[nbytes:])
         return result
+
+    def is_speaking(self, cooldown: float = 0.5) -> bool:
+        """Return True if the buffer recently delivered real audio.
+
+        Used by the voice sink to suppress echo — incoming audio is
+        likely acoustic feedback while the bot is speaking.
+
+        Args:
+            cooldown: seconds after last real audio read to still
+                      consider the bot "speaking" (accounts for
+                      propagation delay and mic tail).
+        """
+        if self._chunks:
+            return True
+        return (time.monotonic() - self._last_nonempty_read) < cooldown
 
     def close(self) -> None:
         self._closed = True
@@ -2663,29 +3103,50 @@ if _HAS_VOICE_RECV and voice_recv is not None:
     class LiveVoiceAudioSink(voice_recv.AudioSink):  # type: ignore[misc]
         """AudioSink that forwards received Discord voice audio to Gemini Live API.
 
-        Receives 48kHz stereo 16-bit PCM from Discord, converts to 16kHz mono,
-        and sends to the Live API session.
+        Uses voice_recv's internal Opus decoder (with jitter buffer, FEC, and
+        PLC) for high-quality PCM output.  The monkey-patched
+        ``_decode_packet`` prevents ``OpusError`` from crashing the
+        packet-router thread.
 
         NOTE: The ``write`` callback runs on the voice_recv packet-router thread,
         **not** the asyncio event loop thread.  We capture the running loop at
         init time and use ``call_soon_threadsafe`` to schedule coroutines.
         """
 
-        def __init__(self, manager: Any, guild_id: int) -> None:
+        def __init__(
+            self,
+            manager: Any,
+            guild_id: int,
+            loop: asyncio.AbstractEventLoop,
+            playback_buffer: LiveAudioBuffer | None = None,
+        ) -> None:
             super().__init__()
             self._manager = manager
             self._guild_id = guild_id
-            # Capture the running event loop from the main thread at construction time
-            self._loop: asyncio.AbstractEventLoop = asyncio.get_running_loop()
+            # Use the long-lived discord client event loop so we don't grab a short-lived task loop
+            self._loop: asyncio.AbstractEventLoop = loop
             self._packet_count: int = 0
+            self._suppressed_count: int = 0
             self._ratecv_state: Any = None  # preserve resampler state across packets
+            # Reference to the outgoing audio buffer for echo suppression.
+            self._playback_buffer: LiveAudioBuffer | None = playback_buffer
+            # Startup grace period: drop the first ~1s of audio while the
+            # codec, jitter buffer, and DAVE key exchange settle.  At 50
+            # packets/sec (20ms each) that's 50 packets ≈ 1 second.
+            self._startup_grace: int = 50
             # Track the last real user who sent audio so on_turn_complete can
             # attribute the user-side transcript to the correct Discord account.
             self._last_speaker_name: str | None = None
             self._last_speaker_id: str | None = None
 
         def wants_opus(self) -> bool:
-            return False  # We want decoded PCM
+            """Return False so voice_recv decodes Opus internally.
+
+            voice_recv's decoder has jitter buffer, FEC, and PLC for much
+            better audio quality.  The monkey-patched ``_decode_packet``
+            prevents OpusError from crashing the PacketRouter thread.
+            """
+            return False
 
         def write(self, user: Any, data: voice_recv.VoiceData) -> None:  # type: ignore[name-defined]
             """Process incoming audio from a Discord user.
@@ -2695,15 +3156,42 @@ if _HAS_VOICE_RECV and voice_recv is not None:
 
             Args:
                 user: The Discord user who spoke. May be None for unmapped SSRCs.
-                data: VoiceData containing PCM audio bytes.
+                data: VoiceData containing decoded 48kHz stereo PCM audio.
             """
-            # Skip packets with an unmapped SSRC (user is None) — these are
-            # typically the bot's own audio stream reflected by Discord's voice
-            # server, or early packets before the SSRC→user mapping is ready.
-            # Also skip any bot user (including ourselves) to prevent audio
-            # feedback where Gemini hears its own output and loops on it.
-            if user is None or getattr(user, "bot", False):
+            if user is None:
                 return
+            if getattr(user, "bot", False):
+                return
+
+            # Startup grace: drop early packets while codec/DAVE settle.
+            if self._startup_grace > 0:
+                self._startup_grace -= 1
+                if self._startup_grace == 0:
+                    log_info(
+                        "[live_voice_sink] Startup grace period ended, forwarding audio"
+                    )
+                return
+
+            # Echo suppression: drop incoming audio while the bot is
+            # playing back Gemini responses (+ 0.5s cooldown).  The
+            # user's mic picks up the bot's output and feeds it back,
+            # creating an infinite conversation loop.
+            if self._playback_buffer and self._playback_buffer.is_speaking():
+                self._suppressed_count += 1
+                if (
+                    self._suppressed_count in (1, 100)
+                    or self._suppressed_count % 1000 == 0
+                ):
+                    log_debug(
+                        f"[live_voice_sink] Echo-suppressed {self._suppressed_count} packets"
+                    )
+                return
+
+            if self._suppressed_count > 0:
+                log_debug(
+                    f"[live_voice_sink] Echo suppression ended after {self._suppressed_count} packets"
+                )
+                self._suppressed_count = 0
 
             pcm_48k_stereo = data.pcm
             if not pcm_48k_stereo:
@@ -2718,35 +3206,113 @@ if _HAS_VOICE_RECV and voice_recv is not None:
             self._last_speaker_id = str(getattr(user, "id", ""))
 
             self._packet_count += 1
-            # Log first packet and then every 500 packets (~10s at 50pps)
             if self._packet_count == 1 or self._packet_count % 500 == 0:
                 log_info(
                     f"[live_voice_sink] Received packet #{self._packet_count} "
-                    f"from user {user}, {len(pcm_48k_stereo)} bytes"
+                    f"from user {user}, {len(pcm_48k_stereo)} bytes PCM"
                 )
 
             try:
-                # Stereo → Mono (mix down)
-                mono = audioop.tomono(pcm_48k_stereo, _DISCORD_SAMPLE_WIDTH, 0.5, 0.5)
-                # 48kHz → 16kHz (ratio 3:1)
-                downsampled, self._ratecv_state = audioop.ratecv(
+                # Need at least one stereo sample (L+R = 4 bytes)
+                if len(pcm_48k_stereo) < 4:
+                    return
+
+                # voice_recv Opus decoder ALWAYS outputs stereo
+                # (CHANNELS=2), but frame duration varies (5-60ms),
+                # so packet sizes range from 960 to 11520 bytes.
+                # Extract left channel — speech lives there;
+                # right channel may carry DC-offset decoder artifacts.
+                mono = audioop.tomono(pcm_48k_stereo, _DISCORD_SAMPLE_WIDTH, 1, 0)
+                rms_mono = audioop.rms(mono, _DISCORD_SAMPLE_WIDTH)
+
+                if self._packet_count <= 10:
+                    log_info(
+                        f"[live_voice_sink] Audio pkt #{self._packet_count}: "
+                        f"in={len(pcm_48k_stereo)}B "
+                        f"mono={len(mono)}B rms={rms_mono}"
+                    )
+
+                # ── Diagnostics: save each pipeline stage to WAV ──
+                if not hasattr(self, "_diag_stereo"):
+                    import wave as _wave
+
+                    self._diag_stereo = _wave.open("logs/voice_1_stereo.wav", "wb")
+                    self._diag_stereo.setnchannels(2)
+                    self._diag_stereo.setsampwidth(_DISCORD_SAMPLE_WIDTH)
+                    self._diag_stereo.setframerate(_DISCORD_RATE)
+
+                    self._diag_left = _wave.open("logs/voice_2_left.wav", "wb")
+                    self._diag_left.setnchannels(1)
+                    self._diag_left.setsampwidth(_DISCORD_SAMPLE_WIDTH)
+                    self._diag_left.setframerate(_DISCORD_RATE)
+
+                    self._diag_right = _wave.open("logs/voice_3_right.wav", "wb")
+                    self._diag_right.setnchannels(1)
+                    self._diag_right.setsampwidth(_DISCORD_SAMPLE_WIDTH)
+                    self._diag_right.setframerate(_DISCORD_RATE)
+
+                    self._diag_16k = _wave.open("logs/voice_4_16khz.wav", "wb")
+                    self._diag_16k.setnchannels(1)
+                    self._diag_16k.setsampwidth(_DISCORD_SAMPLE_WIDTH)
+                    self._diag_16k.setframerate(_GEMINI_INPUT_RATE)
+
+                    self._diag_count = 0
+                    log_info(
+                        "[live_voice_sink] Saving diagnostic WAVs to logs/voice_*.wav"
+                    )
+
+                if self._diag_stereo is not None:
+                    self._diag_stereo.writeframes(pcm_48k_stereo)
+                    self._diag_left.writeframes(mono)
+                    right = audioop.tomono(pcm_48k_stereo, _DISCORD_SAMPLE_WIDTH, 0, 1)
+                    self._diag_right.writeframes(right)
+
+                if rms_mono == 0:
+                    # Pure silence — don't waste bandwidth
+                    return
+
+                # Downsample 48kHz → 16kHz for Gemini Live API input.
+                resampled, self._ratecv_state = audioop.ratecv(
                     mono,
                     _DISCORD_SAMPLE_WIDTH,
-                    1,
+                    1,  # mono
                     _DISCORD_RATE,
                     _GEMINI_INPUT_RATE,
                     self._ratecv_state,
                 )
-                # Schedule on the main event loop (thread-safe)
+
+                # Write resampled to diagnostic WAV
+                if self._diag_stereo is not None:
+                    self._diag_16k.writeframes(resampled)
+                    self._diag_count += 1
+                    if self._diag_count >= 500:
+                        for f in (
+                            self._diag_stereo,
+                            self._diag_left,
+                            self._diag_right,
+                            self._diag_16k,
+                        ):
+                            f.close()
+                        self._diag_stereo = None
+                        log_info("[live_voice_sink] Diagnostic WAVs saved")
+
                 asyncio.run_coroutine_threadsafe(
-                    self._manager.send_audio(self._guild_id, downsampled),
+                    self._manager.send_audio(self._guild_id, resampled),
                     self._loop,
                 )
+
             except Exception as e:
                 log_warning(f"[live_voice_sink] Audio processing failed: {e}")
 
         def cleanup(self) -> None:
-            pass
+            """Clean up when sink is stopped."""
+            import traceback
+
+            log_warning(
+                f"[live_voice_sink] Sink cleanup for guild {self._guild_id} "
+                f"(packets received: {self._packet_count})\n"
+                f"Call stack:\n{''.join(traceback.format_stack())}"
+            )
 
 
 else:

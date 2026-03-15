@@ -1564,7 +1564,9 @@ async def handle_incoming_message(
             # in accordance with the new policy that at least one delivered
             # message prevents an LLM failure notification.
             if not actions_executed_during_loop:
-                await send_llm_fallback_message(bot, message, failure_reason, context=ctx)
+                await send_llm_fallback_message(
+                    bot, message, failure_reason, context=ctx
+                )
                 return LLM_FAILED
             else:
                 log_warning(
