@@ -964,6 +964,12 @@ class AnimationHandler {
         if (!this._expressionSources) this._expressionSources = [];
         this._expressionSources.push(source);
     }
+    removeExpressionSourcesByTag(tag) {
+        if (!this._expressionSources) return;
+        this._expressionSources = this._expressionSources.filter(
+            s => s && s.source !== tag
+        );
+    }
     clearExpressionSources() {
         this._expressionSources = [];
     }
@@ -3090,7 +3096,6 @@ class AnimationHandler {
         // we're waiting for a new one, the skeleton will still be driven by idle.
         try {
             await this._ensureBaseIdle(1.0, false);
-        } catch (e) { /* ignore */ }
         } catch (e) { /* ignore */ }
 
         // Ensure eyes are open when starting a new non-think action to avoid lingering closed lids

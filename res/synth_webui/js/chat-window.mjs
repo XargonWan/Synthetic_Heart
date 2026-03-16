@@ -584,6 +584,11 @@ export function initChatUI() {
             }
         }
 
+        // Backwards-compatible helper for older code that expects this to exist.
+        function updateSendState() {
+            updateButtonMode();
+        }
+
         // ── Ambient VAD (volume-based, triggers look-at-camera always) ───────
         function _startVADLoop(stream) {
             if (micVADInterval) return;
@@ -915,14 +920,19 @@ export function initChatUI() {
                         } else if (data && data.type === 'vrm_expression_set') {
                             try {
                                 if (window.animationHandler && typeof window.animationHandler.addExpressionSource === 'function') {
-                                    const tgt = {};
-                                    if (data.name) tgt[String(data.name)] = Number(data.intensity) || 0;
+                                    // prefer pre-resolved targets dict sent by Python (GAP 1A);
+                                    // fall back to {name: intensity} for backward compat.
+                                    const tgt = (data.targets && typeof data.targets === 'object')
+                                        ? Object.assign({}, data.targets)
+                                        : (data.name ? {[String(data.name)]: Number(data.intensity) || 0} : {});
                                     window.animationHandler.addExpressionSource({targets: tgt, priority: 25, source: 'facial_expression'});
                                 }
                             } catch (e) { /* ignore */ }
                         } else if (data && data.type === 'vrm_expression_clear') {
                             try {
-                                if (window.animationHandler && typeof window.animationHandler.clearExpressionSources === 'function') {
+                                if (window.animationHandler && typeof window.animationHandler.removeExpressionSourcesByTag === 'function') {
+                                    window.animationHandler.removeExpressionSourcesByTag('facial_expression');
+                                } else if (window.animationHandler && typeof window.animationHandler.clearExpressionSources === 'function') {
                                     window.animationHandler.clearExpressionSources();
                                 }
                             } catch (e) { /* ignore */ }

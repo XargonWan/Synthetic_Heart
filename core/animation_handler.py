@@ -107,7 +107,7 @@ class KaradaStateServer:
             callable
         ] = []  # Callbacks when animation changes
 
-    # new methods inserted here (will add after class header)
+        # new methods inserted here (will add after class header)
         # Plugin/override state animations: state_name -> {'loop': [...], 'post': [...], 'other': [...]}
         self._registered_state_animations: Dict[str, Dict[str, List[str]]] = {}
         # State aliases map (normalized state -> list of alias names)
@@ -181,57 +181,55 @@ class KaradaStateServer:
             try:
                 await websocket.send_json(payload)
             except Exception as exc:  # pragma: no cover - best effort
-                log_warning(f"[KaradaStateServer] failed to send face_values to {sid}: {exc}")
+                log_warning(
+                    f"[KaradaStateServer] failed to send face_values to {sid}: {exc}"
+                )
 
-    async def push_face_expression(self, name: Optional[str], intensity: float) -> None:
+    async def push_face_expression(
+        self,
+        name: Optional[str],
+        intensity: float,
+        targets: Optional[Dict[str, float]] = None,
+    ) -> None:
         """Emit a high-priority facial expression packet.
 
         If ``name`` is None or empty, a ``vrm_expression_clear`` packet is
-        broadcast which instructs the client to remove the facial_expression
-        source from its pipeline.  Otherwise ``vrm_expression_set`` is used.
+        broadcast which instructs the client to remove the
+        ``facial_expression`` source from its pipeline.
+
+        If *targets* is provided (a pre-resolved mapping of blendshape key
+        → intensity already scaled by the caller), a ``vrm_expression_set``
+        packet with an explicit ``targets`` dict is sent.  The JS tick-
+        pipeline can then apply the correct morphs without needing to look up
+        the expression catalogue client-side.
+
+        When *targets* is ``None`` the bare *name* and *intensity* are
+        forwarded as a backward-compatible fallback.
         """
         if not self.webui:
             return
+        payload: Dict[str, Any]
         if not name:
             payload = {"type": "vrm_expression_clear"}
+        elif targets is not None:
+            payload = {"type": "vrm_expression_set", "targets": targets}
         else:
-            payload = {"type": "vrm_expression_set", "name": name, "intensity": intensity}
+            payload = {
+                "type": "vrm_expression_set",
+                "name": name,
+                "intensity": intensity,
+            }
         for sid, websocket in list(getattr(self.webui, "connections", {}).items()):
             try:
                 await websocket.send_json(payload)
             except Exception as exc:  # pragma: no cover
-                log_warning(f"[KaradaStateServer] failed to push expression to {sid}: {exc}")
+                log_warning(
+                    f"[KaradaStateServer] failed to push expression to {sid}: {exc}"
+                )
 
     def has_connected_clients(self) -> bool:
         """Return True if any WebUI clients are currently connected."""
         return bool(getattr(self.webui, "connections", {}))
-
-        # changes. This is different from the full 'animation' command (which
-        # includes playback instruction) and allows multiple clients to observe
-        # the central state even if they missed the immediate play command.
-        try:
-            cb = getattr(webui, "_broadcast_animation_state_summary", None)
-            if cb and cb not in self._animation_state_changed_callbacks:
-                self.register_animation_state_changed_callback(cb)
-                log_debug(
-                    "[KaradaStateServer] Registered WebUI animation state summary callback"
-                )
-        except Exception:
-            pass
-        # Also register the authoritative broadcast callback so that when the
-        # centralized animation state changes we explicitly push an
-        # 'animation' command to all connected WebUI clients. This helps
-        # ensure clients that treat the lightweight 'animation_state' as
-        # informational will still receive a playback command to apply.
-        try:
-            cb2 = getattr(webui, "_broadcast_animation_state", None)
-            if cb2 and cb2 not in self._animation_state_changed_callbacks:
-                self.register_animation_state_changed_callback(cb2)
-                log_debug(
-                    "[KaradaStateServer] Registered WebUI authoritative animation broadcast callback"
-                )
-        except Exception:
-            pass
 
     async def ensure_idle_preloaded(self, session_id: Optional[str] = None) -> None:
         """Pre-load IDLE animation in advance to ensure smooth fallback.

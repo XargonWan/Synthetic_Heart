@@ -1,6 +1,8 @@
 import pytest
 
-from core.facial_expression_parser import parse_facial_expressions, FacialExpressionEvent
+from core.facial_expression_parser import (
+    parse_facial_expressions,
+)
 
 
 def test_parse_no_tags():
@@ -32,12 +34,12 @@ def test_parse_reset_and_multiple():
 
 
 def test_parse_invalid_format():
+    # [em_!:x] contains '!' which is not in [a-z_]+, so the regex does NOT match.
+    # The tag is left untouched in the output text and no events are produced.
     text = "Bad [em_!:x] text"
-    # invalid name should just strip tag but still produce event with name '!'
     clean, events = parse_facial_expressions(text)
-    assert clean == "Bad  text"
-    assert events[0].name == "!"
-    assert events[0].intensity == 1.0
+    assert clean == text
+    assert events == []
 
 
 def test_overlapping_tags():
@@ -53,4 +55,3 @@ def test_tag_missing_intensity():
     text = "Foo [em_angry] Bar"
     clean, events = parse_facial_expressions(text)
     assert events[0].intensity == 1.0
-

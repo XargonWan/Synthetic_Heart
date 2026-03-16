@@ -998,6 +998,7 @@ async def _handle_plugin_action(
                         # find our plugin instance (if loaded)
                         expr_plugin = None
                         from core.core_initializer import PLUGIN_REGISTRY
+
                         if isinstance(PLUGIN_REGISTRY, dict):
                             for p in PLUGIN_REGISTRY.values():
                                 if isinstance(p, FacialExpressionPlugin):
@@ -1007,11 +1008,14 @@ async def _handle_plugin_action(
                             total_chars = len(clean_text)
                             # read settings via persona manager as plugin does
                             from core.persona_manager import get_persona_manager
+
                             persona_json = None
                             pm = get_persona_manager()
                             if pm and getattr(pm, "_current_persona", None):
                                 try:
-                                    persona_json = pm._load_persona_json(pm._current_persona.name)
+                                    persona_json = pm._load_persona_json(
+                                        pm._current_persona.name
+                                    )
                                 except Exception:
                                     persona_json = None
                             cooldown = (
@@ -1024,9 +1028,19 @@ async def _handle_plugin_action(
                                 if persona_json
                                 else 12
                             )
+                            expr_section = (
+                                persona_json.get("facial_expressions", {})
+                                if persona_json
+                                else {}
+                            )
                             asyncio.create_task(
                                 expr_plugin._play_expression_timeline(
-                                    events, total_chars, getattr(original_message, "session_id", ""), cooldown, chars_per_sec
+                                    events,
+                                    total_chars,
+                                    getattr(original_message, "session_id", ""),
+                                    cooldown,
+                                    chars_per_sec,
+                                    expr_section=expr_section,
                                 )
                             )
                 except Exception:

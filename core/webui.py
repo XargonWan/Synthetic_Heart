@@ -1913,12 +1913,15 @@ class SynthWebUIInterface:
         try:
             from core.core_initializer import PLUGIN_REGISTRY
 
+            import tempfile
+
             auris = PLUGIN_REGISTRY.get("auris_plugin")
             if auris is None:
                 raise HTTPException(
                     status_code=503,
                     detail="Auris STT subsystem is not loaded. Select an Auris engine or disable via ACTIVE_AURIS_ENGINE.",
                 )
+            tmp_dir = Path(tempfile.mkdtemp())
             tmp_dir.mkdir(parents=True, exist_ok=True)
             suffix = Path(file.filename).suffix or ".audio"
             tmp_path = tmp_dir / f"webui_{uuid.uuid4().hex}{suffix}"

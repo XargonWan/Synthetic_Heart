@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from core.plugin_base import PluginBase
 from core.animation_handler import get_karada_state_server
@@ -43,22 +42,31 @@ class FacialExpressionPlugin(PluginBase):
                 persona_json = pm._load_persona_json(pm._current_persona.name)
             except Exception:
                 persona_json = None
-        expr_section = persona_json.get("facial_expressions", {}) if persona_json else {}
+        expr_section = (
+            persona_json.get("facial_expressions", {}) if persona_json else {}
+        )
         # fallback defaults if skin doesn't provide any
         if not expr_section:
-            expr_section = {name: {} for name in [
-                "smile", "grin", "sad", "blush", "surprised", "angry",
-            ]}
+            expr_section = {
+                name: {}
+                for name in [
+                    "smile",
+                    "grin",
+                    "sad",
+                    "blush",
+                    "surprised",
+                    "angry",
+                ]
+            }
         expr_names = ", ".join(expr_section.keys()) or "<none>"
 
         instructions = (
             "You can embed facial expression tags in your message text: [em_NAME:INTENSITY]"
-            "\nAvailable: %s" % expr_names
+            "\nAvailable: %s"
+            % expr_names
+            + ("\nINTENSITY: float 0.0-1.0. Use [em] to reset immediately.")
             + (
-                "\nINTENSITY: float 0.0-1.0. Use [em] to reset immediately."
-            )
-            + (
-                "\nThese tags are invisible to users. Example: \"Ciao! [em_grin:0.9] Come va?\""
+                '\nThese tags are invisible to users. Example: "Ciao! [em_grin:0.9] Come va?"'
             )
             + (
                 "\nOnly use these when responding to interfaces that support face rendering."
@@ -92,9 +100,17 @@ class FacialExpressionPlugin(PluginBase):
                 if persona_json
                 else 12
             )
+            expr_section: Optional[Dict[str, Any]] = (
+                persona_json.get("facial_expressions", {}) if persona_json else {}
+            )
             asyncio.create_task(
                 self._play_expression_timeline(
-                    events, total_chars, session_id, cooldown, chars_per_sec
+                    events,
+                    total_chars,
+                    session_id,
+                    cooldown,
+                    chars_per_sec,
+                    expr_section=expr_section,
                 )
             )
         return clean
@@ -106,8 +122,17 @@ class FacialExpressionPlugin(PluginBase):
         session_id: str,
         cooldown_s: float,
         chars_per_sec: float,
+        expr_section: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Drive KaradaStateServer through a sequence of expression events."""
+        """Drive KaradaStateServer through a sequence of expression events.
+
+        *expr_section* is the ``facial_expressions`` dict from the active
+        persona.json (``{name: {targets: {blendshape: value}}}``).
+        When provided, each event's blendshape targets are resolved here
+        (Python-side) and forwarded to the client already scaled by the
+        event intensity.  This lets the JS pipeline apply the correct morphs
+        without knowing the expression catalogue (GAP 1A).
+        """
         karada = get_karada_state_server()
         if not karada:
             return
@@ -122,7 +147,27 @@ class FacialExpressionPlugin(PluginBase):
             sleep_for = item.delay - (now - start)
             if sleep_for > 0:
                 await asyncio.sleep(sleep_for)
-            await karada.push_face_expression(item.name, item.intensity)
+            # resolve blendshape targets from persona expression catalogue
+            resolved_targets: Optional[Dict[str, float]] = None
+            if item.name and expr_section:
+                raw = expr_section.get(item.name, {}).get("targets", {})
+                if raw:
+                    resolved_targets = {
+                        k: float(v) * item.intensity for k, v in raw.items()
+                    }
+            await karada.push_face_expression(
+                item.name, item.intensity, targets=resolved_targets
+            )
         # after all events, schedule cooldown reset
         await asyncio.sleep(cooldown_s)
         await karada.push_face_expression(None, 0)
+
+    def get_metadata(self) -> Dict[str, Any]:
+        return {
+            "name": "facial_expression_plugin",
+            "description": "Parses [em_NAME:INTENSITY] tags in LLM output and drives VRM blendshape expressions via KaradaStateServer.",
+            "version": "1.0.0",
+        }
+
+
+PLUGIN_CLASS = FacialExpressionPlugin
