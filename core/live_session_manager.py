@@ -32,9 +32,12 @@ LIVE_AUDIO_MIME = f"audio/pcm;rate={LIVE_AUDIO_SAMPLE_RATE}"
 LIVE_OUTPUT_SAMPLE_RATE = 24000
 LIVE_OUTPUT_MIME = f"audio/pcm;rate={LIVE_OUTPUT_SAMPLE_RATE}"
 
-# Session limits (from Google docs)
-MAX_AUDIO_SESSION_SECONDS = 15 * 60  # 15 minutes audio-only
-RECONNECT_BUFFER_SECONDS = 30  # reconnect 30s before limit
+# Session limits — Google documents 15 min for audio-only sessions, but
+# in practice the server closes WebSocket connections at roughly 10 min
+# (600s).  We use the empirical value so proactive reconnection fires
+# before the server kills the connection.
+MAX_AUDIO_SESSION_SECONDS = 10 * 60  # ~10 minutes (empirical)
+RECONNECT_BUFFER_SECONDS = 60  # reconnect 60s before observed limit
 
 # Live API model
 LIVE_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
@@ -180,6 +183,7 @@ class LiveSessionManager:
         self._on_text: Callable[[int, str], Awaitable[None]] | None = None
         self._on_tool_call: Callable[[int, dict], Awaitable[dict]] | None = None
         self._on_turn_complete: Callable[[int, str, str], Awaitable[None]] | None = None
+        self._on_reconnect_failed: Callable[[int], Awaitable[None]] | None = None
         self._reconnect_locks: dict[int, asyncio.Lock] = {}
         # Audio send buffers: guild_id -> bytearray
         self._send_buffers: dict[int, bytearray] = {}
@@ -253,6 +257,16 @@ class LiveSessionManager:
         """
         self._on_turn_complete = callback
 
+    def set_reconnect_failed_callback(
+        self, callback: Callable[[int], Awaitable[None]]
+    ) -> None:
+        """Set callback fired when session reconnect fails after all retries.
+
+        Args: (guild_id,) — the interface should clean up voice state for
+        this guild since the Gemini session is irrecoverable.
+        """
+        self._on_reconnect_failed = callback
+
     async def start_session(
         self,
         guild_id: int,
@@ -260,6 +274,7 @@ class LiveSessionManager:
         system_instruction: str,
         tools: list[dict[str, Any]] | None = None,
         attachment_context: str | None = None,
+        is_reconnect: bool = False,
     ) -> bool:
         """Start a Live API session for a guild's voice channel.
 
@@ -430,16 +445,27 @@ class LiveSessionManager:
 
             # Kick off the model with an initial text turn so it sends a greeting
             # without waiting for user audio. The system instruction handles the persona.
+            # On reconnect, tell the model to continue naturally without re-greeting.
+            if is_reconnect:
+                _kick_text = (
+                    "[Voice session refreshed — you are continuing the same "
+                    "conversation. Do NOT greet or introduce yourself again. "
+                    "Simply acknowledge briefly that you're back and continue "
+                    "naturally.]"
+                )
+            else:
+                _kick_text = "[Session started. Greet naturally.]"
             try:
                 await session.send_client_content(
                     turns=types.Content(
                         role="user",
-                        parts=[types.Part(text="[Session started. Greet naturally.]")],
+                        parts=[types.Part(text=_kick_text)],
                     ),
                     turn_complete=True,
                 )
                 log_info(
-                    f"[live_session] Sent initial kick to model for guild {guild_id}"
+                    f"[live_session] Sent initial kick to model for guild {guild_id} "
+                    f"(reconnect={is_reconnect})"
                 )
             except Exception as e:
                 log_warning(f"[live_session] Initial kick failed (non-fatal): {e}")
@@ -897,12 +923,14 @@ class LiveSessionManager:
                 # Per-turn transcript accumulators (filled from transcription fields).
                 user_parts: list[str] = []
                 model_parts: list[str] = []
+                turn_msg_count = 0
 
                 async for message in state._session.receive():
                     if not state.is_active:
                         break
 
                     msg_count += 1
+                    turn_msg_count += 1
 
                     # --- Deep debug: log every message's structure ---
                     sc = getattr(message, "server_content", None)
@@ -1041,8 +1069,22 @@ class LiveSessionManager:
 
                 log_info(
                     f"[live_session] Turn {turn_count} receive loop exited "
-                    f"(guild {guild_id}, {msg_count} total msgs)"
+                    f"(guild {guild_id}, {turn_msg_count} msgs this turn, "
+                    f"{msg_count} total)"
                 )
+
+                # Empty turn = session.receive() yielded nothing.  This
+                # happens when the WebSocket was closed by the server
+                # (e.g. session time limit) without raising an exception.
+                # Treat it as a dead session and trigger reconnect.
+                if turn_msg_count == 0:
+                    log_warning(
+                        f"[live_session] ⚠️ Empty turn detected for guild "
+                        f"{guild_id} (elapsed {state.elapsed_seconds:.0f}s) "
+                        f"— session likely dead, triggering reconnect"
+                    )
+                    asyncio.create_task(self._reconnect(guild_id))
+                    break
 
                 # Turn complete — fire callback with accumulated transcripts.
                 if self._on_turn_complete and (user_parts or model_parts):
@@ -1080,26 +1122,59 @@ class LiveSessionManager:
             log_info(f"[live_session] Attempting auto-reconnect for guild {guild_id}")
             asyncio.create_task(self._reconnect(guild_id))
 
+    _RECONNECT_MAX_RETRIES: int = 3
+    _RECONNECT_RETRY_DELAY: float = 2.0  # seconds between retries
+
     async def _reconnect(self, guild_id: int) -> None:
         """Reconnect a session approaching the time limit.
 
         Rebuilds the system instruction from the current persona and
         re-discovers tool declarations so function calling is preserved
-        across session boundaries.
+        across session boundaries.  Retries up to ``_RECONNECT_MAX_RETRIES``
+        times before giving up and notifying via ``_on_reconnect_failed``.
         """
+        try:
+            await self._reconnect_inner(guild_id)
+        except Exception as outer_err:
+            # Safety net: ensure no exception escapes silently from the
+            # create_task wrapper.  If we get here, something unexpected
+            # went wrong (e.g. build_live_system_instruction threw).
+            log_error(
+                f"[live_session] ❌ Unhandled error in _reconnect for guild "
+                f"{guild_id}: {outer_err}"
+            )
+            if self._on_reconnect_failed:
+                try:
+                    await self._on_reconnect_failed(guild_id)
+                except Exception:
+                    pass
+
+    async def _reconnect_inner(self, guild_id: int) -> None:
+        """Core reconnect logic — called by ``_reconnect`` with safety wrapper."""
         lock = self._reconnect_locks.get(guild_id)
         if not lock:
+            log_warning(
+                f"[live_session] No reconnect lock for guild {guild_id} — "
+                "session may have been fully stopped"
+            )
             return
         if lock.locked():
+            log_debug(
+                f"[live_session] Reconnect already in progress for guild {guild_id}"
+            )
             return  # Already reconnecting
 
         async with lock:
             state = self._sessions.get(guild_id)
             if not state:
+                log_warning(
+                    f"[live_session] No session state for guild {guild_id} "
+                    "— cannot reconnect"
+                )
                 return  # Session was fully removed — nothing to reconnect
 
             log_info(
-                f"[live_session] Reconnecting session for guild {guild_id} "
+                f"[live_session] 🔄 Reconnecting session for guild {guild_id} "
                 f"(elapsed {state.elapsed_seconds:.0f}s, was_active={state.is_active})"
             )
 
@@ -1107,11 +1182,16 @@ class LiveSessionManager:
             _att_ctx = state.attachment_context
             await self.stop_session(guild_id)
 
-            # Rebuild system instruction from current persona for the new session
+            # Rebuild system instruction from current persona for the new
+            # session — includes fresh chat history from recent_chats cache.
             from core.prompt_engine import build_live_system_instruction
 
             instruction = await build_live_system_instruction(
                 attachment_context=_att_ctx,
+            )
+            log_info(
+                f"[live_session] Rebuilt system instruction for reconnect "
+                f"({len(instruction)} chars)"
             )
 
             # Re-discover tool declarations so function calling persists
@@ -1125,13 +1205,54 @@ class LiveSessionManager:
                     f"[live_session] Could not rebuild tool declarations on reconnect: {e}"
                 )
 
-            await self.start_session(
-                guild_id=guild_id,
-                channel_id=channel_id,
-                system_instruction=instruction,
-                tools=tools,
-                attachment_context=_att_ctx,
+            # Retry loop — Gemini may reject the connection briefly after a
+            # 1011 close.  We back off and try again up to _RECONNECT_MAX_RETRIES
+            # times before declaring failure.
+            last_err: Exception | None = None
+            for attempt in range(1, self._RECONNECT_MAX_RETRIES + 1):
+                try:
+                    log_info(
+                        f"[live_session] Reconnect attempt {attempt}/"
+                        f"{self._RECONNECT_MAX_RETRIES} for guild {guild_id}"
+                    )
+                    ok = await self.start_session(
+                        guild_id=guild_id,
+                        channel_id=channel_id,
+                        system_instruction=instruction,
+                        tools=tools,
+                        attachment_context=_att_ctx,
+                        is_reconnect=True,
+                    )
+                    if ok:
+                        log_info(
+                            f"[live_session] ✅ Reconnect succeeded for guild "
+                            f"{guild_id} (attempt {attempt})"
+                        )
+                        return  # success
+                    last_err = RuntimeError("start_session returned False")
+                except Exception as exc:
+                    last_err = exc
+
+                log_warning(
+                    f"[live_session] Reconnect attempt {attempt}/"
+                    f"{self._RECONNECT_MAX_RETRIES} failed for guild "
+                    f"{guild_id}: {last_err}"
+                )
+                if attempt < self._RECONNECT_MAX_RETRIES:
+                    await asyncio.sleep(self._RECONNECT_RETRY_DELAY * attempt)
+
+            # All retries exhausted — notify the interface to clean up
+            log_error(
+                f"[live_session] ❌ Reconnect failed after "
+                f"{self._RECONNECT_MAX_RETRIES} attempts for guild {guild_id}"
             )
+            if self._on_reconnect_failed:
+                try:
+                    await self._on_reconnect_failed(guild_id)
+                except Exception as cb_err:
+                    log_warning(
+                        f"[live_session] Reconnect-failed callback error: {cb_err}"
+                    )
 
     async def reconnect_with_instruction(
         self,
@@ -1155,6 +1276,7 @@ class LiveSessionManager:
             channel_id=channel_id,
             system_instruction=system_instruction,
             tools=tools,
+            is_reconnect=True,
         )
 
     async def close_all(self) -> None:

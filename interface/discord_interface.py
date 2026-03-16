@@ -1371,10 +1371,23 @@ class DiscordInterface:
                     f"model={len(model_transcript)} chars"
                 )
 
+            async def on_reconnect_failed(gid: int) -> None:
+                """Called when all reconnect retries are exhausted.
+
+                Cleans up the Discord voice state so the user isn't stuck
+                with a zombie session that can never recover.
+                """
+                log_warning(
+                    f"[live_voice] Reconnect failed for guild {gid} — "
+                    "cleaning up voice state"
+                )
+                await self._stop_live_voice(gid)
+
             manager.set_audio_callback(on_audio_from_model)
             manager.set_text_callback(on_text_from_model)
             manager.set_tool_call_callback(on_tool_call)
             manager.set_turn_complete_callback(on_turn_complete)
+            manager.set_reconnect_failed_callback(on_reconnect_failed)
 
             # Start the Live API session
             started = await manager.start_session(
@@ -1413,6 +1426,13 @@ class DiscordInterface:
             # Activate per-path cortex routing for the live voice interface
             # path so that any message-chain activity on this path uses the
             # live engine rather than the global cortex.
+            #
+            # NOTE: We intentionally do NOT pass a rejoin_callback here.
+            # Session reconnection is handled at the Gemini API level by
+            # LiveSessionManager._reconnect() which fires proactively via
+            # should_reconnect (540s) and reactively on WebSocket errors.
+            # A Discord-level rejoin would race with the Gemini reconnect
+            # and cause cascading restarts.
             try:
                 from cortex.live.live_base import LiveSessionManager as _LSM
 
