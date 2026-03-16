@@ -209,16 +209,38 @@ _register_exposed_var(
     scope="live",
     component="cortex_live",
     options=[
-        "Aoede",  # Breezy, natural (default)
-        "Puck",  # Upbeat, playful
-        "Charon",  # Informational, calm
-        "Kore",  # Firm, clear
-        "Fenrir",  # Excitable
-        "Orbit",  # Easy-going
-        "Zephyr",  # Bright
-        "Leda",  # Youthful
-        "Orus",  # Firm, deep
-        "Autonoe",  # Bright, warm
+        # Female
+        "Aoede",
+        "Kore",
+        "Leda",
+        "Zephyr",
+        "Autonoe",
+        "Achernar",
+        "Callirrhoe",
+        "Despina",
+        "Erinome",
+        "Gacrux",
+        "Laomedeia",
+        "Pulcherrima",
+        "Sulafat",
+        "Vindemiatrix",
+        # Male
+        "Puck",
+        "Charon",
+        "Fenrir",
+        "Orus",
+        "Achird",
+        "Algenib",
+        "Algieba",
+        "Alnilam",
+        "Enceladus",
+        "Iapetus",
+        "Rasalgethi",
+        "Sadachbia",
+        "Sadaltager",
+        "Schedar",
+        "Umbriel",
+        "Zubenelgenubi",
     ],
 )
 
@@ -234,6 +256,34 @@ _register_exposed_var(
         "Leave empty for default persona behavior."
     ),
     scope="live",
+    component="cortex_live",
+)
+
+# Live session feature toggles
+LIVE_AFFECTIVE_DIALOG = config_registry.get_var(
+    "LIVE_AFFECTIVE_DIALOG",
+    False,
+    label="Affective Dialog",
+    description="Model adapts tone/emotion to match the user's expression.",
+    group="core",
+    component="cortex_live",
+)
+
+LIVE_PROACTIVE_AUDIO = config_registry.get_var(
+    "LIVE_PROACTIVE_AUDIO",
+    False,
+    label="Proactive Audio",
+    description="Model can choose not to respond when audio is irrelevant.",
+    group="core",
+    component="cortex_live",
+)
+
+LIVE_THINKING_BUDGET = config_registry.get_var(
+    "LIVE_THINKING_BUDGET",
+    0,
+    label="Thinking Budget",
+    description="Internal reasoning tokens before responding (0 = disabled).",
+    group="core",
     component="cortex_live",
 )
 

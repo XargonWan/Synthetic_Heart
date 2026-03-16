@@ -3009,6 +3009,50 @@ function pickAccentDarkFromHex(hex) { return darkenHex(hex, 0.28); }
                         liveVoiceStyleTa.dataset.bound = '1';
                     }
 
+                    // ── Live session feature toggles ─────────────────────────
+                    const liveAffective = document.getElementById('live-affective-dialog');
+                    const liveProactive = document.getElementById('live-proactive-audio');
+                    const liveThinkingBudget = document.getElementById('live-thinking-budget');
+
+                    // Load current values
+                    if (liveAffective || liveProactive || liveThinkingBudget) {
+                        try {
+                            const cfgR = await fetch('/api/config');
+                            if (cfgR.ok) {
+                                const cfgD = await cfgR.json();
+                                const cfgI = Array.isArray(cfgD.items) ? cfgD.items : [];
+                                const aff = cfgI.find(i => i.key === 'LIVE_AFFECTIVE_DIALOG');
+                                const pro = cfgI.find(i => i.key === 'LIVE_PROACTIVE_AUDIO');
+                                const tb = cfgI.find(i => i.key === 'LIVE_THINKING_BUDGET');
+                                if (aff && liveAffective) liveAffective.checked = !!aff.value;
+                                if (pro && liveProactive) liveProactive.checked = !!pro.value;
+                                if (tb && liveThinkingBudget) liveThinkingBudget.value = tb.value || 0;
+                            }
+                        } catch (e) { /* non-fatal */ }
+                    }
+
+                    // Helper to save a boolean/number config key
+                    const saveLiveCfg = async (key, value, label) => {
+                        try {
+                            const r = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, value }) });
+                            if (r.ok) window.showToast && window.showToast(label + ' saved');
+                            else window.showToast && window.showToast('Failed to save ' + label, true);
+                        } catch (e) { window.showToast && window.showToast('Failed to save ' + label, true); }
+                    };
+
+                    if (liveAffective && !liveAffective.dataset.bound) {
+                        liveAffective.addEventListener('change', () => saveLiveCfg('LIVE_AFFECTIVE_DIALOG', liveAffective.checked, 'Affective dialog'));
+                        liveAffective.dataset.bound = '1';
+                    }
+                    if (liveProactive && !liveProactive.dataset.bound) {
+                        liveProactive.addEventListener('change', () => saveLiveCfg('LIVE_PROACTIVE_AUDIO', liveProactive.checked, 'Proactive audio'));
+                        liveProactive.dataset.bound = '1';
+                    }
+                    if (liveThinkingBudget && !liveThinkingBudget.dataset.bound) {
+                        liveThinkingBudget.addEventListener('change', () => saveLiveCfg('LIVE_THINKING_BUDGET', parseInt(liveThinkingBudget.value, 10) || 0, 'Thinking budget'));
+                        liveThinkingBudget.dataset.bound = '1';
+                    }
+
                     // ── Kitten TTS speaker selector ───────────────────────────
                     const kittenSpeakerSelect = document.getElementById('kitten-speaker-select');
                     const kittenPlayBtn = document.getElementById('kitten-play-btn');

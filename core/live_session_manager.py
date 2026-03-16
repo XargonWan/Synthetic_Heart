@@ -39,9 +39,8 @@ RECONNECT_BUFFER_SECONDS = 30  # reconnect 30s before limit
 # Live API model
 LIVE_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
 
-# Default voice — configurable via LIVE_VOICE_NAME in persona.json or .env.
-# Available prebuilt voices: Puck, Charon, Kore, Fenrir, Aoede, Orbit,
-# Zephyr, Leda, Orus, Autonoe.  Check Google's docs for the full current list.
+# Default voice — configurable via LIVE_VOICE_NAME in the WebUI or .env.
+# 30 Chirp3:HD prebuilt voices available — see Google's docs for the full list.
 _DEFAULT_VOICE = "Aoede"
 
 try:
@@ -290,6 +289,31 @@ class LiveSessionManager:
         except Exception:
             pass
 
+        # ── Resolve optional session features from config ──
+        _affective = False
+        _proactive = False
+        _thinking_budget = 0
+        try:
+            from core.config_manager import config_registry as _cfg
+
+            _aff_raw = _cfg.get_value("LIVE_AFFECTIVE_DIALOG", False)
+            _pro_raw = _cfg.get_value("LIVE_PROACTIVE_AUDIO", False)
+            # Config registry may return strings; guard against bool("false")==True
+            _affective = _aff_raw is True or (
+                isinstance(_aff_raw, str) and _aff_raw.lower() == "true"
+            )
+            _proactive = _pro_raw is True or (
+                isinstance(_pro_raw, str) and _pro_raw.lower() == "true"
+            )
+            _tb = _cfg.get_value("LIVE_THINKING_BUDGET", 0)
+            _thinking_budget = int(_tb) if _tb else 0
+            log_info(
+                f"[live_session] Feature flags: affective={_affective} "
+                f"proactive={_proactive} thinking_budget={_thinking_budget}"
+            )
+        except Exception:
+            pass
+
         live_config = types.LiveConnectConfig(
             response_modalities=["AUDIO"],  # type: ignore[arg-type]
             input_audio_transcription=types.AudioTranscriptionConfig(),
@@ -314,6 +338,37 @@ class LiveSessionManager:
             ),
             system_instruction=system_instruction,
         )
+
+        # Affective dialog — model adapts tone to user's expression (v1alpha)
+        if _affective:
+            try:
+                live_config.enable_affective_dialog = True  # type: ignore[attr-defined]
+                log_info("[live_session] Affective dialog enabled")
+            except Exception as exc:
+                log_warning(f"[live_session] Could not enable affective dialog: {exc}")
+
+        # Proactive audio — model can choose not to respond to irrelevant audio
+        if _proactive:
+            try:
+                live_config.proactivity = types.ProactivityConfig(  # type: ignore[attr-defined]
+                    proactive_audio=True,
+                )
+                log_info("[live_session] Proactive audio enabled")
+            except Exception as exc:
+                log_warning(f"[live_session] Could not enable proactive audio: {exc}")
+
+        # Thinking budget — internal reasoning tokens before responding
+        if _thinking_budget > 0:
+            try:
+                live_config.thinking_config = types.ThinkingConfig(  # type: ignore[attr-defined]
+                    thinking_budget=_thinking_budget,
+                    include_thoughts=False,
+                )
+                log_info(
+                    f"[live_session] Thinking budget set to {_thinking_budget} tokens"
+                )
+            except Exception as exc:
+                log_warning(f"[live_session] Could not set thinking budget: {exc}")
         if tools:
             live_config.tools = tools  # type: ignore[assignment]
 
