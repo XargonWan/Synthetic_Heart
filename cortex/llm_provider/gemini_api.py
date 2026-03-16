@@ -485,22 +485,18 @@ class GeminiAPIPlugin(AIPluginBase):
     # ------------------------------------------------------------------
 
     def get_live_session_manager(self) -> "LiveSessionManager | None":
-        """Return the LiveSessionManager instance, creating it lazily.
+        """Return the global LiveSessionManager singleton.
 
         Returns None if the google-genai SDK is unavailable or no API key is set.
+        Uses the singleton so all code paths (start, stop, is_session_active,
+        chat sync) share the same instance and session state.
         """
         if not _HAS_GENAI_SDK or not GEMINI_API_KEY:
             return None
 
-        if not hasattr(self, "_live_session_manager"):
-            from core.live_session_manager import LiveSessionManager
+        from core.live_session_manager import LiveSessionManager
 
-            self._live_session_manager = LiveSessionManager(
-                api_key=str(GEMINI_API_KEY).strip()
-            )
-            log_info("[gemini_api] LiveSessionManager created")
-
-        return self._live_session_manager
+        return LiveSessionManager.get_instance(api_key=str(GEMINI_API_KEY).strip())
 
     async def start_live_voice_session(
         self,

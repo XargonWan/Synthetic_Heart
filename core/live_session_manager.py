@@ -457,6 +457,7 @@ class LiveSessionManager:
         """Stop the Live API session for a guild."""
         state = self._sessions.pop(guild_id, None)
         self._send_buffers.pop(guild_id, None)
+        self._reconnect_locks.pop(guild_id, None)
 
         # Cancel the flush task
         flush_task = self._flush_tasks.pop(guild_id, None)
