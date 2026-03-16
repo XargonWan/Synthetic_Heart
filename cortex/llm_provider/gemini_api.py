@@ -1357,7 +1357,9 @@ class GeminiAPIPlugin(AIPluginBase):
 
         # Keys whose subtrees are schema definitions (not multimodal data)
         # and should be skipped during recursive attachment collection.
-        SCHEMA_ONLY_KEYS = {"actions", "available_actions", "schema", "payload"}
+        # NOTE: "payload" was removed — it caused the function to skip
+        # input.payload.attachments where the actual multimodal data lives.
+        SCHEMA_ONLY_KEYS = {"actions", "available_actions", "schema"}
 
         def collect_attachments_recursive(container: dict | list | str) -> None:
             """Recursively collect multimodal attachments from any level."""
