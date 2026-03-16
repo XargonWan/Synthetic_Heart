@@ -614,6 +614,30 @@ async def handle_incoming_message(
                         f"[message_chain] ⚠️ No recognized text field in Gemini action, using fallback payload: {list(fallback_payload.keys())}"
                     )
                 actions = [normalized_action]
+            elif (
+                isinstance(parsed, dict)
+                and "text" in parsed
+                and "interface_path" in parsed
+            ):
+                # Bare message payload recovered from corrupted JSON — the
+                # LLM produced the correct payload but the actions wrapper
+                # was lost during JSON extraction.  Infer the action type
+                # from the interface_path prefix.
+                _ipath = str(parsed.get("interface_path", ""))
+                _iface = _ipath.split("/")[0] if "/" in _ipath else _ipath
+                _inferred_type = f"message_{_iface}" if _iface else None
+                if _inferred_type:
+                    log_info(
+                        f"[message_chain] 🔄 Wrapping bare message payload "
+                        f"as {_inferred_type} (recovered from corrupted JSON)"
+                    )
+                    actions = [{"type": _inferred_type, "payload": parsed}]
+                else:
+                    log_warning(
+                        f"[message_chain] Bare payload has interface_path "
+                        f"but no inferrable action type: {_ipath}"
+                    )
+                    parsed = None
             else:
                 log_warning(
                     f"[message_chain] Unrecognized JSON structure: {parsed} - triggering corrector"
