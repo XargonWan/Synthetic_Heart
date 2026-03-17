@@ -7121,6 +7121,9 @@ class SynthWebUIInterface:
             active_live = None
 
         live_data: list[dict] = list(by_cortex.get("live", []))
+        # Fix active flag for cortex live engines (they were marked using BASE_CORTEX's active_engine)
+        for engine in live_data:
+            engine["active"] = engine.get("name") == active_live
         # always offer disabled choice; mark it active if the config says so
         live_data.insert(
             0,

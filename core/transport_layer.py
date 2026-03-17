@@ -956,6 +956,20 @@ async def universal_send(interface_send_func, *args, text: str = None, **kwargs)
         # Non-fatal: keep original text if recovery fails
         pass
 
+    # Strip emotion tags like {arousal 10, devotion 10} from outbound text.
+    # The LLM embeds these for internal emotion state tracking but they
+    # must never leak into user-visible messages.
+    try:
+        if isinstance(text, str) and text and "{" in text:
+            from plugins.emotion_manager import strip_emotion_tags
+
+            cleaned = strip_emotion_tags(text)
+            if cleaned != text:
+                log_debug("[transport] Stripped emotion tags from outbound text")
+                text = cleaned
+    except Exception:
+        pass
+
     # Diagnostic: log interface function and runtime send parameters
     try:
         bot_self = getattr(interface_send_func, "__self__", None)
